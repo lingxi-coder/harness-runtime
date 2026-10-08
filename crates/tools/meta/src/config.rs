@@ -933,7 +933,7 @@ impl Tool for ConfigTool {
 
 /// Wrap result `data` in a `ToolCallResult` envelope.
 fn done(data: Value) -> ToolCallResult {
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data,
         model_content: None,
         new_messages: vec![],

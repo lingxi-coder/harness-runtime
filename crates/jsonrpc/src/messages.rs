@@ -6,7 +6,8 @@
 //! field presence (`id`+`method` → Request, `id`+`result`/`error` →
 //! Response, `method` only → Notification).
 
-use serde::{Deserialize, Deserializer, Serialize};
+use json_projection::{Utf16JsonProjection, Utf16JsonProjectionError};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 /// Literal `"2.0"` — the only valid value for the `jsonrpc` field per spec.
@@ -26,13 +27,40 @@ pub const INTERNAL_ERROR: i32 = -32603;
 /// JSON-RPC 2.0 request/response identifier. Permitted shapes per spec are
 /// number, string, or null; this enum models the two non-null cases. A null
 /// id on a *response* is represented by `Response.id == None`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 #[serde(untagged)]
 pub enum Id {
     /// Numeric id (we use this for outbound calls — monotonic i64 from the router).
     Number(i64),
     /// String id (used by some peers; mirrored verbatim when we echo responses).
     String(String),
+    /// An identifier with isolated UTF-16 units; never merged by display text.
+    #[serde(skip_deserializing)]
+    StringUtf16(Vec<u16>),
+}
+
+impl Serialize for Id {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Number(value) => serializer.serialize_i64(*value),
+            Self::String(value) => serializer.serialize_str(value),
+            Self::StringUtf16(value) => serializer.serialize_str(&String::from_utf16_lossy(value)),
+        }
+    }
+}
+impl Id {
+    #[must_use]
+    /// Return this identity with its exact JavaScript UTF-16 units.
+    pub fn projected(&self) -> Utf16JsonProjection {
+        match self {
+            Self::Number(value) => Utf16JsonProjection::plain(serde_json::json!(value)),
+            Self::String(value) => Utf16JsonProjection::plain(serde_json::json!(value)),
+            Self::StringUtf16(value) => {
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(value), value.clone())
+                    .expect("UTF-16 id display matches its code units")
+            }
+        }
+    }
 }
 
 /// JSON-RPC 2.0 Request — has both `method` and `id`.
@@ -45,6 +73,9 @@ pub enum Id {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    /// Exact native envelope retained beside the typed display view.
+    #[serde(skip)]
+    pub projection: Option<Utf16JsonProjection>,
     /// MUST equal `"2.0"`.
     pub jsonrpc: String,
     /// Request id.
@@ -62,6 +93,9 @@ pub struct Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Notification {
+    /// Exact native envelope retained beside the typed display view.
+    #[serde(skip)]
+    pub projection: Option<Utf16JsonProjection>,
     /// MUST equal `"2.0"`.
     pub jsonrpc: String,
     /// Method name.
@@ -78,6 +112,9 @@ pub struct Notification {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
+    /// Exact native envelope retained beside the typed display view.
+    #[serde(skip)]
+    pub projection: Option<Utf16JsonProjection>,
     /// MUST equal `"2.0"`.
     pub jsonrpc: String,
     /// Echoed request id, or `null` if id was unrecoverable.
@@ -130,10 +167,73 @@ pub enum Message {
     Notification(Notification),
 }
 
+impl Message {
+    /// Decode one validated projection without lowering its exact strings or keys.
+    pub fn from_projection(
+        projection: Utf16JsonProjection,
+    ) -> Result<Self, Utf16JsonProjectionError> {
+        projection.validate()?;
+        let mut message: Self = serde_json::from_value(projection.value.clone())
+            .map_err(|_| Utf16JsonProjectionError::InvalidProjection("invalid JSON-RPC message"))?;
+        let exact_id = projection
+            .string_units("/id")
+            .filter(|units| String::from_utf16(units).is_err())
+            .map(Id::StringUtf16);
+        match &mut message {
+            Self::Request(request) => {
+                if let Some(id) = exact_id {
+                    request.id = id;
+                }
+                request.projection = Some(projection);
+            }
+            Self::Response(response) => {
+                if let Some(id) = exact_id {
+                    response.id = Some(id);
+                }
+                response.projection = Some(projection);
+            }
+            Self::Notification(notification) => notification.projection = Some(projection),
+        }
+        Ok(message)
+    }
+    /// Rebuild the public envelope, rejecting stale associations instead of
+    /// silently applying unrelated exact sidecars to edited display values.
+    pub fn projected(&self) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
+        let display = serde_json::to_value(self)
+            .map_err(|_| Utf16JsonProjectionError::InvalidProjection("invalid JSON-RPC message"))?;
+        let carrier = match self {
+            Self::Request(request) => request.projection.as_ref(),
+            Self::Response(response) => response.projection.as_ref(),
+            Self::Notification(notification) => notification.projection.as_ref(),
+        };
+        let mut projection = if let Some(carrier) = carrier {
+            carrier.validate()?;
+            if carrier.value != display {
+                return Err(Utf16JsonProjectionError::InvalidProjection(
+                    "JSON-RPC projection does not match its display message",
+                ));
+            }
+            carrier.clone()
+        } else {
+            Utf16JsonProjection::plain(display)
+        };
+        let id = match self {
+            Self::Request(request) => Some(&request.id),
+            Self::Response(response) => response.id.as_ref(),
+            Self::Notification(_) => None,
+        };
+        if let Some(id) = id {
+            projection.set_field("id", id.projected())?;
+        }
+        Ok(projection)
+    }
+}
+
 impl Request {
     /// Build a fresh request with `jsonrpc = "2.0"`.
     pub fn new(method: impl Into<String>, params: Option<Value>, id: Id) -> Self {
         Self {
+            projection: None,
             jsonrpc: JSONRPC_VERSION.into(),
             id,
             method: method.into(),
@@ -146,6 +246,7 @@ impl Notification {
     /// Build a fresh notification with `jsonrpc = "2.0"`.
     pub fn new(method: impl Into<String>, params: Option<Value>) -> Self {
         Self {
+            projection: None,
             jsonrpc: JSONRPC_VERSION.into(),
             method: method.into(),
             params,
@@ -154,10 +255,29 @@ impl Notification {
 }
 
 impl Response {
+    /// Build a response carrying the exact result received from its owner.
+    pub fn success_projected(
+        id: Id,
+        result: Utf16JsonProjection,
+    ) -> Result<Self, Utf16JsonProjectionError> {
+        result.validate()?;
+        let mut response = Self::success(id, result.value.clone());
+        let mut projection = Message::Response(response.clone()).projected()?;
+        projection.set_field("result", result)?;
+        response.projection = Some(projection);
+        Ok(response)
+    }
+    /// Extract the associated exact result from a response envelope.
+    pub fn projected_result(&self) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
+        Message::Response(self.clone())
+            .projected()?
+            .subprojection("/result")
+    }
     /// Build a success response.
     #[must_use]
     pub fn success(id: Id, result: Value) -> Self {
         Self {
+            projection: None,
             jsonrpc: JSONRPC_VERSION.into(),
             id: Some(id),
             result: Some(result),
@@ -169,6 +289,7 @@ impl Response {
     #[must_use]
     pub fn error(id: Option<Id>, error: ResponseError) -> Self {
         Self {
+            projection: None,
             jsonrpc: JSONRPC_VERSION.into(),
             id,
             result: None,
@@ -181,6 +302,46 @@ impl Response {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn projected_request_id_and_payload_roundtrip_distinct_surrogates() {
+        let source = Utf16JsonProjection::parse(r#"{"jsonrpc":"2.0","id":"\ud800","method":"echo","params":{"\ud800":"\ud801","\ud801":"�"}}"#).unwrap();
+        let message = Message::from_projection(source.clone()).unwrap();
+        let Message::Request(request) = &message else {
+            panic!("request");
+        };
+        assert_eq!(request.id, Id::StringUtf16(vec![0xd800]));
+        assert_ne!(request.id, Id::StringUtf16(vec![0xd801]));
+        assert_eq!(
+            message.projected().unwrap().to_json_string().unwrap(),
+            source.to_json_string().unwrap()
+        );
+        let response = Response::success_projected(
+            request.id.clone(),
+            source.subprojection("/params").unwrap(),
+        )
+        .unwrap();
+        let wire = Message::Response(response).projected().unwrap();
+        assert_eq!(wire.string_units("/id"), Some(vec![0xd800]));
+        assert_eq!(
+            wire.subprojection("/result").unwrap(),
+            source.subprojection("/params").unwrap()
+        );
+        assert!(!wire.value.as_object().unwrap().contains_key("projection"));
+    }
+
+    #[test]
+    fn stale_message_projection_is_rejected_at_wire_boundary() {
+        let source =
+            Utf16JsonProjection::parse(r#"{"jsonrpc":"2.0","id":1,"result":{"text":"\ud800"}}"#)
+                .unwrap();
+        let mut message = Message::from_projection(source).unwrap();
+        let Message::Response(response) = &mut message else {
+            panic!("response");
+        };
+        response.result = Some(json!({"text":"changed"}));
+        assert!(message.projected().is_err());
+    }
 
     #[test]
     fn jsonrpc_version_constant_is_literally_2_0() {
@@ -217,6 +378,7 @@ mod tests {
     #[test]
     fn request_wire_shape_has_jsonrpc_id_method_params() {
         let req = Request {
+            projection: None,
             jsonrpc: JSONRPC_VERSION.into(),
             id: Id::Number(1),
             method: "initialize".into(),
@@ -235,6 +397,7 @@ mod tests {
     #[test]
     fn notification_has_no_id_field_when_serialized() {
         let n = Notification {
+            projection: None,
             jsonrpc: JSONRPC_VERSION.into(),
             method: "notifications/cancelled".into(),
             params: Some(json!({"requestId": 7})),
@@ -251,6 +414,7 @@ mod tests {
     #[test]
     fn response_success_serializes_result_not_error() {
         let r = Response {
+            projection: None,
             jsonrpc: JSONRPC_VERSION.into(),
             id: Some(Id::Number(1)),
             result: Some(json!({"ok": true})),
@@ -267,6 +431,7 @@ mod tests {
     #[test]
     fn response_error_serializes_error_not_result() {
         let r = Response {
+            projection: None,
             jsonrpc: JSONRPC_VERSION.into(),
             id: Some(Id::Number(1)),
             result: None,
@@ -304,6 +469,7 @@ mod tests {
     #[test]
     fn response_null_id_when_id_unknown() {
         let r = Response {
+            projection: None,
             jsonrpc: JSONRPC_VERSION.into(),
             id: None,
             result: None,

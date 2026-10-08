@@ -52,6 +52,62 @@ fn orch_with_refusal_chain(chain: &[&str]) -> (ConversationOrchestrator, MockOut
     (orch, out)
 }
 
+#[tokio::test]
+async fn batched_calls_capture_the_live_latch_and_ignore_a_stale_session_target() {
+    struct TargetProbe(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl crate::OrchestratorApiClient for TargetProbe {
+        async fn messages_create(
+            &self,
+            request: crate::OrchestratorApiRequest,
+        ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+            let crate::OrchestratorApiRequest::Main(request) = request else {
+                panic!("expected main request")
+            };
+            let context = lingxi_core::host::refusal_driver::current_fallback_target().unwrap();
+            assert_eq!(
+                context.is_target(&request.model, str::to_owned),
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            );
+            Ok(crate::test_support::mock_message_response(
+                vec![llm_runtime::ContentBlock::Text {
+                    text: "done".into(),
+                    cache_control: None, citations: None,
+                }],
+                Some("end_turn"),
+            ))
+        }
+    }
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig {
+            refusal_fallback_model: Some("fallback".into()),
+            ..Default::default()
+        },
+        Arc::new(TargetProbe(std::sync::atomic::AtomicUsize::new(0))),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::with_files(vec![])),
+        PathBuf::from("/work/repo"),
+    );
+    assert!(orch.maybe_swap_to_refusal_fallback().await);
+    assert!(orch.run_turn("first").await.is_ok());
+    lingxi_core::host::OrchestratorHandle::switch_model(&orch, "other", None)
+        .await
+        .unwrap();
+    assert!(orch.run_turn("second").await.is_ok());
+    lingxi_core::host::OrchestratorHandle::switch_model(&orch, "fallback", None)
+        .await
+        .unwrap();
+    assert!(orch.run_turn("third").await.is_ok());
+    assert!(orch.model_runtime.refusal_cascade.lock().await.is_latched());
+    assert_eq!(
+        lingxi_core::host::refusal_driver::current_fallback_target(),
+        None
+    );
+}
+
 /// The point of the cascade: successive refusals walk the chain instead of
 /// stopping after one hop. The once-per-session latch does NOT apply to a
 /// multi-hop chain — the chain itself is the bound.

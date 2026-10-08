@@ -1,0 +1,1115 @@
+{
+  "version": "2.1.293",
+  "captureRoot": "/tmp/headless-baseline-293-parser-cohort",
+  "scope": "Two native repetitions per parser research case; no Harness parity claim",
+  "cases": {
+    "probe-parser-mixed-stdin": [
+      {
+        "side": "native-a",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "8145ffa6-a924-4d49-8c17-bd9cb67f92c5",
+            "HEADLESS_ARGV_WITHOUT_LF"
+          ],
+          "sessionId": "8145ffa6-a924-4d49-8c17-bd9cb67f92c5",
+          "primarySessionId": "8145ffa6-a924-4d49-8c17-bd9cb67f92c5",
+          "sessionIds": [
+            "8145ffa6-a924-4d49-8c17-bd9cb67f92c5"
+          ],
+          "pid": 60401,
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-parser-cohort-probe-parser-mixed-stdin-workspace/8145ffa6-a924-4d49-8c17-bd9cb67f92c5.jsonl",
+              "bytes": 4036,
+              "sha256": "d2775da4ccae990350c9fc9523410594639bd73f6a36ed11cbf6a5cb86494f43"
+            }
+          ],
+          "channels": {
+            "stdin": {
+              "bytes": 23,
+              "sha256": "effc6c7441ae15767948f0e79a2e3bca72a2f4938d823bdc46be67c9665a07a6"
+            },
+            "stdout": {
+              "bytes": 1588,
+              "sha256": "70f3486b4efe47e343d25252177e36c8f3946dfc292a65c500ed288391f9d723"
+            },
+            "stderr": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          }
+        },
+        "stdin": "HEADLESS_STDIN_WITH_LF\n",
+        "stdout": "{\"duration_api_ms\":10,\"stop_reason\":\"end_turn\",\"session_id\":\"8145ffa6-a924-4d49-8c17-bd9cb67f92c5\",\"total_cost_usd\":0.000022,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\",\"fallback_credit\":null},\"modelUsage\":{\"claude-sonnet-5-5\":{\"inputTokens\":1,\"outputTokens\":2,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.000022,\"contextWindow\":1000000,\"maxOutputTokens\":128000,\"thinkingTokens\":0,\"canonicalModel\":\"claude-sonnet-5-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"safety_stops\":0,\"is_error\":false,\"num_turns\":1,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"HEADLESS_LOCAL_RESPONSE\",\"ttft_ms\":27,\"type\":\"result\",\"duration_ms\":31,\"uuid\":\"0ea19014-8b77-4899-b0a2-e7c361dbcf8a\",\"ttft_stream_ms\":26,\"time_to_request_ms\":22,\"first_content_frame_ms\":26,\"queued_turn_count\":0,\"result_index\":0}\n",
+        "stderr": "",
+        "requests": [
+          {
+            "model": "claude-sonnet-5-5",
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HEADLESS_ARGV_WITHOUT_LF\nHEADLESS_STDIN_WITH_LF\n",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "system",
+                "content": [],
+                "output_config": {
+                  "effort": "medium"
+                }
+              }
+            ],
+            "system": [
+              {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.293.841; cc_entrypoint=sdk-cli;"
+              },
+              {
+                "type": "text",
+                "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              },
+              {
+                "type": "text",
+                "text": "You are a local deterministic headless fixture.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
+            "tools": [],
+            "metadata": {
+              "user_id": "{\"device_id\":\"a2843c860ec75dc61547a593b6cdb04321b113171b28822950400d434f251f38\",\"account_uuid\":\"\",\"session_id\":\"8145ffa6-a924-4d49-8c17-bd9cb67f92c5\"}"
+            },
+            "max_tokens": 128000,
+            "thinking": {
+              "type": "adaptive",
+              "display": "omitted"
+            },
+            "context_management": {
+              "edits": [
+                {
+                  "type": "clear_thinking_20251015",
+                  "keep": "all"
+                }
+              ]
+            },
+            "output_config": {
+              "effort": "medium"
+            },
+            "stream": true
+          }
+        ]
+      },
+      {
+        "side": "native-b",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "8145ffa6-a924-4d49-8c17-bd9cb67f92c5",
+            "HEADLESS_ARGV_WITHOUT_LF"
+          ],
+          "sessionId": "8145ffa6-a924-4d49-8c17-bd9cb67f92c5",
+          "primarySessionId": "8145ffa6-a924-4d49-8c17-bd9cb67f92c5",
+          "sessionIds": [
+            "8145ffa6-a924-4d49-8c17-bd9cb67f92c5"
+          ],
+          "pid": 60409,
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-parser-cohort-probe-parser-mixed-stdin-workspace/8145ffa6-a924-4d49-8c17-bd9cb67f92c5.jsonl",
+              "bytes": 4036,
+              "sha256": "839a995647515638b31d25373cce0ba4b6b688ebb28ab326c6b109dcc0327c98"
+            }
+          ],
+          "channels": {
+            "stdin": {
+              "bytes": 23,
+              "sha256": "effc6c7441ae15767948f0e79a2e3bca72a2f4938d823bdc46be67c9665a07a6"
+            },
+            "stdout": {
+              "bytes": 1588,
+              "sha256": "c8f9b5e8f535a3173f5cf2b58247dc1f9be7e1128a8eed4530e0d4529db2a129"
+            },
+            "stderr": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          }
+        },
+        "stdin": "HEADLESS_STDIN_WITH_LF\n",
+        "stdout": "{\"duration_api_ms\":11,\"stop_reason\":\"end_turn\",\"session_id\":\"8145ffa6-a924-4d49-8c17-bd9cb67f92c5\",\"total_cost_usd\":0.000022,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\",\"fallback_credit\":null},\"modelUsage\":{\"claude-sonnet-5-5\":{\"inputTokens\":1,\"outputTokens\":2,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.000022,\"contextWindow\":1000000,\"maxOutputTokens\":128000,\"thinkingTokens\":0,\"canonicalModel\":\"claude-sonnet-5-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"safety_stops\":0,\"is_error\":false,\"num_turns\":1,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"HEADLESS_LOCAL_RESPONSE\",\"ttft_ms\":28,\"type\":\"result\",\"duration_ms\":32,\"uuid\":\"beda40b0-7e36-467b-811c-a268c4b9fad2\",\"ttft_stream_ms\":28,\"time_to_request_ms\":22,\"first_content_frame_ms\":28,\"queued_turn_count\":0,\"result_index\":0}\n",
+        "stderr": "",
+        "requests": [
+          {
+            "model": "claude-sonnet-5-5",
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HEADLESS_ARGV_WITHOUT_LF\nHEADLESS_STDIN_WITH_LF\n",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "system",
+                "content": [],
+                "output_config": {
+                  "effort": "medium"
+                }
+              }
+            ],
+            "system": [
+              {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.293.841; cc_entrypoint=sdk-cli;"
+              },
+              {
+                "type": "text",
+                "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              },
+              {
+                "type": "text",
+                "text": "You are a local deterministic headless fixture.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
+            "tools": [],
+            "metadata": {
+              "user_id": "{\"device_id\":\"a121e38f82732c0a5dde8b8015b5dbe5f7b292f7ea1e2aa50106333c9e44d7f6\",\"account_uuid\":\"\",\"session_id\":\"8145ffa6-a924-4d49-8c17-bd9cb67f92c5\"}"
+            },
+            "max_tokens": 128000,
+            "thinking": {
+              "type": "adaptive",
+              "display": "omitted"
+            },
+            "context_management": {
+              "edits": [
+                {
+                  "type": "clear_thinking_20251015",
+                  "keep": "all"
+                }
+              ]
+            },
+            "output_config": {
+              "effort": "medium"
+            },
+            "stream": true
+          }
+        ]
+      }
+    ],
+    "probe-parser-partial-json": [
+      {
+        "side": "native-a",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "060e3765-bf0e-4f80-8db9-fec3bedfc61f",
+            "--include-partial-messages",
+            "Return HEADLESS_LOCAL_RESPONSE."
+          ],
+          "sessionId": "060e3765-bf0e-4f80-8db9-fec3bedfc61f",
+          "primarySessionId": "060e3765-bf0e-4f80-8db9-fec3bedfc61f",
+          "sessionIds": [
+            "060e3765-bf0e-4f80-8db9-fec3bedfc61f"
+          ],
+          "pid": 60461,
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 0,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [],
+          "channels": {
+            "stdin": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stdout": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stderr": {
+              "bytes": 84,
+              "sha256": "0acbb5ee3c700ba5af5c68c2f0e6fa17af85e18c2f3dea12211e7796efef1258"
+            }
+          }
+        },
+        "stdin": "",
+        "stdout": "",
+        "stderr": "Error: --include-partial-messages requires --print and --output-format=stream-json.\n",
+        "requests": []
+      },
+      {
+        "side": "native-b",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "060e3765-bf0e-4f80-8db9-fec3bedfc61f",
+            "--include-partial-messages",
+            "Return HEADLESS_LOCAL_RESPONSE."
+          ],
+          "sessionId": "060e3765-bf0e-4f80-8db9-fec3bedfc61f",
+          "primarySessionId": "060e3765-bf0e-4f80-8db9-fec3bedfc61f",
+          "sessionIds": [
+            "060e3765-bf0e-4f80-8db9-fec3bedfc61f"
+          ],
+          "pid": 60465,
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 0,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [],
+          "channels": {
+            "stdin": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stdout": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stderr": {
+              "bytes": 84,
+              "sha256": "0acbb5ee3c700ba5af5c68c2f0e6fa17af85e18c2f3dea12211e7796efef1258"
+            }
+          }
+        },
+        "stdin": "",
+        "stdout": "",
+        "stderr": "Error: --include-partial-messages requires --print and --output-format=stream-json.\n",
+        "requests": []
+      }
+    ],
+    "probe-parser-replay-text": [
+      {
+        "side": "native-a",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "text",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "5d84eb44-27c3-4add-8319-c86d954f55e8",
+            "--replay-user-messages",
+            "Return HEADLESS_LOCAL_RESPONSE."
+          ],
+          "sessionId": "5d84eb44-27c3-4add-8319-c86d954f55e8",
+          "primarySessionId": "5d84eb44-27c3-4add-8319-c86d954f55e8",
+          "sessionIds": [
+            "5d84eb44-27c3-4add-8319-c86d954f55e8"
+          ],
+          "pid": 60468,
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": null,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [],
+          "channels": {
+            "stdin": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stdout": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stderr": {
+              "bytes": 104,
+              "sha256": "51b661a933dde981de2e0e50670b6e9f8751e844015e3de00280bc05828d878d"
+            }
+          }
+        },
+        "stdin": "",
+        "stdout": "",
+        "stderr": "Error: --replay-user-messages requires both --input-format=stream-json and --output-format=stream-json.\n",
+        "requests": []
+      },
+      {
+        "side": "native-b",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "text",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "5d84eb44-27c3-4add-8319-c86d954f55e8",
+            "--replay-user-messages",
+            "Return HEADLESS_LOCAL_RESPONSE."
+          ],
+          "sessionId": "5d84eb44-27c3-4add-8319-c86d954f55e8",
+          "primarySessionId": "5d84eb44-27c3-4add-8319-c86d954f55e8",
+          "sessionIds": [
+            "5d84eb44-27c3-4add-8319-c86d954f55e8"
+          ],
+          "pid": 60472,
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": null,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [],
+          "channels": {
+            "stdin": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stdout": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stderr": {
+              "bytes": 104,
+              "sha256": "51b661a933dde981de2e0e50670b6e9f8751e844015e3de00280bc05828d878d"
+            }
+          }
+        },
+        "stdin": "",
+        "stdout": "",
+        "stderr": "Error: --replay-user-messages requires both --input-format=stream-json and --output-format=stream-json.\n",
+        "requests": []
+      }
+    ],
+    "probe-parser-sdk-json": [
+      {
+        "side": "native-a",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "de80cc08-7575-4dbd-8fca-cbf5d6d96b84",
+            "--input-format",
+            "stream-json"
+          ],
+          "sessionId": "de80cc08-7575-4dbd-8fca-cbf5d6d96b84",
+          "primarySessionId": "de80cc08-7575-4dbd-8fca-cbf5d6d96b84",
+          "sessionIds": [
+            "de80cc08-7575-4dbd-8fca-cbf5d6d96b84"
+          ],
+          "pid": 60479,
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 0,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [],
+          "channels": {
+            "stdin": {
+              "bytes": 164,
+              "sha256": "3966b64acd74c434b23426971e45914c94cb6968ecfaec476d83af1476c72abe"
+            },
+            "stdout": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stderr": {
+              "bytes": 70,
+              "sha256": "50c4bc73b00e74c4482a26a1d3fdc36962b3a0918da3441450484c7db1466f3b"
+            }
+          }
+        },
+        "stdin": "{\"type\":\"user\",\"session_id\":\"de80cc08-7575-4dbd-8fca-cbf5d6d96b84\",\"parent_tool_use_id\":null,\"message\":{\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RESPONSE.\"}}\n",
+        "stdout": "",
+        "stderr": "Error: --input-format=stream-json requires output-format=stream-json.\n",
+        "requests": []
+      },
+      {
+        "side": "native-b",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "de80cc08-7575-4dbd-8fca-cbf5d6d96b84",
+            "--input-format",
+            "stream-json"
+          ],
+          "sessionId": "de80cc08-7575-4dbd-8fca-cbf5d6d96b84",
+          "primarySessionId": "de80cc08-7575-4dbd-8fca-cbf5d6d96b84",
+          "sessionIds": [
+            "de80cc08-7575-4dbd-8fca-cbf5d6d96b84"
+          ],
+          "pid": 60483,
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 0,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [],
+          "channels": {
+            "stdin": {
+              "bytes": 164,
+              "sha256": "3966b64acd74c434b23426971e45914c94cb6968ecfaec476d83af1476c72abe"
+            },
+            "stdout": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stderr": {
+              "bytes": 70,
+              "sha256": "50c4bc73b00e74c4482a26a1d3fdc36962b3a0918da3441450484c7db1466f3b"
+            }
+          }
+        },
+        "stdin": "{\"type\":\"user\",\"session_id\":\"de80cc08-7575-4dbd-8fca-cbf5d6d96b84\",\"parent_tool_use_id\":null,\"message\":{\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RESPONSE.\"}}\n",
+        "stdout": "",
+        "stderr": "Error: --input-format=stream-json requires output-format=stream-json.\n",
+        "requests": []
+      }
+    ],
+    "probe-parser-tools-default": [
+      {
+        "side": "native-a",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "default",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed",
+            "Return HEADLESS_LOCAL_RESPONSE."
+          ],
+          "sessionId": "94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed",
+          "primarySessionId": "94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed",
+          "sessionIds": [
+            "94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed"
+          ],
+          "pid": 60386,
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-parser-cohort-probe-parser-tools-default-workspace/94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed.jsonl",
+              "bytes": 5334,
+              "sha256": "93a955ad770a3888e6958456cdf881ac521712f0a45ea29ed40fb32e14077717"
+            }
+          ],
+          "channels": {
+            "stdin": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stdout": {
+              "bytes": 1588,
+              "sha256": "3987cecf0de68637c5010f730be068dcc73f8c430126e0c353420b2a85bbe0d0"
+            },
+            "stderr": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          }
+        },
+        "stdin": "",
+        "stdout": "{\"duration_api_ms\":10,\"stop_reason\":\"end_turn\",\"session_id\":\"94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed\",\"total_cost_usd\":0.000022,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\",\"fallback_credit\":null},\"modelUsage\":{\"claude-sonnet-5-5\":{\"inputTokens\":1,\"outputTokens\":2,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.000022,\"contextWindow\":1000000,\"maxOutputTokens\":128000,\"thinkingTokens\":0,\"canonicalModel\":\"claude-sonnet-5-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"safety_stops\":0,\"is_error\":false,\"num_turns\":1,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"HEADLESS_LOCAL_RESPONSE\",\"ttft_ms\":28,\"type\":\"result\",\"duration_ms\":31,\"uuid\":\"eea9a67a-1c2a-4545-828f-2afd6ee0f122\",\"ttft_stream_ms\":27,\"time_to_request_ms\":22,\"first_content_frame_ms\":27,\"queued_turn_count\":0,\"result_index\":0}\n",
+        "stderr": "",
+        "requests": [
+          {
+            "model": "claude-sonnet-5-5",
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Return HEADLESS_LOCAL_RESPONSE.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "system",
+                "content": [],
+                "output_config": {
+                  "effort": "medium"
+                }
+              }
+            ],
+            "system": [
+              {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.293.7c5; cc_entrypoint=sdk-cli;"
+              },
+              {
+                "type": "text",
+                "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              },
+              {
+                "type": "text",
+                "text": "You are a local deterministic headless fixture.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
+            "tools": [
+              {
+                "name": "Bash",
+                "description": "execute shell commands",
+                "input_schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "description": "The command to execute",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Optional timeout in milliseconds (max 600000 for a foreground command)",
+                      "type": "number"
+                    },
+                    "description": {
+                      "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
+                      "type": "string"
+                    },
+                    "dangerouslyDisableSandbox": {
+                      "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "command"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "name": "Edit",
+                "description": "modify file contents in place",
+                "input_schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "file_path": {
+                      "description": "The absolute path to the file to modify",
+                      "type": "string"
+                    },
+                    "old_string": {
+                      "description": "The text to replace",
+                      "type": "string"
+                    },
+                    "new_string": {
+                      "description": "The text to replace it with (must be different from old_string)",
+                      "type": "string"
+                    },
+                    "replace_all": {
+                      "description": "Replace all occurrences of old_string (default false)",
+                      "default": false,
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "file_path",
+                    "old_string",
+                    "new_string"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "name": "Read",
+                "description": "read files, images, PDFs, notebooks",
+                "input_schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "file_path": {
+                      "description": "The absolute path to the file to read",
+                      "type": "string"
+                    },
+                    "offset": {
+                      "description": "The line number to start reading from. Only provide if the file is too large to read at once",
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "limit": {
+                      "description": "The number of lines to read. Only provide if the file is too large to read at once.",
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "pages": {
+                      "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages per request.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "file_path"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ],
+            "metadata": {
+              "user_id": "{\"device_id\":\"331e37a7b33720faac1b779891fb47f1f22cb295235e8c88d12b9893a79db069\",\"account_uuid\":\"\",\"session_id\":\"94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed\"}"
+            },
+            "max_tokens": 128000,
+            "thinking": {
+              "type": "adaptive",
+              "display": "omitted"
+            },
+            "context_management": {
+              "edits": [
+                {
+                  "type": "clear_thinking_20251015",
+                  "keep": "all"
+                }
+              ]
+            },
+            "output_config": {
+              "effort": "medium"
+            },
+            "stream": true
+          }
+        ]
+      },
+      {
+        "side": "native-b",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "default",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--session-id",
+            "94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed",
+            "Return HEADLESS_LOCAL_RESPONSE."
+          ],
+          "sessionId": "94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed",
+          "primarySessionId": "94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed",
+          "sessionIds": [
+            "94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed"
+          ],
+          "pid": 60394,
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-parser-cohort-probe-parser-tools-default-workspace/94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed.jsonl",
+              "bytes": 5333,
+              "sha256": "4a1e982b7f9b16c5b3675b299c91a7aff8c29791cc3d0f9ac9b249171add8da6"
+            }
+          ],
+          "channels": {
+            "stdin": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            "stdout": {
+              "bytes": 1587,
+              "sha256": "d86b31c16e1a43e7c8b405610440fc47b61fd1ee546b0e57e4e9cedceb9f06fd"
+            },
+            "stderr": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          }
+        },
+        "stdin": "",
+        "stdout": "{\"duration_api_ms\":9,\"stop_reason\":\"end_turn\",\"session_id\":\"94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed\",\"total_cost_usd\":0.000022,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":2,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\",\"fallback_credit\":null},\"modelUsage\":{\"claude-sonnet-5-5\":{\"inputTokens\":1,\"outputTokens\":2,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.000022,\"contextWindow\":1000000,\"maxOutputTokens\":128000,\"thinkingTokens\":0,\"canonicalModel\":\"claude-sonnet-5-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"safety_stops\":0,\"is_error\":false,\"num_turns\":1,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"HEADLESS_LOCAL_RESPONSE\",\"ttft_ms\":28,\"type\":\"result\",\"duration_ms\":32,\"uuid\":\"6cba772d-1305-4ef5-9e2d-17dec1967cbb\",\"ttft_stream_ms\":28,\"time_to_request_ms\":24,\"first_content_frame_ms\":28,\"queued_turn_count\":0,\"result_index\":0}\n",
+        "stderr": "",
+        "requests": [
+          {
+            "model": "claude-sonnet-5-5",
+            "messages": [
+              {
+                "role": "user",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Return HEADLESS_LOCAL_RESPONSE.",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                ]
+              },
+              {
+                "role": "system",
+                "content": [],
+                "output_config": {
+                  "effort": "medium"
+                }
+              }
+            ],
+            "system": [
+              {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.293.7c5; cc_entrypoint=sdk-cli;"
+              },
+              {
+                "type": "text",
+                "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              },
+              {
+                "type": "text",
+                "text": "You are a local deterministic headless fixture.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ],
+            "tools": [
+              {
+                "name": "Bash",
+                "description": "execute shell commands",
+                "input_schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "description": "The command to execute",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Optional timeout in milliseconds (max 600000 for a foreground command)",
+                      "type": "number"
+                    },
+                    "description": {
+                      "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
+                      "type": "string"
+                    },
+                    "dangerouslyDisableSandbox": {
+                      "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "command"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "name": "Edit",
+                "description": "modify file contents in place",
+                "input_schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "file_path": {
+                      "description": "The absolute path to the file to modify",
+                      "type": "string"
+                    },
+                    "old_string": {
+                      "description": "The text to replace",
+                      "type": "string"
+                    },
+                    "new_string": {
+                      "description": "The text to replace it with (must be different from old_string)",
+                      "type": "string"
+                    },
+                    "replace_all": {
+                      "description": "Replace all occurrences of old_string (default false)",
+                      "default": false,
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "file_path",
+                    "old_string",
+                    "new_string"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              {
+                "name": "Read",
+                "description": "read files, images, PDFs, notebooks",
+                "input_schema": {
+                  "$schema": "https://json-schema.org/draft/2020-12/schema",
+                  "type": "object",
+                  "properties": {
+                    "file_path": {
+                      "description": "The absolute path to the file to read",
+                      "type": "string"
+                    },
+                    "offset": {
+                      "description": "The line number to start reading from. Only provide if the file is too large to read at once",
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "limit": {
+                      "description": "The number of lines to read. Only provide if the file is too large to read at once.",
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "pages": {
+                      "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages per request.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "file_path"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            ],
+            "metadata": {
+              "user_id": "{\"device_id\":\"956da88bc017d946a8f96bda9bffbf056626c50580ce548339e7893a20981b57\",\"account_uuid\":\"\",\"session_id\":\"94f1a1d2-c2b4-4b91-8cd2-f8fe8c37b7ed\"}"
+            },
+            "max_tokens": 128000,
+            "thinking": {
+              "type": "adaptive",
+              "display": "omitted"
+            },
+            "context_management": {
+              "edits": [
+                {
+                  "type": "clear_thinking_20251015",
+                  "keep": "all"
+                }
+              ]
+            },
+            "output_config": {
+              "effort": "medium"
+            },
+            "stream": true
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -55,6 +55,10 @@ fn default_query_source() -> String {
     QUERY_SOURCE_REPL_MAIN_THREAD.to_string()
 }
 
+fn default_max_structured_output_retries() -> i64 {
+    5
+}
+
 /// Claude Code 2.1.245 `E_`: collapse `agent:custom:<id>` to `agent:custom`.
 #[must_use]
 pub fn sanitize_query_source(raw: &str) -> &str {
@@ -81,6 +85,14 @@ pub struct OrchestratorConfig {
     /// non-zero, mirroring claude-code's truthy `if (maxTurns && …)` check. Set
     /// a positive value (e.g. from `--max-turns N`) to impose a ceiling.
     pub max_turns: u32,
+    /// Validation attempts within one StructuredOutput query, independent of
+    /// the ordinary turn ceiling.
+    #[serde(default = "default_max_structured_output_retries")]
+    pub max_structured_output_retries: i64,
+    /// This query explicitly requires the configured StructuredOutput capture
+    /// tool. A registry entry with that name does not activate schema policy.
+    #[serde(default)]
+    pub structured_output_enabled: bool,
 
     /// Active model identifier (passed verbatim to
     /// `AnthropicProvider::messages_create_non_stream`).
@@ -112,6 +124,11 @@ pub struct OrchestratorConfig {
     /// callers retain the additional-context prefix by selecting `Inline`.
     #[serde(default)]
     pub context_rendering: lingxi_core::host::instructions::InstructionRendering,
+
+    /// Explicit native bare composition: omit ambient context and attachment
+    /// producers while retaining task completion delivery through its owner.
+    #[serde(default)]
+    pub bare: bool,
 
     /// CLI `--exclude-dynamic-system-prompt-sections`. When `true`, the
     /// per-machine `env_block` (cwd / env info / git status / OS / shell) is
@@ -463,10 +480,13 @@ impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
             max_turns: MAX_TURNS_DEFAULT,
+            max_structured_output_retries: default_max_structured_output_retries(),
+            structured_output_enabled: false,
             model: DEFAULT_MODEL.to_string(),
             fallback_model: None,
             system_prompt_override: None,
             context_rendering: lingxi_core::host::instructions::InstructionRendering::Announced,
+            bare: false,
             exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: false,
             interactive_session: false,
@@ -548,9 +568,11 @@ mod tests {
 
     #[test]
     fn default_system_prompt_override_is_none() {
-        assert!(OrchestratorConfig::default()
-            .system_prompt_override
-            .is_none());
+        assert!(
+            OrchestratorConfig::default()
+                .system_prompt_override
+                .is_none()
+        );
     }
 
     #[test]
@@ -584,6 +606,7 @@ mod tests {
             fallback_model: Some("claude-sonnet-4-6".into()),
             system_prompt_override: Some("custom".into()),
             context_rendering: lingxi_core::host::instructions::InstructionRendering::Announced,
+            bare: false,
             exclude_dynamic_system_prompt_sections: false,
             interactive_permissions: true,
             interactive_session: true,
@@ -670,9 +693,11 @@ mod tests {
 
     #[test]
     fn default_plan_mode_instructions_is_none() {
-        assert!(OrchestratorConfig::default()
-            .plan_mode_instructions
-            .is_none());
+        assert!(
+            OrchestratorConfig::default()
+                .plan_mode_instructions
+                .is_none()
+        );
     }
 
     #[test]
@@ -684,9 +709,11 @@ mod tests {
     fn default_refusal_fallback_model_is_none() {
         // Finding #80: the parity default is a strict no-op — a `refusal`
         // response keeps today's terminal/Continue behavior.
-        assert!(OrchestratorConfig::default()
-            .refusal_fallback_model
-            .is_none());
+        assert!(
+            OrchestratorConfig::default()
+                .refusal_fallback_model
+                .is_none()
+        );
     }
 
     #[test]

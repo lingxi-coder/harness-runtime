@@ -1097,6 +1097,28 @@ pub trait ModSessionContext: Send + Sync {
     async fn ui_selection(&self) -> Result<Option<Value>, ModError> {
         Ok(None)
     }
+    async fn remote_ui_operation(
+        &self,
+        event: &str,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _plugin: &str,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ModError> {
+        let value = match event {
+            "ui.selection" => self.ui_selection().await?.unwrap_or(Value::Null),
+            "ui.copy" => json!({"isCopied":false,"reason":"no-surface"}),
+            "prompt.read" => json!({"text":"","cursor":0}),
+            "prompt.fill" => json!({"isFilled":false,"refusal":"no_composer","text":"","cursor":0}),
+            "prompt.suggest" => json!({"isShown":false}),
+            _ => {
+                return Err(ModError::Protocol(format!(
+                    "Unknown remote UI operation: {event}"
+                )))
+            }
+        };
+        Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+            value,
+        ))
+    }
     /// Forward a host-local Client VM frame to the owner of this session.
     async fn emit_mod_ui_client_frame(&self, _runtime_id: &str, _frame_json: &str) {}
     /// Invalidate only the supplied UI render sites in this session.
@@ -1217,7 +1239,7 @@ pub trait ModSessionContext: Send + Sync {
         &self,
         _input: ModAgentSpawnInput,
         _context: ModAgentSpawnContext,
-    ) -> Result<Value, ModError> {
+    ) -> Result<ModUtf16ValueProjection, ModError> {
         Err(ModError::Unavailable(
             "agent.spawn needs a launch-capable session".into(),
         ))
@@ -1240,9 +1262,9 @@ pub trait ModSessionContext: Send + Sync {
     async fn tool_call(
         &self,
         plugin: &str,
-        _input: Value,
+        _input: ModUtf16ValueProjection,
         _context: &ModToolCallContext,
-    ) -> Result<Value, ModError> {
+    ) -> Result<ModUtf16ValueProjection, ModError> {
         Err(ModError::Unavailable(format!(
             "{plugin}: $.tool.call needs a permission-aware session"
         )))
@@ -1253,10 +1275,10 @@ pub trait ModSessionContext: Send + Sync {
     /// middleware answer contract.
     async fn project_tool_call_api_result(
         &self,
-        _input: Value,
-        accepted_answer: Value,
+        _input: ModUtf16ValueProjection,
+        accepted_answer: ModUtf16ValueProjection,
         _context: &ModToolCallContext,
-    ) -> Result<Value, ModError> {
+    ) -> Result<ModUtf16ValueProjection, ModError> {
         Ok(accepted_answer)
     }
     /// Called once after the outer `tool.call` middleware has returned a valid
@@ -1417,6 +1439,19 @@ impl ModSessionContext for WeakModSessionContext {
         session.ui_selection().await
     }
 
+    async fn remote_ui_operation(
+        &self,
+        event: &str,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        plugin: &str,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ModError> {
+        let session = self
+            .0
+            .upgrade()
+            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        session.remote_ui_operation(event, input, plugin).await
+    }
+
     async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame_json: &str) {
         if let Some(session) = self.0.upgrade() {
             session
@@ -1572,9 +1607,9 @@ impl ModSessionContext for WeakModSessionContext {
     async fn tool_call(
         &self,
         plugin: &str,
-        input: Value,
+        input: ModUtf16ValueProjection,
         context: &ModToolCallContext,
-    ) -> Result<Value, ModError> {
+    ) -> Result<ModUtf16ValueProjection, ModError> {
         let session = self
             .0
             .upgrade()
@@ -1584,10 +1619,10 @@ impl ModSessionContext for WeakModSessionContext {
 
     async fn project_tool_call_api_result(
         &self,
-        input: Value,
-        accepted_answer: Value,
+        input: ModUtf16ValueProjection,
+        accepted_answer: ModUtf16ValueProjection,
         context: &ModToolCallContext,
-    ) -> Result<Value, ModError> {
+    ) -> Result<ModUtf16ValueProjection, ModError> {
         let session = self
             .0
             .upgrade()
@@ -2026,8 +2061,9 @@ impl ModExactJsonValue {
         match self {
             Self::Null => Value::Null,
             Self::Bool(value) => Value::Bool(*value),
-            Self::Number(value) => serde_json::Number::from_f64(*value)
-                .map_or(Value::Null, Value::Number),
+            Self::Number(value) => {
+                serde_json::Number::from_f64(*value).map_or(Value::Null, Value::Number)
+            }
             Self::String(units) => match String::from_utf16(units) {
                 Ok(value) => Value::String(value),
                 Err(_) => {
@@ -2157,9 +2193,8 @@ impl ModExactJsonValue {
     }
 
     fn parse_json(text: &str) -> Result<Self, String> {
-        let projection =
-            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(text)
-                .map_err(|error| error.to_string())?;
+        let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(text)
+            .map_err(|error| error.to_string())?;
         Self::from_core_projection(&projection)
     }
 
@@ -2200,7 +2235,8 @@ impl ModExactJsonValue {
         };
         let Some(index) = entries
             .iter()
-            .position(|(candidate, _)| candidate.as_slice() == key) else {
+            .position(|(candidate, _)| candidate.as_slice() == key)
+        else {
             return false;
         };
         entries.remove(index);
@@ -2219,7 +2255,10 @@ impl ModExactJsonValue {
 }
 
 fn append_mod_json_pointer(pointer: &str, segment: &str) -> String {
-    format!("{pointer}/{}", segment.replace('~', "~0").replace('/', "~1"))
+    format!(
+        "{pointer}/{}",
+        segment.replace('~', "~0").replace('/', "~1")
+    )
 }
 
 fn mod_exact_object_key_order(entries: &[(Vec<u16>, ModExactJsonValue)]) -> Vec<usize> {
@@ -2256,22 +2295,26 @@ fn mod_js_number_to_string(value: f64) -> String {
         .expect("finite Mod JSON number")
         .to_string();
     let unsigned = shortest.strip_prefix('-').unwrap_or(&shortest);
-    let (mantissa, exponent) = if let Some(index) = unsigned
-        .find('e')
-        .or_else(|| unsigned.find('E'))
-    {
-        (
-            &unsigned[..index],
-            unsigned[index + 1..]
-                .parse::<i32>()
-                .expect("valid Ryu exponent"),
-        )
-    } else {
-        (unsigned, 0_i32)
-    };
+    let (mantissa, exponent) =
+        if let Some(index) = unsigned.find('e').or_else(|| unsigned.find('E')) {
+            (
+                &unsigned[..index],
+                unsigned[index + 1..]
+                    .parse::<i32>()
+                    .expect("valid Ryu exponent"),
+            )
+        } else {
+            (unsigned, 0_i32)
+        };
     let decimal_offset = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
-    let mut digits = mantissa.chars().filter(|character| *character != '.').collect::<String>();
-    let leading_zeroes = digits.chars().take_while(|character| *character == '0').count();
+    let mut digits = mantissa
+        .chars()
+        .filter(|character| *character != '.')
+        .collect::<String>();
+    let leading_zeroes = digits
+        .chars()
+        .take_while(|character| *character == '0')
+        .count();
     digits.drain(..leading_zeroes);
     let decimal_position = decimal_offset + exponent - leading_zeroes as i32;
     while digits.len() > 1 && digits.ends_with('0') {
@@ -2289,11 +2332,7 @@ fn mod_js_number_to_string(value: f64) -> String {
             output
         }
     } else if decimal_position <= 0 && decimal_position > -6 {
-        format!(
-            "0.{}{}",
-            "0".repeat((-decimal_position) as usize),
-            digits
-        )
+        format!("0.{}{}", "0".repeat((-decimal_position) as usize), digits)
     } else {
         let exponent = decimal_position - 1;
         let significand = if digits.len() == 1 {
@@ -2338,12 +2377,11 @@ fn write_mod_utf16_json_string(units: &[u16], output: &mut String) {
                 output.push(HEX[((unit >> 4) & 0x0f) as usize] as char);
                 output.push(HEX[(unit & 0x0f) as usize] as char);
             }
-            0xd800..=0xdbff if index + 1 < units.len()
-                && (0xdc00..=0xdfff).contains(&units[index + 1]) =>
+            0xd800..=0xdbff
+                if index + 1 < units.len() && (0xdc00..=0xdfff).contains(&units[index + 1]) =>
             {
-                let scalar = 0x10000
-                    + (((unit as u32 - 0xd800) << 10)
-                        | (units[index + 1] as u32 - 0xdc00));
+                let scalar =
+                    0x10000 + (((unit as u32 - 0xd800) << 10) | (units[index + 1] as u32 - 0xdc00));
                 output.push(char::from_u32(scalar).expect("valid UTF-16 pair"));
                 index += 1;
             }
@@ -2371,12 +2409,9 @@ fn mod_utf16_string_units_at_projection(
     {
         return Ok(sidecar.code_units.clone());
     }
-    let value = mod_utf16_value_at_pointer(
-        &projection.value,
-        &parse_mod_utf16_pointer(pointer)?,
-    )
-    .and_then(Value::as_str)
-    .ok_or_else(|| format!("Mod API {pointer} must be a string"))?;
+    let value = mod_utf16_value_at_pointer(&projection.value, &parse_mod_utf16_pointer(pointer)?)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Mod API {pointer} must be a string"))?;
     Ok(value.encode_utf16().collect())
 }
 
@@ -2384,12 +2419,9 @@ fn mod_exact_projection_at_pointer(
     projection: &ModUtf16ValueProjection,
     pointer: &str,
 ) -> Result<ModUtf16ValueProjection, String> {
-    let value = mod_utf16_value_at_pointer(
-        &projection.value,
-        &parse_mod_utf16_pointer(pointer)?,
-    )
-    .cloned()
-    .ok_or_else(|| format!("Mod API {pointer} is required"))?;
+    let value = mod_utf16_value_at_pointer(&projection.value, &parse_mod_utf16_pointer(pointer)?)
+        .cloned()
+        .ok_or_else(|| format!("Mod API {pointer} is required"))?;
     let child_prefix = format!("{pointer}/");
     let strings = rebase_utf16_sidecars(
         projection
@@ -2415,19 +2447,18 @@ fn mod_exact_projection_at_pointer(
     )?;
     validate_mod_utf16_sidecars(&value, &strings)?;
     validate_mod_utf16_key_sidecars(&value, &keys)?;
-    Ok(ModUtf16ValueProjection { value, strings, keys })
+    Ok(ModUtf16ValueProjection {
+        value,
+        strings,
+        keys,
+    })
 }
 
 fn mod_optional_exact_json_at_pointer(
     projection: &ModUtf16ValueProjection,
     pointer: &str,
 ) -> Result<Option<ModExactJsonValue>, String> {
-    if mod_utf16_value_at_pointer(
-        &projection.value,
-        &parse_mod_utf16_pointer(pointer)?,
-    )
-    .is_none()
-    {
+    if mod_utf16_value_at_pointer(&projection.value, &parse_mod_utf16_pointer(pointer)?).is_none() {
         return Ok(None);
     }
     let value = mod_exact_projection_at_pointer(projection, pointer)?;
@@ -2511,10 +2542,7 @@ impl ModStateKey {
     }
 }
 
-fn mod_state_key(
-    input: &ModUtf16ValueProjection,
-    event: &str,
-) -> Result<ModStateKey, ModError> {
+fn mod_state_key(input: &ModUtf16ValueProjection, event: &str) -> Result<ModStateKey, ModError> {
     let args = input.value.as_object().ok_or_else(|| {
         ModError::Hook(format!(
             "{event} takes a reference {{ plugin, key }} (id for a family member)"
@@ -2526,24 +2554,29 @@ fn mod_state_key(
         )));
     }
     if !args.get("key").is_some_and(Value::is_string) {
-        return Err(ModError::Hook(format!("{event} key must be a non-empty string")));
+        return Err(ModError::Hook(format!(
+            "{event} key must be a non-empty string"
+        )));
     }
-    let plugin_units = mod_utf16_string_units_at_projection(input, "/plugin")
-        .map_err(ModError::Hook)?;
-    let key_units = mod_utf16_string_units_at_projection(input, "/key")
-        .map_err(ModError::Hook)?;
+    let plugin_units =
+        mod_utf16_string_units_at_projection(input, "/plugin").map_err(ModError::Hook)?;
+    let key_units = mod_utf16_string_units_at_projection(input, "/key").map_err(ModError::Hook)?;
     let id_units = match args.get("id") {
         None => None,
-        Some(value) if value.is_string() => Some(
-            mod_utf16_string_units_at_projection(input, "/id").map_err(ModError::Hook)?,
-        ),
+        Some(value) if value.is_string() => {
+            Some(mod_utf16_string_units_at_projection(input, "/id").map_err(ModError::Hook)?)
+        }
         Some(_) => return Err(ModError::Hook(format!("{event} id must be a string"))),
     };
     if plugin_units.is_empty() {
-        return Err(ModError::Hook(format!("{event} plugin must be a non-empty string")));
+        return Err(ModError::Hook(format!(
+            "{event} plugin must be a non-empty string"
+        )));
     }
     if key_units.is_empty() {
-        return Err(ModError::Hook(format!("{event} key must be a non-empty string")));
+        return Err(ModError::Hook(format!(
+            "{event} key must be a non-empty string"
+        )));
     }
     if plugin_units.contains(&0)
         || key_units.contains(&0)
@@ -2562,10 +2595,13 @@ fn mod_state_key(
         let visible = input
             .keys
             .iter()
-            .find(|sidecar| sidecar.pointer.is_empty() && sidecar.placeholder.as_str() == extra.as_str())
-            .map_or_else(|| extra.clone(), |sidecar| {
-                String::from_utf16_lossy(&sidecar.code_units)
-            });
+            .find(|sidecar| {
+                sidecar.pointer.is_empty() && sidecar.placeholder.as_str() == extra.as_str()
+            })
+            .map_or_else(
+                || extra.clone(),
+                |sidecar| String::from_utf16_lossy(&sidecar.code_units),
+            );
         return Err(ModError::Hook(format!("{event} has extra field {visible}")));
     }
     Ok(ModStateKey {
@@ -3094,7 +3130,11 @@ fn retain_generation_api_session(sessions: &GenerationApiSessions, ticket: &str)
     let Some(entry) = sessions.get_mut(ticket) else {
         return false;
     };
-    if entry.session.generation_cancellation_token().is_some_and(|token| token.is_cancelled()) {
+    if entry
+        .session
+        .generation_cancellation_token()
+        .is_some_and(|token| token.is_cancelled())
+    {
         return false;
     }
     entry.references = entry.references.saturating_add(1);
@@ -3386,7 +3426,8 @@ fn background_output_context(
                 sessions: epoch.generation_api_sessions.clone(),
                 ticket: ticket.clone(),
             };
-            let session = worker.generation_api_session_in(&epoch.generation_api_sessions, ticket)?;
+            let session =
+                worker.generation_api_session_in(&epoch.generation_api_sessions, ticket)?;
             Ok((session, Some(lease)))
         }
         Some(_) => Err(ModError::Protocol(
@@ -3830,7 +3871,7 @@ async fn background_api_loop(
                         u64,
                         Option<Result<HostApiValue, ModError>>,
                         Weak<dyn ModSessionContext>,
-                Option<Arc<dyn ModSessionContext>>,
+                        Option<Arc<dyn ModSessionContext>>,
                     ),
                 > + Send,
         >,
@@ -4581,8 +4622,7 @@ struct ModStateStore {
     values: HashMap<ModStateKey, ModStateValue>,
     version_floor: u64,
     ui_render_sites: HashMap<ModUiRenderSiteKey, ModUiRenderSiteState>,
-    pending_ui_render_reads:
-        HashMap<(ModUiRenderSiteKey, u64), HashMap<ModStateKey, u64>>,
+    pending_ui_render_reads: HashMap<(ModUiRenderSiteKey, u64), HashMap<ModStateKey, u64>>,
     ui_render_plugin_versions: HashMap<(String, ModUiRenderPace), u64>,
     ui_render_plugin_pacing: HashMap<String, (ModUiPacedCounter, ModUiPacedCounter)>,
     ui_render_slow_plugins: HashMap<String, u64>,
@@ -5660,7 +5700,8 @@ impl ModHost {
             #[cfg(test)]
             test_route_gate,
         });
-        host.start_epoch_tasks(&epoch, output, background_replies).await;
+        host.start_epoch_tasks(&epoch, output, background_replies)
+            .await;
         Ok(host)
     }
 
@@ -5689,9 +5730,7 @@ impl ModHost {
     }
 
     /// Take the single failure stream consumed by the owning PluginManager.
-    pub fn subscribe_worker_failures(
-        &self,
-    ) -> Option<mpsc::UnboundedReceiver<ModWorkerFailure>> {
+    pub fn subscribe_worker_failures(&self) -> Option<mpsc::UnboundedReceiver<ModWorkerFailure>> {
         self.worker_failure_receiver
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5797,17 +5836,15 @@ impl ModHost {
         self.note_client_ui_global_render_change().await;
 
         let epoch_id = self.next_worker_epoch.fetch_add(1, Ordering::Relaxed);
-        let (child, input, output) = match
-            spawn_mod_worker(&self.node_executable, self.electron_run_as_node).await
-        {
-            Ok(worker) => worker,
-            Err(error) => {
-                old_epoch.status.store(WORKER_EPOCH_DEAD, Ordering::Release);
-                return Err(error);
-            }
-        };
-        let (new_epoch, background_replies) =
-            ModWorkerEpoch::new(epoch_id, child, input, true);
+        let (child, input, output) =
+            match spawn_mod_worker(&self.node_executable, self.electron_run_as_node).await {
+                Ok(worker) => worker,
+                Err(error) => {
+                    old_epoch.status.store(WORKER_EPOCH_DEAD, Ordering::Release);
+                    return Err(error);
+                }
+            };
+        let (new_epoch, background_replies) = ModWorkerEpoch::new(epoch_id, child, input, true);
         *self.worker_epoch.write().await = new_epoch.clone();
         self.start_epoch_tasks(&new_epoch, output, background_replies)
             .await;
@@ -6301,7 +6338,12 @@ impl ModHost {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(ticket)
-            .filter(|entry| !entry.session.generation_cancellation_token().is_some_and(|token| token.is_cancelled()))
+            .filter(|entry| {
+                !entry
+                    .session
+                    .generation_cancellation_token()
+                    .is_some_and(|token| token.is_cancelled())
+            })
             .map(|entry| Arc::clone(&entry.session))
             .ok_or_else(|| {
                 ModError::Unavailable("originating Mod dispatch generation ended".into())
@@ -6489,7 +6531,9 @@ impl ModHost {
         let status = epoch.status.load(Ordering::Acquire);
         if status == WORKER_EPOCH_DEAD
             || (status == WORKER_EPOCH_RECOVERING
-                && !MOD_WORKER_RECOVERY_SCOPE.try_with(|active| *active).unwrap_or(false))
+                && !MOD_WORKER_RECOVERY_SCOPE
+                    .try_with(|active| *active)
+                    .unwrap_or(false))
         {
             return Err(ModError::Unavailable("Mod worker is recovering".into()));
         }
@@ -6515,7 +6559,8 @@ impl ModHost {
                     // with this worker request id so concurrent W1 generations never
                     // share the background session binding.
                     let context_ticket = format!("{}:{}:{}", self.instance_id, id, ticket.as_str());
-                    epoch.generation_api_sessions
+                    epoch
+                        .generation_api_sessions
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(
@@ -6551,7 +6596,8 @@ impl ModHost {
         }
         object.insert("id".into(), json!(id));
         let (sender, replies) = mpsc::unbounded_channel();
-        epoch.routes
+        epoch
+            .routes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, sender);
@@ -6698,8 +6744,8 @@ impl ModHost {
             let key = if event == "store.keys" {
                 None
             } else {
-                let key = mod_utf16_string_units_at_projection(&input, "/key")
-                    .map_err(ModError::Hook)?;
+                let key =
+                    mod_utf16_string_units_at_projection(&input, "/key").map_err(ModError::Hook)?;
                 if key.len() > 256 {
                     return Err(ModError::Hook("store key exceeds 256 characters".into()));
                 }
@@ -6857,6 +6903,13 @@ impl ModHost {
             validate_mod_utf16_key_sidecars(&input_projection.value, &input_projection.keys)
                 .map_err(ModError::Protocol)?;
             let mut input_projection = input_projection;
+            if matches!(event, "prompt.fill" | "prompt.suggest") {
+                input_projection.value["origin"] =
+                    json!({"kind":"plugin","name":api_context.caller.plugin});
+                if event == "prompt.fill" && input_projection.value.get("mode").is_none() {
+                    input_projection.value["mode"] = json!("replace");
+                }
+            }
             let mut input = input_projection.value.clone();
             // These APIs are direct Host operations, not middleware events.
             // In particular, `agent.spawn` enters the canonical Agent launch
@@ -6891,7 +6944,7 @@ impl ModHost {
                     request_cancellation,
                     spawn_slot,
                 );
-                return Ok(HostApiValue::Json(
+                return Ok(HostApiValue::JsonWithUtf16(
                     session.agent_spawn_api(spawn_input, spawn_context).await?,
                 ));
             }
@@ -7044,7 +7097,7 @@ impl ModHost {
                     dispatch_message,
                     api_context.hook_origin.clone(),
                     generation_session,
-                    generation_context_ticket,
+                    generation_context_ticket.clone(),
                 )
                 .await?;
             type ClockCall<'a> = Pin<
@@ -7138,8 +7191,16 @@ impl ModHost {
                         }
                         if event == "state.set"
                             && (next_input.get("ifVersion") != input.get("ifVersion")
-                                || mod_optional_exact_json_at_pointer(&next_projection, "/previous").ok()
-                                    != mod_optional_exact_json_at_pointer(&input_projection, "/previous").ok())
+                                || mod_optional_exact_json_at_pointer(
+                                    &next_projection,
+                                    "/previous",
+                                )
+                                .ok()
+                                    != mod_optional_exact_json_at_pointer(
+                                        &input_projection,
+                                        "/previous",
+                                    )
+                                    .ok())
                         {
                             self.send(&json!({"id":request.id,"kind":"next.error","callId":call_id,"message":"state.set ifVersion and previous are pinned"})).await?;
                             continue;
@@ -7180,6 +7241,10 @@ impl ModHost {
                                         event,
                                         "env.get"
                                             | "ui.selection"
+                                            | "ui.copy"
+                                            | "prompt.read"
+                                            | "prompt.fill"
+                                            | "prompt.suggest"
                                             | "model.classify"
                                             | "telemetry.log"
                                             | "telemetry.mark"
@@ -7197,6 +7262,8 @@ impl ModHost {
                                     "tool.check"
                                         | "tool.call"
                                         | "prompt.compose"
+                                        | "prompt.fill"
+                                        | "prompt.suggest"
                                         | "prompt.context"
                                         | "session.receive"
                                 );
@@ -7261,6 +7328,60 @@ impl ModHost {
                             }
                             return Ok(HostApiValue::JsonWithUtf16(result_projection));
                         }
+                        if event == "prompt.fill" {
+                            let after = self
+                                .dispatch_host_api_with_projection(
+                                    "prompt.read",
+                                    ModUtf16ValueProjection::plain(json!({})),
+                                    cwd,
+                                    session,
+                                    cwd_is_pinned,
+                                    depth.saturating_add(1),
+                                    origin.clone(),
+                                    api_context.clone(),
+                                    storage_id.clone(),
+                                    skip_hook_id,
+                                    log_route_id,
+                                    tool_call_context.clone(),
+                                    generation_context_ticket.clone(),
+                                )
+                                .await?;
+                            let after = match after {
+                                HostApiValue::JsonWithUtf16(value) => {
+                                    core_projection_from_mod(value)?
+                                }
+                                HostApiValue::Json(value) => {
+                                    lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                                        value,
+                                    )
+                                }
+                                HostApiValue::Undefined => {
+                                    lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                                        json!({"text":"","cursor":0}),
+                                    )
+                                }
+                            };
+                            let mut answer = core_projection_from_mod(result_projection)?;
+                            let text = after.subprojection("/text").unwrap_or_else(|_| {
+                                lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!(
+                                    ""
+                                ))
+                            });
+                            answer
+                                .set_field("text", text)
+                                .map_err(|error| ModError::Protocol(error.to_string()))?;
+                            answer.value["cursor"] = after
+                                .value
+                                .get("cursor")
+                                .cloned()
+                                .unwrap_or_else(|| json!(0));
+                            return Ok(HostApiValue::JsonWithUtf16(mod_projection_from_core(
+                                answer,
+                            )?));
+                        }
+                        if event == "prompt.suggest" {
+                            return Ok(HostApiValue::JsonWithUtf16(result_projection));
+                        }
                         if event == "prompt.compose" {
                             if !valid_prompt_compose_result(&result_projection) {
                                 return Err(ModError::Hook(
@@ -7308,22 +7429,23 @@ impl ModHost {
                             })?;
                             let projected = session
                                 .project_tool_call_api_result(
-                                    input.clone(),
-                                    result.clone(),
+                                    input_projection.clone(),
+                                    result_projection,
                                     context,
                                 )
                                 .await?;
-                            if !valid_tool_call_api_projection(&projected) {
+                            if !valid_tool_call_api_projection(&projected.value) {
                                 return Err(ModError::Protocol(
                                     "tool.call API projection returned an unsupported result"
                                         .into(),
                                 ));
                             }
                             complete_tool_call(session, context).await?;
-                            if projected == result {
-                                return Ok(HostApiValue::JsonWithUtf16(result_projection));
-                            }
-                            return Ok(HostApiValue::Json(projected));
+                            validate_mod_utf16_sidecars(&projected.value, &projected.strings)
+                                .map_err(ModError::Protocol)?;
+                            validate_mod_utf16_key_sidecars(&projected.value, &projected.keys)
+                                .map_err(ModError::Protocol)?;
+                            return Ok(HostApiValue::JsonWithUtf16(projected));
                         }
                         if let Some(reason) = result.get("deny").and_then(Value::as_str) {
                             if matches!(event, "telemetry.log" | "telemetry.mark") {
@@ -7342,6 +7464,10 @@ impl ModHost {
                             "store.get"
                                 | "env.get"
                                 | "ui.selection"
+                                | "ui.copy"
+                                | "prompt.read"
+                                | "prompt.fill"
+                                | "prompt.suggest"
                                 | "model.classify"
                                 | "telemetry.log"
                                 | "telemetry.mark"
@@ -7746,6 +7872,10 @@ impl ModHost {
                                 | "ui.toast"
                                 | "ui.status"
                                 | "ui.selection"
+                                | "ui.copy"
+                                | "prompt.read"
+                                | "prompt.fill"
+                                | "prompt.suggest"
                                 | "telemetry.log"
                                 | "telemetry.mark"
                                 | "tool.call"
@@ -7924,8 +8054,8 @@ impl ModHost {
             }
             let value_projection =
                 mod_exact_projection_at_pointer(&input, "/value").map_err(ModError::Hook)?;
-            let value = ModExactJsonValue::from_projection(&value_projection)
-                .map_err(ModError::Hook)?;
+            let value =
+                ModExactJsonValue::from_projection(&value_projection).map_err(ModError::Hook)?;
             if value.compact_json().encode_utf16().count() > 4 * 1024 * 1024 {
                 return Err(ModError::Hook("state.set value exceeds 4 MiB".into()));
             }
@@ -7993,7 +8123,9 @@ impl ModHost {
                 return Ok(HostApiValue::Undefined);
             }
             if result.value.is_string() {
-                return Ok(HostApiValue::JsonWithUtf16(mod_projection_from_core(result)?));
+                return Ok(HostApiValue::JsonWithUtf16(mod_projection_from_core(
+                    result,
+                )?));
             }
             return Err(ModError::Hook(
                 "model.classify result must be a string or undefined".into(),
@@ -8009,6 +8141,48 @@ impl ModHost {
                 .prompt_compose_core(input, None, None)
                 .await
                 .map(HostApiValue::JsonWithUtf16);
+        }
+        if event == "tool.call" {
+            if input
+                .value
+                .get("tool")
+                .and_then(Value::as_str)
+                .filter(|tool| !tool.is_empty())
+                .is_none()
+            {
+                return Err(ModError::Hook(format!(
+                    "{plugin}: $.tool.call takes the event's input: {{ tool, ...args }}"
+                )));
+            }
+            let session = session.ok_or_else(|| {
+                ModError::Unavailable(format!(
+                    "{plugin}: $.tool.call needs a permission-aware session"
+                ))
+            })?;
+            let context = tool_call_context.ok_or_else(|| {
+                ModError::Protocol("tool.call is missing its host execution context".into())
+            })?;
+            return session
+                .tool_call(plugin, input, context)
+                .await
+                .map(HostApiValue::JsonWithUtf16);
+        }
+        if matches!(
+            event,
+            "ui.copy" | "ui.selection" | "prompt.read" | "prompt.fill" | "prompt.suggest"
+        ) {
+            let Some(session) = session else {
+                return Ok(HostApiValue::Undefined);
+            };
+            let result = session
+                .remote_ui_operation(event, core_projection_from_mod(input)?, plugin)
+                .await?;
+            if result.value.is_null() {
+                return Ok(HostApiValue::Undefined);
+            }
+            return Ok(HostApiValue::JsonWithUtf16(mod_projection_from_core(
+                result,
+            )?));
         }
         self.run_host_api_core_json(
             event,
@@ -8053,11 +8227,10 @@ impl ModHost {
                     "{event} requires the projection-aware host API core"
                 )))
             }
-            "state.get" | "state.set" | "store.get" | "store.set" | "store.delete" | "store.keys" => {
-                Err(ModError::Protocol(format!(
-                    "{event} requires the projection-aware host API core"
-                )))
-            }
+            "state.get" | "state.set" | "store.get" | "store.set" | "store.delete"
+            | "store.keys" => Err(ModError::Protocol(format!(
+                "{event} requires the projection-aware host API core"
+            ))),
             "model.fork" => {
                 let prompt = input
                     .get("prompt")
@@ -8140,27 +8313,9 @@ impl ModHost {
                     .ok_or_else(|| ModError::Unavailable("tool.check needs a session".into()))?;
                 session.tool_check(tool, tool_input).await
             }
-            "tool.call" => {
-                if input
-                    .get("tool")
-                    .and_then(Value::as_str)
-                    .filter(|tool| !tool.is_empty())
-                    .is_none()
-                {
-                    return Err(ModError::Hook(format!(
-                        "{plugin}: $.tool.call takes the event's input: {{ tool, ...args }}"
-                    )));
-                }
-                let session = session.ok_or_else(|| {
-                    ModError::Unavailable(format!(
-                        "{plugin}: $.tool.call needs a permission-aware session"
-                    ))
-                })?;
-                let context = tool_call_context.ok_or_else(|| {
-                    ModError::Protocol("tool.call is missing its host execution context".into())
-                })?;
-                session.tool_call(plugin, input, context).await
-            }
+            "tool.call" => Err(ModError::Protocol(
+                "tool.call requires the projection-aware host API core".into(),
+            )),
             "tool.list" => {
                 let session = session
                     .ok_or_else(|| ModError::Unavailable("tool.list needs a session".into()))?;
@@ -9914,6 +10069,10 @@ impl ModHost {
                                     | "ui.toast"
                                     | "ui.status"
                                     | "ui.selection"
+                                    | "ui.copy"
+                                    | "prompt.read"
+                                    | "prompt.fill"
+                                    | "prompt.suggest"
                                     | "telemetry.log"
                                     | "telemetry.mark"
                                     | "tool.call"
@@ -10211,7 +10370,12 @@ mod tests {
                 .await
         });
         started_rx.await.unwrap();
-        report_worker_epoch_failure(&epoch, &host.worker_failure_sender, "test epoch died".into(), None);
+        report_worker_epoch_failure(
+            &epoch,
+            &host.worker_failure_sender,
+            "test epoch died".into(),
+            None,
+        );
         drop(held_input);
         let result = tokio::time::timeout(Duration::from_secs(5), send)
             .await
@@ -10382,16 +10546,22 @@ mod tests {
         assert!(line.starts_with("new:"));
         assert!(line.contains("current.probe"));
         let mut old_lines = BufReader::new(old_output).lines();
-        assert!(tokio::time::timeout(Duration::from_millis(100), old_lines.next_line())
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), old_lines.next_line())
+                .await
+                .is_err()
+        );
     }
 
     fn projected(value: Value) -> ModUtf16ValueProjection {
         ModUtf16ValueProjection::plain(value)
     }
 
-    fn projected_text(value: Value, pointer: &str, code_units: Vec<u16>) -> ModUtf16ValueProjection {
+    fn projected_text(
+        value: Value,
+        pointer: &str,
+        code_units: Vec<u16>,
+    ) -> ModUtf16ValueProjection {
         ModUtf16ValueProjection {
             value,
             strings: vec![ModUtf16StringSidecar {
@@ -10790,7 +10960,7 @@ mod tests {
             &self,
             input: ModAgentSpawnInput,
             context: ModAgentSpawnContext,
-        ) -> Result<Value, ModError> {
+        ) -> Result<ModUtf16ValueProjection, ModError> {
             if self.fail_spawn.load(Ordering::Acquire) {
                 return Err(ModError::Hook("Agent admission refused".into()));
             }
@@ -10811,7 +10981,9 @@ mod tests {
                 .retained_left_running
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(retained_left_running);
-            Ok(json!({"result":{"agentId":"child-launched"},"text":""}))
+            Ok(ModUtf16ValueProjection::plain(
+                json!({"result":{"agentId":"child-launched"},"text":""}),
+            ))
         }
     }
 
@@ -11076,11 +11248,9 @@ mod tests {
                 return Err(ModError::Unavailable("no classifier".into()));
             }
             match input.value.get("text").and_then(Value::as_str) {
-                Some("question") => Ok(
-                    lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
-                        Value::String("bug".into()),
-                    ),
-                ),
+                Some("question") => Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    Value::String("bug".into()),
+                )),
                 Some("lone-label") => {
                     if input.string_units("/labels/0") != Some(vec![0xd800]) {
                         return Err(ModError::Hook(
@@ -11607,9 +11777,10 @@ mod tests {
             async fn tool_call(
                 &self,
                 plugin: &str,
-                input: Value,
+                input: ModUtf16ValueProjection,
                 context: &ModToolCallContext,
-            ) -> Result<Value, ModError> {
+            ) -> Result<ModUtf16ValueProjection, ModError> {
+                let input = input.value;
                 assert_eq!(plugin, "tool-call-api");
                 assert!(matches!(
                     &context.agent_spawn_provenance.hook_caller,
@@ -11669,10 +11840,10 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(context.virtual_assistant_uuid.clone());
-                Ok(json!({
+                Ok(ModUtf16ValueProjection::plain(json!({
                     "result":{"path":input["path"]},
                     "text":"core result"
-                }))
+                })))
             }
 
             async fn complete_tool_call(
@@ -11872,9 +12043,10 @@ mod tests {
             async fn tool_call(
                 &self,
                 plugin: &str,
-                input: Value,
+                input: ModUtf16ValueProjection,
                 context: &ModToolCallContext,
-            ) -> Result<Value, ModError> {
+            ) -> Result<ModUtf16ValueProjection, ModError> {
+                let input = input.value;
                 assert_eq!(plugin, "tool-call-preflight");
                 assert_eq!(input["tool"], "read-alias");
                 assert_eq!(input["path"], "/prepared");
@@ -11889,7 +12061,9 @@ mod tests {
                 );
                 self.core_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(json!({"result":{"path":input["path"]},"text":"prepared"}))
+                Ok(ModUtf16ValueProjection::plain(
+                    json!({"result":{"path":input["path"]},"text":"prepared"}),
+                ))
             }
 
             async fn complete_tool_call(
@@ -12076,9 +12250,10 @@ mod tests {
             async fn tool_call(
                 &self,
                 plugin: &str,
-                input: Value,
+                input: ModUtf16ValueProjection,
                 context: &ModToolCallContext,
-            ) -> Result<Value, ModError> {
+            ) -> Result<ModUtf16ValueProjection, ModError> {
+                let input = input.value;
                 assert_eq!(plugin, "tool-call-cancel");
                 assert_eq!(input["tool"], "SlowRead");
                 self.started
@@ -12087,7 +12262,9 @@ mod tests {
                     context.cancellation.is_cancelled(),
                     std::sync::atomic::Ordering::SeqCst,
                 );
-                Ok(json!({"result":"read-result","text":"read-result"}))
+                Ok(ModUtf16ValueProjection::plain(
+                    json!({"result":"read-result","text":"read-result"}),
+                ))
             }
 
             async fn complete_tool_call(
@@ -12203,48 +12380,51 @@ mod tests {
             async fn tool_call(
                 &self,
                 plugin: &str,
-                input: Value,
+                input: ModUtf16ValueProjection,
                 _context: &ModToolCallContext,
-            ) -> Result<Value, ModError> {
+            ) -> Result<ModUtf16ValueProjection, ModError> {
+                let input = input.value;
                 assert_eq!(plugin, "tool-call-projection");
                 if input["tool"] == "Invalid" {
                     self.phases.lock().unwrap().push("core-invalid");
-                    return Ok(json!({
+                    return Ok(ModUtf16ValueProjection::plain(json!({
                         "result":"core-invalid",
                         "text":"core invalid"
-                    }));
+                    })));
                 }
                 assert_eq!(input["tool"], "Agent");
                 self.phases.lock().unwrap().push("core-agent");
-                Ok(json!({
+                Ok(ModUtf16ValueProjection::plain(json!({
                     "result":{"raw":"agent-tool-result"},
                     "text":"agent failed",
                     "isError":true
-                }))
+                })))
             }
 
             async fn project_tool_call_api_result(
                 &self,
-                input: Value,
-                accepted_answer: Value,
+                input: ModUtf16ValueProjection,
+                accepted_answer: ModUtf16ValueProjection,
                 context: &ModToolCallContext,
-            ) -> Result<Value, ModError> {
-                if input["tool"] == "Invalid" {
-                    assert_eq!(accepted_answer["result"], "core-invalid");
-                    assert_eq!(accepted_answer["text"], "core invalid");
+            ) -> Result<ModUtf16ValueProjection, ModError> {
+                if input.value["tool"] == "Invalid" {
+                    assert_eq!(accepted_answer.value["result"], "core-invalid");
+                    assert_eq!(accepted_answer.value["text"], "core invalid");
                     self.phases.lock().unwrap().push("project-invalid");
                     return Ok(accepted_answer);
                 }
-                assert_eq!(input["tool"], "Agent");
-                assert_eq!(input["tool_use_id"], "caller-id-is-not-reused");
-                assert_eq!(accepted_answer["result"]["raw"], "agent-tool-result");
-                assert_eq!(accepted_answer["text"], "agent failed");
-                assert_eq!(accepted_answer["isError"], true);
+                assert_eq!(input.value["tool"], "Agent");
+                assert_eq!(input.value["tool_use_id"], "caller-id-is-not-reused");
+                assert_eq!(accepted_answer.value["result"]["raw"], "agent-tool-result");
+                assert_eq!(accepted_answer.value["text"], "agent failed");
+                assert_eq!(accepted_answer.value["isError"], true);
                 assert!(context.virtual_tool_use_id.starts_with("toolu_plugin_"));
                 self.phases.lock().unwrap().push("project-agent");
                 // Native FAt(undefined, text) is projected after the strict
                 // middleware answer has been accepted.
-                Ok(json!({"text":"agent failed","isError":true}))
+                Ok(ModUtf16ValueProjection::plain(
+                    json!({"text":"agent failed","isError":true}),
+                ))
             }
 
             async fn complete_tool_call(
@@ -12404,31 +12584,34 @@ mod tests {
             async fn tool_call(
                 &self,
                 _plugin: &str,
-                input: Value,
+                input: ModUtf16ValueProjection,
                 context: &ModToolCallContext,
-            ) -> Result<Value, ModError> {
+            ) -> Result<ModUtf16ValueProjection, ModError> {
+                let input = input.value;
                 assert_eq!(input["tool"], "Agent");
                 self.started
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 context.cancellation.cancel();
-                Ok(json!({
+                Ok(ModUtf16ValueProjection::plain(json!({
                     "result":{"raw":"agent-result"},
                     "text":"agent failed",
                     "isError":true
-                }))
+                })))
             }
 
             async fn project_tool_call_api_result(
                 &self,
-                _input: Value,
-                accepted_answer: Value,
+                _input: ModUtf16ValueProjection,
+                accepted_answer: ModUtf16ValueProjection,
                 context: &ModToolCallContext,
-            ) -> Result<Value, ModError> {
-                assert_eq!(accepted_answer["result"]["raw"], "agent-result");
+            ) -> Result<ModUtf16ValueProjection, ModError> {
+                assert_eq!(accepted_answer.value["result"]["raw"], "agent-result");
                 assert!(context.cancellation.is_cancelled());
                 self.projection_started.notify_one();
                 self.projection_release.notified().await;
-                Ok(json!({"text":"agent failed","isError":true}))
+                Ok(ModUtf16ValueProjection::plain(
+                    json!({"text":"agent failed","isError":true}),
+                ))
             }
 
             async fn complete_tool_call(
@@ -12581,9 +12764,9 @@ mod tests {
             async fn tool_call(
                 &self,
                 _plugin: &str,
-                _input: Value,
+                _input: ModUtf16ValueProjection,
                 context: &ModToolCallContext,
-            ) -> Result<Value, ModError> {
+            ) -> Result<ModUtf16ValueProjection, ModError> {
                 let cancellation = context.cancellation.clone();
                 let observed = self.observed_cancellation.clone();
                 tokio::spawn(async move {
@@ -12591,7 +12774,7 @@ mod tests {
                     observed.store(true, std::sync::atomic::Ordering::SeqCst);
                 });
                 self.started.notify_one();
-                std::future::pending::<Result<Value, ModError>>().await
+                std::future::pending::<Result<ModUtf16ValueProjection, ModError>>().await
             }
         }
 
@@ -16239,9 +16422,15 @@ mod tests {
         assert_eq!(hydrated.keys.len(), 1);
         assert_eq!(hydrated.keys[0].code_units, vec![0xd800]);
         assert_ne!(hydrated.keys[0].placeholder, "__lingxiModUtf16KeyV1_0__");
-        assert_eq!(hydrated.value["nested"]["__lingxiModUtf16KeyV1_0__"], "ordinary user key");
+        assert_eq!(
+            hydrated.value["nested"]["__lingxiModUtf16KeyV1_0__"],
+            "ordinary user key"
+        );
         assert_eq!(hydrated.strings.len(), 2);
-        assert!(hydrated.strings.iter().all(|sidecar| sidecar.code_units == [0xd800]));
+        assert!(hydrated
+            .strings
+            .iter()
+            .all(|sidecar| sidecar.code_units == [0xd800]));
     }
 
     #[tokio::test]
@@ -16374,7 +16563,12 @@ mod tests {
         let store_text = std::fs::read_dir(&store_root)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "json"))
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            })
             .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
             .next()
             .expect("store.set persists an ordinary JSON object");
@@ -18255,7 +18449,10 @@ mod tests {
         let sessions = &epoch.generation_api_sessions;
         sessions.lock().unwrap().insert(
             ticket.into(),
-            GenerationApiSessionEntry { session, references: 1 },
+            GenerationApiSessionEntry {
+                session,
+                references: 1,
+            },
         );
         assert!(retain_generation_api_session(&sessions, ticket));
         assert!(host.generation_api_session_in(sessions, ticket).is_ok());
@@ -18266,7 +18463,10 @@ mod tests {
         // before the asynchronous invalidation watcher removes it.
         assert!(sessions.lock().unwrap().contains_key(ticket));
         assert!(!retain_generation_api_session(&sessions, ticket));
-        assert!(matches!(host.generation_api_session_in(sessions, ticket), Err(ModError::Unavailable(_))));
+        assert!(matches!(
+            host.generation_api_session_in(sessions, ticket),
+            Err(ModError::Unavailable(_))
+        ));
         assert_eq!(sessions.lock().unwrap()[ticket].references, 1);
         release_generation_api_session(&sessions, ticket);
         assert!(!sessions.lock().unwrap().contains_key(ticket));
@@ -18275,10 +18475,9 @@ mod tests {
     #[tokio::test]
     async fn worker_timer_state_set_is_rejected_after_generation_reset_at_route_boundary() {
         async fn wait_for_state_value(host: &ModHost, key: &str, expected: Value) {
-            let expected = ModExactJsonValue::from_projection(
-                &ModUtf16ValueProjection::plain(expected),
-            )
-            .unwrap();
+            let expected =
+                ModExactJsonValue::from_projection(&ModUtf16ValueProjection::plain(expected))
+                    .unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let value = host
@@ -18384,7 +18583,10 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values
-            .get(&ModStateKey::test("worker-generation-route-test", "staleLate"))
+            .get(&ModStateKey::test(
+                "worker-generation-route-test",
+                "staleLate",
+            ))
             .map(|entry| entry.value.clone());
         assert_eq!(
             stale_late, None,
@@ -18455,14 +18657,21 @@ mod tests {
         host.apply_ui_invalidation_update(immediate, Some(&generation_session))
             .await;
         let before_retire = generation_emissions.load(Ordering::Acquire);
-        assert_eq!(before_retire, 1, "both counter bumps share one invalidation frame");
+        assert_eq!(
+            before_retire, 1,
+            "both counter bumps share one invalidation frame"
+        );
 
         let paced = host
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .request_ui_render_plugin_invalidation("generation-bound-plugin", true, 1);
-        assert_eq!(paced.timers.len(), 2, "both current pace counters schedule their next bump");
+        assert_eq!(
+            paced.timers.len(),
+            2,
+            "both current pace counters schedule their next bump"
+        );
         host.apply_ui_invalidation_update(paced, Some(&generation_session))
             .await;
         current.store(false, Ordering::Release);

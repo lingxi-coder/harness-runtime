@@ -21,7 +21,7 @@ pub(crate) struct ChildStepRequest {
     pub profile: Option<String>,
     pub system: Option<String>,
     pub messages: Vec<ConversationMessage>,
-    pub tools: Vec<Value>,
+    pub tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     pub effort: Option<Value>,
     pub forced_tool: Option<String>,
     pub call_opts: SubagentApiCallOpts,

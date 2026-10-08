@@ -58,22 +58,24 @@ fn orch_with_bus(
     api: Arc<MockApiClient>,
     output: Arc<MockOutputStream>,
     bus: Arc<AnalyticsBus>,
-) -> ConversationOrchestrator {
-    ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig {
-            interactive_session: true,
-            ..OrchestratorConfig::default()
-        },
-        api,
-        streaming,
-        Arc::new(ToolRegistry::new()),
-        orchestrator::test_support::noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        output,
-        Arc::new(StaticMemoryProvider::empty()),
-        PathBuf::from("/tmp"),
+) -> Arc<ConversationOrchestrator> {
+    ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig {
+                interactive_session: true,
+                ..OrchestratorConfig::default()
+            },
+            api,
+            streaming,
+            Arc::new(ToolRegistry::new()),
+            orchestrator::test_support::noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output,
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_analytics_bus(bus),
     )
-    .with_analytics_bus(bus)
 }
 
 /// Assert the finalize contract for a given error → expected `cause` + notice.
@@ -137,13 +139,13 @@ async fn assert_finalizes(err: LlmError, expected_cause: &str, expected_notice: 
     let (partial_content, partial_stop) = assistants[0];
     assert_eq!(partial_stop.as_deref(), Some("end_turn"));
     assert!(
-        matches!(&partial_content[0], ContentBlock::Text { text } if text == "useful"),
+        matches!(&partial_content[0], ContentBlock::Text { text, .. } if text == "useful"),
         "partial assistant must keep the streamed text; got {partial_content:?}"
     );
     // (2) the incomplete-response notice, byte-exact.
     let (notice_content, _) = assistants[1];
     assert!(
-        matches!(&notice_content[0], ContentBlock::Text { text } if text == expected_notice),
+        matches!(&notice_content[0], ContentBlock::Text { text, .. } if text == expected_notice),
         "notice text must be byte-exact; got {notice_content:?}"
     );
     drop(guard);
@@ -329,7 +331,7 @@ async fn transport_after_incomplete_text_block_finalizes_visible_partial() {
     assert_eq!(assistants.len(), 2, "partial text plus interruption notice");
     assert!(matches!(
         assistants[0].first(),
-        Some(ContentBlock::Text { text }) if text == "partial"
+        Some(ContentBlock::Text { text, .. }) if text == "partial"
     ));
     drop(guard);
 
@@ -377,7 +379,7 @@ async fn noninteractive_partial_finalize_recovers_with_meta_nudge() {
             Ok(orchestrator::test_support::message_stop()),
         ],
     ]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig {
             interactive_session: false,
             ..OrchestratorConfig::default()
@@ -390,7 +392,7 @@ async fn noninteractive_partial_finalize_recovers_with_meta_nudge() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
     assert!(matches!(
         orch.run_turn_streaming("hi").await.unwrap(),
         ConversationOutcome::EndTurn { .. }
@@ -399,11 +401,11 @@ async fn noninteractive_partial_finalize_recovers_with_meta_nudge() {
     assert_eq!(calls.len(), 2);
     assert!(calls[1].messages.iter().any(|message| matches!(message,
         ConversationMessage::User { content, is_meta: true, .. }
-            if content.iter().any(|block| matches!(block, ContentBlock::Text { text }
+            if content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. }
                 if text == "Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start."))
     )));
     assert!(calls[1].messages.iter().any(|message| matches!(message,
         ConversationMessage::Assistant { content, .. }
-            if content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text == "useful"))
+            if content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "useful"))
     )), "truncated output is retained during recovery");
 }

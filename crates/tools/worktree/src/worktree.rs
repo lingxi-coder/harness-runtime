@@ -653,7 +653,7 @@ impl EnterWorktreeTool {
                 let suffix = branch_suffix(&handle.branch_name);
                 let display_path = handle.path.to_string_lossy().into_owned();
                 let message = worktree_session_message("Entered", &display_path, &suffix);
-                Ok(ToolCallResult {
+                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     data: json!({
                         "path": display_path,
                         "branch_name": handle.branch_name,
@@ -742,7 +742,7 @@ impl EnterWorktreeTool {
                 let suffix = branch_suffix(&handle.branch_name);
                 let display_path = handle.path.to_string_lossy().into_owned();
                 let message = worktree_session_message("Created", &display_path, &suffix);
-                Ok(ToolCallResult {
+                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     data: json!({
                         "path": display_path,
                         "branch_name": handle.branch_name,
@@ -1755,7 +1755,7 @@ impl Tool for ExitWorktreeTool {
             data["tmux_session_name"] = json!(name);
         }
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content: Some(message),
             new_messages: Vec::new(),

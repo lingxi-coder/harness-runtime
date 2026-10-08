@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+branding.workspace = true
 core = { path = "../core" }
 jsonrpc = { path = "../jsonrpc" }
 lsp-types = "0.95"

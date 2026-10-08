@@ -269,7 +269,7 @@ pub const IDLE_PAUSED_SUMMARY_SUFFIX: &str =
 
 /// `Pns` — appended to the check-in BODY once the idle cap is reached
 /// (`Mns(e)` = `{summary: e.summary+Rns, body: e.body+Pns}`).
-pub const IDLE_PAUSED_BODY_SUFFIX: &str = " Claude Code won't wake this session for another check-in until the user sends a message, so say clearly where things stand.";
+pub const IDLE_PAUSED_BODY_SUFFIX: &str = " The agent won't wake this session for another check-in until the user sends a message, so say clearly where things stand.";
 
 /// `RUe(e)` — `(e.idleCheckinCount ?? 0) >= xns`.
 #[must_use]
@@ -718,7 +718,7 @@ mod tests {
     fn the_pause_suffix_is_byte_exact() {
         assert_eq!(
             with_idle_pause_suffix("Goal check-in: body."),
-            "Goal check-in: body. Claude Code won't wake this session for another check-in until the user sends a message, so say clearly where things stand."
+            "Goal check-in: body. The agent won't wake this session for another check-in until the user sends a message, so say clearly where things stand."
         );
     }
 

@@ -1,5 +1,5 @@
 //! Inbound JSON-RPC request handlers required by the
-//! `{roots:{listChanged:true}, elicitation:{}}` capability declaration.
+//! roots and form/URL elicitation capability declaration.
 //!
 //! Implementations match claude-code's defaults in
 //! `services/mcp/client.ts` lines 1009-1018 (roots) and 1188-1197

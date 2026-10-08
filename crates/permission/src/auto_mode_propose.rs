@@ -188,8 +188,8 @@ The ""####;
 /// `remove_from_permissions_allow`, `notes`) and the shipped-defaults trailer.
 /// Ends with a blank line: the caller appends the rendered default labels.
 ///
-/// From 2.1.220 (`3880` UTF-16 code units at binary offset `110571912`), with
-/// ONE deliberate divergence: the config paths this workspace renamed. The
+/// Adapted from 2.1.220 (`3880` UTF-16 code units at binary offset `110571912`)
+/// for the current config paths and product-neutral environment labels. The
 /// prompt names the recon's `.lingxi/settings.local.json` sub-block LITERALLY,
 /// so it has to track the heading the recon actually renders — pointing the
 /// model at a `.claude/…` sub-block that no longer appears would silently kill
@@ -217,7 +217,7 @@ publishing).
   **Protected IaC scopes**
 
 ### User-specific
-- **Primary use of Claude Code**, **Trusted repo**, **Org-specific CLIs**,
+- **Primary use**, **Trusted repo**, **Org-specific CLIs**,
   and any "routine under <user>/ prefix" qualifiers
 
 ## What goes in `allow` / `soft_deny` / `hard_deny`
@@ -994,16 +994,12 @@ mod tests {
     }
 
     #[test]
-    fn prompt_chunks_match_the_oracle_lengths_and_seams() {
-        // Lengths are UTF-16 code units, as stored in the binary's string table.
+    fn prompt_chunks_preserve_current_lengths_and_seams() {
+        // Pin the shipped prompt lengths in UTF-16 code units. Current product
+        // wording deliberately differs from the upstream template.
         assert_eq!(PROMPT_HEAD.encode_utf16().count(), 676);
         assert_eq!(PROMPT_ENVIRONMENT.encode_utf16().count(), 2598);
-        // Still 3880: `.claude` -> `.lingxi` and `CLAUDE.md` -> `LINGXI.md`
-        // are length-preserving, so the count pins the oracle's even though
-        // the TEXT deliberately diverges. The count alone would not catch a
-        // bad rename here, which is why `the_prompt_names_this_workspaces_paths`
-        // asserts the spellings directly.
-        assert_eq!(PROMPT_SECTIONS.encode_utf16().count(), 3880);
+        assert_eq!(PROMPT_SECTIONS.encode_utf16().count(), 3865);
 
         // The seams the caller interpolates into.
         assert!(PROMPT_HEAD.ends_with("\n- Posture = "));
@@ -1107,8 +1103,12 @@ mod tests {
             &prompt[prompt.len().saturating_sub(120)..]
         );
         // Nothing lost: the whole prompt is at least the three chunks long.
+        let chunk_length: usize = [PROMPT_HEAD, PROMPT_ENVIRONMENT, PROMPT_SECTIONS]
+            .into_iter()
+            .map(|chunk| chunk.encode_utf16().count())
+            .sum();
         assert!(
-            prompt.encode_utf16().count() > 676 + 2598 + 3880,
+            prompt.encode_utf16().count() > chunk_length,
             "assembled prompt must contain all three chunks plus interpolations"
         );
     }

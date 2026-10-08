@@ -9,7 +9,7 @@ use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use serde_json::json;
 
 fn user(text: &str) -> ConversationMessage {
-    ConversationMessage::User {
+    ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: text.into(),
@@ -69,7 +69,7 @@ fn service_with_transport(
 fn auxiliary(
     service: &ApiService,
     messages: Vec<ConversationMessage>,
-    tools: Vec<serde_json::Value>,
+    tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> LlmRequest {
     service
         .build_side_query_request_with_thinking(
@@ -291,7 +291,7 @@ async fn auxiliary_history_conversion_does_not_use_the_parent_continuation_bound
 }
 
 fn history_user(content: Vec<ContentBlock>) -> ConversationMessage {
-    ConversationMessage::User {
+    ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
         content,
         is_meta: false,
@@ -323,11 +323,11 @@ fn gemini_native_history() -> (Vec<ConversationMessage>, wire::ContinuationRef) 
                 text: "Inspect the desktop".into(),
                 citations: None,
             }]),
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 stop_reason: Some("tool_use".into()),
                 content: vec![
-                    ContentBlock::ToolUse {
+                    ContentBlock::ToolUse { input_projection: None,
                         id: "synthetic".into(),
                         name: "computer".into(),
                         input: json!({"action":"screenshot"}),
@@ -344,7 +344,7 @@ fn gemini_native_history() -> (Vec<ConversationMessage>, wire::ContinuationRef) 
                 ],
             },
             history_user(vec![
-                ContentBlock::ToolResult {
+                ContentBlock::ToolResult { output_projection: None,
                     tool_use_id: "synthetic".into(),
                     content: "Observed desktop".into(),
                     is_error: Some(false),

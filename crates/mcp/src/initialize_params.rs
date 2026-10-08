@@ -8,17 +8,14 @@ use serde_json::{Map, Value};
 /// Latest MCP protocol version date the bundled client sends in `initialize`.
 pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
 
-/// Wire-shape `{"roots": {"listChanged": true}, "elicitation": {}}` — both
-/// fields required. `roots.listChanged: true` advertises that the client will
-/// send `notifications/roots/list_changed` when its working-dir set changes
-/// (claude-code `J7n()` = `{roots:{listChanged:!0},elicitation:{}}`, parity
-/// 2.1.207). `elicitation` stays an EMPTY object (the Java MCP SDK rejects
-/// unknown elicitation props).
+/// Current ordinary-transport wire shape contains roots.listChanged and
+/// both form/URL elicitation modes. The client applies its frozen per-server
+/// initialize mode before sending; an explicit Bare choice retains `{}`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientCapabilities {
     /// `roots` capability marker — serialized as `{"listChanged": true}`.
     pub roots: Map<String, Value>,
-    /// `elicitation` capability marker — serialized as an empty JSON object.
+    /// Form/URL capability modes, or the explicit empty Bare marker.
     pub elicitation: Map<String, Value>,
 }
 
@@ -28,7 +25,11 @@ impl Default for ClientCapabilities {
         roots.insert("listChanged".to_string(), Value::Bool(true));
         Self {
             roots,
-            elicitation: Map::new(),
+            elicitation: lingxi_core::host::McpElicitationMode::FormAndUrl
+                .wire()
+                .as_object()
+                .expect("elicitation capability is an object")
+                .clone(),
         }
     }
 }
@@ -76,7 +77,7 @@ mod tests {
         assert_eq!(json["protocolVersion"], LATEST_PROTOCOL_VERSION);
 
         // capabilities is EXACTLY
-        // {"roots": {"listChanged": true}, "elicitation": {}}.
+        // {"roots": {"listChanged": true}, "elicitation": {"form":{},"url":{}}}.
         let caps = &json["capabilities"];
         assert!(caps.is_object(), "capabilities must be a JSON object");
         let caps_obj = caps.as_object().unwrap();
@@ -98,9 +99,9 @@ mod tests {
             "elicitation must be an object"
         );
         assert_eq!(
-            caps["elicitation"].as_object().unwrap().len(),
-            0,
-            "elicitation must be EMPTY — Java MCP SDK rejects {{form:{{}},url:{{}}}}",
+            caps["elicitation"],
+            serde_json::json!({"form": {}, "url": {}}),
+            "current default advertises both form and URL elicitation",
         );
 
         // clientInfo is camelCase (NOT client_info).
@@ -122,10 +123,9 @@ mod tests {
             s.contains(r#""name":"lingxi""#),
             "wire bytes must contain literal \"name\":\"lingxi\", got: {s}",
         );
-        // Capability bytes are EXACTLY the claude-code 2.1.207 shape
-        // {"roots":{"listChanged":true},"elicitation":{}}.
+        // Current native capability bytes include form and URL modes.
         assert!(
-            s.contains(r#""capabilities":{"roots":{"listChanged":true},"elicitation":{}}"#),
+            s.contains(r#""capabilities":{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}"#),
             "wire bytes must contain the parity capability shape, got: {s}",
         );
     }

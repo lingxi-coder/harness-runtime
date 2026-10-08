@@ -20,6 +20,7 @@ use lingxi_core::host::task_registry::{
     TaskRecord, TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
 };
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
     Ok(match s {
@@ -722,6 +723,22 @@ impl TaskRegistryHandle for TaskRegistry {
     // Per-session subagent-spawn counter (claude 2.1.212 `getTotalAgentSpawns` /
     // `incrementTotalAgentSpawns`) — delegate the trait surface the `Agent` tool
     // reads to the concrete registry's atomic counter.
+    fn agent_session_statistics(&self, session_id: lingxi_core::types::SessionId) -> Option<Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>> {
+        Some(TaskRegistry::agent_session_statistics(self, session_id))
+    }
+
+    async fn agent_statistics_for_parent(&self, agent_id: lingxi_core::types::AgentId) -> Option<Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>> {
+        TaskRegistry::agent_statistics_for_parent(self, agent_id).await
+    }
+
+    fn reset_agent_session_statistics(&self, session_id: lingxi_core::types::SessionId, clear_previous: Option<lingxi_core::types::SessionId>) {
+        TaskRegistry::reset_agent_session_statistics(self, session_id, clear_previous);
+    }
+
+    fn bind_agent_spawn_token(&self, task_id: &str, token: lingxi_core::host::agent_statistics::AgentSpawnToken) {
+        TaskRegistry::bind_agent_spawn_token(self, task_id, token);
+    }
+
     fn get_total_agent_spawns(&self) -> u64 {
         TaskRegistry::total_agent_spawns(self)
     }

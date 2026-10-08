@@ -648,7 +648,13 @@ impl PoolSubagentSpawner {
         // every drop/filter, exactly like every other MCP tool. Empty when the
         // definition declared no `mcpServers` or no builder is wired.
         agent_mcp_tools: &[Arc<dyn tool_api::Tool>],
-    ) -> Result<(Vec<serde_json::Value>, Vec<String>), SubagentSpawnError> {
+    ) -> Result<
+        (
+            Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+            Vec<String>,
+        ),
+        SubagentSpawnError,
+    > {
         if self.tool_registry.get().is_none() {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -685,7 +691,14 @@ impl PoolSubagentSpawner {
         agent_mcp_tools: &[Arc<dyn tool_api::Tool>],
         supplied: Option<&Arc<dyn tool_api::Tool>>,
         gates: crate::tool_resolver::HandbackToolGates,
-    ) -> Result<(Vec<serde_json::Value>, Vec<String>, bool), SubagentSpawnError> {
+    ) -> Result<
+        (
+            Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+            Vec<String>,
+            bool,
+        ),
+        SubagentSpawnError,
+    > {
         let Some(registry) = self.tool_registry.get() else {
             return Ok((Vec::new(), Vec::new(), false));
         };
@@ -839,6 +852,7 @@ impl PoolSubagentSpawner {
             // cells (None when unfilled — tests / minimal builds). `hook_session_id`
             // / `hook_cwd` carry the boot-set values.
             hook_executor: None,
+            agent_spawn_token: None,
             stop_hook_scope: Default::default(),
             subagent_stop_firer: None,
             strict_plugin_only_hooks: false,
@@ -934,6 +948,7 @@ impl PoolSubagentSpawner {
         &self,
         request: &SubagentSpawnRequest,
         origin_session_id: Option<lingxi_core::types::SessionId>,
+        safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
     ) -> Result<Option<SubagentSpawnRequest>, SubagentSpawnError> {
         // `RuntimeLink::get` already hands back an owned `Arc`; the
         // `OnceLock` this arrived on borrows and needs a `.cloned()`.
@@ -967,6 +982,7 @@ impl PoolSubagentSpawner {
                 event,
                 hooks::HookContext {
                     session_id: origin_session_id.unwrap_or(self.hook_session_id),
+                    model_safety_observer: safety_observer,
                     cwd: self.hook_cwd.clone(),
                     ..Default::default()
                 },
@@ -1039,8 +1055,14 @@ impl PoolSubagentSpawner {
             .as_ref()
             .and_then(|(_, owner)| *owner)
             .or_else(|| self.resolved_origin_session_id(request));
+        let safety_budget = origin_session_id
+            .and_then(|session_id| inherit.budget.scoped_for_session(session_id))
+            .unwrap_or_else(|| Arc::clone(&inherit.budget));
+        let safety_observer = safety_budget
+            .model_safety_observer()
+            .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
         let rewritten = self
-            .apply_agent_spawn_hook(request, origin_session_id)
+            .apply_agent_spawn_hook(request, origin_session_id, safety_observer)
             .await?;
         let request = rewritten.as_ref().unwrap_or(request);
         validate_child_model_profile(request).map_err(SubagentSpawnError::Runtime)?;
@@ -1266,6 +1288,7 @@ impl PoolSubagentSpawner {
             .unwrap_or(false);
         ctx.skill_loader = self.skill_loader.get();
         ctx.hook_session_id = ctx.origin_session_id.unwrap_or(self.hook_session_id);
+        ctx.agent_spawn_token = request.agent_spawn_token.clone();
         ctx.stop_hook_scope = request.stop_hook_scope;
         ctx.subagent_stop_firer = ctx
             .hook_executor

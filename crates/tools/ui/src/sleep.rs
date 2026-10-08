@@ -148,7 +148,7 @@ impl Tool for SleepTool {
         meta.insert("duration_ms".into(), AnalyticsValue::Int(d as i64));
         self.ctx.bus.log_event(SLEEP_COMPLETED, meta).await;
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "duration_ms": d, "slept": true }),
             model_content: None,
             new_messages: vec![],

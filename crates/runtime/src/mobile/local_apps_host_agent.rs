@@ -241,7 +241,7 @@ impl AgentOutputStream {
 
 #[async_trait]
 impl OutputStream for AgentOutputStream {
-    async fn emit_text(&self, text: &str) {
+    async fn emit_text(&self, text: &str, _utf16_code_units: Option<&[u16]>) {
         if let Some(max_tokens) = self.max_tokens {
             let estimated = text.len().div_ceil(4) as u64;
             let max_tokens = u64::from(max_tokens);
@@ -292,7 +292,7 @@ impl OutputStream for AgentOutputStream {
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _input: &Value,
-    ) {
+     _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
     }
 
     async fn emit_tool_result(
@@ -301,7 +301,7 @@ impl OutputStream for AgentOutputStream {
         _tool: &str,
         _model_text: &str,
         _result: &Value,
-    ) {
+     _projection: Option<&lingxi_core::host::ToolResultProjection>) {
     }
 
     async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
@@ -331,15 +331,15 @@ impl AgentOutputRouter {
 
 #[async_trait]
 impl OutputStream for AgentOutputRouter {
-    async fn emit_text(&self, text: &str) {
+    async fn emit_text(&self, text: &str, _utf16_code_units: Option<&[u16]>) {
         if let Some(target) = self.target().await {
-            target.emit_text(text).await;
+            target.emit_text(text, _utf16_code_units).await;
         }
     }
 
-    async fn emit_tool_call(&self, id: &lingxi_core::types::ToolUseId, tool: &str, input: &Value) {
+    async fn emit_tool_call(&self, id: &lingxi_core::types::ToolUseId, tool: &str, input: &Value, _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
         if let Some(target) = self.target().await {
-            target.emit_tool_call(id, tool, input).await;
+            target.emit_tool_call(id, tool, input, _input_projection).await;
         }
     }
 
@@ -349,9 +349,9 @@ impl OutputStream for AgentOutputRouter {
         tool: &str,
         model_text: &str,
         result: &Value,
-    ) {
+     _projection: Option<&lingxi_core::host::ToolResultProjection>) {
         if let Some(target) = self.target().await {
-            target.emit_tool_result(id, tool, model_text, result).await;
+            target.emit_tool_result(id, tool, model_text, result, None).await;
         }
     }
 
@@ -1150,7 +1150,7 @@ mod tests {
             _cancel: CancellationToken,
             output: Arc<AgentOutputStream>,
         ) -> Result<(), String> {
-            output.emit_text(&prompt).await;
+            output.emit_text(&prompt, None).await;
             Ok(())
         }
     }
@@ -1655,7 +1655,7 @@ mod tests {
             Some("stream-1".into()),
         );
         output.started().await;
-        output.emit_text("hello").await;
+        output.emit_text("hello", None).await;
         output.completed().await;
 
         let events = sink.events().await;
@@ -1693,8 +1693,8 @@ mod tests {
             Some(cancel.clone()),
             Some(2),
         );
-        output.emit_text("12345678").await;
-        output.emit_text("x").await;
+        output.emit_text("12345678", None).await;
+        output.emit_text("x", None).await;
 
         assert_eq!(output.text_snapshot().await, "12345678");
         assert!(cancel.is_cancelled());

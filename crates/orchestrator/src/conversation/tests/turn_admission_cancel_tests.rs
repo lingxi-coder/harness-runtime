@@ -19,7 +19,7 @@ enum Entry {
 async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
     let api = Arc::new(MockApiClient::new(Vec::new()));
     let streaming = Arc::new(MockStreamingApiClient::with_turns(Vec::new()));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         crate::OrchestratorConfig::default(),
         api.clone(),
         streaming.clone(),
@@ -29,7 +29,7 @@ async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     // The prior turn keeps ownership throughout cancellation of the waiter.
     let _owner = orch.turn_gate.lock().await;
     let cancel = CancellationToken::new();
@@ -54,7 +54,9 @@ async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
                     goal_retry_id: None,
                     text: "queued".into(),
                     is_meta: false,
+                    mod_origin: None,
                     message_id: None,
+                    transcript_row_token: None,
                     queue_priority: None,
                     scheduled_task_id: None,
                     scheduled_fire_id: None,

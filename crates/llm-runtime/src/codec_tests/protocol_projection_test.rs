@@ -25,7 +25,7 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
         ))
         .unwrap();
     let mut request = HistoryFixture::new("chat-model");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "assistant".into(),
         content: response.content,
     });
@@ -49,6 +49,7 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
         text: "B�".into(),
         utf16_code_units: vec![66, 0xd83d],
         cache_control: None,
+        citations: None,
     });
     let original = request.clone();
     let anthropic = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01")
@@ -65,7 +66,7 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
 #[test]
 fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
     let mut request = HistoryFixture::new("chat-model");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "assistant".into(),
         content: vec![
             ContentBlock::ServerToolUse {
@@ -91,12 +92,12 @@ fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
 }
 
 fn exact_tool_result(cache_control: Option<CacheControl>) -> ContentBlock {
-    ContentBlock::ToolResult {
+    ContentBlock::ToolResult { output_projection: None,
         tool_call_id: "call-1".into(),
         output: Value::Array(lingxi_core::types::js_utf16::tool_result_sidecar(vec![
             65, 0xd83d, 10,
         ])),
-        is_error: false,
+        is_error: Some(false),
         cache_control,
         cache_reference: None,
     }
@@ -116,7 +117,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
     for codec in codecs {
         for control in [None, Some(CacheControl::Ephemeral)] {
             let mut request = HistoryFixture::new("claude-sonnet-4-6");
-            request.messages.push(Message {
+            request.messages.push(Message { api_output_config: None,
                 role: "assistant".into(),
                 content: vec![
                     ContentBlock::ProviderContent {
@@ -129,7 +130,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
                     },
                 ],
             });
-            request.messages.push(Message {
+            request.messages.push(Message { api_output_config: None,
                 role: "user".into(),
                 content: vec![
                     ContentBlock::ProviderContent {
@@ -141,6 +142,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
                         text: "B�".into(),
                         utf16_code_units: vec![66, 0xd83d],
                         cache_control: None,
+                        citations: None,
                     },
                 ],
             });
@@ -166,7 +168,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
 #[test]
 fn tool_result_sidecars_become_display_text_on_chat_wire() {
     let mut request = HistoryFixture::new("chat-model");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".into(),
         content: vec![exact_tool_result(None)],
     });

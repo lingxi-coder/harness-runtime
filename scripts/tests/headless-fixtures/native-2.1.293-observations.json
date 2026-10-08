@@ -1,0 +1,1906 @@
+{
+  "schemaVersion": 2,
+  "baselineVersion": "2.1.293",
+  "platform": "darwin-arm64",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "sources": [
+    {
+      "root": "/tmp/headless-baseline-293-final",
+      "reportSha256": "b8c240cee7ab34545677d77ea26caed9619caa8d1ca1fafddaa08d7044874e1c"
+    },
+    {
+      "root": "/tmp/headless-baseline-293-schema-retries",
+      "reportSha256": "9677a19527762a9227a480593948cc666d357f0b35011cb8d99296d0f1be56c0"
+    },
+    {
+      "root": "/tmp/headless-baseline-293-broad-startup",
+      "reportSha256": "b31c0ac7e283bae455f1efeae9b700e3ecab57d2d9f4aa7487a711c7605ecb56"
+    },
+    {
+      "root": "/tmp/headless-baseline-293-mcp-connected",
+      "reportSha256": "cdfe134936af85600bd84291fece335eaf50b9b600de925546de1b975c3011cd"
+    },
+    {
+      "root": "/tmp/headless-baseline-293-verbose-plugin",
+      "reportSha256": "573c656f7c76bda14c54c1f1d83e9a40102e534e5517c1547100fba2609050ae"
+    },
+    {
+      "root": "/tmp/headless-baseline-293-fork",
+      "reportSha256": "06e15991ca971692cfd0d7ba57c0f3cf7e2aa45cf8cbb4593ba335b0921d038b"
+    },
+    {
+      "root": "/tmp/headless-baseline-293-shutdown-timing",
+      "reportSha256": "91821e9ea46eff4d5a533d44edd73f672c7ea83f3fb7c182693f695904eb059c"
+    }
+  ],
+  "selectedCaseCount": 28,
+  "selectedNativeProcesses": 60,
+  "captureComplete": true,
+  "normalizedStableCaseCount": 18,
+  "normalizedUnstableCaseCount": 10,
+  "normalizationRules": "scripts/tests/headless-fixtures/normalization.json",
+  "normalizationSha256": "897b1ef6fd202f63c3c1dad7b7a8581745f024e8e8ea370e277e68b9af44bcd9",
+  "harnessInvoked": false,
+  "parityEstablished": false,
+  "recorderAndAdapterTests": 17,
+  "unverifiedGroups": [
+    "queued send_now delivering/stopped and cancel_queued",
+    "dynamic SDK MCP manifests/tools-list changes",
+    "actual UI render/event/key responses",
+    "model/permission/thinking control mutations",
+    "CLI invalid format combinations/continue/missing-or-ambiguous resume",
+    "signals/closed stdout or stdin",
+    "hook error/deny and latest293 Mods modules",
+    "file-history/backups/worktree/agent-setting fork inheritance and no-persistence fork",
+    "broader schema keywords/dialects and retry-budget edge values"
+  ],
+  "cases": [
+    {
+      "id": "print-text",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": null,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-print-text-workspace/6b7ff52d-e492-4084-88e2-5ad153e3c053.jsonl",
+              "bytes": 3895,
+              "sha256": "8a849a72364880233f6067444af7564938404999f2466bdde91633873c480f65"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": null,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-print-text-workspace/6b7ff52d-e492-4084-88e2-5ad153e3c053.jsonl",
+              "bytes": 3895,
+              "sha256": "9d68600d1ce9c34c2f7da723bff95e8bab13c531585eec2162590a56684344ce"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 8,
+      "normalizedEqual": false,
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-final-print-text-workspace/6b7ff52d-e492-4084-88e2-5ad153e3c053.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Identity correlation is not a bijection",
+          "details": {
+            "rule": "dynamic-2-uuid-attachment",
+            "group": "message",
+            "left": "6cb7d43f-857e-48c2-9641-104a774ac7ca",
+            "right": "0bc9e6d4-1f39-4a4e-8135-101d2be3d16d"
+          }
+        }
+      ]
+    },
+    {
+      "id": "print-json",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-print-json-workspace/a551131e-7abd-4692-8a38-2eb7bacda426.jsonl",
+              "bytes": 3895,
+              "sha256": "091b4cea0c74d9fc89fba38977086e162b5537449c0701ee751b3e00f1c37efc"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-print-json-workspace/a551131e-7abd-4692-8a38-2eb7bacda426.jsonl",
+              "bytes": 3896,
+              "sha256": "58f44f6fd0e3d35382fb10adcf7dc8cb251a95e06cc6692ee18510d82e0182ef"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": false,
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-final-print-json-workspace/a551131e-7abd-4692-8a38-2eb7bacda426.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Identity correlation is not a bijection",
+          "details": {
+            "rule": "dynamic-1-parentUuid-attachment",
+            "group": "message",
+            "left": "07fece8a-5ab7-40fc-81bc-092e78bbefaa",
+            "right": "b9f46118-7bc9-4b8d-85dd-55a1a69770f4"
+          }
+        }
+      ]
+    },
+    {
+      "id": "print-json-verbose",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-print-json-verbose-workspace/9d783f5c-874d-47b6-80fb-0fc0f036f0a6.jsonl",
+              "bytes": 3927,
+              "sha256": "97c31ed99c6e50c88a03d7db7cac28dad781d3f6c2dcfcb6444f73de514c3112"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-print-json-verbose-workspace/9d783f5c-874d-47b6-80fb-0fc0f036f0a6.jsonl",
+              "bytes": 3926,
+              "sha256": "8974ebe28b5c118bb463603b78097cb5604ced5e9135615d28493a1b584fd176"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": false,
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-final-print-json-verbose-workspace/9d783f5c-874d-47b6-80fb-0fc0f036f0a6.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Identity correlation is not a bijection",
+          "details": {
+            "rule": "dynamic-1-parentUuid-attachment",
+            "group": "message",
+            "left": "5bd78405-f856-4a5d-ac86-0fb633eb7046",
+            "right": "c9d6ec9d-2f6a-4247-9d43-d23854974688"
+          }
+        }
+      ]
+    },
+    {
+      "id": "print-stream-json",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-print-stream-json-workspace/c0a2ce5a-0c6b-4a7e-83e6-16b4ff3b93b8.jsonl",
+              "bytes": 3923,
+              "sha256": "8314a91f99286e11780061954dd1e6639263e93dea523c05e78cac598a860c22"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-print-stream-json-workspace/c0a2ce5a-0c6b-4a7e-83e6-16b4ff3b93b8.jsonl",
+              "bytes": 3923,
+              "sha256": "4a33186a09d18585429b8e8c7e352db52fa3a6bbb763a1dc7f7c11d6340355f0"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": false,
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-final-print-stream-json-workspace/c0a2ce5a-0c6b-4a7e-83e6-16b4ff3b93b8.jsonl",
+          "kind": "normalized-byte-difference",
+          "difference": {
+            "offset": 1239,
+            "left": {
+              "length": 3830,
+              "byte": 112,
+              "contextStart": 1215,
+              "contextEnd": 1264,
+              "hex": "222c226769744272616e6368223a2248454144227d0a7b22706172656e7455756964223a22406964656e746974793a6d65",
+              "text": "\",\"gitBranch\":\"HEAD\"}\n{\"parentUuid\":\"@identity:me"
+            },
+            "right": {
+              "length": 3830,
+              "byte": 116,
+              "contextStart": 1215,
+              "contextEnd": 1264,
+              "hex": "222c226769744272616e6368223a2248454144227d0a7b2274797065223a2271756575652d6f7065726174696f6e222c22",
+              "text": "\",\"gitBranch\":\"HEAD\"}\n{\"type\":\"queue-operation\",\""
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-uuid-system",
+            "side": "right",
+            "expected": 1,
+            "actual": 2,
+            "path": "/uuid"
+          }
+        }
+      ]
+    },
+    {
+      "id": "partial-stream",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-partial-stream-workspace/f474daa0-e785-4890-8987-cbc90fce915c.jsonl",
+              "bytes": 3911,
+              "sha256": "12892fecfefcd814550aef158e675b4420fe8375d319434b72b5660577685c0e"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-partial-stream-workspace/f474daa0-e785-4890-8987-cbc90fce915c.jsonl",
+              "bytes": 3911,
+              "sha256": "50f89a41a4554f05646d079d696a9da1b5ae00ee82c1c285ec1cafe6b568b151"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "unicode-json",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-unicode-json-workspace/70b586fa-6933-44c6-8964-8f9009480aff.jsonl",
+              "bytes": 3918,
+              "sha256": "b0ce01fd695177efc7c5108d9d28100f518941c7e9952c0a64dad97d248e43fc"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-unicode-json-workspace/70b586fa-6933-44c6-8964-8f9009480aff.jsonl",
+              "bytes": 3916,
+              "sha256": "3981077c03c3042d1fbfe121b7b6a205d27b9658dd3ab8ddf4187b5006027006"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "stdin-text",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": null,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-stdin-text-workspace/c8915921-b269-4396-8023-842769048b77.jsonl",
+              "bytes": 3898,
+              "sha256": "fd958ca2bbcc4e838505a7ea10866cc702a19e2ca3c5e3afc90a51f0e8481cea"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": null,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-stdin-text-workspace/c8915921-b269-4396-8023-842769048b77.jsonl",
+              "bytes": 3897,
+              "sha256": "144d672c5b16a3af3ab9193b9efeec0c88036a9814d3d5b5767c5d2f91978377"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 8,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "no-persistence",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 10,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "sdk-initialize",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-initialize-workspace/8bf067cd-04e1-447a-8985-6703c5d5cfd1.jsonl",
+              "bytes": 3909,
+              "sha256": "48f2b8897082bbb90127009cd224aee0e0d90339b9f4dec134cad91a82861cc1"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-initialize-workspace/8bf067cd-04e1-447a-8985-6703c5d5cfd1.jsonl",
+              "bytes": 3911,
+              "sha256": "16c6de09dfeadb34f9f37b9e67566987f6dd9bbb793a5e29e3774341543e9bd7"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": false,
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-final-sdk-initialize-workspace/8bf067cd-04e1-447a-8985-6703c5d5cfd1.jsonl",
+          "kind": "normalized-byte-difference",
+          "difference": {
+            "offset": 9,
+            "left": {
+              "length": 3818,
+              "byte": 97,
+              "contextStart": 0,
+              "contextEnd": 34,
+              "hex": "7b2274797065223a22617469732d6c61746368222c2261746973223a22222c227365",
+              "text": "{\"type\":\"atis-latch\",\"atis\":\"\",\"se"
+            },
+            "right": {
+              "length": 3818,
+              "byte": 108,
+              "contextStart": 0,
+              "contextEnd": 34,
+              "hex": "7b2274797065223a226c6173742d70726f6d7074222c226c65616655756964223a22",
+              "text": "{\"type\":\"last-prompt\",\"leafUuid\":\""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "sdk-replay",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-replay-workspace/34b885d2-1a8b-46a3-8952-b39264254595.jsonl",
+              "bytes": 3895,
+              "sha256": "7da365d4494adf4a1eacc05d39dbda21db017d6db1ec4230d1ace6e339b2ef9d"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-replay-workspace/34b885d2-1a8b-46a3-8952-b39264254595.jsonl",
+              "bytes": 3895,
+              "sha256": "5cee657156106f34e400727630ec42ea1caf9062f22b465111b9a323f95f2e09"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "sdk-multi-turn",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 2,
+          "resultSubtypes": [
+            "success",
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-multi-turn-workspace/f1e7c704-ee61-4de3-8932-75c124d1cc16.jsonl",
+              "bytes": 5838,
+              "sha256": "d5986c93e4f6cb941291a46299ac0b1e3b314f7c396ef46784c3ca171c4f901d"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 2,
+          "resultSubtypes": [
+            "success",
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-multi-turn-workspace/f1e7c704-ee61-4de3-8932-75c124d1cc16.jsonl",
+              "bytes": 5838,
+              "sha256": "55e4ed127d6c8d62ededa71f110d2855a8916c4448a54d2cf2d740f05a122c35"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 17,
+      "rawEqualArtifacts": 11,
+      "normalizedEqual": false,
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-final-sdk-multi-turn-workspace/f1e7c704-ee61-4de3-8932-75c124d1cc16.jsonl",
+          "kind": "normalized-byte-difference",
+          "difference": {
+            "offset": 1233,
+            "left": {
+              "length": 5723,
+              "byte": 112,
+              "contextStart": 1209,
+              "contextEnd": 1258,
+              "hex": "222c226769744272616e6368223a2248454144227d0a7b22706172656e7455756964223a22406964656e746974793a6d65",
+              "text": "\",\"gitBranch\":\"HEAD\"}\n{\"parentUuid\":\"@identity:me"
+            },
+            "right": {
+              "length": 5723,
+              "byte": 116,
+              "contextStart": 1209,
+              "contextEnd": 1258,
+              "hex": "222c226769744272616e6368223a2248454144227d0a7b2274797065223a2271756575652d6f7065726174696f6e222c22",
+              "text": "\",\"gitBranch\":\"HEAD\"}\n{\"type\":\"queue-operation\",\""
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "sdk-resume",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-resume-workspace/f26f4157-e414-4518-867e-c4229b916d29.jsonl",
+              "bytes": 3893,
+              "sha256": "e8686d5a8d1c244bab7f2491d1bd1b4900d01ab266f446e364d4c87ae3355a45"
+            }
+          ],
+          "timedOut": false
+        },
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-resume-workspace/f26f4157-e414-4518-867e-c4229b916d29.jsonl",
+              "bytes": 6629,
+              "sha256": "00ad44d703e27bb0cf9743c9a48f9b87ddbbc2d2f31cbc578c1985c423f6a464"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-resume-workspace/f26f4157-e414-4518-867e-c4229b916d29.jsonl",
+              "bytes": 3895,
+              "sha256": "b5e422607313f2f065eb4f73026a3a9ce935374ec5129977b8b0b09b76e43dde"
+            }
+          ],
+          "timedOut": false
+        },
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-resume-workspace/f26f4157-e414-4518-867e-c4229b916d29.jsonl",
+              "bytes": 6631,
+              "sha256": "c70ca7e7004c83ed2ddc957750d39531511d575d6f46f1e7fdb493f19e74c4cc"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 22,
+      "rawEqualArtifacts": 14,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "schema-success",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-schema-success-workspace/8e812215-0a0c-46df-85f3-ee1062e2465e.jsonl",
+              "bytes": 5263,
+              "sha256": "37a0c940a473f375458ef0aa06fd349392fbe84c21992788d2e21cf6d618c5ff"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-schema-success-workspace/8e812215-0a0c-46df-85f3-ee1062e2465e.jsonl",
+              "bytes": 5263,
+              "sha256": "ffc67c8bf6fab156dc1e50d41a9bca20c8f38c36c9a418bc240a7d5f1d6166a6"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "max-turns",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "error_max_turns"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-max-turns-workspace/38a948fb-45f7-46dd-8bbb-373bac247e76.jsonl",
+              "bytes": 6611,
+              "sha256": "2a0c3cca6038591d09245e0d6e3525f83bdf1e1bb2b3153cddde05caf198272a"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "error_max_turns"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-max-turns-workspace/38a948fb-45f7-46dd-8bbb-373bac247e76.jsonl",
+              "bytes": 6611,
+              "sha256": "290e284ab5cf13a4b7298d3158a8db5498420f956aeeff2513a7b199080a6548"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "budget-limit",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "error_max_budget_usd"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-budget-limit-workspace/e76c1c15-f7fa-4971-85ed-0844683c9651.jsonl",
+              "bytes": 3908,
+              "sha256": "a37d9c6fad807b97570ae423cc040115de174e626e1991f914a14f8984ee8844"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "error_max_budget_usd"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-budget-limit-workspace/e76c1c15-f7fa-4971-85ed-0844683c9651.jsonl",
+              "bytes": 3908,
+              "sha256": "3bd96bd1d272cc46133808e2727687d347d2e034056d0b0aff49bf2d4b564f5d"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "permission-deny-none",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-permission-deny-none-workspace/222122d2-aedd-467b-8891-4bcdd361fe6b.jsonl",
+              "bytes": 8998,
+              "sha256": "a97bad71fd873d3cb70944c5972f73c388acde9cb1653e799e10954c9ec64eca"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-permission-deny-none-workspace/222122d2-aedd-467b-8891-4bcdd361fe6b.jsonl",
+              "bytes": 8998,
+              "sha256": "0a320941fa65639fccd5658f7b05c150aa3a19c3fb14aab679cb6b2a99e44fc4"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 17,
+      "rawEqualArtifacts": 11,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "permission-host-allow",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 1,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-permission-host-allow-workspace/a518a938-92ff-4b47-8260-9526aa242ef3.jsonl",
+              "bytes": 7302,
+              "sha256": "f6f65d9ee3ffd2ed9033aec72c7ab7c835757f8870edf0a33f6023dd456c6d8a"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 1,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-permission-host-allow-workspace/a518a938-92ff-4b47-8260-9526aa242ef3.jsonl",
+              "bytes": 7302,
+              "sha256": "ea8b076c3a6592f39fd222c904a68d9991684a44bab60273172202b14053d921"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 17,
+      "rawEqualArtifacts": 10,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "permission-host-deny",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 1,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-permission-host-deny-workspace/08d6854c-5e11-4888-8885-f2d1057be605.jsonl",
+              "bytes": 7283,
+              "sha256": "12665a14ee844471f71f173095e1c483d02fa7d36bf02a83d380362d073a1a8d"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 1,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-permission-host-deny-workspace/08d6854c-5e11-4888-8885-f2d1057be605.jsonl",
+              "bytes": 7283,
+              "sha256": "39df8c6a2e6d09f6550a156ddc21c3ffd4aeec16ca114e89643e3d40f4ab1e7a"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 17,
+      "rawEqualArtifacts": 10,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "sdk-interrupt",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "error_during_execution"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-interrupt-workspace/b043d89c-ef8c-40c1-8e2c-d9e3d41268e3.jsonl",
+              "bytes": 3182,
+              "sha256": "7b0bc86f9bb015dd74b54c64f4b7782f7684ab360b2c61c06a7c1a5e3dd518d3"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "error_during_execution"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-final-sdk-interrupt-workspace/b043d89c-ef8c-40c1-8e2c-d9e3d41268e3.jsonl",
+              "bytes": 3182,
+              "sha256": "07e1bd4f0f5ed6b065d28daef83dc9f40354817eb9616bbf4b11a1d59973b2f3"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": false,
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-final-sdk-interrupt-workspace/b043d89c-ef8c-40c1-8e2c-d9e3d41268e3.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Identity correlation is not a bijection",
+          "details": {
+            "rule": "dynamic-1-parentUuid-attachment",
+            "group": "message",
+            "left": "8c926780-350e-4354-aa1a-58a0b6cfa860",
+            "right": "9a93d5e9-9cbc-4733-a800-385e38391686"
+          }
+        }
+      ]
+    },
+    {
+      "id": "sdk-malformed-input",
+      "sourceRoot": "/tmp/headless-baseline-293-final",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 0,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "sessions": [],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 0,
+          "resultSubtypes": [],
+          "permissionRequests": 0,
+          "sessions": [],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 4,
+      "rawEqualArtifacts": 3,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "schema-retry-exhausted",
+      "sourceRoot": "/tmp/headless-baseline-293-schema-retries",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "error_max_structured_output_retries"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-schema-retries-schema-retry-exhausted-workspace/2b222b75-dd0c-4597-8d0b-f28d203d8415.jsonl",
+              "bytes": 6847,
+              "sha256": "9c31deb9e988304d688ac59b1a3f1b95e6dd2694a82581d586bb3ade82614912"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 1,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "error_max_structured_output_retries"
+          ],
+          "permissionRequests": 0,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-schema-retries-schema-retry-exhausted-workspace/2b222b75-dd0c-4597-8d0b-f28d203d8415.jsonl",
+              "bytes": 6847,
+              "sha256": "a714fa05066115cdd5ea2423f4c59c40071a299aa395153a69f7f08a7cf1d5fa"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 17,
+      "rawEqualArtifacts": 11,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "sdk-control-validation",
+      "sourceRoot": "/tmp/headless-baseline-293-broad-startup",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [
+            {
+              "subtype": "error",
+              "request_id": "fixture-read-missing",
+              "error": "mcp_read_resource: serverName must be a string"
+            },
+            {
+              "subtype": "error",
+              "request_id": "fixture-read-bad-uri",
+              "error": "mcp_read_resource: uri must use the ui:// scheme"
+            },
+            {
+              "subtype": "error",
+              "request_id": "fixture-read-unknown-server",
+              "error": "Server not found: missing"
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-send-now-idle",
+              "response": {
+                "still_queued": [],
+                "send_now": "nothing_waiting"
+              }
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-send-now-unknown",
+              "response": {
+                "still_queued": [],
+                "send_now": "nothing_waiting"
+              }
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-cancel-async-unknown",
+              "response": {
+                "cancelled": false
+              }
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-ui-attach",
+              "response": {
+                "surfaces": [
+                  "mobile"
+                ]
+              }
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-ui-detach",
+              "response": {
+                "detached": true,
+                "surfaces": []
+              }
+            }
+          ],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-broad-startup-sdk-control-validation-workspace/988c0e72-50be-48ee-8eef-2a499eadcbfa.jsonl",
+              "bytes": 3973,
+              "sha256": "5780aaf8a73f60e0b5101e02a47e03b3614772529f1bbd27cbfb9757054de18c"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [
+            {
+              "subtype": "error",
+              "request_id": "fixture-read-missing",
+              "error": "mcp_read_resource: serverName must be a string"
+            },
+            {
+              "subtype": "error",
+              "request_id": "fixture-read-bad-uri",
+              "error": "mcp_read_resource: uri must use the ui:// scheme"
+            },
+            {
+              "subtype": "error",
+              "request_id": "fixture-read-unknown-server",
+              "error": "Server not found: missing"
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-send-now-idle",
+              "response": {
+                "still_queued": [],
+                "send_now": "nothing_waiting"
+              }
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-send-now-unknown",
+              "response": {
+                "still_queued": [],
+                "send_now": "nothing_waiting"
+              }
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-cancel-async-unknown",
+              "response": {
+                "cancelled": false
+              }
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-ui-attach",
+              "response": {
+                "surfaces": [
+                  "mobile"
+                ]
+              }
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-ui-detach",
+              "response": {
+                "detached": true,
+                "surfaces": []
+              }
+            }
+          ],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-broad-startup-sdk-control-validation-workspace/988c0e72-50be-48ee-8eef-2a499eadcbfa.jsonl",
+              "bytes": 3973,
+              "sha256": "143f0f48e3772b69a75ed1001a795c7bd2f88590b12ebcfecd40772234bb9510"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": false,
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-broad-startup-sdk-control-validation-workspace/988c0e72-50be-48ee-8eef-2a499eadcbfa.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Identity correlation is not a bijection",
+          "details": {
+            "rule": "dynamic-1-parentUuid-attachment",
+            "group": "message",
+            "left": "93193cc9-8593-490a-a9ed-4525fe5295d8",
+            "right": "e6032270-adce-418d-8851-8e7c018aed74"
+          }
+        }
+      ]
+    },
+    {
+      "id": "startup-hooks-mcp",
+      "sourceRoot": "/tmp/headless-baseline-293-mcp-connected",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [
+            {
+              "subtype": "error",
+              "request_id": "fixture-read-local-resource-pending",
+              "error": "MCP server fixture is not connected (status: pending)"
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-read-local-resource-connected",
+              "response": {
+                "contents": [
+                  {
+                    "uri": "ui://headless-fixture/readme",
+                    "mimeType": "text/plain",
+                    "text": "HEADLESS_LOCAL_RESOURCE"
+                  }
+                ]
+              }
+            }
+          ],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-mcp-connected-startup-hooks-mcp-workspace/a8516c68-6829-4989-8be2-117e0166c51d.jsonl",
+              "bytes": 8996,
+              "sha256": "6dbe14123f0f646a163a4d3fd99542776832c7685d9ee6c9fe6b1d40a0678c16"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [
+            {
+              "subtype": "error",
+              "request_id": "fixture-read-local-resource-pending",
+              "error": "MCP server fixture is not connected (status: pending)"
+            },
+            {
+              "subtype": "success",
+              "request_id": "fixture-read-local-resource-connected",
+              "response": {
+                "contents": [
+                  {
+                    "uri": "ui://headless-fixture/readme",
+                    "mimeType": "text/plain",
+                    "text": "HEADLESS_LOCAL_RESOURCE"
+                  }
+                ]
+              }
+            }
+          ],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-mcp-connected-startup-hooks-mcp-workspace/a8516c68-6829-4989-8be2-117e0166c51d.jsonl",
+              "bytes": 8996,
+              "sha256": "d996f7ea3ccfd13429465d18382a7da6f8be0154c6c481c5a39077f062eebef2"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "print-json-verbose-tools",
+      "sourceRoot": "/tmp/headless-baseline-293-verbose-plugin",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-verbose-plugin-print-json-verbose-tools-workspace/27489f29-90dc-450f-8311-6ee7976e643b.jsonl",
+              "bytes": 9141,
+              "sha256": "07f71a8bc193b7cf8e9551eabb9fdfc26b3889670de5214fc5b1218389b84899"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-verbose-plugin-print-json-verbose-tools-workspace/27489f29-90dc-450f-8311-6ee7976e643b.jsonl",
+              "bytes": 9141,
+              "sha256": "70783061968d229122dc48a2e9d194c5d7d37e555f598eae9caa23ac7e382145"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 17,
+      "rawEqualArtifacts": 11,
+      "normalizedEqual": false,
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-verbose-plugin-print-json-verbose-tools-workspace/27489f29-90dc-450f-8311-6ee7976e643b.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Identity correlation is not a bijection",
+          "details": {
+            "rule": "dynamic-6-uuid-user",
+            "group": "message",
+            "left": "325709a4-85f6-4bf6-ab56-e1b529937cdb",
+            "right": "d09f0037-af11-4d9f-99b3-ef2624783c44"
+          }
+        }
+      ]
+    },
+    {
+      "id": "print-json-verbose-hooks",
+      "sourceRoot": "/tmp/headless-baseline-293-verbose-plugin",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-verbose-plugin-print-json-verbose-hooks-workspace/2b441a1d-6021-4bf4-88ce-317e879c1190.jsonl",
+              "bytes": 9088,
+              "sha256": "42fa024f3e8f55c3d151074464d815ec691c11d873ee5af1ceb08f342abcf2c3"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-verbose-plugin-print-json-verbose-hooks-workspace/2b441a1d-6021-4bf4-88ce-317e879c1190.jsonl",
+              "bytes": 9090,
+              "sha256": "d4cf1a2839da74645bafe86df2a248270fb6d83e92825ea2aeb97aba8d81a388"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "startup-local-plugin",
+      "sourceRoot": "/tmp/headless-baseline-293-verbose-plugin",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-verbose-plugin-startup-local-plugin-workspace/eb178fb3-8fad-4175-83da-d393c8d7e19f.jsonl",
+              "bytes": 8192,
+              "sha256": "ff9f9a406e4de5b13e2770829dbd0cf635a6bbb6d3f02e9c2dd73f3266d344fc"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-verbose-plugin-startup-local-plugin-workspace/eb178fb3-8fad-4175-83da-d393c8d7e19f.jsonl",
+              "bytes": 8192,
+              "sha256": "8b43c12a0bcd2c8de2c67afe62ab5a6d7a7db819d6389f54e49d5263a0764f45"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    },
+    {
+      "id": "sdk-fork",
+      "sourceRoot": "/tmp/headless-baseline-293-fork",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/cfb6b45d-5034-4833-8b25-a8eeacf0e516.jsonl",
+              "bytes": 3881,
+              "sha256": "a6680703706c480cafa8543b6b34885aba41a4a6b04fd74e43daf01b8e66bc7e"
+            }
+          ],
+          "timedOut": false
+        },
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/cfb6b45d-5034-4833-8b25-a8eeacf0e516.jsonl",
+              "bytes": 3881,
+              "sha256": "a6680703706c480cafa8543b6b34885aba41a4a6b04fd74e43daf01b8e66bc7e"
+            },
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/f36a8cf7-7077-4e67-bb3b-a0fd5791ff39.jsonl",
+              "bytes": 5435,
+              "sha256": "d7ff37428c190220669706e1f09070e7fa587905882fbfaab83a4ff1d8d35339"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/cfb6b45d-5034-4833-8b25-a8eeacf0e516.jsonl",
+              "bytes": 3881,
+              "sha256": "cb400e7f18d701e259fe1e060275f731547e473f0dad12cd46e5f06b9a1a0d88"
+            }
+          ],
+          "timedOut": false
+        },
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/421b1d28-7df8-4d55-9008-17094e2d96d9.jsonl",
+              "bytes": 5435,
+              "sha256": "6faa963f4cef87d28a6331ca08baba1ca74db7501a9417af143522d47e3c5116"
+            },
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/cfb6b45d-5034-4833-8b25-a8eeacf0e516.jsonl",
+              "bytes": 3881,
+              "sha256": "cb400e7f18d701e259fe1e060275f731547e473f0dad12cd46e5f06b9a1a0d88"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 23,
+      "rawEqualArtifacts": 13,
+      "normalizedEqual": false,
+      "filenameIdentity": {
+        "group": "session",
+        "leftId": "f36a8cf7-7077-4e67-bb3b-a0fd5791ff39",
+        "rightId": "421b1d28-7df8-4d55-9008-17094e2d96d9",
+        "leftPath": "processes/1/sessions/projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/f36a8cf7-7077-4e67-bb3b-a0fd5791ff39.jsonl",
+        "rightPath": "processes/1/sessions/projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/421b1d28-7df8-4d55-9008-17094e2d96d9.jsonl",
+        "leftCanonical": "processes/1/sessions/projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/@forked-session.jsonl",
+        "rightCanonical": "processes/1/sessions/projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/@forked-session.jsonl"
+      },
+      "unresolved": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/cfb6b45d-5034-4833-8b25-a8eeacf0e516.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Identity correlation is not a bijection",
+          "details": {
+            "rule": "dynamic-1-parentUuid-attachment",
+            "group": "message",
+            "left": "6c0444c2-8142-42dd-9711-e7baea8317ef",
+            "right": "b69ba692-6f7d-4716-81ee-4e1bb3cdd0e4"
+          }
+        },
+        {
+          "artifact": "processes/1/sessions/projects/-private-tmp-headless-baseline-293-fork-sdk-fork-workspace/cfb6b45d-5034-4833-8b25-a8eeacf0e516.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Identity correlation is not a bijection",
+          "details": {
+            "rule": "dynamic-1-parentUuid-attachment",
+            "group": "message",
+            "left": "6c0444c2-8142-42dd-9711-e7baea8317ef",
+            "right": "b69ba692-6f7d-4716-81ee-4e1bb3cdd0e4"
+          }
+        }
+      ]
+    },
+    {
+      "id": "print-json-verbose-shutdown",
+      "sourceRoot": "/tmp/headless-baseline-293-shutdown-timing",
+      "captureComplete": true,
+      "nativeA": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "lifecycleMarkers": {
+            "beginMs": 1791423489446,
+            "endMs": 1791423489667
+          },
+          "firstStdoutWallMs": 1791423489380,
+          "closeWallMs": 1791423489677,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-shutdown-timing-print-json-verbose-shutdown-workspace/fb183fe9-08e1-4a33-8802-229fd05a4683.jsonl",
+              "bytes": 8282,
+              "sha256": "50a3c48fdc75d38c1c9fb7fdcbbb8c6c26a9a1f67792a3ed222739c728af15d5"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "nativeB": [
+        {
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "lifecycleMarkers": {
+            "beginMs": 1791423490067,
+            "endMs": 1791423490268
+          },
+          "firstStdoutWallMs": 1791423490010,
+          "closeWallMs": 1791423490277,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-shutdown-timing-print-json-verbose-shutdown-workspace/fb183fe9-08e1-4a33-8802-229fd05a4683.jsonl",
+              "bytes": 8282,
+              "sha256": "5e591e8603066148134b13e2ecd119c4a2ee69e6ee1b41d54ce89315fd73e504"
+            }
+          ],
+          "timedOut": false
+        }
+      ],
+      "artifactCount": 11,
+      "rawEqualArtifacts": 7,
+      "normalizedEqual": true,
+      "unresolved": []
+    }
+  ],
+  "acceptance": "Several bounded native batches and a frozen strict normalization plan. Structural/identity drift remains visible; no Harness capture or full parity claim."
+}

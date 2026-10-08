@@ -438,10 +438,12 @@ mod tests {
                 .with_path_translator(Arc::new(FakeGuestTranslator));
 
         // A translatable base still yields the rebased excludes.
-        assert!(!gate
-            .read_deny_exclude_globs(std::path::Path::new("/workspace/ws"))
-            .unwrap_or_default()
-            .is_empty());
+        assert!(
+            !gate
+                .read_deny_exclude_globs(std::path::Path::new("/workspace/ws"))
+                .unwrap_or_default()
+                .is_empty()
+        );
 
         // A fenced one yields NO list at all — not an empty list.
         assert_eq!(
@@ -581,13 +583,18 @@ mod tests {
         });
         let gate = PolicyPermissionGate::new(policy, inner.clone());
         assert_eq!(
-            gate.check("Bash", &json!({"command":"pyright --version"})).await,
+            gate.check("Bash", &json!({"command":"pyright --version"}))
+                .await,
             PermissionDecision::Deny {
                 reason: "must ask for non-read-only Bash".into(),
             },
             "pyright no longer belongs to Native's read-only Bash allowlist"
         );
-        assert_eq!(inner.calls(), 1, "non-read-only Bash must reach prompt transport");
+        assert_eq!(
+            inner.calls(),
+            1,
+            "non-read-only Bash must reach prompt transport"
+        );
     }
 
     #[tokio::test]
@@ -851,7 +858,11 @@ mod tests {
             captured_pretool_resolution(&clean_gate, "Bash", &input, &ctx).await,
             PermissionResolution::Allow { .. }
         ));
-        assert_eq!(clean_inner.calls(), 0, "a clean hook allow skips the prompt");
+        assert_eq!(
+            clean_inner.calls(),
+            0,
+            "a clean hook allow skips the prompt"
+        );
 
         let allowed = policy_with(
             r#"{ "permissions": { "allow": ["Bash"] } }"#,
@@ -891,7 +902,11 @@ mod tests {
             gate.ask_via_transport("Bash", &input, &ctx).await,
             PermissionOutcome::Deny { .. }
         ));
-        assert_eq!(inner.calls(), 1, "the full pipeline reaches the transport once");
+        assert_eq!(
+            inner.calls(),
+            1,
+            "the full pipeline reaches the transport once"
+        );
     }
 
     #[tokio::test]
@@ -904,7 +919,13 @@ mod tests {
         });
         let dont_ask_gate = PolicyPermissionGate::new(dont_ask, dont_ask_inner.clone());
         assert!(matches!(
-            captured_pretool_resolution(&dont_ask_gate, "Bash", &json!({"command":"npm install"}), &ctx).await,
+            captured_pretool_resolution(
+                &dont_ask_gate,
+                "Bash",
+                &json!({"command":"npm install"}),
+                &ctx
+            )
+            .await,
             PermissionResolution::Allow { .. }
         ));
         assert_eq!(dont_ask_inner.calls(), 0);
@@ -917,17 +938,16 @@ mod tests {
         let ifs_command = ["cat$", "{IFS}/etc/passwd"].concat();
         for command in [ifs_command.as_str(), "echo x > /etc/foo"] {
             assert!(matches!(
-                captured_pretool_resolution(
-                    &gate,
-                    "Bash",
-                    &json!({"command": command}),
-                    &ctx,
-                )
-                .await,
+                captured_pretool_resolution(&gate, "Bash", &json!({"command": command}), &ctx,)
+                    .await,
                 PermissionResolution::Allow { .. }
             ));
         }
-        assert_eq!(inner.calls(), 0, "Other-tagged guards do not create a rule verdict");
+        assert_eq!(
+            inner.calls(),
+            0,
+            "Other-tagged guards do not create a rule verdict"
+        );
     }
 
     #[tokio::test]
@@ -1472,8 +1492,11 @@ mod tests {
             .check_mod_query("Bash", &json!({"command":"nested-command"}), &ctx)
             .await
             .unwrap();
-        assert_eq!(ask.verdict.decision, ModToolCheckDecision::Ask,
-            "Native core inspection precedes z7o's DontAsk execution transform");
+        assert_eq!(
+            ask.verdict.decision,
+            ModToolCheckDecision::Ask,
+            "Native core inspection precedes z7o's DontAsk execution transform"
+        );
         assert_eq!(ask.verdict.rule.as_deref(), Some("Bash(nested-command)"));
 
         // An actual non-rule core denial still must not cite matchedAskRule.
@@ -1483,7 +1506,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deny.verdict.decision, ModToolCheckDecision::Deny);
-        assert_eq!(deny.verdict.rule, None, "matchedAskRule must not decorate a deny");
+        assert_eq!(
+            deny.verdict.rule, None,
+            "matchedAskRule must not decorate a deny"
+        );
     }
 
     #[test]
@@ -1553,7 +1579,8 @@ mod tests {
             )
             .await
             .unwrap()
-            .verdict.decision,
+            .verdict
+            .decision,
             ModToolCheckDecision::Allow
         );
         assert_eq!(
@@ -1564,7 +1591,8 @@ mod tests {
             )
             .await
             .unwrap()
-            .verdict.decision,
+            .verdict
+            .decision,
             ModToolCheckDecision::Ask
         );
         assert_eq!(inner.calls(), 0);
@@ -2027,7 +2055,10 @@ mod tests {
             .expect("captured preflight");
         assert!(matches!(preflight.resolution, PermissionResolution::Ask));
         assert_eq!(
-            preflight.evaluation.as_ref().map(|evaluation| evaluation.verdict.decision),
+            preflight
+                .evaluation
+                .as_ref()
+                .map(|evaluation| evaluation.verdict.decision),
             Some(lingxi_core::host::permission_gate::ModToolCheckDecision::Ask),
             "the Mod core projection preserves the Ask verdict"
         );
@@ -3404,7 +3435,11 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         let outcome = gate
             .consume_auto_outcome(
                 PermissionOutcome::AllowAuto {
-                    updated_input: Some(json!({"command": "echo hi"})),
+                    updated_input: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                            json!({"command": "echo hi"}),
+                        ),
+                    ),
                 },
                 &PermissionCheckContext::default(),
             )
@@ -4080,10 +4115,11 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             gate.agent_type_deny("reviewer").await.as_deref(),
             Some("session")
         );
-        assert!(gate
-            .agent_deny_content_types()
-            .await
-            .contains(&"reviewer".into()));
+        assert!(
+            gate.agent_deny_content_types()
+                .await
+                .contains(&"reviewer".into())
+        );
     }
 
     #[tokio::test]
@@ -4455,7 +4491,6 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         }
     }
 
-
     #[test]
     fn read_path_snapshot_distinguishes_inactive_and_unavailable_policy_inputs() {
         use lingxi_core::host::permission_gate::{
@@ -4551,7 +4586,10 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         }));
         let after_remove = ask_gate.read_path_policy_snapshot();
         assert!(!after_remove.facts().read_deny_rules_active);
-        assert_eq!(after_remove.check_path(path).denied_by_read_rule, Match::NoMatch);
+        assert_eq!(
+            after_remove.check_path(path).denied_by_read_rule,
+            Match::NoMatch
+        );
 
         let cli_rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": { "deny": ["Read"] } }"#,
@@ -4609,25 +4647,65 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
 
         let restricted = gate_for(true, false);
         let restricted = restricted.read_path_policy_snapshot();
-        assert_eq!(restricted.check_path(std::path::Path::new("/project-only/a"))
-            .held_outside, Match::NoMatch, "restricted uses all additional working dirs");
-        assert_eq!(restricted.check_path(std::path::Path::new("/outside/tool-results/out"))
-            .held_outside, Match::NoMatch, "session read carve-outs survive restricted mode");
-        assert_eq!(restricted.check_path(std::path::Path::new("/home/u/.lingxi/skills/a"))
-            .held_outside, Match::Match, "the readBlockFence config carve-out is not active under restricted");
+        assert_eq!(
+            restricted
+                .check_path(std::path::Path::new("/project-only/a"))
+                .held_outside,
+            Match::NoMatch,
+            "restricted uses all additional working dirs"
+        );
+        assert_eq!(
+            restricted
+                .check_path(std::path::Path::new("/outside/tool-results/out"))
+                .held_outside,
+            Match::NoMatch,
+            "session read carve-outs survive restricted mode"
+        );
+        assert_eq!(
+            restricted
+                .check_path(std::path::Path::new("/home/u/.lingxi/skills/a"))
+                .held_outside,
+            Match::Match,
+            "the readBlockFence config carve-out is not active under restricted"
+        );
 
         let blocked = gate_for(false, true);
         let blocked = blocked.read_path_policy_snapshot();
-        assert_eq!(blocked.check_path(std::path::Path::new("/extra/a"))
-            .held_outside, Match::NoMatch, "non-project additional dirs widen readBlock working dirs");
-        assert_eq!(blocked.check_path(std::path::Path::new("/project-only/a"))
-            .held_outside, Match::Match, "projectSettings dirs are filtered from readBlock working dirs");
-        assert_eq!(blocked.check_path(std::path::Path::new("/outside/tool-results/out"))
-            .held_outside, Match::NoMatch, "tool-result allowance survives blockOutsideReads");
-        assert_eq!(blocked.check_path(std::path::Path::new("/home/u/.lingxi/skills/a"))
-            .held_outside, Match::NoMatch, "user skill config is allowed by readBlockFence");
-        assert_eq!(blocked.check_path(std::path::Path::new("/home/u/.lingxi/other"))
-            .held_outside, Match::Match, "unlisted config paths remain held outside");
+        assert_eq!(
+            blocked
+                .check_path(std::path::Path::new("/extra/a"))
+                .held_outside,
+            Match::NoMatch,
+            "non-project additional dirs widen readBlock working dirs"
+        );
+        assert_eq!(
+            blocked
+                .check_path(std::path::Path::new("/project-only/a"))
+                .held_outside,
+            Match::Match,
+            "projectSettings dirs are filtered from readBlock working dirs"
+        );
+        assert_eq!(
+            blocked
+                .check_path(std::path::Path::new("/outside/tool-results/out"))
+                .held_outside,
+            Match::NoMatch,
+            "tool-result allowance survives blockOutsideReads"
+        );
+        assert_eq!(
+            blocked
+                .check_path(std::path::Path::new("/home/u/.lingxi/skills/a"))
+                .held_outside,
+            Match::NoMatch,
+            "user skill config is allowed by readBlockFence"
+        );
+        assert_eq!(
+            blocked
+                .check_path(std::path::Path::new("/home/u/.lingxi/other"))
+                .held_outside,
+            Match::Match,
+            "unlisted config paths remain held outside"
+        );
 
         let live_gate = PolicyPermissionGate::new(
             Arc::new(
@@ -4670,5 +4748,4 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             Match::Match
         );
     }
-
 }

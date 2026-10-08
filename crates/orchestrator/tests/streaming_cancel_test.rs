@@ -191,7 +191,7 @@ impl Tool for CancelBlockingTool {
             }
             // No token (non-streaming) → just run to "end" so the test fails loudly
             // if the token is not threaded through.
-            None => Ok(ToolCallResult {
+            None => Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "cancel-tool-ran-to-end" }),
                 model_content: None,
                 new_messages: vec![],
@@ -292,7 +292,7 @@ async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_cal
             match &content[0] {
                 ContentBlock::ToolResult {
                     content, is_error, ..
-                } => Some((content.clone(), *is_error)),
+                } => Some((content.clone(), is_error.unwrap_or(false))),
                 _ => None,
             }
         }

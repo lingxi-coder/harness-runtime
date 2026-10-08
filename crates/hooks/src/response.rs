@@ -241,7 +241,7 @@ impl ExactHookText {
                 lingxi_core::types::ConversationMessage::user(id, self.display.clone())
             };
         }
-        lingxi_core::types::ConversationMessage::User {
+        lingxi_core::types::ConversationMessage::User { api_message_override: None,
             id,
             content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                 text: self.display.clone(),

@@ -48,7 +48,7 @@ fn assert_only_real_tool_names(contract: &str, label: &str) {
     // planted bad name behind an innocuous one. Fail loudly and specifically
     // instead of scanning a text this gate cannot actually parse.
     assert!(
-        contract.matches('`').count() % 2 == 0,
+        contract.matches('`').count().is_multiple_of(2),
         "{label} has an ODD number of backticks, so this scanner cannot pair them \
          into spans without silently shifting every one after the stray mark: {contract}"
     );
@@ -4167,7 +4167,7 @@ async fn approved_create_receipt_with_design(
     assert_eq!(
         stage
             .get("design_spec_sha256")
-            .map_or(false, |v| !v.is_null()),
+            .is_some_and(|v| !v.is_null()),
         has_design_spec,
         "design_spec_sha256 presence must track whether a design spec was staged: {stage}"
     );

@@ -524,7 +524,7 @@ fn dir_listing(entries: Vec<mcp::McpDirectoryEntry>) -> ToolCallResult {
     };
     let data = json!({ "resources": entries });
     let json_tail = serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_string());
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data,
         model_content: Some(format!("{header}\n\n{json_tail}")),
         new_messages: vec![],
@@ -537,7 +537,7 @@ fn dir_listing(entries: Vec<mcp::McpDirectoryEntry>) -> ToolCallResult {
 /// Oracle `mapToolResultToToolResultBlockParam`: when `error` is set the model
 /// sees the error text alone.
 fn dir_error(error: String) -> ToolCallResult {
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data: json!({ "resources": [], "error": error }),
         model_content: Some(error),
         new_messages: vec![],
@@ -761,6 +761,7 @@ mod tests {
         registry.connections.write().await.insert(
             scoped_key,
             mcp::McpConnectionState::Cached {
+                server_info: None,
                 config: crate::mcp_tool::cached_resource_test_support::cached_server_config(
                     "cached",
                 ),

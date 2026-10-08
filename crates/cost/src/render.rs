@@ -393,6 +393,8 @@ mod tests {
             output_tokens: 2_000,
             cache_read_input_tokens: 1_500,
             cache_creation_input_tokens: 0,
+            reasoning_tokens: 0,
+            web_search_requests: 0,
         }];
         let out = usage_by_model_block(&rows);
         // label right-aligned to 21 ("claude-opus-4-8:" is 16 chars, so 5 leading spaces),
@@ -431,6 +433,8 @@ mod tests {
                 output_tokens: 500,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning_tokens: 0,
+                web_search_requests: 0,
             },
             ModelUsageRow {
                 model: "claude-sonnet-4-20250514".into(),
@@ -440,6 +444,8 @@ mod tests {
                 output_tokens: 100,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning_tokens: 0,
+                web_search_requests: 0,
             },
         ];
         let out = usage_by_model_block(&rows);
@@ -515,6 +521,8 @@ mod tests {
             output_tokens: 2_000,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_tokens: 0,
+            web_search_requests: 0,
         }];
         let snap = lingxi_core::host::CostSnapshot {
             total_usd: 0.1234,

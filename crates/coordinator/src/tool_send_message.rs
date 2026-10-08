@@ -673,7 +673,7 @@ impl SendMessageTool {
             object.remove("inlineHandback");
         }
         let model_content = Some(model_data.to_string());
-        ToolCallResult {
+        ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content,
             new_messages: Vec::new(),
@@ -1117,6 +1117,7 @@ mod tests {
 
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
+            input_projection: None,
             agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
                 debug: false,

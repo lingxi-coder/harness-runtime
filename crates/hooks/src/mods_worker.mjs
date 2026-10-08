@@ -38,8 +38,8 @@ let parentUiPressCounter = 0;
 const context = createContext({ AbortController, AbortSignal });
 const invocationSlot = `__lingxi_mod_call_${randomUUID().replaceAll('-', '')}`;
 const invokeScript = new Script(`globalThis[${JSON.stringify(invocationSlot)}].fn(...globalThis[${JSON.stringify(invocationSlot)}].args)`);
-const supportedEvents = new Set(['plugin.register', 'tool.call', 'tool.check', 'tool.describe', 'tool.list', 'tool.register', 'command.list', 'command.register', 'command.run', 'command.describe', 'prompt.submit', 'prompt.context', 'prompt.attachment', 'prompt.section', 'prompt.compose', 'session.start', 'session.receive', 'session.end', 'session.compact', 'session.measure', 'session.append', 'session.attach', 'session.detach', 'turn.start', 'turn.step', 'turn.complete', 'agent.offer', 'agent.spawn', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.render', 'ui.resolve', 'ui.press', 'ui.input', 'ui.select', 'ui.message', 'ui.fault', 'ui.selection', 'ui.log', 'ui.toast', 'ui.status', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
-const operationEvents = new Set(['tool.check', 'tool.list', 'tool.register', 'command.list', 'command.register', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.log', 'ui.toast', 'ui.status', 'ui.selection', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.receive', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
+const supportedEvents = new Set(['plugin.register', 'tool.call', 'tool.check', 'tool.describe', 'tool.list', 'tool.register', 'command.list', 'command.register', 'command.run', 'command.describe', 'prompt.submit', 'prompt.fill', 'prompt.suggest', 'prompt.context', 'prompt.attachment', 'prompt.section', 'prompt.compose', 'session.start', 'session.receive', 'session.end', 'session.compact', 'session.measure', 'session.append', 'session.attach', 'session.detach', 'turn.start', 'turn.step', 'turn.complete', 'agent.offer', 'agent.spawn', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.render', 'ui.resolve', 'ui.press', 'ui.input', 'ui.select', 'ui.message', 'ui.fault', 'ui.selection', 'ui.copy', 'prompt.read', 'ui.log', 'ui.toast', 'ui.status', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
+const operationEvents = new Set(['tool.check', 'tool.list', 'tool.register', 'command.list', 'command.register', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.log', 'ui.toast', 'ui.status', 'ui.selection', 'ui.copy', 'prompt.read', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.receive', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
 const commandRunHeldEvents = new Set(['tool.call', 'prompt.context', 'prompt.section', 'prompt.compose', 'command.run']);
 const promptSubmitHeldEvents = new Set([
   'classic.PreToolUse', 'tool.call', 'agent.spawn', 'session.send', 'prompt.section',
@@ -708,7 +708,7 @@ function sessionAttachArgumentError(event) {
   if (!validExactEventObject(event, keys, ['surface', 'clientId'])) {
     return 'session.attach takes { surface, clientId, viewport? }';
   }
-  if (!validRemoteModUiSurface(event.surface) || !validModUiClientId(event.clientId)
+  if (!validRemoteModUiSurface(event.surface) || !(validModUiClientId(event.clientId) || event.clientId === `${event.surface}:default`)
       || (Object.hasOwn(event, 'viewport') && !validModUiViewport(event.viewport))) {
     return 'session.attach needs a remote surface, valid clientId, and optional measured viewport';
   }
@@ -731,7 +731,7 @@ function sessionDetachArgumentError(event) {
   if (!validExactEventObject(event, keys, ['surface', 'clientId', 'reason'])) {
     return 'session.detach takes { surface, clientId, reason }';
   }
-  if (!validRemoteModUiSurface(event.surface) || !validModUiClientId(event.clientId)
+  if (!validRemoteModUiSurface(event.surface) || !(validModUiClientId(event.clientId) || event.clientId === `${event.surface}:default`)
       || event.reason !== 'detach' && event.reason !== 'end') {
     return 'session.detach needs a remote surface, valid clientId, and detach/end reason';
   }
@@ -1315,7 +1315,55 @@ function validPromptSubmitResult(input, result, downstream) {
     && validPromptSubmitContext(result.context);
 }
 
+// Native 2.1.293 uEe: clamp to grapheme edges, split overlapping runs,
+// merge styles in declaration order, then coalesce adjacent equal styles.
+function remotePromptDecorations(text, decorations) {
+  if (!decorations?.length) return [];
+  const keys = ['color','backgroundColor','dimColor','bold','italic','underline','strikethrough'];
+  const colors = {black:'#000000',red:'#e5484d',green:'#46a758',yellow:'#f5d90a',blue:'#3e63dd',magenta:'#d6409f',cyan:'#05a2c2',white:'#ffffff',gray:'#8b8d98',grey:'#8b8d98',blackBright:'#6e6e6e',redBright:'#ff6369',greenBright:'#5bd07f',yellowBright:'#ffe629',blueBright:'#5b8def',magentaBright:'#ee6ac2',cyanBright:'#3ec2e0',whiteBright:'#ffffff'};
+  const boundaries = /^[\t\n\x20-\x7e]*$/.test(text) ? undefined
+    : [...Array.from(new Intl.Segmenter(undefined, {granularity:'grapheme'}).segment(text), item => item.index), text.length];
+  const floor = offset => {
+    offset = Math.max(0, Math.min(offset, text.length));
+    if (!boundaries) return offset;
+    let low = 0, high = boundaries.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (boundaries[middle] <= offset) low = middle + 1; else high = middle;
+    }
+    return boundaries[low - 1] ?? 0;
+  };
+  const spans = decorations.flatMap((run, order) => {
+    const start = floor(run.start), end = floor(run.end);
+    return end > start ? [{...run,start,end,order}] : [];
+  });
+  const edges = [...new Set(spans.flatMap(run => [run.start,run.end]))].sort((a,b) => a-b);
+  const result = [];
+  for (let index = 1; index < edges.length; index++) {
+    const start = edges[index-1], end = edges[index];
+    const active = spans.filter(run => run.start <= start && run.end > start);
+    if (!active.length) continue;
+    const style = {};
+    for (const run of active) for (const key of keys) {
+      if (run[key] !== undefined) style[key] = ['color','backgroundColor'].includes(key) && Object.hasOwn(colors,run[key]) ? colors[run[key]] : run[key];
+    }
+    const previous = result.at(-1);
+    if (previous?.end === start && keys.every(key => previous[key] === style[key])) previous.end = end;
+    else result.push({start,end,...style});
+  }
+  return result;
+}
+
+function remotePromptArgumentError(event, input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.text !== 'string') return 'takes { text } (a string)';
+  if (event === 'prompt.fill' && input.mode !== undefined && !['replace','append','insert'].includes(input.mode)) return 'takes { mode } of replace, append, insert';
+  if (event === 'prompt.fill' && input.decorations !== undefined && (!Array.isArray(input.decorations) || !input.decorations.every(run => run && typeof run === 'object' && Number.isInteger(run.start) && run.start >= 0 && Number.isInteger(run.end) && run.end > run.start && ['color','backgroundColor'].every(key => run[key] === undefined || typeof run[key] === 'string') && ['dimColor','bold','italic','underline','strikethrough'].every(key => run[key] === undefined || typeof run[key] === 'boolean')))) return 'takes { decorations }';
+  if (event === 'prompt.suggest' && input.text.trim() === '') return 'takes a non-empty suggestion';
+}
+
 function validOperationResult(event, input, result, downstream = []) {
+  if (event === 'prompt.fill') return result && typeof result === 'object' && typeof result.isFilled === 'boolean';
+  if (event === 'prompt.suggest') return result && typeof result === 'object' && typeof result.isShown === 'boolean';
   if (event === 'prompt.submit') return validPromptSubmitResult(input, result, downstream);
   if (event === 'agent.offer') return validExactEventObject(result,
     new Set(['isOffered']), ['isOffered']) && typeof result.isOffered === 'boolean';
@@ -3011,6 +3059,17 @@ function makeApi(plugin, storageId, tier, root, requestId, budget, hookId, heldE
       },
     },
     prompt: {
+      read: () => call('prompt.read', {}),
+      fill: input => {
+        const error = remotePromptArgumentError('prompt.fill', input);
+        if (error) return Promise.reject(new Error(`${plugin}: $.prompt.fill ${error}`));
+        return call('prompt.fill', { text: input.text, ...(input.mode !== undefined ? {mode: input.mode} : {}), ...(input.decorations !== undefined ? {decorations: input.decorations} : {}) });
+      },
+      suggest: input => {
+        const error = remotePromptArgumentError('prompt.suggest', input);
+        if (error) return Promise.reject(new Error(`${plugin}: $.prompt.suggest ${error}`));
+        return call('prompt.suggest', {text: input.text});
+      },
       submit: input => {
         const held = activeDispatch.has(requestId) ? heldEvent : undefined;
         if (held === 'prompt.submit') {
@@ -3123,6 +3182,10 @@ function makeApi(plugin, storageId, tier, root, requestId, budget, hookId, heldE
             : undefined);
       },
       selection: () => call('ui.selection', {}),
+      copy: input => {
+        if (!input || typeof input.text !== 'string' || (input.surface !== undefined && !['terminal','desktop','mobile','vscode'].includes(input.surface))) return Promise.reject(new Error(`${plugin}: $.ui.copy takes { text, surface? } (a string text)`));
+        return call('ui.copy', {text: input.text, ...(input.surface !== undefined ? {surface: input.surface} : {})});
+      },
       log: (text, options) => {
         // Claude Code's log() is void: enqueue the operation and report a
         // refusal through the worker's debug channel, never as a thrown call.
@@ -3452,6 +3515,9 @@ async function dispatch(message) {
     uiInputSelectActionAvailable = uiInputSelectActionMatches(
       message.input, message.pressToken, 'Select', message.input.value,
     );
+  } else if (message.event === 'prompt.fill' || message.event === 'prompt.suggest') {
+    const error = remotePromptArgumentError(message.event, message.input);
+    if (error) throw new Error(error);
   } else if (message.event === 'ui.selection') {
     const error = uiSelectionArgumentError(message.input);
     if (error) throw new Error(error);
@@ -3714,7 +3780,9 @@ async function dispatch(message) {
             returned = await new Promise((accept, reject) => {
               const callId = nextCallId++;
               pendingCore.set(callId, { requestId: message.id, event: message.event, accept, reject });
-              send({ id: message.id, kind: 'next', callId, input: event });
+              const input = message.event === 'prompt.fill' && event.decorations !== undefined
+                ? {...event, decorations:remotePromptDecorations(event.text,event.decorations)} : event;
+              send({ id: message.id, kind: 'next', callId, input });
             });
           }
           outcome = 'returned';
@@ -3810,6 +3878,12 @@ async function dispatch(message) {
         if (message.event === 'ui.select' && !uiSelectForwarded(event, nextEvent)) {
           return Promise.reject(new Error('ui.select identity is pinned; value must remain valid'));
         }
+        if (['prompt.fill','prompt.suggest'].includes(message.event)
+            && (!nextEvent || typeof nextEvent.text !== 'string'
+              || !equalJson(nextEvent.origin, event.origin)
+              || (message.event === 'prompt.fill' && nextEvent.mode !== event.mode))) {
+          return Promise.reject(new Error(`${message.event} origin and mode are pinned`));
+        }
         if (message.event === 'ui.selection' && !uiSelectionForwarded(event, nextEvent)) {
           return Promise.reject(new Error('ui.selection takes no arguments'));
         }
@@ -3896,6 +3970,12 @@ async function dispatch(message) {
         }
         if (message.event === 'ui.select' && !uiSelectForwarded(event, nextEvent)) {
           return Promise.reject(new Error('ui.select identity is pinned; value must remain valid'));
+        }
+        if (['prompt.fill','prompt.suggest'].includes(message.event)
+            && (!nextEvent || typeof nextEvent.text !== 'string'
+              || !equalJson(nextEvent.origin, event.origin)
+              || (message.event === 'prompt.fill' && nextEvent.mode !== event.mode))) {
+          return Promise.reject(new Error(`${message.event} origin and mode are pinned`));
         }
         if (message.event === 'ui.selection' && !uiSelectionForwarded(event, nextEvent)) {
           return Promise.reject(new Error('ui.selection takes no arguments'));

@@ -250,7 +250,7 @@ impl Tool for SyntheticOutputTool {
         }
 
         // Model-facing return value is identical to the TS tool.
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "data": STRUCTURED_OUTPUT_SUCCESS_DATA,
                 "structured_output": payload,
@@ -274,6 +274,8 @@ mod tests {
     /// `tool-api/test-support` feature (not enabled for the coordinator crate).
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
+            input_projection: None,
+            agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
@@ -288,13 +290,19 @@ mod tests {
             messages: vec![],
             tool_use_id: None,
             assistant_message_id: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
             agent_id: None,
+            nested_memory_triggers: std::sync::Arc::default(),
             agent_name: None,
             observer: None,
             observer_pairings: None,
             team_name: None,
             origin_session_id: None,
+            instruction_context: None,
             tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
+            trusted_effective_permission_mode: None,
+            classifier_only_review: None,
             content_replacement_state: None,
             session: None,
             subagent_registry: None,

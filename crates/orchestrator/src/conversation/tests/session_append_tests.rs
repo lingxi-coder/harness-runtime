@@ -131,14 +131,14 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
             data: "ZG9jdW1lbnQ=".into(),
         },
     };
-    let assistant = ConversationMessage::Assistant {
+    let assistant = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             ContentBlock::Text {
                 text: "merged-first".into(),
                 citations: None,
             },
-            ContentBlock::ToolUse {
+            ContentBlock::ToolUse { input_projection: None,
                 id: tool_use_id.clone(),
                 name: "Read".into(),
                 input: serde_json::json!({"file_path":"source.txt"}),
@@ -171,7 +171,7 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
     assert_eq!(inputs[0]["door"], "response");
     assert_eq!(inputs[0]["origin"]["kind"], "model");
 
-    let expected_tool = ContentBlock::ToolUse {
+    let expected_tool = ContentBlock::ToolUse { input_projection: None,
         id: tool_use_id.clone(),
         name: "Read".into(),
         input: serde_json::json!({"file_path":"source.txt"}),
@@ -221,9 +221,9 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
         .iter()
         .any(|block| block["text"] == "remove this text"));
 
-    let result = ConversationMessage::User {
+    let result = ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
-        content: vec![ContentBlock::ToolResult {
+        content: vec![ContentBlock::ToolResult { content_projection: None,
             tool_use_id: tool_use_id.clone(),
             content: "original tool output".into(),
             is_error: Some(false),
@@ -303,14 +303,14 @@ async fn per_block_session_append_updates_merged_history_and_jsonl_rows() {
     let path = root.path().join("session.jsonl");
     let (orchestrator, output) = build_orchestrator(root.path(), &path, REWRITE_MOD).await;
     let tool_use_id = ToolUseId::new();
-    let assistant = ConversationMessage::Assistant {
+    let assistant = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             ContentBlock::Text {
                 text: "streamed-text".into(),
                 citations: None,
             },
-            ContentBlock::ToolUse {
+            ContentBlock::ToolUse { input_projection: None,
                 id: tool_use_id.clone(),
                 name: "Bash".into(),
                 input: serde_json::json!({"command":"pwd"}),
@@ -343,7 +343,7 @@ async fn per_block_session_append_updates_merged_history_and_jsonl_rows() {
     );
     assert_eq!(
         content[1],
-        ContentBlock::ToolUse {
+        ContentBlock::ToolUse { input_projection: None,
             id: tool_use_id.clone(),
             name: "Bash".into(),
             input: serde_json::json!({"command":"pwd"}),
@@ -387,16 +387,16 @@ async fn duplicate_tool_use_anchors_replay_each_accepted_text_overlay() {
 }"#;
     let (orchestrator, output) = build_orchestrator(root.path(), &path, module).await;
     let duplicate_id = ToolUseId::new();
-    let assistant = ConversationMessage::Assistant {
+    let assistant = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
-            ContentBlock::ToolUse {
+            ContentBlock::ToolUse { input_projection: None,
                 id: duplicate_id.clone(),
                 name: "Bash".into(),
                 input: serde_json::json!({"command":"first"}),
                 provider_id: None,
             },
-            ContentBlock::ToolUse {
+            ContentBlock::ToolUse { input_projection: None,
                 id: duplicate_id.clone(),
                 name: "Read".into(),
                 input: serde_json::json!({"file":"second"}),
@@ -420,7 +420,7 @@ async fn duplicate_tool_use_anchors_replay_each_accepted_text_overlay() {
             text: "prefix".into(),
             citations: Some(None),
         },
-        ContentBlock::ToolUse {
+        ContentBlock::ToolUse { input_projection: None,
             id: duplicate_id.clone(),
             name: "Bash".into(),
             input: serde_json::json!({"command":"first"}),
@@ -430,7 +430,7 @@ async fn duplicate_tool_use_anchors_replay_each_accepted_text_overlay() {
             text: "suffix".into(),
             citations: Some(None),
         },
-        ContentBlock::ToolUse {
+        ContentBlock::ToolUse { input_projection: None,
             id: duplicate_id,
             name: "Read".into(),
             input: serde_json::json!({"file":"second"}),
@@ -469,7 +469,7 @@ async fn compact_boundary_session_append_keeps_metadata_and_rewrites_disk_and_hi
     let root = tempfile::tempdir().expect("tempdir");
     let path = root.path().join("session.jsonl");
     let (orchestrator, output) = build_orchestrator(root.path(), &path, REWRITE_MOD).await;
-    let marker = ConversationMessage::System {
+    let marker = ConversationMessage::System { api_system: None,
         id: MessageId::new(),
         content: "Conversation compacted".into(),
         subtype: Some("compact_boundary".into()),

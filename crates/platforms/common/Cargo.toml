@@ -10,6 +10,7 @@ mobile-linux-api.workspace = true
 core = { path = "../../core" }
 mobile-linux-core.workspace = true
 branding.workspace = true
+base64 = "0.22"
 jsonrpc = { path = "../../jsonrpc" }
 llm-runtime = { path = "../../llm-runtime" }
 http-client = { path = "../../http-client" }

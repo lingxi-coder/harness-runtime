@@ -9,8 +9,8 @@ use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
@@ -47,7 +47,12 @@ impl RuntimeSpawner for WindowsRuntime {
         task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) -> Result<BackgroundTaskHandle, RuntimeError> {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
-        self.handles.lock().unwrap().insert(id, tokio::spawn(task));
+        self.handles.lock().unwrap().insert(
+            id,
+            tokio::spawn(lingxi_core::host::model_safety::bind_current_model_safety(
+                task,
+            )),
+        );
         Ok(BackgroundTaskHandle {
             task_name: name.to_string(),
             task_id: id,

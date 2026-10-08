@@ -155,17 +155,17 @@ mod tests {
     }
 
     fn assistant(text: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text { text: text.into(), citations: None }],
             stop_reason: Some("end_turn".into()),
         }
     }
 
     fn assistant_tool(id: MessageId, tool: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id,
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: ToolUseId::new(),
                 name: tool.into(),
                 input: json!({}),

@@ -52,29 +52,29 @@ async fn transcript_append_failure_is_silent_to_the_user() {
     orch.persist_compact_boundary_to_jsonl(&boundary, &metadata)
         .await;
 
-    let per_block = ConversationMessage::Assistant {
+    let per_block = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             lingxi_core::types::ContentBlock::Text {
-                text: "first".into(),
+                text: "first".into(), citations: None,
             },
             lingxi_core::types::ContentBlock::Text {
-                text: "second".into(),
+                text: "second".into(), citations: None,
             },
         ],
         stop_reason: Some("end_turn".into()),
     };
-    orch.persist_assistant_per_block(&per_block, None, None)
+    orch.persist_assistant_per_block(&per_block, None, None, None)
         .await;
 
-    let merged = ConversationMessage::Assistant {
+    let merged = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "merged".into(),
+            text: "merged".into(), citations: None,
         }],
         stop_reason: Some("end_turn".into()),
     };
-    orch.persist_assistant_merged(&merged, None, None).await;
+    orch.persist_assistant_merged(&merged, None, None, None).await;
 
     // CC 2.1.218 shows NO user-visible notice for a transcript-append
     // failure — the handling is log + telemetry only. Every persist path

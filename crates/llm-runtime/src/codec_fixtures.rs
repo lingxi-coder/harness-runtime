@@ -99,8 +99,25 @@ impl Codec {
             serde_json::from_slice(&output.body).map_err(invalid)?,
         );
         result.method = output.method;
+        result.json_encoding =
+            lingxi_llm_client::exact_json::JsonEncoding::for_protocol(self.profile.protocol);
+        result.body_protocol = Some(self.profile.protocol);
+        result.anthropic_request_kind = if self.profile.protocol
+            == wire::ProtocolFamily::AnthropicMessages
+            && req.execution.query_source.as_deref() == Some("hook_prompt")
+        {
+            lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::HookPrompt
+        } else {
+            req.execution.anthropic_request_kind
+        };
         result.headers = output.headers.into_iter().collect();
-        result.json_string_overrides = req.execution.message_json_string_overrides.clone();
+        result.json_string_overrides = lingxi_llm_client::exact_json::map_message_text_overrides(
+            &req.input,
+            self.profile.protocol,
+            &result.body_json,
+            &req.execution.message_json_string_overrides,
+        )
+        .map_err(error)?;
         Ok(result)
     }
 }
@@ -326,11 +343,12 @@ pub(crate) struct HistoryFixture {
 }
 impl HistoryFixture {
     pub fn with_user_text(mut self, text: impl Into<String>) -> Self {
-        self.messages.push(Message {
+        self.messages.push(Message { api_output_config: None,
             role: "user".into(),
             content: vec![ContentBlock::Text {
                 text: text.into(),
                 cache_control: None,
+                citations: None,
             }],
         });
         self

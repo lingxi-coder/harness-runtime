@@ -297,6 +297,7 @@ impl Task for DreamHandler {
         //    `context_paths` has no source on the variant, so an empty vec is
         //    passed.
         let request = SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
             agent_spawn_provenance: Default::default(),
             handback_opt_in: false,

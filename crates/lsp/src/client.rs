@@ -120,7 +120,7 @@ impl LspClient {
         let params = json!({
             "processId": std::process::id(),
             "clientInfo": {
-                "name": "Claude Code",
+                "name": branding::PRODUCT_NAME,
                 "version": LSP_CLIENT_VERSION,
             },
             "initializationOptions": config.initialization_options.clone().unwrap_or_else(|| json!({})),

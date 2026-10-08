@@ -58,23 +58,6 @@ pub const POST_COMPACT_MAX_FILES_TO_RESTORE: usize = 5;
 pub const POST_COMPACT_TOKEN_BUDGET: u64 = 50_000;
 /// Per-file token budget for post-compact file restoration.
 pub const POST_COMPACT_MAX_TOKENS_PER_FILE: u64 = 5_000;
-/// Character budget for the post-compact file re-read's
-/// `fileReadingLimits.maxTokens` semantics (`maxTokens * 4`).
-///
-/// The oracle's compact-time re-reader is bounded by the same 5_000-token
-/// ceiling the post-compaction attachment budget uses. Callers that want a
-/// bounded async read should cap the decoded text to this many characters
-/// before applying the post-compact file truncation renderer.
-pub const POST_COMPACT_MAX_CHARS_PER_FILE_READ: usize = 20_000;
-/// Byte budget for bounded UTF-8 post-compact file re-reads.
-///
-/// The model-facing limit is expressed in JavaScript UTF-16 code units. A
-/// valid UTF-8 scalar consumes at most three bytes per UTF-16 unit (a BMP
-/// character can use three bytes; an astral scalar uses four bytes for two
-/// units), so this ceiling guarantees that a full 20k-unit prefix can be
-/// decoded before the caller applies the UTF-16 clamp.
-pub const POST_COMPACT_MAX_BYTES_PER_FILE_READ: usize =
-    POST_COMPACT_MAX_CHARS_PER_FILE_READ * 3 + 3;
 /// Per-skill token budget for post-compact skill restoration.
 pub const POST_COMPACT_MAX_TOKENS_PER_SKILL: u64 = 5_000;
 /// Total token budget shared across post-compact skill restoration.

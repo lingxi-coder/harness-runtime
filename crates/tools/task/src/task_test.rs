@@ -1710,6 +1710,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     include_examples: false,
                     model: None,
                     model_profile: None,
+                    ..Default::default()
                 })
                 .await;
             assert_eq!(
@@ -1728,6 +1729,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     include_examples: false,
                     model: None,
                     model_profile: None,
+                    ..Default::default()
                 })
                 .await;
             assert_eq!(p, TASK_LIST_PROMPT_SWARM);
@@ -1746,6 +1748,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     include_examples: false,
                     model: None,
                     model_profile: None,
+                    ..Default::default()
                 })
                 .await;
             assert_eq!(
@@ -1764,6 +1767,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     include_examples: false,
                     model: None,
                     model_profile: None,
+                    ..Default::default()
                 })
                 .await;
             assert_eq!(p, TASK_CREATE_PROMPT_SWARM);
@@ -2491,6 +2495,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 // A `local_bash` task carries a distinct command; TaskStop must
                 // prefer this over `description` (claude-code stopTask.ts:97).
                 command: Some("echo hi > out.txt".into()),
+                agent_facts: None,
                 ..Default::default()
             }
         }
@@ -2503,6 +2508,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 description: "run the agent".into(),
                 // Non-bash tasks have no command; TaskStop falls back to description.
                 command: None,
+                agent_facts: None,
                 ..Default::default()
             }
         }
@@ -3386,6 +3392,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 description: "echo hi".into(),
                 command: Some("echo hi > out.txt".into()),
                 owner_agent_id: owner.map(str::to_string),
+                agent_facts: None,
                 ..Default::default()
             }
         }
@@ -3545,6 +3552,7 @@ waiting on the user: an elicitation dialog is open"
                 task_type: "mcp_task".into(),
                 status: "completed".into(),
                 description: "deploy".into(),
+                agent_facts: None,
                 ..Default::default()
             };
             let reg = MockRegistry::with_record(Some(record));

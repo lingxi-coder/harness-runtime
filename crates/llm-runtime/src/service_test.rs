@@ -2,9 +2,27 @@
 
 pub use super::*;
 
+// Shared across all service test modules: flags are process-global, so retry
+// fixtures must exclude the dispatch-header writers in sibling modules too.
+static DISPATCH_FLAG_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn cedar_lattice_write() -> std::sync::RwLockWriteGuard<'static, ()> {
+    DISPATCH_FLAG_LOCK
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub(super) fn cedar_lattice_read() -> std::sync::RwLockReadGuard<'static, ()> {
+    DISPATCH_FLAG_LOCK
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CacheControl;
+    use lingxi_llm_client::providers::anthropic::system_prompt::PromptText;
 
     fn cache_control_at(
         request: &LlmRequest,
@@ -31,6 +49,86 @@ mod tests {
                     },
                 }
             })
+    }
+
+    #[test]
+    fn native_custom_system_prompt_matches_hwe_utf16_line_splitting() {
+        use lingxi_llm_client::providers::anthropic::system_prompt::{
+            PromptText, SystemPromptInput, DYNAMIC_BOUNDARY,
+        };
+
+        let marker = DYNAMIC_BOUNDARY.encode_utf16().collect::<Vec<_>>();
+        let mut exact_units = "before".encode_utf16().collect::<Vec<_>>();
+        exact_units.push(0xd800);
+        exact_units.push(b'\n' as u16);
+        exact_units.extend("\u{feff} \u{00a0}\t".encode_utf16());
+        exact_units.extend(marker.iter().copied());
+        exact_units.push(b'\r' as u16);
+        exact_units.push(0x2028);
+        exact_units.push(b'\n' as u16);
+        exact_units.extend("middle\n".encode_utf16());
+        exact_units.extend(marker.iter().copied());
+        exact_units.push(b'\n' as u16);
+        exact_units.push(0xdc00);
+
+        let original = PromptText::from_utf16(exact_units);
+        let parsed = native_custom_system_prompt(original.clone());
+        let SystemPromptInput::NativeCustomPrompt {
+            text,
+            source_elements,
+        } = parsed
+        else {
+            panic!("Native customSystemPrompt must retain its parsed source elements");
+        };
+        assert_eq!(text, original);
+        assert_eq!(source_elements.len(), 3);
+        assert_eq!(
+            source_elements[0].utf16_code_units(),
+            [
+                "before".encode_utf16().collect::<Vec<_>>(),
+                vec![0xd800, b'\n' as u16]
+            ]
+            .concat()
+        );
+        assert_eq!(source_elements[1].utf16_code_units(), marker);
+        let mut expected_after = vec![b'\n' as u16];
+        expected_after.extend("middle\n".encode_utf16());
+        expected_after.extend(marker.iter().copied());
+        expected_after.push(b'\n' as u16);
+        expected_after.push(0xdc00);
+        assert_eq!(source_elements[2].utf16_code_units(), expected_after);
+
+        let empty_sides = PromptText::from_string(format!("\n \t{DYNAMIC_BOUNDARY} \r\n"));
+        let parsed = native_custom_system_prompt(empty_sides);
+        let SystemPromptInput::NativeCustomPrompt {
+            source_elements, ..
+        } = parsed
+        else {
+            panic!("Native customSystemPrompt variant");
+        };
+        assert_eq!(source_elements.len(), 1);
+        assert!(source_elements[0].equals_ascii(DYNAMIC_BOUNDARY));
+
+        let no_marker = PromptText::from_utf16(vec![0xd800, b' ' as u16, b'x' as u16]);
+        let parsed = native_custom_system_prompt(no_marker.clone());
+        let SystemPromptInput::NativeCustomPrompt {
+            text,
+            source_elements,
+        } = parsed
+        else {
+            panic!("Native customSystemPrompt variant");
+        };
+        assert_eq!(text, no_marker);
+        assert_eq!(source_elements, vec![no_marker]);
+
+        let through_string_entry =
+            custom_system_prompt(Some(&format!("first\n{DYNAMIC_BOUNDARY}\nsecond")))
+                .expect("custom string input");
+        assert!(matches!(
+            through_string_entry,
+            SystemPromptInput::NativeCustomPrompt { source_elements, .. }
+                if source_elements.len() == 3
+        ));
     }
 
     #[test]
@@ -132,10 +230,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
-    // Local opaque stand-ins for the orchestrator's locked-template constants
-    // (the build_request tests assert the system prefix self-referentially and
-    // use SECTION_SEP only as the "\n\n" separator, so any non-empty HEADER works).
-    const HEADER: &str = "You are LingXi, an agentic command-line coding assistant.";
+    // These SDK projection fixtures exercise Native's exact brand-member
+    // classifier. An arbitrary opaque header is an ordinary source member,
+    // so use the current Native identity while testing its block/cache shape.
+    const HEADER: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
     const SECTION_SEP: &str = "\n\n";
 
     // ── FakeTransport ─────────────────────────────────────────────────────────
@@ -341,6 +439,101 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn rejected_dispatch_admission_never_sends_or_marks_the_attempt() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let service = make_adapter_with_retries(transport.clone(), Some(0));
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        let mut request = crate::MessagesCreateRequest::new(
+            "claude-sonnet-4-20250514",
+            None,
+            None,
+            vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "fake request".into(),
+            )],
+            Vec::new(),
+        );
+        request.opts.max_output_tokens = Some(100);
+        request.opts.model_attempt = registered_request().execution.model_attempt;
+        request.opts.request_dispatch_admission =
+            Some(crate::RequestDispatchAdmission::new(|| false));
+        let capture = crate::prompt_cache::RequestCapture::default();
+
+        let result = capture.scope(service.messages_create(request)).await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: false
+            })
+        ));
+        assert_eq!(
+            transport.seen_count(),
+            0,
+            "rejected prompts never reach SDK transport"
+        );
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec!["begin", "finish-owned", "settled"],
+            "rejection settles the reserved attempt as not dispatched"
+        );
+        assert!(
+            capture.take().is_none(),
+            "unadmitted prompts are not recorded as sent"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_rejection_reports_prior_dispatch_and_never_replays_again() {
+        let transport = FakeTransport::sequence(vec![FakeResponse::Err(LlmError::Transport {
+            message: "connection refused".into(),
+        })]);
+        let service = make_adapter_with_retries(transport.clone(), Some(1));
+        let probe = Arc::new(AttemptProbe::default());
+        service.set_model_attempt_hooks(Arc::new(probe.clone()));
+        let admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let check = admissions.clone();
+        let mut request = registered_request();
+        request.execution.request_dispatch_admission =
+            Some(crate::RequestDispatchAdmission::new(move || {
+                check.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            }));
+
+        let result = service
+            .execute_non_stream_request(
+                request,
+                crate::NonStreamingRequestClass::Main,
+                crate::NonStreamingRetryOptions::default(),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: true
+            })
+        ));
+        assert_eq!(
+            transport.seen_count(),
+            1,
+            "the rejected retry is never replayed"
+        );
+        assert_eq!(
+            *probe.events.lock().unwrap(),
+            vec![
+                "begin",
+                "dispatch",
+                "finish-owned",
+                "settled",
+                "begin",
+                "finish-owned",
+                "settled",
+            ]
+        );
+    }
+
     struct IncompleteResponseTransport {
         status: u16,
     }
@@ -443,7 +636,8 @@ mod tests {
             let probe = Arc::new(AttemptProbe::default());
             service.set_model_attempt_hooks(Arc::new(probe.clone()));
             let result = tokio::time::timeout(
-                crate::execution::non_stream_timeout() + Duration::from_secs(1),
+                crate::model::request_timeout::non_stream_timeout().unwrap()
+                    + Duration::from_secs(1),
                 service.execute_side_query_request(registered_request()),
             )
             .await;
@@ -467,7 +661,8 @@ mod tests {
         });
         let service = make_adapter_with_retries(transport, Some(0));
         let probe = Arc::new(AttemptProbe {
-            admission_delay: crate::execution::non_stream_timeout() + Duration::from_secs(1),
+            admission_delay: crate::model::request_timeout::non_stream_timeout().unwrap()
+                + Duration::from_secs(1),
             ..Default::default()
         });
         service.set_model_attempt_hooks(Arc::new(probe.clone()));
@@ -491,6 +686,64 @@ mod tests {
                 .unwrap(),
         );
         request
+    }
+
+    #[tokio::test]
+    async fn owned_main_request_requires_and_settles_its_registered_attempt() {
+        for bind_hooks in [false, true] {
+            let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+            let service = make_adapter_with_retries(transport.clone(), Some(0));
+            service.set_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+            let probe = Arc::new(AttemptProbe::default());
+            if bind_hooks {
+                service.set_model_attempt_hooks(Arc::new(probe.clone()));
+            }
+            let registered = registered_request();
+            let mut request = crate::MessagesCreateRequest::new(
+                &registered.input.model,
+                None,
+                None,
+                vec![lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "fake request".into(),
+                )],
+                Vec::new(),
+            );
+            request.opts.max_output_tokens = Some(100);
+            request.opts.model_attempt = registered.execution.model_attempt;
+            request.opts.query_source = Some("registered-main-test".into());
+            let result = service.messages_create(request).await;
+            if !bind_hooks {
+                assert!(
+                    matches!(result, Err(LlmError::InvalidRequest { message }) if message.contains("requires host accounting hooks"))
+                );
+                assert_eq!(
+                    transport.seen_count(),
+                    0,
+                    "unowned admission cannot dispatch"
+                );
+                assert!(probe.events.lock().unwrap().is_empty());
+                continue;
+            }
+            result.unwrap();
+            assert_eq!(transport.seen_count(), 1);
+            assert_eq!(
+                *probe.events.lock().unwrap(),
+                ["begin", "dispatch", "finish-owned", "settled"]
+            );
+            let seen = transport.seen.lock().unwrap();
+            let body = &seen[0].body_json;
+            assert_eq!(body["max_tokens"], 100);
+            assert!(body.get("model_attempt").is_none());
+            assert!(body.get("query_source").is_none());
+            let observations = probe.observations.lock().unwrap();
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].0.counts().input_tokens, 5);
+            assert_eq!(
+                observations[0].1,
+                crate::ModelAttemptUsageCompleteness::Complete
+            );
+        }
     }
 
     struct HttpOnlyProbeTransport {
@@ -601,7 +854,7 @@ mod tests {
         );
         let probe = Arc::new(AttemptProbe::default());
         service.set_model_attempt_hooks(Arc::new(probe.clone()));
-        // Each drive has a fresh x-request-id, but still shares one connection.
+        // Each drive opens a fresh WebSocket session while sharing one connection.
         for _ in 0..2 {
             let mut stream = service.stream_request(request.clone()).await.unwrap();
             while let Some(event) = stream.next().await {
@@ -715,12 +968,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(transport.seen_count(), 2);
-        assert!(transport
-            .seen_headers(0)
-            .contains_key("anthropic-dispatch-id"));
-        assert!(!transport
-            .seen_headers(1)
-            .contains_key("anthropic-dispatch-id"));
+        assert_eq!(
+            transport
+                .seen_headers(0)
+                .get(DISPATCH_ID_HEADER)
+                .map(String::as_str),
+            Some("v2s")
+        );
+        assert_eq!(
+            transport
+                .seen_headers(1)
+                .get(DISPATCH_ID_HEADER)
+                .map(String::as_str),
+            Some("v2p")
+        );
         assert_eq!(
             *probe.events.lock().unwrap(),
             vec![
@@ -1321,6 +1582,10 @@ mod tests {
             None,
             None,
         )
+        .with_fast_policy_source(Arc::new(|| crate::model::fast_admission::Policy {
+            cached_org_enabled: true,
+            ..Default::default()
+        }))
     }
 
     /// `max_retries` bounds the retry ladder; `None` keeps the production
@@ -1386,6 +1651,10 @@ mod tests {
             max_retries,
             None,
         )
+        .with_fast_policy_source(Arc::new(|| crate::model::fast_admission::Policy {
+            cached_org_enabled: true,
+            ..Default::default()
+        }))
     }
 
     fn make_adapter(transport: Arc<dyn Transport>) -> ApiService {
@@ -1522,7 +1791,9 @@ mod tests {
         let adapter = make_adapter_for_protocol(protocol, provider_id, base_url);
         let request = LlmRequest::new("model").with_user_text("hi");
         let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
-        adapter.inject_headers(&mut prepared, "req_test", DispatchHeaderState::default());
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
         prepared.provider_request.headers
     }
 
@@ -1533,11 +1804,40 @@ mod tests {
     // concurrently. Lock poison is benign here — recover the guard.
     static CACHE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    struct CacheEnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl CacheEnvRestore {
+        fn clear(names: &[&'static str]) -> Self {
+            let saved = names
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect();
+            for name in names {
+                std::env::remove_var(name);
+            }
+            Self(saved)
+        }
+    }
+
+    impl Drop for CacheEnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+    }
+
     fn text_user_msg(s: &str) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: s.to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -1545,11 +1845,10 @@ mod tests {
         }
     }
 
-    /// `last_request_id()` captures the provider's server-side request id on
-    /// every recorded headers pass (origin = Server), falls back to the
-    /// client-generated id when no server header is present (origin = Client),
-    /// and clears only when both are absent. This is the slot the persisted
-    /// assistant line's top-level `requestId` reads from.
+    /// `last_request_id()` captures the selected provider's server-side request
+    /// id (origin = Server), uses a sent SDK client UUID when present (origin =
+    /// Client), and clears when neither exists. Host telemetry IDs are not
+    /// provider request IDs and must not appear in this persisted field.
     #[test]
     fn last_request_id_captures_request_id_header() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
@@ -1559,7 +1858,12 @@ mod tests {
 
         let mut h = std::collections::BTreeMap::new();
         h.insert("request-id".to_string(), "req_011abc".to_string());
-        adapter.record_rate_limit_from_headers(&h, "client_xyz");
+        adapter.record_rate_limit_from_headers_for_route(
+            &h,
+            Some("client_uuid"),
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            "anthropic",
+        );
         assert_eq!(adapter.last_request_id(), Some("req_011abc".to_string()));
         // Server header present → server origin (client id ignored).
         assert_eq!(
@@ -1567,27 +1871,41 @@ mod tests {
             Some(RequestIdOrigin::Server)
         );
 
-        // `x-request-id` (OpenAI/generic) is also a server header → server origin.
+        // `x-request-id` remains a provider response fallback header → server origin.
         let mut h2 = std::collections::BTreeMap::new();
         h2.insert("x-request-id".to_string(), "req_xfallback".to_string());
-        adapter.record_rate_limit_from_headers(&h2, "client_xyz");
+        adapter.record_rate_limit_from_headers_for_route(
+            &h2,
+            Some("client_uuid"),
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            "anthropic",
+        );
         assert_eq!(adapter.last_request_id(), Some("req_xfallback".to_string()));
         assert_eq!(
             adapter.last_request_id_origin(),
             Some(RequestIdOrigin::Server)
         );
 
-        // No server id header → fall back to the client-generated id, marked
-        // client-origin (correlation-only, not provider-lookupable).
-        adapter.record_rate_limit_from_headers(&std::collections::BTreeMap::new(), "client_xyz");
-        assert_eq!(adapter.last_request_id(), Some("client_xyz".to_string()));
+        // No server id header → use only a client ID that was actually sent.
+        adapter.record_rate_limit_from_headers_for_route(
+            &std::collections::BTreeMap::new(),
+            Some("client_uuid"),
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            "anthropic",
+        );
+        assert_eq!(adapter.last_request_id(), Some("client_uuid".to_string()));
         assert_eq!(
             adapter.last_request_id_origin(),
             Some(RequestIdOrigin::Client)
         );
 
-        // Neither a server header nor a client id → cleared (no stale leak).
-        adapter.record_rate_limit_from_headers(&std::collections::BTreeMap::new(), "");
+        // Neither a server header nor a sent SDK client ID → no old Host ID fallback.
+        adapter.record_rate_limit_from_headers_for_route(
+            &std::collections::BTreeMap::new(),
+            None,
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            "anthropic",
+        );
         assert_eq!(adapter.last_request_id(), None);
         assert_eq!(adapter.last_request_id_origin(), None);
     }
@@ -1598,9 +1916,16 @@ mod tests {
         std::env::remove_var("DISABLE_PROMPT_CACHING");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
-        // A HEADER-prefixed assembled-shape system prompt splits into prefix +
-        // rest (splitSysPromptPrefix default mode), both org-scoped.
-        let system = format!("{HEADER}{SECTION_SEP}rest body here");
+        // The main getSystemPrompt source vector keeps the banner separate
+        // from its body. Custom --system-prompt input has a distinct role.
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![
+                PromptText::from_string(HEADER),
+                PromptText::from_string("rest body here"),
+            ],
+            None,
+            None,
+        );
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
@@ -1610,6 +1935,8 @@ mod tests {
                 vec![],
                 false,
                 Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
         // (a) two system blocks: prefix (HEADER) + rest, each org-scoped → each
@@ -1651,6 +1978,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn build_request_samples_current_main_and_subagent_cache_ttl_settings() {
+        use lingxi_core::settings::schema::{
+            PromptCacheTtl as HostTtl, PromptCacheTtlSettings as HostSettings,
+        };
+        use lingxi_llm_client::protocol::{CachePosition, CacheTtl};
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "DISABLE_PROMPT_CACHING",
+            "FORCE_PROMPT_CACHING_5M",
+            "CLAUDE_CODE_PROMPT_CACHE_TTL",
+            "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
+            "ENABLE_PROMPT_CACHING_1H",
+            "ENABLE_PROMPT_CACHING_1H_BEDROCK",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "LINGXI_GLOBAL_CACHE_SCOPE",
+        ]);
+        let settings = Arc::new(std::sync::Mutex::new(HostSettings {
+            main: Some(HostTtl::OneHour),
+            subagent: Some(HostTtl::FiveMinutes),
+        }));
+        let source_settings = settings.clone();
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )))
+        .with_prompt_cache_ttl_settings_source(Arc::new(move || *source_settings.lock().unwrap()));
+        let system_text = format!("{HEADER}{SECTION_SEP}retained settings prompt");
+        let system = custom_system_prompt(Some(&system_text));
+
+        let main = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                system.as_ref(),
+                vec![text_user_msg("main")],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Named("sdk"),
+            )
+            .expect("main request");
+        let ttl_at_system = |request: &LlmRequest| {
+            request
+                .input
+                .prompt_cache
+                .breakpoints
+                .iter()
+                .find(|point| matches!(&point.position, CachePosition::System { index: 0 }))
+                .expect("system cache breakpoint")
+                .ttl
+        };
+        assert_eq!(ttl_at_system(&main), CacheTtl::OneHour);
+
+        *settings.lock().unwrap() = HostSettings {
+            main: Some(HostTtl::FiveMinutes),
+            subagent: Some(HostTtl::OneHour),
+        };
+        let subagent = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                system.as_ref(),
+                vec![text_user_msg("subagent")],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Subagent,
+            )
+            .expect("subagent request");
+        assert_eq!(ttl_at_system(&subagent), CacheTtl::OneHour);
+    }
+
     /// The `tool_reference` normalization branch is selected by the SESSION-scoped
     /// tool-search gate (Claude Code `$U()`), NOT by whether the request's own
     /// toolset carries a `ToolSearch` declaration. This is the compaction /
@@ -1666,8 +2071,10 @@ mod tests {
         let convo = || {
             vec![
                 ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolUse {
+                        input_projection: None,
                         id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         name: "ToolSearch".to_string(),
                         input: serde_json::json!({}),
@@ -1676,11 +2083,13 @@ mod tests {
                     stop_reason: None,
                 },
                 ConversationMessage::User {
+                    api_message_override: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolResult {
+                        output_projection: None,
                         tool_use_id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         content: String::new(),
-                        is_error: false,
+                        is_error: Some(false),
                         provider_tool_use_id: Some("toolu_ref".to_string()),
                         content_blocks: Some(vec![serde_json::json!({
                             "type": "tool_reference",
@@ -1732,6 +2141,8 @@ mod tests {
                 vec![],
                 false,
                 Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
         assert_eq!(
@@ -1752,6 +2163,8 @@ mod tests {
                 vec![],
                 false,
                 Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
         assert_eq!(
@@ -1778,6 +2191,8 @@ mod tests {
                     vec![],
                     false,
                     None,
+                    false,
+                    PromptCacheQuerySource::Unspecified,
                 )
                 .expect("build_request")
                 .input
@@ -1815,6 +2230,8 @@ mod tests {
                 vec![],
                 false,
                 None,
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request")
             .input
@@ -1853,6 +2270,8 @@ mod tests {
                     vec![],
                     false,
                     max_tokens,
+                    false,
+                    PromptCacheQuerySource::Unspecified,
                 )
                 .expect("build_request")
                 .input
@@ -1885,7 +2304,14 @@ mod tests {
         std::env::set_var("DISABLE_PROMPT_CACHING", "1");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
-        let system = format!("{HEADER}{SECTION_SEP}rest body here");
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![
+                PromptText::from_string(HEADER),
+                PromptText::from_string("rest body here"),
+            ],
+            None,
+            None,
+        );
         let req = adapter
             .build_request(
                 "claude-sonnet-4-20250514",
@@ -1895,6 +2321,8 @@ mod tests {
                 vec![],
                 false,
                 Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
         std::env::remove_var("DISABLE_PROMPT_CACHING");
@@ -1931,23 +2359,45 @@ mod tests {
     }
 
     #[test]
-    fn build_request_global_cache_gate_dormant_by_default() {
-        // Without the opt-in env, the global gate is off even for a subscriber:
-        // a boundary-bearing prompt still splits org-default (2 blocks).
-        use crate::prompt_format::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+    fn build_request_global_cache_gate_respects_experimental_beta_disable() {
+        // Native suppresses the source boundary when experimental betas are
+        // disabled, independent of subscription or local opt-in state.
+        use lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY as SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
+        std::env::set_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1");
         std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
-        let adapter = make_adapter_with_subscriber(
-            transport,
-            SubscriberState {
-                is_subscriber: true,
-                is_enterprise: false,
+        let adapter = make_adapter(transport);
+        let sections = [
+            lingxi_llm_client::providers::anthropic::system_prompt::SourceSection {
+                text: "shared".into(),
+                scope: lingxi_llm_client::providers::anthropic::system_prompt::SectionScope::Shared,
             },
+            lingxi_llm_client::providers::anthropic::system_prompt::SourceSection {
+                text: "session".into(),
+                scope:
+                    lingxi_llm_client::providers::anthropic::system_prompt::SectionScope::Session,
+            },
+        ];
+        assert_eq!(
+            adapter.prompt_snapshot_source_vector("claude-sonnet-4-20250514", None, &sections),
+            vec![
+                PromptText::from_string("shared"),
+                PromptText::from_string("session")
+            ]
         );
-        let system = format!(
-            "{HEADER}{SECTION_SEP}static{SECTION_SEP}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}{SECTION_SEP}dynamic"
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![
+                PromptText::from_string(HEADER),
+                PromptText::from_string("static"),
+                PromptText::from_string(SYSTEM_PROMPT_DYNAMIC_BOUNDARY),
+                PromptText::from_string("dynamic"),
+            ],
+            None,
+            None,
         );
         let req = adapter
             .build_request(
@@ -1958,10 +2408,13 @@ mod tests {
                 vec![],
                 false,
                 Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
-        // Gate off → org default (no scope:global block, marker left inline).
+        // Gate off → org default; the internal scope marker is not model text.
         assert_eq!(req.input.system.len(), 2);
+        assert_eq!(req.input.system[1].text, "static\n\ndynamic");
         assert_eq!(
             cache_control_at(
                 &req,
@@ -1969,28 +2422,54 @@ mod tests {
             ),
             Some(CacheControl::Ephemeral)
         );
+        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
     }
 
     #[test]
-    fn build_request_global_cache_gate_armed_marks_global_static() {
-        // With the opt-in env + subscriber, the 1P global path activates and the
-        // static block carries scope:global while prefix/dynamic are uncached.
-        use crate::prompt_format::SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
+    fn build_request_global_cache_gate_uses_native_default_without_subscription_or_opt_in() {
+        // With an untainted host and Native's default beta state, the direct
+        // first-party route emits the marker without a subscriber or local
+        // LINGXI_GLOBAL_CACHE_SCOPE opt-in.
         use crate::CacheScope;
+        use lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY as SYSTEM_PROMPT_DYNAMIC_BOUNDARY;
         let _guard = CACHE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DISABLE_PROMPT_CACHING");
         std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
-        std::env::set_var("LINGXI_GLOBAL_CACHE_SCOPE", "1");
+        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
-        let adapter = make_adapter_with_subscriber(
-            transport,
-            SubscriberState {
-                is_subscriber: true,
-                is_enterprise: false,
+        let adapter = make_adapter(transport);
+        let sections = [
+            lingxi_llm_client::providers::anthropic::system_prompt::SourceSection {
+                text: "shared".into(),
+                scope: lingxi_llm_client::providers::anthropic::system_prompt::SectionScope::Shared,
             },
+            lingxi_llm_client::providers::anthropic::system_prompt::SourceSection {
+                text: "session".into(),
+                scope:
+                    lingxi_llm_client::providers::anthropic::system_prompt::SectionScope::Session,
+            },
+        ];
+        assert_eq!(
+            adapter.prompt_snapshot_source_vector("claude-sonnet-4-20250514", None, &sections),
+            vec![
+                PromptText::from_string("shared"),
+                PromptText::from_string(
+                    lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY,
+                ),
+                PromptText::from_string("session")
+            ]
         );
-        let system = format!(
-            "{HEADER}{SECTION_SEP}static{SECTION_SEP}{SYSTEM_PROMPT_DYNAMIC_BOUNDARY}{SECTION_SEP}dynamic"
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![
+                PromptText::from_string(HEADER),
+                PromptText::from_string("static"),
+                PromptText::from_string(SYSTEM_PROMPT_DYNAMIC_BOUNDARY),
+                PromptText::from_string("dynamic"),
+            ],
+            None,
+            None,
         );
         let req = adapter
             .build_request(
@@ -2001,9 +2480,10 @@ mod tests {
                 vec![],
                 false,
                 Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
-        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
         assert_eq!(req.input.system.len(), 3);
         assert_eq!(req.input.system[0].text, HEADER);
         assert_eq!(
@@ -2035,6 +2515,110 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn sdk_request_body_emits_native_global_scope_without_subscription_or_opt_in() {
+        use lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY;
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
+        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![
+                PromptText::from_string(HEADER),
+                PromptText::from_string("static"),
+                PromptText::from_string(DYNAMIC_BOUNDARY),
+                PromptText::from_string("dynamic"),
+            ],
+            None,
+            None,
+        );
+        let request = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                Some(&system),
+                vec![text_user_msg("hi")],
+                vec![],
+                false,
+                Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .expect("global-cache request");
+        let prepared = adapter.client.prepare(&request).await.expect("SDK prepare");
+        let body = prepared.provider_request.body_json;
+        assert_eq!(body["system"].as_array().unwrap().len(), 3);
+        assert_eq!(body["system"][0]["text"], HEADER);
+        assert_eq!(body["system"][1]["text"], "static");
+        assert_eq!(body["system"][2]["text"], "dynamic");
+        assert_eq!(body["system"][1]["cache_control"]["scope"], "global");
+        assert!(!body.to_string().contains(DYNAMIC_BOUNDARY));
+    }
+
+    #[tokio::test]
+    async fn sdk_request_body_honors_native_process_base_url_gate() {
+        use lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY;
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
+        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://proxy.example.test");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![
+                PromptText::from_string(HEADER),
+                PromptText::from_string("static"),
+                PromptText::from_string(DYNAMIC_BOUNDARY),
+                PromptText::from_string("dynamic"),
+            ],
+            None,
+            None,
+        );
+        let request = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                Some(&system),
+                vec![text_user_msg("hi")],
+                vec![],
+                false,
+                Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .expect("proxy-gated request");
+        let prepared = adapter.client.prepare(&request).await.expect("SDK prepare");
+        let body = prepared.provider_request.body_json;
+        assert_eq!(body["system"].as_array().unwrap().len(), 2);
+        assert_eq!(body["system"][0]["text"], HEADER);
+        assert_eq!(body["system"][1]["text"], "static\n\ndynamic");
+        assert!(body["system"][1].get("cache_control").is_some());
+        assert_eq!(
+            body["system"][1]
+                .get("cache_control")
+                .and_then(|value| value.get("scope")),
+            None
+        );
+        assert!(!body.to_string().contains(DYNAMIC_BOUNDARY));
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
     // ── 1P cache-EDITING (cache_edits / cache_reference, RESIDUAL 4) ───────────
 
     /// A multi-message conversation: an assistant tool_use, a user tool_result,
@@ -2048,8 +2632,10 @@ mod tests {
         let tool_id = ToolUseId::new();
         vec![
             CM::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![PB::ToolUse {
+                    input_projection: None,
                     id: tool_id.clone(),
                     name: "Read".to_string(),
                     input: serde_json::json!({"path": "/x"}),
@@ -2058,11 +2644,13 @@ mod tests {
                 stop_reason: None,
             },
             CM::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![PB::ToolResult {
+                    content_projection: None,
                     tool_use_id: tool_id,
                     content: "file body".to_string(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: Some("toolu_abc".to_string()),
                     content_blocks: None,
                 }],
@@ -2071,9 +2659,11 @@ mod tests {
                 is_visible_in_transcript_only: false,
             },
             CM::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![PB::Text {
                     text: "ok".to_string(),
+                    citations: None,
                 }],
                 stop_reason: None,
             },
@@ -2107,11 +2697,13 @@ mod tests {
             .build_request(
                 "claude-sonnet-4-20250514",
                 None,
-                Some("sys"),
+                custom_system_prompt(Some("sys")).as_ref(),
                 tool_result_conversation(),
                 vec![],
                 false,
                 Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
         // No cache_edits block anywhere.
@@ -2171,11 +2763,13 @@ mod tests {
             .build_request(
                 "claude-sonnet-4-20250514",
                 None,
-                Some("sys"),
+                custom_system_prompt(Some("sys")).as_ref(),
                 tool_result_conversation(),
                 vec![],
                 false,
                 Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
         std::env::remove_var("LINGXI_CACHE_EDITING");
@@ -2207,6 +2801,8 @@ mod tests {
                 vec![],
                 false,
                 None,
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request with profile");
         assert_eq!(
@@ -2225,7 +2821,17 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let req = adapter
-            .build_request("claude-opus-4-7", None, None, vec![], vec![], false, None)
+            .build_request(
+                "claude-opus-4-7",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
             .expect("build_request without profile");
         assert_eq!(
             req.input.model, "claude-opus-4-7",
@@ -2237,6 +2843,78 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn mod_request_effort_applies_only_inside_its_task_scope() {
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let service = make_adapter(transport);
+        let ordinary = service
+            .build_request(
+                "claude-opus-4-7",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .unwrap();
+        let rewritten = with_mod_request_effort("low", async {
+            service.build_request(
+                "claude-opus-4-7",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+        })
+        .await
+        .unwrap();
+        let side_query = with_mod_request_effort("low", async {
+            service.build_side_query_request_with_thinking(
+                "claude-opus-4-7",
+                None,
+                None,
+                false,
+                vec![],
+                vec![],
+                None,
+                None,
+                vec![],
+                None,
+                None,
+                None,
+                Some("mod_side_query"),
+            )
+        })
+        .await
+        .unwrap();
+        let again = service
+            .build_request(
+                "claude-opus-4-7",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .unwrap();
+        let effort = |request: &LlmRequest| {
+            serde_json::to_value(request).unwrap()["input"]["thinking"]["effort"].clone()
+        };
+        assert_eq!(effort(&rewritten), serde_json::json!("low"));
+        assert!(effort(&side_query).is_null());
+        assert_eq!(effort(&ordinary), effort(&again));
+    }
+
     #[test]
     fn side_query_builder_preserves_all_canonical_request_controls() {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
@@ -2245,7 +2923,10 @@ mod tests {
             .build_side_query_request_with_thinking(
                 "claude-sonnet-4-20250514",
                 Some("anthropic"),
-                Some("system"),
+                Some(&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::custom_prompt(
+                    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string("system"),
+                )),
+                false,
                 vec![text_user_msg("payload")],
                 vec![],
                 Some(321),
@@ -2355,7 +3036,17 @@ mod tests {
             ("claude-mythos-5-1", 128_000),
         ] {
             let req = adapter
-                .build_request(model, None, None, vec![], vec![], false, None)
+                .build_request(
+                    model,
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                    false,
+                    None,
+                    false,
+                    PromptCacheQuerySource::Unspecified,
+                )
                 .expect("build_request");
             assert_eq!(
                 req.input
@@ -2389,7 +3080,17 @@ mod tests {
         // compaction max output for haiku-4-5 = (32_000, 64_000) → budget 63_999,
         // clamped to max_tokens(32_000)-1 = 31_999.
         let req = adapter
-            .build_request("claude-haiku-4-5", None, None, vec![], vec![], false, None)
+            .build_request(
+                "claude-haiku-4-5",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
             .expect("build_request");
         assert_eq!(req.input.max_tokens, Some(32_000));
         assert_eq!(
@@ -2426,7 +3127,17 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport.clone());
         let expected = match adapter
-            .build_request(model, None, None, vec![], vec![], false, None)
+            .build_request(
+                model,
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
             .expect("build_request")
             .input
             .thinking
@@ -2434,13 +3145,13 @@ mod tests {
             Some(lingxi_llm_client::protocol::ThinkingConfig {
                 mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
                 ..
-            }) => serde_json::json!({"type": "adaptive"}),
+            }) => serde_json::json!({"type": "adaptive", "display": "updates"}),
             Some(lingxi_llm_client::protocol::ThinkingConfig {
                 mode: Some(lingxi_llm_client::protocol::ThinkingMode::Enabled),
                 budget: Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(budget_tokens)),
                 ..
             }) => {
-                serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens})
+                serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens, "display": "updates"})
             }
             None => serde_json::Value::Null,
             other => panic!("unexpected thinking config: {other:?}"),
@@ -2451,7 +3162,13 @@ mod tests {
             "session thinking is ON by default"
         );
         adapter
-            .messages_create(model, None, None, vec![], vec![])
+            .messages_create(crate::MessagesCreateRequest::new(
+                model,
+                None,
+                None,
+                vec![],
+                vec![],
+            ))
             .await
             .expect("messages_create");
         let body = transport.seen.lock().unwrap()[0].body_json.clone();
@@ -2471,13 +3188,19 @@ mod tests {
             },
         );
         adapter2
-            .messages_create(model, None, None, vec![], vec![])
+            .messages_create(crate::MessagesCreateRequest::new(
+                model,
+                None,
+                None,
+                vec![],
+                vec![],
+            ))
             .await
             .expect("messages_create");
         let body2 = transport2.seen.lock().unwrap()[0].body_json.clone();
         assert_eq!(
             body2["thinking"],
-            serde_json::json!({"type": "enabled", "budget_tokens": 2_048}),
+            serde_json::json!({"type": "enabled", "budget_tokens": 2_048, "display": "updates"}),
             "an explicit session budget rides on the subagent seam"
         );
         clear_thinking_env();
@@ -2502,6 +3225,8 @@ mod tests {
                 vec![],
                 false,
                 None,
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("enabled request");
         assert_eq!(
@@ -2523,6 +3248,8 @@ mod tests {
                 vec![],
                 false,
                 None,
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("disabled request");
         assert!(disabled.input.thinking.is_none());
@@ -2538,7 +3265,17 @@ mod tests {
         let adapter = make_adapter(transport);
 
         let req = adapter
-            .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
+            .build_request(
+                "claude-opus-4-8",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
             .expect("build_request");
         assert!(
             req.input.thinking.is_none(),
@@ -2571,6 +3308,8 @@ mod tests {
                 vec![],
                 false,
                 Some(7_777),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("build_request");
         assert_eq!(req.input.max_tokens, Some(7_777));
@@ -2601,6 +3340,8 @@ mod tests {
                 vec![],
                 false,
                 None,
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("ordinary GLM request");
         assert_eq!(ordinary.input.max_tokens, Some(32_000));
@@ -2614,6 +3355,8 @@ mod tests {
                 vec![],
                 false,
                 Some(u32::MAX),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("explicit GLM request");
         assert_eq!(oversized_override.input.max_tokens, Some(230_400));
@@ -2632,6 +3375,8 @@ mod tests {
                 Vec::new(),
                 false,
                 Some(150_000),
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("custom model request");
 
@@ -2646,7 +3391,17 @@ mod tests {
         let adapter =
             make_adapter(transport).with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
         let req = adapter
-            .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
+            .build_request(
+                "claude-opus-4-8",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
             .expect("build_request");
         assert!(
             req.input.thinking.is_none(),
@@ -2670,7 +3425,17 @@ mod tests {
             make_adapter(transport).with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
         // claude-sonnet-4-5 IS in the `rhn` set → temperature:1 is sent.
         let req = adapter
-            .build_request("claude-sonnet-4-5", None, None, vec![], vec![], false, None)
+            .build_request(
+                "claude-sonnet-4-5",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
             .expect("build_request");
         assert!(
             req.input.thinking.is_none(),
@@ -2693,7 +3458,17 @@ mod tests {
             user_id: "{\"session_id\":\"s1\"}".to_string(),
         });
         let req = adapter
-            .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
+            .build_request(
+                "claude-opus-4-8",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
             .expect("build_request");
         assert_eq!(
             req.input.metadata,
@@ -2705,7 +3480,17 @@ mod tests {
             200,
             ok_response_json(),
         )))
-        .build_request("claude-opus-4-8", None, None, vec![], vec![], false, None)
+        .build_request(
+            "claude-opus-4-8",
+            None,
+            None,
+            vec![],
+            vec![],
+            false,
+            None,
+            false,
+            PromptCacheQuerySource::Unspecified,
+        )
         .expect("build_request");
         assert!(bare.input.metadata.is_null());
         clear_thinking_env();
@@ -2773,9 +3558,11 @@ mod tests {
         let text = || crate::ContentBlock::Text {
             text: "keep".to_string(),
             cache_control: None,
+            citations: None,
         };
         let messages = vec![
             crate::Message {
+                api_output_config: None,
                 role: "assistant".to_string(),
                 content: vec![
                     text(),
@@ -2793,6 +3580,7 @@ mod tests {
                 ],
             },
             crate::Message {
+                api_output_config: None,
                 role: "user".to_string(),
                 content: vec![crate::ContentBlock::Reasoning {
                     text: "leave non-assistant untouched".to_string(),
@@ -2816,7 +3604,8 @@ mod tests {
             messages[0].content,
             vec![lingxi_llm_client::protocol::ContentBlock::Text {
                 text: "keep".into(),
-                thought_signature: None
+                thought_signature: None,
+                citations: None
             }]
         );
         assert!(matches!(
@@ -2830,8 +3619,12 @@ mod tests {
     /// Prepare `request` on `adapter` and run the header injectors (which now also
     /// run the `CLAUDE_CODE_EXTRA_BODY` merge), returning the outgoing body.
     async fn body_after_inject(adapter: &ApiService, request: &LlmRequest) -> serde_json::Value {
-        let mut prepared = adapter.client.prepare(request).await.expect("prepare");
-        adapter.inject_headers(&mut prepared, "req_test", DispatchHeaderState::default());
+        let mut request = request.clone();
+        request.execution.resolve_native_effort = true;
+        let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
         prepared.provider_request.body_json
     }
 
@@ -2936,7 +3729,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extra_body_output_config_merges_computed_wins() {
+    async fn side_effort_beta_observes_resolution_snapshot_instead_of_stale_wire_field() {
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
+        let mut prepared = adapter.client.prepare(&request).await.unwrap();
+        prepared.anthropic_request_kind = lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery;
+        prepared.provider_request.body_json["output_config"] = serde_json::json!({"effort":"high"});
+        prepared.effort_policy = Some(
+            lingxi_llm_client::providers::anthropic::request_policy::AnthropicEffortPolicy {
+                supported: true,
+                value: None,
+            },
+        );
+        assert!(
+            !adapter.beta_context(&prepared).effort,
+            "native side query without hook effort does not call YMe, even when an SDK base contains effort"
+        );
+        prepared.effort_policy.as_mut().unwrap().value = Some(serde_json::json!(7));
+        assert!(
+            !adapter.beta_context(&prepared).effort,
+            "native numeric resolution also emits no effort beta"
+        );
+        prepared.effort_policy.as_mut().unwrap().value = Some(serde_json::json!("low"));
+        assert!(adapter.beta_context(&prepared).effort);
+    }
+
+    #[tokio::test]
+    async fn main_extra_body_output_config_removes_unsupported_effort() {
         let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_thinking_env();
         std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
@@ -2949,18 +3771,14 @@ mod tests {
         let mut request = LlmRequest::new("claude-sonnet-4-20250514").with_user_text("hi");
         request.set_effort(Some(serde_json::json!("high"))).unwrap();
 
-        // (5) extra body's output_config is peeled and the computed one layered on
-        // top: colliding `effort` → computed wins; extra's `format` is merged in.
+        // Native YMe deletes effort before inspecting explicit presence when
+        // the selected model is unsupported, while retaining other fields.
         std::env::set_var(
             "CLAUDE_CODE_EXTRA_BODY",
             r#"{"output_config":{"effort":"low","format":"json"}}"#,
         );
         let body = body_after_inject(&adapter, &request).await;
-        assert_eq!(
-            body["output_config"]["effort"],
-            serde_json::json!("high"),
-            "computed output_config keys win over the extra body"
-        );
+        assert!(body.pointer("/output_config/effort").is_none());
         assert_eq!(
             body["output_config"]["format"],
             serde_json::json!("json"),
@@ -2994,7 +3812,7 @@ mod tests {
             .insert("speed".to_string(), serde_json::json!("fast"));
 
         std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"speed":"slow"}"#);
-        adapter.merge_extra_body(&mut prepared);
+        adapter.merge_extra_body(&mut prepared).unwrap();
         let body = prepared.provider_request.body_json;
         assert_eq!(
             body["speed"],
@@ -3002,7 +3820,7 @@ mod tests {
             "computed speed wins over the extra body's speed"
         );
         prepared.provider_request.body_json = body;
-        ApiService::enforce_fast_route(&mut prepared);
+        adapter.enforce_fast_route(&mut prepared);
         assert!(
             prepared.provider_request.body_json.get("speed").is_none(),
             "the final capability gate strips speed from unsupported models"
@@ -3067,6 +3885,32 @@ mod tests {
         assert!(r3.get("anthropic_beta").is_none());
 
         std::env::remove_var("CLAUDE_CODE_EXTRA_BODY");
+    }
+
+    #[test]
+    fn extra_body_raw_parser_and_cleanup_match_current_native() {
+        let _g = THINKING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("CLAUDE_CODE_EXTRA_BODY");
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/extra_body_2_1_287.json"))
+                .unwrap();
+        for case in fixture["rawCases"].as_array().unwrap() {
+            std::env::set_var("CLAUDE_CODE_EXTRA_BODY", case["raw"].as_str().unwrap());
+            assert_eq!(
+                serde_json::Value::Object(extra_body_object().unwrap().unwrap_or_default()),
+                case["expected"],
+                "{case}"
+            );
+        }
+        std::env::set_var("CLAUDE_CODE_EXTRA_BODY", r#"{"betas":{"toString":null}}"#);
+        assert!(matches!(
+            extra_body_object(),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+        match original {
+            Some(value) => std::env::set_var("CLAUDE_CODE_EXTRA_BODY", value),
+            None => std::env::remove_var("CLAUDE_CODE_EXTRA_BODY"),
+        }
     }
 
     #[tokio::test]
@@ -3193,13 +4037,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport.clone());
         let resp = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
-                Some("sys"),
+                custom_system_prompt(Some("sys")),
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await
             .expect("ok");
         assert_eq!(resp.model, "claude-sonnet-4-20250514");
@@ -3227,13 +4071,13 @@ mod tests {
             "input_schema": {"type": "object"}
         })];
         let _ = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
-                Some("sys"),
+                custom_system_prompt(Some("sys")),
                 Vec::new(),
                 tools,
-            )
+            ))
             .await
             .expect("ok");
         assert_eq!(transport.seen_count(), 1);
@@ -3249,7 +4093,13 @@ mod tests {
             "input_schema": {"type": "object"}
         })];
         let result = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, Vec::new(), tools)
+            .messages_create(crate::MessagesCreateRequest::new(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                tools,
+            ))
             .await;
         assert!(result.is_ok(), "tool-capable model should accept tools");
     }
@@ -3260,6 +4110,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Image {
                 source: ImageSource::Url {
@@ -3273,7 +4124,13 @@ mod tests {
         // The capability check is in ModelRuntime.validate_capabilities; since
         // FakeTransport doesn't inspect the body, this exercises the whole path.
         let _ = adapter
-            .messages_create("claude-sonnet-4-20250514", None, None, msgs, Vec::new())
+            .messages_create(crate::MessagesCreateRequest::new(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                msgs,
+                Vec::new(),
+            ))
             .await;
     }
 
@@ -3299,13 +4156,13 @@ mod tests {
         ]);
         let adapter = make_adapter(transport.clone());
         let resp = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await
             .expect("ok after retry");
         assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
@@ -3319,13 +4176,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport.clone());
         let _ = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await
             .expect("ok");
         let headers = transport.seen_headers(0);
@@ -3349,7 +4206,7 @@ mod tests {
     /// only the tests that flip it is not enough: while the flip is live, every
     /// *concurrently running* test in this binary reads the flipped value too.
     /// A leaked opt-in makes first-party attempts carry `anthropic-dispatch-id`,
-    /// and [`AnthropicAdapter::note_dispatch_header_failure`] then inserts one
+    /// and [`ApiService::note_dispatch_header_failure`] then inserts one
     /// extra, budget-free "strip and retry" attempt on the first 5xx — which
     /// silently shifts every attempt-count and fallback-position assertion in
     /// the drive-loop tests (they consumed one more canned response than they
@@ -3359,23 +4216,6 @@ mod tests {
     /// whose expectations depend on the header being ABSENT takes
     /// [`cedar_lattice_read`]. Readers exclude writers, which is the whole
     /// invariant — concurrent readers of an unflipped flag are fine.
-    static DISPATCH_FLAG_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
-
-    /// Exclusive side of [`DISPATCH_FLAG_LOCK`] — for tests that flip the flag.
-    fn cedar_lattice_write() -> std::sync::RwLockWriteGuard<'static, ()> {
-        DISPATCH_FLAG_LOCK
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Shared side of [`DISPATCH_FLAG_LOCK`] — for tests that require the
-    /// dispatch opt-in to stay OFF (attempt counts, fallback walking, backoff).
-    fn cedar_lattice_read() -> std::sync::RwLockReadGuard<'static, ()> {
-        DISPATCH_FLAG_LOCK
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     /// Turns `tengu_cedar_lattice` on for the duration of a test and clears it
     /// on drop, so a panicking test cannot leak the opt-in into its neighbours.
     struct CedarLatticeOn;
@@ -3527,9 +4367,13 @@ mod tests {
         );
         let request = LlmRequest::new("model").with_user_text("hi");
         let mut aux = adapter.client.prepare(&request).await.expect("prepare");
-        adapter.inject_headers(&mut aux, "req_aux", DispatchHeaderState::AUXILIARY);
+        adapter
+            .inject_headers(&mut aux, DispatchHeaderState::AUXILIARY)
+            .unwrap();
         let mut main = adapter.client.prepare(&request).await.expect("prepare");
-        adapter.inject_headers(&mut main, "req_main", DispatchHeaderState::default());
+        adapter
+            .inject_headers(&mut main, DispatchHeaderState::default())
+            .unwrap();
         assert!(
             !aux.provider_request
                 .headers
@@ -3542,8 +4386,519 @@ mod tests {
             .contains_key("anthropic-dispatch-id"));
     }
 
+    struct DispatchTrafficTransport {
+        requests: Mutex<Vec<ProviderRequest>>,
+        fail_first: bool,
+    }
+
+    impl llm_runtime::test_support::FixtureTransport for DispatchTrafficTransport {
+        fn execute<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.clone());
+            let fail = self.fail_first && requests.len() == 1;
+            Box::pin(async move {
+                if fail {
+                    Err(LlmError::ProviderInternal)
+                } else {
+                    Ok(ProviderResponse::json(200, ok_response_json()))
+                }
+            })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.clone());
+            let fail = self.fail_first && requests.len() == 1;
+            Box::pin(async move {
+                if fail {
+                    Err(LlmError::ProviderInternal)
+                } else {
+                    Ok(StreamingResponse {
+                        status: 200,
+                        headers: BTreeMap::new(),
+                        frames: Box::new(ScriptedFrames::new(
+                            ScriptedStreamTransport::anthropic_success().frames.clone(),
+                        )),
+                    })
+                }
+            })
+        }
+    }
+    llm_runtime::impl_fixture_transport!(DispatchTrafficTransport);
+
+    struct DispatchRecoveryFrames(VecDeque<Result<crate::RawStreamFrame, LlmError>>);
+
+    impl crate::FrameStream for DispatchRecoveryFrames {
+        fn next_frame(&mut self) -> BoxFuture<'_, Result<Option<crate::RawStreamFrame>, LlmError>> {
+            let result = self.0.pop_front().transpose();
+            Box::pin(async move { result })
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum DispatchFault {
+        Http(u16, bool),
+        Connection,
+        Timeout,
+        Body(bool),
+    }
+
+    struct DispatchRecoveryTransport {
+        requests: Mutex<Vec<ProviderRequest>>,
+        fault: DispatchFault,
+        failures: usize,
+    }
+
+    impl DispatchRecoveryTransport {
+        fn record(&self, request: &ProviderRequest) -> bool {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request.clone());
+            requests.len() <= self.failures
+        }
+
+        fn response(&self, failed: bool) -> Result<ProviderResponse, LlmError> {
+            if !failed {
+                return Ok(ProviderResponse::json(200, ok_response_json()));
+            }
+            match self.fault {
+                DispatchFault::Http(status, declined) => Ok(ProviderResponse {
+                    status,
+                    headers: BTreeMap::from([
+                        ("request-id".into(), "dispatch-request".into()),
+                        (
+                            "x-should-retry".into(),
+                            if declined { "false" } else { "true" }.into(),
+                        ),
+                    ]),
+                    request_id: Some("dispatch-request".into()),
+                    body_json: serde_json::json!({"type":"error","error":{"type":"api_error","message":"service unavailable"}}),
+                }),
+                DispatchFault::Timeout => Err(LlmError::TransportTimeout {
+                    message: "HTTP request timed out".into(),
+                }),
+                DispatchFault::Connection | DispatchFault::Body(_) => Err(LlmError::Transport {
+                    message: "connection reset".into(),
+                }),
+            }
+        }
+
+        fn headers(&self) -> Vec<Option<String>> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.headers.get(DISPATCH_ID_HEADER).cloned())
+                .collect()
+        }
+    }
+
+    impl llm_runtime::test_support::FixtureTransport for DispatchRecoveryTransport {
+        fn execute<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
+            let result = self.response(self.record(request));
+            Box::pin(async move { result })
+        }
+
+        fn open_stream<'a>(
+            &'a self,
+            request: &'a ProviderRequest,
+        ) -> BoxFuture<'a, Result<StreamingResponse, LlmError>> {
+            let failed = self.record(request);
+            let result = if failed && matches!(self.fault, DispatchFault::Body(_)) {
+                let mut frames = Vec::new();
+                if matches!(self.fault, DispatchFault::Body(true)) {
+                    frames.push(Ok(crate::RawStreamFrame::new(serde_json::to_vec(&serde_json::json!({"type":"message_start","message":{"id":"msg_dispatch","model":"claude-sonnet-4-20250514","content":[],"usage":{"input_tokens":1,"output_tokens":0}}})).unwrap())));
+                }
+                frames.push(Err(LlmError::Transport {
+                    message: "connection reset".into(),
+                }));
+                Ok(StreamingResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    frames: Box::new(DispatchRecoveryFrames(frames.into())),
+                })
+            } else {
+                self.response(failed).map(|response| {
+                    let frames = if response.status >= 400 {
+                        vec![Ok(crate::RawStreamFrame::new(
+                            serde_json::to_vec(&response.body_json).unwrap(),
+                        ))]
+                    } else {
+                        ScriptedStreamTransport::anthropic_success()
+                            .frames
+                            .iter()
+                            .cloned()
+                            .map(|bytes| Ok(crate::RawStreamFrame::new(bytes)))
+                            .collect()
+                    };
+                    StreamingResponse {
+                        status: response.status,
+                        headers: response.headers,
+                        frames: Box::new(DispatchRecoveryFrames(frames.into())),
+                    }
+                })
+            };
+            Box::pin(async move { result })
+        }
+    }
+    llm_runtime::impl_fixture_transport!(DispatchRecoveryTransport);
+
+    async fn dispatch_result(
+        service: &ApiService,
+        source: &str,
+        streaming: bool,
+        side_query: bool,
+    ) -> Result<(), LlmError> {
+        use futures::StreamExt;
+        let model = "claude-sonnet-4-20250514";
+        let mut request = LlmRequest::new(model).with_user_text("hi");
+        request.input.max_tokens = Some(100);
+        request.execution.query_source = Some(source.into());
+        if streaming {
+            let mut stream = service.stream_request(request).await?;
+            while let Some(event) = stream.next().await {
+                event?;
+            }
+        } else if side_query {
+            service.execute_side_query_request(request).await?;
+        } else {
+            let mut request = crate::MessagesCreateRequest::new(
+                model,
+                None,
+                None,
+                vec![ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "hi".into(),
+                )],
+                Vec::new(),
+            );
+            request.opts.max_output_tokens = Some(100);
+            request.opts.query_source = Some(source.into());
+            service.messages_create(request).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn physical_dispatch_287_http_recovery_and_query_reset() {
+        let _lock = cedar_lattice_write();
+        for cedar in [false, true] {
+            let _cedar = cedar.then(CedarLatticeOn::set);
+            for dreamy in [false, true] {
+                let _dreamy = DreamyFrostGuard::set(dreamy);
+                for source in ["sdk", "hook_prompt"] {
+                    for (streaming, side_query) in [(false, false), (true, false), (false, true)] {
+                        for declined in [false, true] {
+                            let transport = Arc::new(DispatchRecoveryTransport {
+                                requests: Mutex::new(Vec::new()),
+                                fault: DispatchFault::Http(503, declined),
+                                failures: 1,
+                            });
+                            let mut service = make_adapter_with_retries(transport.clone(), Some(0));
+                            service.set_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+                            let sink = Arc::new(::telemetry::InMemorySink::new());
+                            let bus = Arc::new(::telemetry::AnalyticsBus::new());
+                            bus.attach_sink(sink.clone()).await;
+                            service.analytics = Some(bus);
+                            let first = if dreamy {
+                                Some("v2d")
+                            } else if cedar && source == "sdk" {
+                                Some("v2s")
+                            } else {
+                                None
+                            };
+                            let start = tokio::time::Instant::now();
+                            dispatch_result(&service, source, streaming, side_query)
+                                .await
+                                .unwrap();
+                            let elapsed = start.elapsed();
+                            assert_eq!(
+                                transport.headers(),
+                                [first.map(str::to_owned), Some("v2p".into())],
+                                "{cedar}/{dreamy}/{source}/{streaming}/{side_query}/{declined}"
+                            );
+                            assert_eq!(
+                                service.last_retry_count(),
+                                0,
+                                "dispatch recovery is outside the ordinary retry budget"
+                            );
+                            if first.is_none() && !declined {
+                                assert!((Duration::from_millis(500)..=Duration::from_millis(625))
+                                    .contains(&elapsed));
+                            } else {
+                                assert_eq!(elapsed, Duration::ZERO);
+                            }
+                            let events = sink.events().await;
+                            let events: Vec<_> = events
+                                .iter()
+                                .filter(|event| event.name == "tengu_dispatch_header_fallback")
+                                .collect();
+                            assert_eq!(events.len(), 1);
+                            let metadata = &events[0].metadata;
+                            for (key, value) in [
+                                ("dispatch", first.unwrap_or("none")),
+                                ("resend_dispatch", "v2p"),
+                                ("query_source", source),
+                                ("request_id", "dispatch-request"),
+                            ] {
+                                assert_eq!(
+                                    serde_json::to_value(&metadata[key]).unwrap(),
+                                    serde_json::Value::from(value)
+                                );
+                            }
+                            assert_eq!(
+                                serde_json::to_value(&metadata["status"]).unwrap(),
+                                serde_json::Value::from(503)
+                            );
+                            let reason = if first.is_some() {
+                                "5xx"
+                            } else if declined {
+                                "headerless_decline"
+                            } else {
+                                "headerless_retryable_503"
+                            };
+                            assert_eq!(
+                                serde_json::to_value(&metadata["reason"]).unwrap(),
+                                serde_json::Value::from(reason)
+                            );
+                            dispatch_result(&service, source, streaming, side_query)
+                                .await
+                                .unwrap();
+                            assert_eq!(
+                                transport.headers()[2].as_deref(),
+                                first,
+                                "the next query must reset its recovery state"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn physical_dispatch_287_recovery_latch_is_once_per_query() {
+        let _lock = cedar_lattice_write();
+        let _dreamy = DreamyFrostGuard::set(true);
+        for fault in [
+            DispatchFault::Http(500, false),
+            DispatchFault::Connection,
+            DispatchFault::Timeout,
+            DispatchFault::Body(false),
+        ] {
+            for streaming in [false, true] {
+                let transport = Arc::new(DispatchRecoveryTransport {
+                    requests: Mutex::new(Vec::new()),
+                    fault,
+                    failures: 2,
+                });
+                let service = make_adapter_with_retries(transport.clone(), Some(0));
+                assert!(dispatch_result(&service, "sdk", streaming, false)
+                    .await
+                    .is_err());
+                assert_eq!(
+                    transport.headers(),
+                    [Some("v2d".into()), Some("v2p".into())]
+                );
+            }
+        }
+        let transport = Arc::new(DispatchRecoveryTransport {
+            requests: Mutex::new(Vec::new()),
+            fault: DispatchFault::Body(true),
+            failures: 1,
+        });
+        let service = make_adapter_with_retries(transport.clone(), Some(0));
+        assert!(dispatch_result(&service, "sdk", true, false).await.is_err());
+        assert_eq!(
+            transport.headers(),
+            [Some("v2d".into())],
+            "forwarded events suppress the body-phase resend"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_287_does_not_add_recovery_to_other_provider_routes() {
+        let _lock = cedar_lattice_write();
+        let _dreamy = DreamyFrostGuard::set(true);
+        for (protocol, provider, base) in [
+            (
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://gateway.example.com",
+            ),
+            (
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::OpenAICompatible {
+                    name: "anthropic-compatible".into(),
+                },
+                "https://api.anthropic.com",
+            ),
+            (
+                ProtocolFamily::OpenAiChat,
+                ProviderId::OpenAICompatible {
+                    name: "custom".into(),
+                },
+                "https://custom.example.com",
+            ),
+            (
+                ProtocolFamily::OpenAiResponses,
+                ProviderId::OpenAICompatible {
+                    name: "responses".into(),
+                },
+                "https://custom.example.com",
+            ),
+        ] {
+            for streaming in [false, true] {
+                let transport = Arc::new(DispatchRecoveryTransport {
+                    requests: Mutex::new(Vec::new()),
+                    fault: DispatchFault::Http(503, false),
+                    failures: 2,
+                });
+                let mut service = make_adapter_for_protocol_with_transport(
+                    protocol,
+                    provider.clone(),
+                    base,
+                    "p",
+                    "claude-sonnet-4-20250514",
+                    transport.clone(),
+                );
+                service.settings_max_retries = Some(0);
+                assert!(dispatch_result(&service, "sdk", streaming, false)
+                    .await
+                    .is_err());
+                assert_eq!(
+                    transport.headers(),
+                    [None],
+                    "{protocol:?}/{provider:?}/{streaming}"
+                );
+            }
+        }
+    }
+
+    struct DreamyFrostGuard;
+    impl DreamyFrostGuard {
+        fn set(enabled: bool) -> Self {
+            ::telemetry::test_set_flag("tengu_dreamy_frost", enabled);
+            Self
+        }
+    }
+    impl Drop for DreamyFrostGuard {
+        fn drop(&mut self) {
+            ::telemetry::test_clear_flag("tengu_dreamy_frost");
+        }
+    }
+
+    async fn run_dispatch_traffic(service: &ApiService, source: Option<&str>, streaming: bool) {
+        use futures::StreamExt;
+
+        let model = "claude-sonnet-4-20250514";
+        if streaming {
+            let mut request = LlmRequest::new(model).with_user_text("hi");
+            request.input.max_tokens = Some(100);
+            request.execution.query_source = source.map(str::to_owned);
+            let mut stream = service.stream_request(request).await.unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        } else {
+            let mut request = crate::MessagesCreateRequest::new(
+                model,
+                None,
+                None,
+                vec![ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "hi".into(),
+                )],
+                Vec::new(),
+            );
+            request.opts.max_output_tokens = Some(100);
+            request.opts.query_source = source.map(str::to_owned);
+            service.messages_create(request).await.unwrap();
+        }
+    }
+
     #[tokio::test]
-    async fn dispatch_header_stripped_after_5xx_and_not_on_429() {
+    async fn physical_stream_and_owned_main_dispatch_follow_native_query_source() {
+        let _lock = cedar_lattice_write();
+        let _cedar = CedarLatticeOn::set();
+        for dreamy in [false, true] {
+            let _dreamy = DreamyFrostGuard::set(dreamy);
+            for (source, ordinary_v2s) in [
+                (None, true),
+                (Some("repl_main_thread"), true),
+                (Some("repl_main_thread:resume"), true),
+                (Some("sdk"), true),
+                (Some("agent:worker"), true),
+                (Some("hook_agent"), true),
+                (Some("hook_prompt"), false),
+                (Some("session_memory"), false),
+            ] {
+                for streaming in [false, true] {
+                    let transport = Arc::new(DispatchTrafficTransport {
+                        requests: Mutex::new(Vec::new()),
+                        fail_first: false,
+                    });
+                    let service = make_adapter_with_retries(transport.clone(), Some(0));
+                    service.set_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+                    run_dispatch_traffic(&service, source, streaming).await;
+                    let requests = transport.requests.lock().unwrap();
+                    assert_eq!(requests.len(), 1);
+                    let expected = if dreamy {
+                        Some("v2d")
+                    } else if ordinary_v2s {
+                        Some("v2s")
+                    } else {
+                        None
+                    };
+                    assert_eq!(
+                        requests[0]
+                            .headers
+                            .get("anthropic-dispatch-id")
+                            .map(String::as_str),
+                        expected,
+                        "source={source:?}, streaming={streaming}, dreamy={dreamy}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auxiliary_stream_and_owned_main_error_use_normal_retry_budget() {
+        let _lock = cedar_lattice_write();
+        let _cedar = CedarLatticeOn::set();
+        let _dreamy = DreamyFrostGuard::set(false);
+        for streaming in [false, true] {
+            let transport = Arc::new(DispatchTrafficTransport {
+                requests: Mutex::new(Vec::new()),
+                fail_first: true,
+            });
+            let service = make_adapter_with_retries(transport.clone(), Some(1));
+            service.set_thinking(crate::model::thinking::ThinkingConfig::Disabled);
+            run_dispatch_traffic(&service, Some("hook_prompt"), streaming).await;
+            let requests = transport.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests
+                .iter()
+                .all(|request| !request.headers.contains_key("anthropic-dispatch-id")));
+            assert_eq!(
+                service.last_retry_count(),
+                1,
+                "auxiliary errors must consume the normal retry budget, without a free header-strip replay"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_recovery_resends_v2p_only_for_this_query() {
         let _g = cedar_lattice_write();
         let _on = CedarLatticeOn::set();
         let adapter = make_adapter_for_protocol(
@@ -3552,126 +4907,59 @@ mod tests {
             "https://api.anthropic.com",
         );
         let request = LlmRequest::new("model").with_user_text("hi");
-        // `Kt`/`no` live in the per-QUERY `let` list of `erp` (2.1.220
-        // @237543834), so this is what one drive owns.
         let mut query = DispatchHeaderState::default();
-        let mut prepared = adapter.client.prepare(&request).await.expect("prepare");
-        adapter.inject_headers(&mut prepared, "req_test", query);
-        assert!(prepared
-            .provider_request
-            .headers
-            .contains_key("anthropic-dispatch-id"));
-
-        // A 429 on a header-carrying attempt does NOT strip (only 5xx/conn).
+        let mut prepared = adapter.client.prepare(&request).await.unwrap();
+        let (attempt, _) = adapter.inject_headers(&mut prepared, query).unwrap();
+        assert_eq!(attempt.value.as_deref(), Some("v2s"));
+        assert!(ApiService::note_dispatch_header_failure(
+            &mut query,
+            &attempt,
+            &LlmError::RateLimited {
+                retry_after: None,
+                scope: None
+            },
+            Some((429, false)),
+        )
+        .is_none());
+        let fallback = ApiService::note_dispatch_header_failure(
+            &mut query,
+            &attempt,
+            &LlmError::ProviderInternal,
+            Some((500, false)),
+        )
+        .unwrap();
+        assert_eq!(fallback.reason, "5xx");
+        assert_eq!(fallback.status, Some(500));
+        assert_eq!(fallback.previous.as_deref(), Some("v2s"));
+        assert!(!fallback.wait);
+        let mut retry = adapter.client.prepare(&request).await.unwrap();
+        let (retry_attempt, _) = adapter.inject_headers(&mut retry, query).unwrap();
         assert_eq!(
-            ApiService::note_dispatch_header_failure(
-                &mut query,
-                &prepared,
-                &LlmError::RateLimited {
-                    retry_after: None,
-                    scope: None
-                }
-            ),
-            None
-        );
-        // A 500 strips: reason "5xx" + the status, latched for this query.
-        assert_eq!(
-            ApiService::note_dispatch_header_failure(
-                &mut query,
-                &prepared,
-                &LlmError::ProviderInternal
-            ),
-            Some(("5xx", Some(500)))
-        );
-        // Latched: the next attempt OF THIS QUERY omits the header even though
-        // the opt-in is still on…
-        let mut prepared2 = adapter.client.prepare(&request).await.expect("prepare");
-        adapter.inject_headers(&mut prepared2, "req_test2", query);
-        assert!(
-            !prepared2
+            retry
                 .provider_request
                 .headers
-                .contains_key("anthropic-dispatch-id"),
-            "fallback latch must strip the header for the rest of this query"
-        );
-        // …and a repeat failure reports nothing new (single telemetry event).
-        assert_eq!(
-            ApiService::note_dispatch_header_failure(
-                &mut query,
-                &prepared,
-                &LlmError::ProviderInternal
-            ),
-            None
-        );
-
-        // The NEXT query starts from a fresh `Kt` on the SAME service and
-        // re-sends the header — the oracle's latch is per-query, not
-        // module-scope.
-        let next_query = DispatchHeaderState::default();
-        let mut prepared3 = adapter.client.prepare(&request).await.expect("prepare");
-        adapter.inject_headers(&mut prepared3, "req_test3", next_query);
-        assert_eq!(
-            prepared3
-                .provider_request
-                .headers
-                .get("anthropic-dispatch-id")
+                .get(DISPATCH_ID_HEADER)
                 .map(String::as_str),
-            Some("v2s"),
-            "the fallback must NOT survive into the next query"
+            Some("v2p")
         );
-
-        // Connection errors classify as "conn_err" with no status.
-        let mut conn_query = DispatchHeaderState::default();
+        assert!(ApiService::note_dispatch_header_failure(
+            &mut query,
+            &retry_attempt,
+            &LlmError::ProviderInternal,
+            Some((503, false)),
+        )
+        .is_none());
+        let mut next = adapter.client.prepare(&request).await.unwrap();
+        adapter
+            .inject_headers(&mut next, DispatchHeaderState::default())
+            .unwrap();
         assert_eq!(
-            ApiService::note_dispatch_header_failure_carried(
-                &mut conn_query,
-                true,
-                &LlmError::Transport {
-                    message: "connect reset".to_string()
-                }
-            ),
-            Some(("conn_err", None))
+            next.provider_request
+                .headers
+                .get(DISPATCH_ID_HEADER)
+                .map(String::as_str),
+            Some("v2s")
         );
-    }
-
-    /// Oracle arm 2 (2.1.220 @237577972): a CONNECTION error in the stream body
-    /// before the first event latches `Kt` and retries; anything else (a 5xx
-    /// has no body phase, the watchdog's `StreamInterrupted` is not `x2()`) is
-    /// left to the normal classification.
-    #[test]
-    fn dispatch_body_phase_arm_only_fires_on_a_carried_connection_error() {
-        let mut st = DispatchHeaderState::default();
-        assert!(!ApiService::note_dispatch_body_phase_failure(
-            &mut st,
-            false,
-            &LlmError::Transport {
-                message: "reset".to_string()
-            }
-        ));
-        assert!(!ApiService::note_dispatch_body_phase_failure(
-            &mut st,
-            true,
-            &LlmError::StreamInterrupted {
-                message: "idle".to_string()
-            }
-        ));
-        assert!(!st.fallen_back);
-        assert!(ApiService::note_dispatch_body_phase_failure(
-            &mut st,
-            true,
-            &LlmError::Transport {
-                message: "reset".to_string()
-            }
-        ));
-        assert!(st.fallen_back, "arm 2 latches Kt for the rest of the query");
-        // `no && !Kt` — a second body-phase error in the same query is a no-op.
-        assert!(!ApiService::note_dispatch_body_phase_failure(
-            &mut st,
-            true,
-            &LlmError::Transport {
-                message: "reset".to_string()
-            }
-        ));
     }
 
     /// A `FrameStream` whose body drops with a connection error before any
@@ -3739,12 +5027,11 @@ mod tests {
     }
     llm_runtime::impl_fixture_transport!(BodyPhaseDropThenOk);
 
-    /// End-to-end arm 2: the drive loop's one-frame lookahead must strip the
-    /// header, emit `tengu_dispatch_header_fallback{reason:"body_phase",
+    /// The drive loop's one-frame lookahead must resend v2p, emit `tengu_dispatch_header_fallback{reason:"body_phase",
     /// status:"none"}` and re-open — and the seeded frame must flow through the
     /// unfold untouched on the retry that succeeds.
     #[tokio::test]
-    async fn dispatch_body_phase_drop_strips_the_header_and_re_opens() {
+    async fn dispatch_body_phase_drop_resends_v2p_and_re_opens() {
         use ::telemetry::AnalyticsValue;
         use futures::StreamExt as _;
 
@@ -3781,8 +5068,8 @@ mod tests {
             .clone();
         assert_eq!(
             seen,
-            vec![Some("v2s".to_string()), None],
-            "attempt 1 carries the header; the body-phase retry must drop it"
+            vec![Some("v2s".to_string()), Some("v2p".to_string())],
+            "the body-phase retry must resend v2p"
         );
 
         let events = sink.events().await;
@@ -3812,9 +5099,21 @@ mod tests {
         .await;
         assert!(anthropic_headers.contains_key("anthropic-beta"));
 
-        let compatible_headers = headers_after_inject_for_protocol(
+        let gateway_headers = headers_after_inject_for_protocol(
             ProtocolFamily::AnthropicMessages,
             ProviderId::AnthropicFirstParty,
+            "https://gateway.example",
+        )
+        .await;
+        assert!(
+            gateway_headers.contains_key("anthropic-beta"),
+            "a first-party provider keeps its beta policy behind a gateway"
+        );
+        let compatible_headers = headers_after_inject_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::Custom {
+                name: "compatible".into(),
+            },
             "https://gateway.example",
         )
         .await;
@@ -3833,6 +5132,11 @@ mod tests {
                 ProtocolFamily::VertexClaude,
                 "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1",
                 "vertex-claude",
+            ),
+            (
+                ProtocolFamily::BedrockClaude,
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                "bedrock-claude",
             ),
         ] {
             let headers = headers_after_inject_for_protocol(
@@ -3876,11 +5180,6 @@ mod tests {
                 "azure-openai",
             ),
             (
-                ProtocolFamily::BedrockClaude,
-                "https://bedrock-runtime.us-east-1.amazonaws.com",
-                "bedrock-claude",
-            ),
-            (
                 ProtocolFamily::VertexGemini,
                 "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1/publishers/google/models/model:generateContent",
                 "vertex-gemini",
@@ -3901,9 +5200,13 @@ mod tests {
                 "{name} must not receive anthropic-beta: {headers:?}"
             );
             assert!(headers.contains_key("user-agent"));
-            assert_eq!(
-                headers.get("x-request-id").map(String::as_str),
-                Some("req_test")
+            assert!(
+                !headers.contains_key("x-request-id"),
+                "Host must not synthesize a provider request-id for {name}"
+            );
+            assert!(
+                !headers.contains_key("x-client-request-id"),
+                "the SDK's selected-route request-id policy is outside this Host-only injector"
             );
         }
     }
@@ -3943,6 +5246,199 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_compatibility_version_keeps_neutral_product_identity() {
+        for (protocol, provider, url, expected) in [
+            (
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://api.anthropic.com",
+                "claude-cli/2.1.293 (external, sdk-cli)",
+            ),
+            (
+                ProtocolFamily::OpenAiChat,
+                ProviderId::OpenAICompatible {
+                    name: "openai".into(),
+                },
+                "https://api.openai.com/v1",
+                "LingXi-Code/0.12.0",
+            ),
+        ] {
+            let mut adapter = make_adapter_for_protocol(protocol, provider, url)
+                .with_anthropic_compatible_version("2.1.293")
+                .with_anthropic_client_metadata(lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin", "aarch64"));
+            adapter.ua = UserAgentEnv {
+                user_type: Some("external".into()),
+                entrypoint: Some("sdk-cli".into()),
+                ..Default::default()
+            };
+            adapter.version = "0.12.0".into();
+            let request = LlmRequest::new("model").with_user_text("hi");
+            let mut prepared = adapter.client.prepare(&request).await.unwrap();
+            adapter.apply_user_agent(&mut prepared);
+            assert_eq!(prepared.provider_request.headers["user-agent"], expected);
+            if protocol == ProtocolFamily::AnthropicMessages {
+                assert_eq!(
+                    prepared.provider_request.headers["x-stainless-package-version"],
+                    "0.128.0"
+                );
+                assert_eq!(
+                    prepared.provider_request.headers["x-stainless-runtime-version"],
+                    "v26.3.0"
+                );
+                assert_eq!(prepared.provider_request.headers["x-stainless-os"], "MacOS");
+                assert_eq!(
+                    prepared.provider_request.headers["x-stainless-arch"],
+                    "arm64"
+                );
+            } else {
+                assert!(!prepared
+                    .provider_request
+                    .headers
+                    .keys()
+                    .any(|name| name.to_ascii_lowercase().starts_with("x-stainless-")));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_api_identity_metadata_does_not_read_process_metadata() {
+        let extra = serde_json::json!({"scope":"embedding","device_id":"stale"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            ApiService::build_api_metadata_user_id_with_extra(
+                "device",
+                "account",
+                "session",
+                Some("parent"),
+                Some(extra)
+            ),
+            r#"{"scope":"embedding","device_id":"device","account_uuid":"account","session_id":"session","parent_session_id":"parent"}"#
+        );
+        assert_eq!(
+            ApiService::build_api_metadata_user_id_with_extra(
+                "device", "account", "session", None, None
+            ),
+            r#"{"device_id":"device","account_uuid":"account","session_id":"session"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn request_session_snapshot_survives_clear_and_new_admissions_refresh() {
+        let original = lingxi_core::types::SessionId::new().as_uuid().to_string();
+        let replacement = lingxi_core::types::SessionId::new().as_uuid().to_string();
+        let live = Arc::new(std::sync::Mutex::new(original.clone()));
+        let metadata = ApiService::build_api_metadata_user_id_with_extra(
+            "device", "account", "boot", None, None,
+        );
+        let adapter = make_adapter_for_protocol(ProtocolFamily::AnthropicMessages,ProviderId::AnthropicFirstParty,"https://api.anthropic.com")
+            .with_request_metadata(crate::RequestMetadata { user_id:metadata.clone() })
+            .with_anthropic_client_metadata(lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin","aarch64"));
+        let owner = live.clone();
+        adapter.set_request_session_id_source(Arc::new(move || {
+            let owner = owner.clone();
+            Box::pin(async move { Some(owner.lock().unwrap().clone()) })
+        }));
+        let mut admitted = LlmRequest::new("model").with_user_text("hi");
+        admitted.input.metadata = serde_json::json!({"user_id":metadata});
+        adapter.capture_request_session_id(&mut admitted).await;
+        *live.lock().unwrap() = replacement.clone();
+        adapter.capture_request_session_id(&mut admitted).await;
+        assert_eq!(
+            admitted.execution.request_session_id.as_deref(),
+            Some(original.as_str())
+        );
+        let mut prepared = adapter.client.prepare(&admitted).await.unwrap();
+        adapter.apply_user_agent(&mut prepared);
+        assert_eq!(
+            prepared.provider_request.headers["x-claude-code-session-id"],
+            original
+        );
+        let identity: serde_json::Value =
+            serde_json::from_str(admitted.input.metadata["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(identity["session_id"], original);
+        let mut next = LlmRequest::new("model").with_user_text("next");
+        adapter.capture_request_session_id(&mut next).await;
+        assert_eq!(
+            next.execution.request_session_id.as_deref(),
+            Some(replacement.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn request_parent_scope_takes_precedence_over_current_session_and_payload() {
+        let parent = lingxi_core::types::SessionId::new();
+        let current = lingxi_core::types::SessionId::new().as_uuid().to_string();
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        );
+        adapter.set_request_session_id_source(Arc::new(move || {
+            let current = current.clone();
+            Box::pin(async move { Some(current) })
+        }));
+        let mut request = LlmRequest::new("model").with_user_text("child");
+        request.input.metadata = serde_json::json!({"session_id":"provider-authored-id"});
+        lingxi_core::host::session_flags::scope_request_session_id(parent, async {
+            adapter.capture_request_session_id(&mut request).await;
+        })
+        .await;
+        assert_eq!(
+            request.execution.request_session_id,
+            Some(parent.as_uuid().to_string())
+        );
+    }
+
+    struct RegisteredRequestSession(lingxi_core::types::SessionId);
+    #[async_trait::async_trait]
+    impl crate::ModelAttemptHooks for RegisteredRequestSession {
+        fn request_session_id(
+            &self,
+            _: &lingxi_core::host::ModelAttemptContext,
+        ) -> Option<lingxi_core::types::SessionId> {
+            Some(self.0)
+        }
+        async fn begin(
+            &self,
+            _: &lingxi_core::host::ModelAttemptContext,
+            _: &LlmRequest,
+            _: &crate::PreparedLlmCall,
+        ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
+            unreachable!("identity lookup does not dispatch")
+        }
+    }
+    #[tokio::test]
+    async fn registered_request_origin_precedes_live_and_unrelated_task_scope() {
+        let origin = lingxi_core::types::SessionId::new();
+        let current = lingxi_core::types::SessionId::new();
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        );
+        adapter.set_model_attempt_hooks(Arc::new(RegisteredRequestSession(origin)));
+        adapter.set_request_session_id_source(Arc::new(|| {
+            panic!("registered requests never consult current owner")
+        }));
+        let run = lingxi_core::host::ModelAttemptRun::new(Arc::new(()));
+        let mut request = LlmRequest::new("model");
+        request.execution.model_attempt = Some(
+            run.context(lingxi_core::host::ModelAttemptStage::Panel, Some(0))
+                .unwrap(),
+        );
+        lingxi_core::host::session_flags::scope_request_session_id(current, async {
+            adapter.capture_request_session_id(&mut request).await;
+        })
+        .await;
+        assert_eq!(
+            request.execution.request_session_id,
+            Some(origin.as_uuid().to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn authenticator_user_agent_is_not_duplicated() {
         // Simulate the Copilot authenticator having set `User-Agent` during
         // prepare(): inject_headers must NOT add a second lowercase `user-agent`.
@@ -3959,42 +5455,15 @@ mod tests {
             .provider_request
             .headers
             .insert("User-Agent".to_string(), "LingXi-Code".to_string());
-        adapter.inject_headers(&mut prepared, "req_test", DispatchHeaderState::default());
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
         let h = &prepared.provider_request.headers;
         assert_eq!(h.get("User-Agent").map(String::as_str), Some("LingXi-Code"));
         assert!(
             !h.contains_key("user-agent"),
             "no duplicate lowercase user-agent: {h:?}"
         );
-    }
-
-    #[test]
-    fn is_fast_mode_not_enabled_discriminates() {
-        // claude-code `YNd`: only a 400 (InvalidRequest) whose message includes
-        // "Fast mode is not enabled" triggers the fast-mode-disable-and-retry.
-        assert!(ApiService::is_fast_mode_not_enabled(
-            &LlmError::InvalidRequest {
-                message: "Fast mode is not enabled for this account".into()
-            }
-        ));
-        // A different 400 must NOT trigger it (would otherwise strip speed on any
-        // 400 and mask real request errors).
-        assert!(!ApiService::is_fast_mode_not_enabled(
-            &LlmError::InvalidRequest {
-                message: "messages: at least one message is required".into()
-            }
-        ));
-        // Non-400 errors never match (the classifier is 400-scoped via the
-        // InvalidRequest discriminant).
-        assert!(!ApiService::is_fast_mode_not_enabled(
-            &LlmError::Overloaded { repeated: false }
-        ));
-        assert!(!ApiService::is_fast_mode_not_enabled(
-            &LlmError::RateLimited {
-                retry_after: None,
-                scope: None,
-            }
-        ));
     }
 
     /// Plan test: budget terminates after DEFAULT_MAX_RETRIES + 1 executions.
@@ -4016,13 +5485,13 @@ mod tests {
             Some(0),
         );
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(result.is_err(), "must fail after exhausting budget");
         // Should have tried DEFAULT_MAX_RETRIES + 1 = 11 times.
@@ -4035,9 +5504,10 @@ mod tests {
         );
     }
 
-    /// Plan test (Step 1b): x-should-retry: false on a 503 is terminal (no retry).
+    /// Native headerless 503 decline gets one v2p retry, then is terminal.
     #[tokio::test]
-    async fn x_should_retry_false_is_terminal_for_5xx() {
+    async fn headerless_503_decline_retries_v2p_once_then_is_terminal() {
+        let _flags = cedar_lattice_read();
         let mut headers = BTreeMap::new();
         headers.insert("x-should-retry".to_string(), "false".to_string());
 
@@ -4052,20 +5522,27 @@ mod tests {
         });
         let adapter = make_adapter(transport.clone());
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(result.is_err(), "x-should-retry:false must be terminal");
-        // Only ONE execution — no retries.
         assert_eq!(
             transport.seen_count(),
-            1,
-            "x-should-retry:false must not retry"
+            2,
+            "one native v2p resend, then terminal"
+        );
+        assert!(!transport.seen_headers(0).contains_key(DISPATCH_ID_HEADER));
+        assert_eq!(
+            transport
+                .seen_headers(1)
+                .get(DISPATCH_ID_HEADER)
+                .map(String::as_str),
+            Some("v2p")
         );
     }
 
@@ -4084,13 +5561,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, response_json));
         let adapter = make_adapter(transport);
         let resp = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await
             .expect("ok");
         match resp.content.as_slice() {
@@ -4116,9 +5593,11 @@ mod tests {
     fn user_with_imgs(range: std::ops::Range<usize>) -> ConversationMessage {
         let mut content = vec![ContentBlock::Text {
             text: "hi".to_string(),
+            citations: None,
         }];
         content.extend(range.map(img));
         ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content,
             is_meta: false,
@@ -4155,12 +5634,14 @@ mod tests {
     #[test]
     fn tool_result_string_content_contributes_no_media() {
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 ContentBlock::ToolResult {
+                    output_projection: None,
                     tool_use_id: lingxi_core::types::ToolUseId::new(),
                     content: "lots of text, no media".to_string(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 },
@@ -4179,11 +5660,13 @@ mod tests {
         // values; these MUST count toward the media cap (claude.ts:965-969), or an
         // image-heavy MCP transcript silently exceeds the API limit and 400s.
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                output_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see images".to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: Some(vec![
                     serde_json::json!({"type": "text", "text": "x"}),
@@ -4201,11 +5684,13 @@ mod tests {
     #[test]
     fn count_media_includes_nested_openai_image_url_media() {
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                output_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see image".to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: Some(vec![serde_json::json!({
                     "type": "image_url",
@@ -4224,11 +5709,13 @@ mod tests {
         // Over the cap, nested tool_result media is stripped oldest-first
         // (claude.ts:982-999), leaving the text + the most-recent nested image.
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                output_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "imgs".to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: Some(vec![
                     serde_json::json!({"type": "image", "source": {"data": "a"}}),
@@ -4300,9 +5787,11 @@ mod tests {
     #[test]
     fn strip_excess_media_no_images_is_noop() {
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "no media here".to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -4405,13 +5894,13 @@ mod tests {
             },
         );
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(result.is_err(), "subscriber 429 must be terminal");
         // Only ONE execution — no retries.
@@ -4457,13 +5946,119 @@ mod tests {
         // Clear, then a terminal promote: with the slot emptied, promote is a
         // no-op and `last_rate_limit` stays None.
         adapter.clear_pending_429();
-        adapter.promote_pending_429();
+        adapter.promote_pending_429(None);
 
         assert_eq!(
             adapter.last_rate_limit_info(),
             None,
             "clear_pending_429 must discard the staged snapshot so promote writes nothing"
         );
+    }
+
+    #[test]
+    fn prompt_cache_overage_is_scoped_epoch_guarded_and_wait_published() {
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let scope =
+            crate::CredentialScope::new(crate::ProviderId::AnthropicFirstParty, "account-profile")
+                .with_credential_id("account-credential");
+        let prepared = crate::client::PreparedPromptCacheContext {
+            scope: scope.clone(),
+            account_epoch: 0,
+            account_epoch_stale: false,
+            is_subscriber: true,
+            pending_overage: Arc::new(Mutex::new(None)),
+        };
+        let header_set = |status: &str, overage_status: &str| {
+            BTreeMap::from([
+                (
+                    "anthropic-ratelimit-unified-status".to_owned(),
+                    status.to_owned(),
+                ),
+                (
+                    "anthropic-ratelimit-unified-overage-status".to_owned(),
+                    overage_status.to_owned(),
+                ),
+            ])
+        };
+
+        let using_overage = header_set("rejected", "allowed");
+        adapter.record_prompt_cache_overage_from_headers(&using_overage, Some(&prepared));
+        assert!(adapter.prompt_cache_overage.is_using_overage(&scope, 0));
+
+        let stale_clear = header_set("allowed", "rejected");
+        assert!(!adapter.prompt_cache_overage.record(&scope, 0, false, 0));
+        assert!(
+            adapter.prompt_cache_overage.is_using_overage(&scope, 0),
+            "older observations cannot clear the current overage state"
+        );
+
+        adapter.record_rate_limit_from_429(&stale_clear, None, "claude-sonnet-4-20250514");
+        adapter.stage_prompt_cache_overage_from_429(&stale_clear, Some(&prepared));
+        assert!(prepared.pending_overage.lock().unwrap().is_some());
+        assert!(
+            adapter.prompt_cache_overage.is_using_overage(&scope, 0),
+            "retryable 429 does not change the current state before terminal promotion"
+        );
+        adapter.clear_pending_429();
+        adapter.promote_pending_429(Some(&prepared));
+        assert!(!adapter.prompt_cache_overage.is_using_overage(&scope, 0));
+
+        let other_scope =
+            crate::CredentialScope::new(crate::ProviderId::AnthropicFirstParty, "another-profile");
+        assert!(!adapter
+            .prompt_cache_overage
+            .is_using_overage(&other_scope, 0));
+
+        let reset = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 30;
+        let retry_headers = BTreeMap::from([
+            (
+                "anthropic-ratelimit-unified-status".to_owned(),
+                "rejected".to_owned(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-status".to_owned(),
+                "allowed_warning".to_owned(),
+            ),
+            (
+                "anthropic-ratelimit-unified-reset".to_owned(),
+                reset.to_string(),
+            ),
+        ]);
+        adapter.record_prompt_cache_overage_from_quota_wait(
+            429,
+            &retry_headers,
+            false,
+            Some(&prepared),
+        );
+        assert!(!adapter.prompt_cache_overage.is_using_overage(&scope, 0));
+        adapter.record_prompt_cache_overage_from_quota_wait(
+            429,
+            &retry_headers,
+            true,
+            Some(&prepared),
+        );
+        assert!(adapter.prompt_cache_overage.is_using_overage(&scope, 0));
+
+        adapter.account_change_observer().account_changed();
+        assert_eq!(adapter.prompt_cache_overage.account_epoch(), 1);
+        // A response that arrives after the credential owner advanced the
+        // account epoch is a late observation for the old request. It must not
+        // seed the new account's scope cache.
+        adapter.record_prompt_cache_overage_from_headers(&using_overage, Some(&prepared));
+        assert!(!adapter.prompt_cache_overage.record(
+            &scope,
+            prepared.account_epoch,
+            true,
+            u128::MAX
+        ));
+        assert!(!adapter.prompt_cache_overage.is_using_overage(&scope, 1));
     }
 
     /// Task 6 (batch 5): a terminal 429 whose response carries the unified
@@ -4501,13 +6096,13 @@ mod tests {
             },
         );
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(
             matches!(result, Err(LlmError::RateLimited { .. })),
@@ -4895,13 +6490,13 @@ mod tests {
             },
         );
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(
             matches!(result, Err(LlmError::RateLimited { .. })),
@@ -4949,7 +6544,7 @@ mod tests {
         );
 
         adapter.record_rate_limit_from_429(&BTreeMap::new(), None, "claude-sonnet-4-20250514");
-        adapter.promote_pending_429();
+        adapter.promote_pending_429(None);
 
         assert_eq!(
             adapter.last_raw_utilization(),
@@ -5003,13 +6598,13 @@ mod tests {
             },
         );
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(result.is_ok(), "429 then 200 must recover: {result:?}");
 
@@ -5117,13 +6712,13 @@ mod tests {
         // Drive A: 429(seven_day) (retried, pending set) → 400 (terminal,
         // non-RateLimited → no promotion). Pending lingers with A's snapshot.
         let a = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-haiku-4-20250307",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(
             matches!(a, Err(LlmError::InvalidRequest { .. })),
@@ -5133,13 +6728,13 @@ mod tests {
         // Drive B: 429(five_hour) (retried, pending OVERWRITTEN with B's
         // snapshot) → 429(five_hour) terminal → promotes B's snapshot.
         let b = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-haiku-4-20250307",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(
             matches!(b, Err(LlmError::RateLimited { .. })),
@@ -5182,13 +6777,13 @@ mod tests {
             },
         );
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(result.is_err());
         assert_eq!(
@@ -5229,13 +6824,13 @@ mod tests {
             },
         );
         let _ = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert_eq!(
             adapter.last_rate_limit_error_message().as_deref(),
@@ -5258,13 +6853,13 @@ mod tests {
             },
         )));
         let _ = pro
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert_eq!(
             pro.last_rate_limit_error_message().as_deref(),
@@ -5302,13 +6897,13 @@ mod tests {
             },
         );
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(
             result.is_ok(),
@@ -5353,13 +6948,13 @@ mod tests {
         // No drive yet ⇒ zero.
         assert_eq!(adapter.last_retry_count(), 0);
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(result.is_ok(), "429→200 must succeed");
         // Exactly one budget-consuming retry was performed.
@@ -5391,13 +6986,13 @@ mod tests {
         let adapter = make_adapter(transport);
 
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
 
         match result {
@@ -5427,13 +7022,13 @@ mod tests {
             .with_thinking(crate::model::thinking::ThinkingConfig::Disabled);
 
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
 
         assert!(matches!(result, Err(LlmError::InvalidRequest { .. })));
@@ -5442,6 +7037,7 @@ mod tests {
 
     fn assistant_with_thinking() -> lingxi_core::types::ConversationMessage {
         lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Thinking {
@@ -5450,6 +7046,7 @@ mod tests {
                 },
                 lingxi_core::types::ContentBlock::Text {
                     text: "hello".into(),
+                    citations: None,
                 },
             ],
             stop_reason: Some("end_turn".into()),
@@ -5484,6 +7081,8 @@ mod tests {
                     vec![],
                     true,
                     None,
+                    false,
+                    PromptCacheQuerySource::Unspecified,
                 )
                 .unwrap()
         })
@@ -5557,13 +7156,13 @@ mod tests {
         let adapter = make_adapter(transport);
         let old = assistant_with_thinking();
         adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 vec![old.clone()],
                 vec![],
-            )
+            ))
             .await
             .unwrap();
         let fresh = assistant_with_thinking();
@@ -5583,6 +7182,8 @@ mod tests {
                 vec![],
                 false,
                 None,
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .unwrap();
         let assistants: Vec<_> = request
@@ -5624,13 +7225,13 @@ mod tests {
         ]);
         let adapter = make_adapter(transport.clone());
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 vec![assistant_with_thinking()],
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(
             result.is_ok(),
@@ -5672,13 +7273,13 @@ mod tests {
             transport.clone(),
         );
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "gpt-4o",
                 Some("openai"),
                 None,
                 vec![assistant_with_thinking()],
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(
             result.is_ok(),
@@ -5716,13 +7317,13 @@ mod tests {
         );
         adapter.set_thinking_signature_stripped(true);
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "gemini-2.5-flash",
                 Some("gemini"),
                 None,
                 vec![assistant_with_thinking()],
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(
             result.is_ok(),
@@ -5757,13 +7358,13 @@ mod tests {
         );
         adapter.set_thinking_signature_stripped(true);
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "deepseek-reasoner",
                 Some("deepseek"),
                 None,
                 vec![assistant_with_thinking()],
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(
             result.is_ok(),
@@ -5880,6 +7481,116 @@ mod tests {
         }
     }
     llm_runtime::impl_fixture_transport!(FakeStreamTransport);
+
+    #[tokio::test]
+    async fn stream_dispatch_admission_guards_the_actual_sdk_send_boundary() {
+        let transport = FakeStreamTransport::sequence(vec![FakeStreamResp::Status {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: None,
+        }]);
+        let service = make_adapter_with_retries(transport.clone(), Some(0));
+        let capture = crate::prompt_cache::RequestCapture::default();
+        let result = capture
+            .scope(service.stream_with_system_prompt(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                Some("main"),
+                Some(crate::RequestDispatchAdmission::new(|| false)),
+            ))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: false
+            })
+        ));
+        assert_eq!(transport.stream_call_count(), 0);
+        assert!(
+            capture.take().is_none(),
+            "rejected stream is not a dispatch snapshot"
+        );
+
+        let accepted = FakeStreamTransport::sequence(vec![FakeStreamResp::Status {
+            status: 200,
+            headers: BTreeMap::new(),
+            body_json: None,
+        }]);
+        let service = make_adapter_with_retries(accepted.clone(), Some(0));
+        let _stream = service
+            .stream_with_system_prompt(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                Some("main"),
+                Some(crate::RequestDispatchAdmission::new(|| true)),
+            )
+            .await
+            .expect("positive control reaches transport");
+        assert_eq!(accepted.stream_call_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_retry_rejection_reports_prior_dispatch_without_replay() {
+        let transport = FakeStreamTransport::sequence(vec![
+            FakeStreamResp::Err(LlmError::Transport {
+                message: "first admitted connect failed".into(),
+            }),
+            FakeStreamResp::Status {
+                status: 200,
+                headers: BTreeMap::new(),
+                body_json: None,
+            },
+        ]);
+        let service = make_adapter_with_retries(transport.clone(), Some(1));
+        let admission_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = admission_calls.clone();
+
+        let result = service
+            .stream_with_system_prompt(
+                "claude-sonnet-4-20250514",
+                None,
+                None,
+                vec![lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "hello".into(),
+                )],
+                Vec::new(),
+                None,
+                None,
+                false,
+                Some("main"),
+                Some(crate::RequestDispatchAdmission::new(move || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                })),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: true
+            })
+        ));
+        assert_eq!(admission_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(
+            transport.stream_call_count(),
+            1,
+            "the stale retry must be rejected before a second transport send"
+        );
+    }
 
     /// A transport whose connect/header phase never resolves.
     struct HangingOpenTransport {
@@ -6417,16 +8128,20 @@ mod tests {
         adapter.fallback_models = vec!["claude-sonnet-4-20250514".to_string()];
 
         let result = adapter
-            .messages_create_with_fallback(
-                "claude-opus-4-6",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None, // no explicit call-site fallback
-                false,
-                false,
-            )
+            .messages_create({
+                let mut request = crate::MessagesCreateRequest::new(
+                    "claude-opus-4-6",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                );
+                request.opts.fallback = match None {
+                    Some(models) => crate::FallbackPolicy::from_models_csv(models),
+                    None => crate::FallbackPolicy::Configured,
+                };
+                request
+            })
             .await;
 
         // Should succeed — 3 × 529 then haiku 200.
@@ -6474,16 +8189,20 @@ mod tests {
 
         // claude-opus-4-6 is_non_custom_opus=true → allow_fallback=true for non-subscriber.
         let result = adapter
-            .messages_create_with_fallback(
-                "claude-opus-4-6",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
-                false,
-                false,
-            )
+            .messages_create({
+                let mut request = crate::MessagesCreateRequest::new(
+                    "claude-opus-4-6",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                );
+                request.opts.fallback = match None {
+                    Some(models) => crate::FallbackPolicy::from_models_csv(models),
+                    None => crate::FallbackPolicy::Configured,
+                };
+                request
+            })
             .await;
 
         assert!(result.is_ok(), "global fallback should work: {result:?}");
@@ -6527,16 +8246,21 @@ mod tests {
         // Request via ALIAS — the alias_to_display map must normalize this to
         // "claude-sonnet-4-20250514" before the fallback_overrides lookup.
         let result = adapter
-            .messages_create_with_fallback(
-                "claude", // alias of "claude-sonnet-4-20250514"
-                None,
-                Some("sys"),
-                Vec::new(),
-                Vec::new(),
-                None, // no explicit call-site fallback (per-model must activate)
-                false,
-                false,
-            )
+            .messages_create({
+                let mut request = crate::MessagesCreateRequest::new(
+                    "claude",
+                    // alias of "claude-sonnet-4-20250514"
+                    None,
+                    custom_system_prompt(Some("sys")),
+                    Vec::new(),
+                    Vec::new(),
+                );
+                request.opts.fallback = match None {
+                    Some(models) => crate::FallbackPolicy::from_models_csv(models),
+                    None => crate::FallbackPolicy::Configured,
+                };
+                request
+            })
             .await;
 
         assert!(
@@ -6609,16 +8333,20 @@ mod tests {
             make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
         let result = adapter
-            .messages_create_with_fallback(
-                "claude-opus-4-6",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
-                false,
-                false,
-            )
+            .messages_create({
+                let mut request = crate::MessagesCreateRequest::new(
+                    "claude-opus-4-6",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                );
+                request.opts.fallback = match None {
+                    Some(models) => crate::FallbackPolicy::from_models_csv(models),
+                    None => crate::FallbackPolicy::Configured,
+                };
+                request
+            })
             .await;
 
         assert!(
@@ -6680,16 +8408,20 @@ mod tests {
             make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
         let result = adapter
-            .messages_create_with_fallback(
-                "claude-opus-4-6",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
-                false,
-                false,
-            )
+            .messages_create({
+                let mut request = crate::MessagesCreateRequest::new(
+                    "claude-opus-4-6",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                );
+                request.opts.fallback = match None {
+                    Some(models) => crate::FallbackPolicy::from_models_csv(models),
+                    None => crate::FallbackPolicy::Configured,
+                };
+                request
+            })
             .await;
 
         assert!(
@@ -6741,16 +8473,20 @@ mod tests {
             make_adapter_with_routing(transport.clone(), fallback_overrides, None, Some(0));
 
         let result = adapter
-            .messages_create_with_fallback(
-                "claude-opus-4-6",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
-                false,
-                false,
-            )
+            .messages_create({
+                let mut request = crate::MessagesCreateRequest::new(
+                    "claude-opus-4-6",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                );
+                request.opts.fallback = match None {
+                    Some(models) => crate::FallbackPolicy::from_models_csv(models),
+                    None => crate::FallbackPolicy::Configured,
+                };
+                request
+            })
             .await;
 
         assert!(
@@ -6812,16 +8548,20 @@ mod tests {
         adapter.fallback_models = vec!["claude-sonnet-4-20250514".to_string()];
 
         let result = adapter
-            .messages_create_with_fallback(
-                "claude-opus-4-6",
-                None,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
-                false,
-                false,
-            )
+            .messages_create({
+                let mut request = crate::MessagesCreateRequest::new(
+                    "claude-opus-4-6",
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                );
+                request.opts.fallback = match None {
+                    Some(models) => crate::FallbackPolicy::from_models_csv(models),
+                    None => crate::FallbackPolicy::Configured,
+                };
+                request
+            })
             .await;
 
         assert!(result.is_ok(), "global fallback must work: {result:?}");
@@ -6871,13 +8611,13 @@ mod tests {
         std::env::remove_var("LINGXI_MAX_RETRIES");
 
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
 
         // Restore.
@@ -6974,13 +8714,13 @@ mod tests {
 
         let before = tokio::time::Instant::now();
         let result = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         let elapsed = before.elapsed();
 
@@ -7026,13 +8766,13 @@ mod tests {
         });
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await
             .expect("ok");
 
@@ -7057,13 +8797,13 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let _ = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await
             .expect("ok");
 
@@ -7113,7 +8853,7 @@ mod tests {
 
         let url = transport.seen.lock().unwrap()[0].url.clone();
         assert!(
-            url.ends_with("/v1/messages/count_tokens"),
+            url.ends_with("/v1/messages/count_tokens?beta=true"),
             "must route to the count_tokens endpoint; url={url}"
         );
         let expected_beta = crate::model::betas::assemble_beta_header(
@@ -7121,13 +8861,17 @@ mod tests {
             crate::model::betas::Endpoint::CountTokens,
             &crate::model::betas::BetaContext::for_model("claude-sonnet-4-20250514"),
         );
+        let expected_beta = format!(
+            "{expected_beta},{}",
+            lingxi_llm_client::providers::anthropic::request_policy::TOKEN_COUNTING
+        );
         assert_eq!(
             transport
                 .seen_headers(0)
                 .get("anthropic-beta")
                 .map(String::as_str),
             Some(expected_beta.as_str()),
-            "anthropic-beta header must equal assemble_beta_header(Anthropic, CountTokens)"
+            "countTokens appends the SDK token-counting beta after model betas"
         );
     }
 
@@ -7508,7 +9252,13 @@ mod tests {
         let adapter = make_bedrock_adapter_with_aws(transport.clone(), aws.clone());
 
         let out = adapter
-            .messages_create("model", None, None, Vec::new(), Vec::new())
+            .messages_create(crate::MessagesCreateRequest::new(
+                "model",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ))
             .await;
         assert!(out.is_ok(), "retry after refresh must succeed: {out:?}");
         assert_eq!(
@@ -7529,7 +9279,13 @@ mod tests {
         let adapter = make_bedrock_adapter_with_aws(transport.clone(), aws.clone());
 
         let out = adapter
-            .messages_create("model", None, None, Vec::new(), Vec::new())
+            .messages_create(crate::MessagesCreateRequest::new(
+                "model",
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ))
             .await;
         assert!(
             matches!(out, Err(LlmError::Authentication { .. })),
@@ -7557,13 +9313,13 @@ mod tests {
         let adapter = adapter.with_aws_auth(aws.clone());
 
         let out = adapter
-            .messages_create(
+            .messages_create(crate::MessagesCreateRequest::new(
                 "claude-sonnet-4-20250514",
                 None,
                 None,
                 Vec::new(),
                 Vec::new(),
-            )
+            ))
             .await;
         assert!(matches!(out, Err(LlmError::Authentication { .. })));
         assert_eq!(
@@ -7628,6 +9384,8 @@ mod tests {
                 Vec::new(),
                 false,
                 None,
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("default request");
         assert!(default_req.input.max_tokens.expect("max tokens") < 32_000);
@@ -7652,6 +9410,8 @@ mod tests {
                 Vec::new(),
                 false,
                 None,
+                false,
+                PromptCacheQuerySource::Unspecified,
             )
             .expect("1m request");
         assert_eq!(beta_req.input.max_tokens, Some(32_000));
@@ -7682,5 +9442,59 @@ mod subscription_rate_limit_tests {
         // handled by the parity subscriber gate.
         assert!(!cannot_clear(Some("anthropic"), "claude-opus-5"));
         assert!(!cannot_clear(None, "claude-opus-5"));
+    }
+    #[tokio::test]
+    async fn headless_admission_preserves_native_effort_context_and_text_display_with_base_override(
+    ) {
+        let adapter=make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,ProviderId::AnthropicFirstParty,
+            "http://configured-anthropic-base.test","native","claude-sonnet-5-5",
+            FakeTransport::always(ProviderResponse::json(200,ok_response_json())),
+        ).with_anthropic_client_metadata(lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin","arm64"))
+            .with_native_thinking_display(lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy {omit_default:true,..Default::default()});
+        let request = adapter
+            .build_request(
+                "claude-sonnet-5-5",
+                None,
+                None,
+                vec![text_user_msg("Return marker.")],
+                vec![],
+                true,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .unwrap();
+        assert!(request.execution.resolve_native_effort);
+        let mut prepared = adapter.client.prepare(&request).await.unwrap();
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        let body = &prepared.provider_request.body_json;
+        assert_eq!(body["thinking"]["display"], "omitted");
+        assert_eq!(body["output_config"]["effort"], "medium");
+        assert_eq!(
+            body["messages"][1],
+            serde_json::json!({"role":"system","content":[],"output_config":{"effort":"medium"}})
+        );
+        let betas: Vec<_> = prepared.provider_request.headers["anthropic-beta"]
+            .split(',')
+            .collect();
+        assert!(
+            betas
+                .iter()
+                .position(|beta| *beta == crate::model::betas::MID_CONVERSATION_SYSTEM)
+                .unwrap()
+                < betas
+                    .iter()
+                    .position(|beta| *beta == crate::model::betas::PER_TURN_CONTROL)
+                    .unwrap()
+        );
+        assert_eq!(
+            body["context_management"],
+            serde_json::json!({"edits":[{"type":"clear_thinking_20251015","keep":"all"}]})
+        );
+        assert!(!prepared.provider_request.headers["anthropic-beta"]
+            .contains("thinking-display-updates-2026-08-18"));
     }
 }

@@ -258,7 +258,7 @@ impl Tool for GitTool {
         };
 
         match dispatch_result {
-            Ok(data) => Ok(ToolCallResult {
+            Ok(data) => Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data,
                 model_content: None,
                 new_messages: Vec::new(),
@@ -542,6 +542,7 @@ mod tests {
             include_examples: false,
             model: None,
             model_profile: None,
+            ..Default::default()
         };
 
         let with_token = GitTool::new(test_ctx_git_enabled());

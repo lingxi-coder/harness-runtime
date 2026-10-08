@@ -488,12 +488,13 @@ async fn recovers_orphaned_parallel_tool_result_from_sibling_branch() {
         "orphaned tool_result tr2 recovered: {uuids:?}"
     );
 
-    // Main chain is NOT reordered: u0, a1, tr1, a3 keep their relative order,
-    // and the recovered group [a2, tr2] is spliced right after the anchor a1.
+    // Claude 2.1.286 merges recovered records in transcript insertion order:
+    // a2 precedes tr1, but tr2 follows tr1. Executed upstream fixture:
+    // recovery-2.1.286/cases.json::legacy_parallel_recovery_order.
     assert_eq!(
         uuids,
-        vec![u0, a1, a2, tr2, tr1, a3],
-        "recovered group inserted after anchor a1; main chain order preserved",
+        vec![u0, a1, a2, tr1, tr2, a3],
+        "recovered records merged in transcript insertion order",
     );
 }
 

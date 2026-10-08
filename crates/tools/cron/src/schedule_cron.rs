@@ -924,7 +924,7 @@ impl Tool for CronCreateTool {
         let human = cron_to_human(&cron);
         let content = build_result_content(&id, &human, recurring, durable);
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "id": id,
                 "humanSchedule": human,

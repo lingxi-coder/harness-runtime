@@ -71,7 +71,7 @@ pub use transcript::TranscriptEntry;
 pub use jsonl::reader::SessionMetadata as JsonlSessionMetadata;
 pub use jsonl::{
     project_dir_name, session_path, validate_uuid, JsonlMessage, JsonlReader, JsonlWriter,
-    LITE_READ_BUF_SIZE,
+    SessionMessageIdentitySnapshot, LITE_READ_BUF_SIZE,
 };
 // SC-08 — transcript-file compaction (`performCompactTranscript`). The trigger
 // lives on `JsonlWriter::maybe_compact_transcript`; these are the surface an

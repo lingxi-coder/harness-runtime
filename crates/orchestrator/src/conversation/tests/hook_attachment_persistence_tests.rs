@@ -1,8 +1,8 @@
 use super::*;
-use crate::test_support::{
-    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-};
 use crate::OrchestratorConfig;
+use crate::test_support::{
+    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+};
 use platform_posix::fs::PosixFileSystem;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
@@ -49,9 +49,105 @@ mod tool_frame_ordering_tests {
         let output = Arc::new(MockOutputStream::new());
         let orch = orch_for_frames(output.clone());
         let id = lingxi_core::types::ToolUseId::new();
-        orch.emit_tool_result_frame(&id, "Bash", "out", &serde_json::json!({}), None)
+        orch.emit_tool_result_frame(&id, "Bash", "out", &serde_json::json!({}), None, None)
             .await;
         assert_eq!(result_ids(&output.snapshot().await), vec![id.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn mod_result_stage_captures_only_its_tool_id() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_for_frames(output.clone());
+        let staged = lingxi_core::types::ToolUseId::new();
+        let nested = lingxi_core::types::ToolUseId::new();
+        let (_, stage) = crate::conversation::with_mod_result_stage(&staged, async {
+            orch.record_tool_use_result(&staged, serde_json::json!("staged"))
+                .await;
+            orch.emit_tool_result_frame(
+                &staged,
+                "Bash",
+                "staged",
+                &serde_json::json!("staged"),
+                None,
+             None)
+            .await;
+            orch.record_tool_use_result(&nested, serde_json::json!("nested"))
+                .await;
+            orch.emit_tool_result_frame(
+                &nested,
+                "Read",
+                "nested",
+                &serde_json::json!("nested"),
+                None,
+             None)
+            .await;
+        })
+        .await;
+        assert_eq!(stage.tool_use_result, Some(serde_json::json!("staged")));
+        assert_eq!(
+            result_ids(&output.snapshot().await),
+            vec![nested.to_string()]
+        );
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(nested.as_str()).map(|projection| &projection.value),
+            Some(&serde_json::json!("nested"))
+        );
+        orch.commit_mod_result_stage(&staged, "Bash", stage, None)
+            .await;
+        assert_eq!(
+            result_ids(&output.snapshot().await),
+            vec![nested.to_string(), staged.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn mod_replacement_keeps_structured_error_result_in_sdk_frame() {
+        let output = Arc::new(MockOutputStream::new());
+        let orch = orch_for_frames(output.clone());
+        let id = lingxi_core::types::ToolUseId::new();
+        let (_, stage) = crate::conversation::with_mod_result_stage(&id, async {
+            orch.record_tool_use_result(&id, serde_json::json!({"interrupted":false}))
+                .await;
+            orch.emit_tool_result_frame(
+                &id,
+                "Bash",
+                "core",
+                &serde_json::json!({"interrupted":false}),
+                None,
+             None)
+            .await;
+        })
+        .await;
+        let replacement = serde_json::json!({"interrupted":true,"stdout":"partial"});
+        orch.commit_mod_result_stage(
+            &id,
+            "Bash",
+            stage,
+            Some((lingxi_core::host::ToolResultProjection {
+                data: replacement.clone().into(),
+                content: serde_json::json!("partial").into(),
+                model_text: Some(serde_json::json!("partial").into()),
+                mcp_meta: None,
+            }, "partial".into())),
+        )
+        .await;
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(id.as_str()).map(|projection| &projection.value),
+            Some(&replacement)
+        );
+        assert!(output.snapshot().await.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::orchestrator::OutputEvent::ToolResult { id: got_id, result, .. }
+                if got_id == &id && result == &replacement
+        )));
     }
 
     /// With buffering ON nothing reaches the stream until release.
@@ -64,9 +160,9 @@ mod tool_frame_ordering_tests {
         let first = lingxi_core::types::ToolUseId::new();
         let second = lingxi_core::types::ToolUseId::new();
         // Buffered in COMPLETION order: `second` finished first.
-        orch.emit_tool_result_frame(&second, "Bash", "b", &serde_json::json!({}), None)
+        orch.emit_tool_result_frame(&second, "Bash", "b", &serde_json::json!({}), None, None)
             .await;
-        orch.emit_tool_result_frame(&first, "Read", "a", &serde_json::json!({}), None)
+        orch.emit_tool_result_frame(&first, "Read", "a", &serde_json::json!({}), None, None)
             .await;
         assert!(
             result_ids(&output.snapshot().await).is_empty(),
@@ -118,7 +214,7 @@ mod tool_frame_ordering_tests {
             "REAL OUTPUT",
             &serde_json::json!({ "stdout": "REAL OUTPUT" }),
             None,
-        )
+         None)
         .await;
         orch.release_tool_frame(&id, "Bash", "SYNTHETIC", true)
             .await;
@@ -150,7 +246,7 @@ mod tool_frame_ordering_tests {
             "REAL OUTPUT",
             &serde_json::json!({ "error": "aborted" }),
             Some("interrupted"),
-        )
+         None)
         .await;
         orch.record_tool_denial_kind(&id, "user-rejected").await;
         orch.record_tool_use_result(
@@ -216,12 +312,12 @@ mod tool_frame_ordering_tests {
         orch.release_tool_frame(&id, "McpTool", "cancelled", true)
             .await;
 
-        let message = lingxi_core::types::ConversationMessage::User {
+        let message = lingxi_core::types::ConversationMessage::User { api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
-            content: vec![lingxi_core::types::ContentBlock::ToolResult {
+            content: vec![lingxi_core::types::ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: id.clone(),
                 content: "cancelled".into(),
-                is_error: true,
+                is_error: Some(true),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -232,30 +328,38 @@ mod tool_frame_ordering_tests {
         orch.persist_message_to_jsonl(&message).await;
 
         let key = id.to_string();
-        assert!(!orch
-            .transcript
-            .tool_use_results
-            .lock()
-            .await
-            .contains_key(&key));
-        assert!(!orch
-            .transcript
-            .tool_denial_kinds
-            .lock()
-            .await
-            .contains_key(&key));
-        assert!(!orch
-            .transcript
-            .tool_use_mcp_meta
-            .lock()
-            .await
-            .contains_key(&key));
-        assert!(!orch
-            .transcript
-            .tool_source_assistant_uuids
-            .lock()
-            .await
-            .contains_key(&key));
+        assert!(
+            !orch
+                .transcript
+                .tool_use_results
+                .lock()
+                .await
+                .contains_key(&key)
+        );
+        assert!(
+            !orch
+                .transcript
+                .tool_denial_kinds
+                .lock()
+                .await
+                .contains_key(&key)
+        );
+        assert!(
+            !orch
+                .transcript
+                .tool_use_mcp_meta
+                .lock()
+                .await
+                .contains_key(&key)
+        );
+        assert!(
+            !orch
+                .transcript
+                .tool_source_assistant_uuids
+                .lock()
+                .await
+                .contains_key(&key)
+        );
     }
 
     #[tokio::test]
@@ -269,7 +373,7 @@ mod tool_frame_ordering_tests {
             "out",
             &serde_json::json!({"stdout": "out"}),
             Some("interrupted"),
-        )
+         None)
         .await;
         orch.record_tool_use_result(&id, serde_json::json!({"stdout": "out"}))
             .await;
@@ -278,18 +382,22 @@ mod tool_frame_ordering_tests {
         orch.set_tool_frame_buffering(false).await;
 
         let key = id.to_string();
-        assert!(!orch
-            .transcript
-            .tool_use_results
-            .lock()
-            .await
-            .contains_key(&key));
-        assert!(!orch
-            .transcript
-            .tool_denial_kinds
-            .lock()
-            .await
-            .contains_key(&key));
+        assert!(
+            !orch
+                .transcript
+                .tool_use_results
+                .lock()
+                .await
+                .contains_key(&key)
+        );
+        assert!(
+            !orch
+                .transcript
+                .tool_denial_kinds
+                .lock()
+                .await
+                .contains_key(&key)
+        );
     }
 }
 
@@ -325,21 +433,32 @@ async fn hook_attachment_is_persisted_as_an_attachment_line() {
             hook_event: "PostToolUse".into(),
             tool_use_id: "toolu_01ApkBwAZMCAza47B5nAWiGS".into(),
         },
-        "formatted",
+        &hooks::ExactHookText::from_text("formatted"),
         "formatted\n",
         "",
         0,
         "./hooks/fmt.sh",
         37,
     );
-    orch.persist_hook_attachment_to_jsonl(payload.clone()).await;
+    let expected_payload = payload.value.clone();
+    let overrides = payload
+        .strings
+        .iter()
+        .map(|sidecar| {
+            (
+                format!("/attachment{}", sidecar.pointer),
+                sidecar.code_units.clone(),
+            )
+        })
+        .collect();
+    orch.persist_hook_attachment_to_jsonl(payload.value, overrides).await;
 
     let raw = std::fs::read_to_string(&path).expect("read jsonl");
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), 1, "one line: {raw}");
     let v: serde_json::Value = serde_json::from_str(lines[0]).expect("json");
     assert_eq!(v["type"], "attachment");
-    assert_eq!(v["attachment"], payload);
+    assert_eq!(v["attachment"], expected_payload);
     assert!(v.get("message").is_none(), "no inner message: {}", lines[0]);
     // Payload precedes the discriminator on real 2.1.220 attachment lines.
     let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
@@ -369,30 +488,34 @@ async fn queued_hook_attachments_flush_after_the_tool_result_in_order() {
     orch.queue_hook_attachment(
         &tuid,
         hooks::additional_context_attachment(
-            "PostToolUse:Edit",
-            tuid.as_str(),
-            "PostToolUse",
-            &["FIRST".to_string()],
-        ),
+                "PostToolUse:Edit",
+                tuid.as_str(),
+                "PostToolUse",
+                &["FIRST".into()],
+            ),
+        None,
     )
     .await;
     orch.queue_hook_attachment(
         &tuid,
-        hooks::error_during_execution_attachment(
-            "SECOND",
-            "PostToolUse:Edit",
-            tuid.as_str(),
-            "PostToolUse",
+        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+            hooks::error_during_execution_attachment(
+                "SECOND",
+                "PostToolUse:Edit",
+                tuid.as_str(),
+                "PostToolUse",
+            ),
         ),
+        None,
     )
     .await;
 
-    let msg = ConversationMessage::User {
+    let msg = ConversationMessage::User { api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
-        content: vec![lingxi_core::types::ContentBlock::ToolResult {
+        content: vec![lingxi_core::types::ContentBlock::ToolResult { content_projection: None,
             tool_use_id: tuid.clone(),
             content: "ok".into(),
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
         }],
@@ -419,6 +542,58 @@ async fn queued_hook_attachments_flush_after_the_tool_result_in_order() {
     // Linear chain: result → first attachment → second attachment.
     assert_eq!(v1["parentUuid"], v0["uuid"]);
     assert_eq!(v2["parentUuid"], v1["uuid"]);
+}
+
+#[tokio::test]
+async fn discarded_result_cleanup_removes_only_its_queued_attachments() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("session.jsonl");
+    let orch = orch_with_writer(dir.path(), path.clone());
+    let accepted = lingxi_core::types::ToolUseId::from("accepted-tool");
+    let discarded = lingxi_core::types::ToolUseId::from("discarded-tool");
+    let attachment = |id: &lingxi_core::types::ToolUseId, text: &str| {
+        hooks::additional_context_attachment(
+                "PostToolUse:Edit",
+                id.as_str(),
+                "PostToolUse",
+                &[hooks::ExactHookText::from_text(text)],
+            )
+    };
+    orch.queue_hook_attachment(&accepted, attachment(&accepted, "keep"), None)
+        .await;
+    orch.queue_hook_attachment(&discarded, attachment(&discarded, "drop"), None)
+        .await;
+
+    // Server-fallback tombstones use the same cleanup path as a synthetic
+    // replacing a real completion. It must preserve the already accepted id.
+    orch.clear_discarded_tool_result_metadata(&discarded).await;
+    let queued = orch.transcript.pending_hook_attachments.lock().await;
+    assert!(queued.contains_key(accepted.as_str()));
+    assert!(!queued.contains_key(discarded.as_str()));
+    drop(queued);
+
+    let accepted_result = ConversationMessage::User { api_message_override: None,
+        id: lingxi_core::types::MessageId::new(),
+        content: vec![lingxi_core::types::ContentBlock::ToolResult { content_projection: None,
+            tool_use_id: accepted.clone(),
+            content: "accepted".into(),
+            is_error: Some(false),
+            provider_tool_use_id: None,
+            content_blocks: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+    };
+    orch.persist_message_to_jsonl(&accepted_result).await;
+    orch.flush_hook_attachments(&accepted).await;
+    orch.flush_hook_attachments(&discarded).await;
+
+    let raw = std::fs::read_to_string(path).expect("read transcript");
+    let lines: Vec<&str> = raw.lines().filter(|line| !line.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "only accepted result and attachment persist");
+    let attachment_line: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(attachment_line["attachment"]["content"][0], "keep");
 }
 
 /// END-TO-END: a real `HookExecutorImpl` wired with the real sink and a
@@ -562,13 +737,17 @@ async fn sink_forwards_to_the_attached_orchestrator() {
     let sink = Arc::new(crate::JsonlHookAttachmentSink::new());
 
     // Unattached: must not panic, must not write.
-    sink.record(serde_json::json!({"type": "hook_success"}))
+    sink.record(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+        serde_json::json!({"type": "hook_success"}),
+    ))
         .await;
     assert!(!path.exists(), "unattached sink writes nothing");
 
     let orch = Arc::new(orch_with_writer(dir.path(), path.clone()));
     sink.attach(&orch);
-    sink.record(serde_json::json!({"type": "hook_cancelled"}))
+    sink.record(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+        serde_json::json!({"type": "hook_cancelled"}),
+    ))
         .await;
 
     let raw = std::fs::read_to_string(&path).expect("read jsonl");
@@ -589,12 +768,14 @@ async fn sink_atomically_persists_oversized_hook_output_in_session_storage() {
         Arc::new(orch_with_writer(dir.path(), path).with_config_home(dir.path().to_path_buf()));
     let session_uuid = orch.session.lock().await.session_id.as_uuid().to_string();
     sink.attach(&orch);
-    let body = "x".repeat(hooks::attachment::HOOK_OUTPUT_INLINE_LIMIT + 1);
+    let body = hooks::ExactHookText::from_text(
+        "x".repeat(hooks::attachment::HOOK_OUTPUT_INLINE_LIMIT + 1),
+    );
 
     let reference = sink
         .persist_large_output(&body)
         .await
-        .expect("persisted reference");
+        .expect("persisted output");
     let output_dir = session::jsonl::path::tool_results_dir(
         dir.path(),
         &orch.current_cwd().to_string_lossy(),
@@ -606,6 +787,9 @@ async fn sink_atomically_persists_oversized_hook_output_in_session_storage() {
         .expect("tool-results entries");
     assert_eq!(files.len(), 1);
     let saved = files[0].path();
-    assert!(reference.contains(&saved.to_string_lossy().to_string()));
-    assert_eq!(std::fs::read_to_string(saved).expect("full output"), body);
+    assert_eq!(reference.path, saved.to_string_lossy().to_string());
+    assert_eq!(
+        std::fs::read_to_string(saved).expect("full output"),
+        body.display
+    );
 }

@@ -48,10 +48,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use hooks::HookExecutorImpl;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
 use hooks::response::HookDecision;
-use hooks::HookExecutorImpl;
 use tool_api::TaskLifecycleHookFirer;
 
 /// Adapts the engine's hook executor to the V2 `Task*` tool's BLOCKING
@@ -298,6 +298,70 @@ mod tests {
             HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime))
                 .with_prompt_runner(Arc::new(BlockingRunner(reason.to_string()))),
         )
+    }
+
+    struct SafetyRunner;
+    #[async_trait]
+    impl HookPromptRunner for SafetyRunner {
+        async fn run(&self, _req: PromptHookRequest) -> Result<String, PromptHookError> {
+            lingxi_core::host::model_safety::current_model_safety_observer()
+                .expect("hook admission retained its cost authority")
+                .record(lingxi_core::host::model_safety::ModelSafetyStop::Refusal);
+            Ok(r#"{"ok":true}"#.into())
+        }
+    }
+
+    #[tokio::test]
+    async fn old_child_hook_keeps_origin_after_main_remount_and_new_hook_captures_new_owner() {
+        use lingxi_core::host::model_safety::{ModelSafetyObserver, scope_model_safety};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let old_count = Arc::new(AtomicU64::new(0));
+        let new_count = Arc::new(AtomicU64::new(0));
+        let observer = |count: Arc<AtomicU64>| {
+            ModelSafetyObserver::new(move |_| {
+                count.fetch_add(1, Ordering::Relaxed);
+            })
+        };
+        let old = observer(old_count.clone());
+        let new = observer(new_count.clone());
+        let executor =
+            match Arc::try_unwrap(blocking_executor_for(HookEventType::TaskCreated, "unused")) {
+                Ok(executor) => executor.with_prompt_runner(Arc::new(SafetyRunner)),
+                Err(_) => panic!("exclusive test executor"),
+            };
+        let provider_calls = Arc::new(AtomicU64::new(0));
+        let active = Arc::new(std::sync::Mutex::new(old.clone()));
+        let provider_active = active.clone();
+        let calls = provider_calls.clone();
+        executor.set_model_safety_provider(Arc::new(move || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            let captured = provider_active.lock().unwrap().clone();
+            Box::pin(async move { Some(captured) })
+        }));
+        // This child captured its authority before the main owner was replaced.
+        let old_ctx = HookContext {
+            model_safety_observer: Some(old.clone()),
+            ..Default::default()
+        };
+        *active.lock().unwrap() = new;
+        let event = || HookEvent::TaskCreated {
+            task_id: "t1".into(),
+            task_type: "test".into(),
+            description: String::new(),
+            teammate_name: None,
+            team_name: None,
+        };
+        executor.execute(event(), old_ctx).await;
+        // A transferred task also preserves its captured origin when no
+        // explicit HookContext authority was necessary at its source.
+        scope_model_safety(old, executor.execute(event(), HookContext::default())).await;
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(old_count.load(Ordering::Relaxed), 2);
+        assert_eq!(new_count.load(Ordering::Relaxed), 0);
+        executor.execute(event(), HookContext::default()).await;
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(old_count.load(Ordering::Relaxed), 2);
+        assert_eq!(new_count.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]

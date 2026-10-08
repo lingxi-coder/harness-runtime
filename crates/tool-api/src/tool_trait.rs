@@ -87,6 +87,10 @@ pub trait Tool: Send + Sync {
     fn input_schema_snapshot(&self) -> Option<Value> {
         None
     }
+    /// Exact schema owned by a dynamic source, when it carries JS UTF-16.
+    fn input_schema_projection(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        None
+    }
 
     /// Revision token for a live schema snapshot. Include every non-content
     /// version component that changes its shape (for example a device service
@@ -639,6 +643,10 @@ pub type ContextModifier = Box<dyn FnOnce(ToolUseContext) -> ToolUseContext + Se
 pub struct ToolCallResult {
     /// JSON payload returned to the model.
     pub data: Value,
+    /// Exact data source, associated with `data`.
+    pub data_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    /// Exact string associated with `model_content`.
+    pub model_content_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Optional faithful model-facing string. When `Some`, the dispatch uses
     /// this verbatim as the tool's model text (and the SDK frame's
     /// `tool_result.content`), keeping `data` as pure metadata. When `None`,
@@ -650,6 +658,8 @@ pub struct ToolCallResult {
     pub context_modifier: Option<ContextModifier>,
     /// Opaque per-call metadata (used by MCP tools).
     pub mcp_meta: Option<serde_json::Value>,
+    /// Exact associated MCP metadata source.
+    pub mcp_meta_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Whether this result is an ERROR — drives the `tool_result` block's
     /// `is_error` flag. `false` for every native tool's success path (a native
     /// failure surfaces as an `Err`, which the dispatch flags separately); MCP
@@ -659,16 +669,35 @@ pub struct ToolCallResult {
 }
 
 impl ToolCallResult {
+    /// Reject exact carriers that no longer describe this accepted result.
+    pub fn validate_projection(&self) -> Result<(), ToolError> {
+        for (projection, value) in [
+            (self.data_projection.as_ref(), Some(self.data.clone())),
+            (self.model_content_projection.as_ref(), self.model_content.clone().map(Value::String)),
+            (self.mcp_meta_projection.as_ref(), self.mcp_meta.clone()),
+        ] {
+            if let Some(projection) = projection {
+                if value.as_ref() != Some(&projection.value) {
+                    return Err(ToolError::Internal("tool result projection association changed".into()));
+                }
+                projection.validate().map_err(|error| ToolError::Internal(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
     /// Build a result from a `data` payload only — the model text is derived
     /// from `data` by the dispatch (`model_content` stays `None`).
     pub fn from_data(data: Value) -> Self {
         Self {
             data,
+            data_projection: None,
+            model_content_projection: None,
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            mcp_meta_projection: None,
         }
     }
 }
@@ -683,6 +712,36 @@ impl std::fmt::Debug for ToolCallResult {
             .field("mcp_meta", &self.mcp_meta)
             .field("is_error", &self.is_error)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod result_projection_tests {
+    use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn result_projection_rejects_overwritten_data_and_missing_model_text() {
+        let source = Utf16JsonProjection::parse(r#"[{"text":"\ud800","\udfff":1}]"#).unwrap();
+        let mut result = ToolCallResult::from_data(source.value.clone());
+        result.data_projection = Some(source);
+        result.validate_projection().unwrap();
+        result.data = serde_json::json!([]);
+        assert!(result.validate_projection().is_err());
+        result.data_projection = None;
+        result.model_content_projection = Some(Utf16JsonProjection::parse(r#""\udc00""#).unwrap());
+        assert!(result.validate_projection().is_err());
+    }
+
+    #[test]
+    fn metadata_null_presence_and_exact_keys_remain_associated() {
+        let meta = Utf16JsonProjection::parse(r#"{"_meta":{"\ud800":"\udfff"},"structuredContent":null}"#).unwrap();
+        let mut result = ToolCallResult::from_data(serde_json::json!([]));
+        result.mcp_meta = Some(meta.value.clone());
+        result.mcp_meta_projection = Some(meta);
+        result.validate_projection().unwrap();
+        result.mcp_meta.as_mut().unwrap().as_object_mut().unwrap().remove("structuredContent");
+        assert!(result.validate_projection().is_err());
     }
 }
 

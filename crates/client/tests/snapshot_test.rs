@@ -49,7 +49,7 @@ use client::protocol::audio::{
 use client::protocol::commands::{
     AppCreateModeDto, ClientCommand, HookAdminCommandDto, ImageRefDto, ListingKindDto,
     McpAdminCommandDto, PermissionBehaviorDto, PluginAdminCommandDto, PromptModeDto,
-    ProviderCredentialSecretDto, SkillAdminCommandDto, WritableScopeDto,
+    ProviderCredentialSecretDto, SkillAdminCommandDto, UiSurfaceDto, WritableScopeDto,
 };
 use client::protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -62,15 +62,17 @@ use client::protocol::controls::{
 };
 use client::protocol::error::ClientError;
 use client::protocol::events::{
-    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
+    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, RefusalContinuationJoinDto,
+    RefusalContinuationPhaseDto, ServerFallbackProviderMessageDto,
+    ServerFallbackTombstoneMessageDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
     TurnRecoveryStateDto,
 };
 use client::protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, ConfigurationDomainDto, ConfigurationEffectDto,
     ConfigurationOperationStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
-    SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto,
-    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    SessionAgentMessageRowDto, SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto,
+    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client::protocol::local_apps::{
     AppAgentProfileProposalDto, AppAuthorizationDecisionDto, AppBridgeOperationDto,
@@ -218,6 +220,63 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SystemNotice {
                 message: "Conversation changes could not be saved.".to_string(),
                 is_error: true,
+            },
+        ),
+        (
+            "event/ui_log.json",
+            ClientEvent::UiLog {
+                plugin: "review".to_string(),
+                text: "Found a mismatch".to_string(),
+            },
+        ),
+        (
+            "event/ui_toast.json",
+            ClientEvent::UiToast {
+                plugin: "review".to_string(),
+                text: "Found a mismatch".to_string(),
+                timeout_ms: 4000,
+            },
+        ),
+        (
+            "event/ui_status.json",
+            ClientEvent::UiStatus {
+                plugin: "review".to_string(),
+                text: None,
+            },
+        ),
+        (
+            "event/ui_control_result.json",
+            ClientEvent::UiControlResult {
+                request_id: "render-1".into(),
+                response_json: Some(
+                    r#"{"tree":{},"props":{},"rewritten":false,"hooked":true}"#.into(),
+                ),
+                metadata_json: Some(r#"{"renderRevision":7}"#.into()),
+                error: None,
+            },
+        ),
+        (
+            "event/ui_control_result_error.json",
+            ClientEvent::UiControlResult {
+                request_id: "module-2".into(),
+                response_json: None,
+                metadata_json: None,
+                error: Some("module unavailable".into()),
+            },
+        ),
+        (
+            "event/ui_client_frame.json",
+            ClientEvent::UiClientFrame {
+                runtime_id: "runtime-1".into(),
+                frame_json: r#"{"type":"ui.render","tree":{}}"#.into(),
+            },
+        ),
+        (
+            "event/ui_invalidate.json",
+            ClientEvent::UiInvalidate {
+                instances_json: Some("[]".into()),
+                uuid: "event-1".into(),
+                session_id: "session-1".into(),
             },
         ),
         (
@@ -489,7 +548,12 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SessionAgentTranscript {
                 session_id: "22222222-2222-4222-8222-222222222222".to_string(),
                 agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
-                messages: vec![canonical_message()],
+                messages: vec![SessionAgentMessageRowDto {
+                    message_index: 0,
+                    message_uuid: "44444444-4444-4444-8444-444444444444".into(),
+                    message: canonical_message(),
+                    api_error_json: None,
+                }],
                 next_message_index: 1,
                 revision: 1,
             },
@@ -515,8 +579,21 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SessionAgentMessage {
                 session_id: "22222222-2222-4222-8222-222222222222".to_string(),
                 agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
-                message_index: 0,
-                message: canonical_message(),
+                row: SessionAgentMessageRowDto {
+                    message_index: 0,
+                    message_uuid: "44444444-4444-4444-8444-444444444444".into(),
+                    message: canonical_message(),
+                    api_error_json: None,
+                },
+            },
+        ),
+        (
+            "event/session_agent_tombstone.json",
+            ClientEvent::SessionAgentTombstone {
+                session_id: "22222222-2222-4222-8222-222222222222".into(),
+                agent_id: "agent:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+                message_uuid: "44444444-4444-4444-8444-444444444444".into(),
+                display_only: true,
             },
         ),
         (
@@ -1407,6 +1484,70 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 },
             },
         ),
+        (
+            "event/query_model_change.json",
+            ClientEvent::QueryModelChange {
+                to_model: "claude-sonnet-4".into(),
+            },
+        ),
+        (
+            "event/assistant_block_start.json",
+            ClientEvent::AssistantBlockStart { block_key: 7 },
+        ),
+        (
+            "event/assistant_block_identity.json",
+            ClientEvent::AssistantBlockIdentity {
+                block_key: 7,
+                message_uuid: "assistant-row-1".into(),
+            },
+        ),
+        (
+            "event/user_transcript_row_identity.json",
+            ClientEvent::UserTranscriptRowIdentity {
+                row_token: "pending-user-row".into(),
+                uuid: "persisted-user-row".into(),
+            },
+        ),
+        (
+            "event/assistant_transcript_row_uuids.json",
+            ClientEvent::AssistantTranscriptRowUuids {
+                message_id: "assistant-turn-1".into(),
+                uuids: vec![Some("assistant-text-row-1".into()), None],
+            },
+        ),
+        (
+            "event/tombstone.json",
+            ClientEvent::Tombstone {
+                message: ServerFallbackTombstoneMessageDto {
+                    uuid: "assistant-row-1".into(),
+                    message_type: "assistant".into(),
+                    timestamp: "2026-10-03T12:00:00.000Z".into(),
+                    request_id: Some("request-1".into()),
+                    request_ref_json: Some(r#"{"route":"native"}"#.into()),
+                    message: ServerFallbackProviderMessageDto {
+                        id: Some("provider-message-1".into()),
+                        model: Some("claude-opus-4".into()),
+                        stop_reason: Some("tool_use".into()),
+                        stop_details_json: Some(r#"{"category":"cyber"}"#.into()),
+                        usage_json: Some(r#"{"input_tokens":5,"output_tokens":2}"#.into()),
+                        content_json: r#"[{"type":"text","text":"superseded"}]"#.into(),
+                    },
+                    is_api_error_message: Some(false),
+                    supersedes_uuids: Some(vec!["assistant-row-0".into()]),
+                },
+                display_only: true,
+            },
+        ),
+        (
+            "event/refusal_continuation.json",
+            ClientEvent::RefusalContinuation {
+                phase: RefusalContinuationPhaseDto::Begin,
+                salvage_text: "retained refusal text".into(),
+                join: RefusalContinuationJoinDto::Exact,
+                replaces_uuids: vec!["assistant-row-0".into()],
+                display_salvage_text: true,
+            },
+        ),
     ]
 }
 
@@ -1605,6 +1746,82 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         ("command/logout.json", ClientCommand::Logout),
         ("command/force_compact.json", ClientCommand::ForceCompact),
         ("command/clear_session.json", ClientCommand::ClearSession),
+        (
+            "command/ui_attach.json",
+            ClientCommand::UiAttach {
+                surface: UiSurfaceDto::Desktop,
+                client_id: "electron-window-1".to_string(),
+            },
+        ),
+        (
+            "command/ui_detach.json",
+            ClientCommand::UiDetach {
+                client_id: "electron-window-1".to_string(),
+            },
+        ),
+        (
+            "command/ui_render.json",
+            ClientCommand::UiRender {
+                request_id: "render-1".into(),
+                request_json: r#"{"subtype":"ui_render"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_client_module.json",
+            ClientCommand::UiClientModule {
+                request_id: "module-1".into(),
+                plugin: "review".into(),
+            },
+        ),
+        (
+            "command/ui_message.json",
+            ClientCommand::UiMessage {
+                request_id: "message-1".into(),
+                request_json: r#"{"subtype":"ui_message"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_client_fault.json",
+            ClientCommand::UiClientFault {
+                request_id: "fault-1".into(),
+                request_json: r#"{"subtype":"ui_client_fault"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_client_press.json",
+            ClientCommand::UiClientPress {
+                request_id: "press-1".into(),
+                request_json: r#"{"subtype":"ui_client_press"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_press.json",
+            ClientCommand::UiPress {
+                request_id: "parent-press-1".into(),
+                request_json: r#"{"subtype":"ui_press"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_input.json",
+            ClientCommand::UiInput {
+                request_id: "parent-input-1".into(),
+                request_json: r#"{"subtype":"ui_input"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_select.json",
+            ClientCommand::UiSelect {
+                request_id: "parent-select-1".into(),
+                request_json: r#"{"subtype":"ui_select"}"#.into(),
+            },
+        ),
+        (
+            "command/ui_client_operation.json",
+            ClientCommand::UiClientOperation {
+                request_id: "operation-1".into(),
+                operation_json: r#"{"subtype":"mount"}"#.into(),
+            },
+        ),
         (
             "command/task_list.json",
             ClientCommand::TaskList {

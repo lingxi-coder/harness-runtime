@@ -74,6 +74,16 @@ pub(super) fn notification_matches_subscription(
     match subscription_id {
         jsonrpc::Id::Number(expected) => observed.as_i64() == Some(*expected),
         jsonrpc::Id::String(expected) => observed.as_str() == Some(expected),
+        jsonrpc::Id::StringUtf16(expected) => {
+            notification
+                .projection
+                .as_ref()
+                .and_then(|projection| {
+                    projection.string_units("/params/_meta/io.modelcontextprotocol~1subscriptionId")
+                })
+                .as_ref()
+                == Some(expected)
+        }
     }
 }
 

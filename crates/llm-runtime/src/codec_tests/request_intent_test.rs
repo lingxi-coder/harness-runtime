@@ -19,7 +19,7 @@ fn anthropic_codec() -> AnthropicMessagesCodec {
 
 fn request_with_block(model: &str, block: ContentBlock) -> HistoryFixture {
     let mut request = HistoryFixture::new(model);
-    request.messages.push(llm_runtime::Message {
+    request.messages.push(llm_runtime::Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![block],
     });

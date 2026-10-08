@@ -133,7 +133,7 @@ impl Tool for AlwaysOkTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "content": "all good" }),
             model_content: None,
             new_messages: vec![],
@@ -372,7 +372,7 @@ fn orch_with(
 fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
     Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![LlmContentBlock::ToolCall {
+            vec![LlmContentBlock::ToolCall { input_projection: None,
                 id: tool_use_id.to_string(),
                 name: tool_name.into(),
                 input: json!({}),
@@ -382,7 +382,7 @@ fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),

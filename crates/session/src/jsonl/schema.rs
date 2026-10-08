@@ -58,6 +58,10 @@ use serde_json::{Map, Value};
 /// `#[serde(flatten)]` so read→write round-trips preserve every byte we read.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonlMessage {
+    /// Exact native row reconstructed from raw JSON or typed producers. This
+    /// carrier is consumed by the native codec and never becomes a JSON field.
+    #[serde(skip)]
+    pub json_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// `"user" | "assistant" | "system" | "attachment" | "summary" | ...`
     /// — see `claude-code/src/types/logs.ts:297` `Entry` union.
     #[serde(rename = "type")]
@@ -189,6 +193,7 @@ const RECOGNIZED_EXTRA: &[&str] = &[
     "isApiErrorMessage",
     "apiErrorStatus",
     "effort",
+    "perTurnEffort",
     // SC-07: emitted by the common trailer (arm h), immediately before
     // `userType`, so it must not also fall out of the unrecognized-key tail.
     SESSION_KIND_KEY,
@@ -308,6 +313,33 @@ const TOOL_RESULT_HEAD_EXTRA: &[&str] = &[
 /// head emitted them.
 const BOUNDARY_HEAD_EXTRA: &[&str] = &["subtype", "content", "level", "compactMetadata"];
 
+const MODEL_FALLBACK_HEAD: &[&str] = &[
+    "subtype",
+    "content",
+    "level",
+    "trigger",
+    "originalModel",
+    "fallbackModel",
+    "isMeta",
+];
+
+const REFUSAL_FALLBACK_HEAD: &[&str] = &[
+    "subtype",
+    "direction",
+    "scope",
+    "content",
+    "level",
+    "trigger",
+    "originalModel",
+    "fallbackModel",
+    "requestId",
+    "apiRefusalCategory",
+    "apiRefusalExplanation",
+    "retractedMessageUuids",
+    "refusedUserMessageUuid",
+    "isMeta",
+];
+
 // Hand-written `Serialize` so the outer JSONL keys land in claude-code's EXACT
 // per-kind order (see module docs). `Deserialize` stays derived — the reader is
 // order-independent. VALUES are byte-identical to the derived impl; only key
@@ -331,6 +363,10 @@ impl Serialize for JsonlMessage {
         let is_api_error = self.extra.contains_key("isApiErrorMessage");
         let is_scheduled_fire = is_system
             && self.extra.get("subtype").and_then(Value::as_str) == Some("scheduled_task_fire");
+        let is_model_fallback = is_system
+            && self.extra.get("subtype").and_then(Value::as_str) == Some("model_fallback");
+        let is_refusal_fallback = is_system
+            && self.extra.get("subtype").and_then(Value::as_str) == Some("model_refusal_fallback");
         // Compact-boundary system line: claude flattens the system envelope
         // (`subtype`/`content`/`level`/`compactMetadata` are top-level
         // siblings, no inner `message`). Only THIS system subtype gets the
@@ -406,12 +442,10 @@ impl Serialize for JsonlMessage {
             }
         } else if is_assistant {
             // (e2) assistant normal head: message, requestId?, type, uuid,
-            //      timestamp, effort?. `effort` (2.1.212) is the last field of
-            //      the in-memory assistant message object `d` (after
-            //      `advisorModel`), spread into the transcript record before the
-            //      `userType`/`cwd`/`version`/`gitBranch` trailer — the level
-            //      string from `Y4n(effort).level`, emitted only when present
-            //      (claude's `...effort!==void 0&&{effort}` guard).
+            //      timestamp, effort?, supersedesUuids?. `effort` (2.1.212)
+            //      is carried before the common trailer. A server-stitch row
+            //      adds `supersedesUuids` to the producer row before
+            //      `insertMessageChain` appends the common trailer.
             map.serialize_entry("message", &self.message)?;
             if let Some(v) = self.extra.get("requestId") {
                 map.serialize_entry("requestId", v)?;
@@ -421,6 +455,12 @@ impl Serialize for JsonlMessage {
             map.serialize_entry("timestamp", &self.timestamp)?;
             if let Some(v) = self.extra.get("effort") {
                 map.serialize_entry("effort", v)?;
+            }
+            if let Some(v) = self.extra.get("perTurnEffort") {
+                map.serialize_entry("perTurnEffort", v)?;
+            }
+            if let Some(v) = self.extra.get("supersedesUuids") {
+                map.serialize_entry("supersedesUuids", v)?;
             }
         } else if is_attachment {
             // (d2) attachment head: attachment, type, uuid, timestamp — the
@@ -434,6 +474,29 @@ impl Serialize for JsonlMessage {
                 map.serialize_entry("attachment", v)?;
             }
             map.serialize_entry("type", &self.message_type)?;
+            map.serialize_entry("uuid", &self.uuid)?;
+            map.serialize_entry("timestamp", &self.timestamp)?;
+            for key in ["rendered", "renderedRole"] {
+                if let Some(value) = self.extra.get(key) {
+                    map.serialize_entry(key, value)?;
+                }
+            }
+        } else if is_refusal_fallback {
+            map.serialize_entry("type", &self.message_type)?;
+            for key in REFUSAL_FALLBACK_HEAD {
+                if let Some(value) = self.extra.get(*key) {
+                    map.serialize_entry(*key, value)?;
+                }
+            }
+            map.serialize_entry("timestamp", &self.timestamp)?;
+            map.serialize_entry("uuid", &self.uuid)?;
+        } else if is_model_fallback {
+            map.serialize_entry("type", &self.message_type)?;
+            for key in MODEL_FALLBACK_HEAD {
+                if let Some(value) = self.extra.get(*key) {
+                    map.serialize_entry(*key, value)?;
+                }
+            }
             map.serialize_entry("uuid", &self.uuid)?;
             map.serialize_entry("timestamp", &self.timestamp)?;
         } else if is_scheduled_fire {
@@ -534,6 +597,9 @@ impl Serialize for JsonlMessage {
         //     `extra` iteration order, so round-trips of those survive. Keys a
         //     per-kind head already emitted are skipped ONLY for that kind.
         for (k, v) in &self.extra {
+            if k == crate::jsonl::exact_json::PRIVATE_UTF16_KEY {
+                continue;
+            }
             if RECOGNIZED_EXTRA.contains(&k.as_str()) {
                 continue;
             }
@@ -543,14 +609,26 @@ impl Serialize for JsonlMessage {
             if is_scheduled_fire && SCHEDULED_FIRE_HEAD.contains(&k.as_str()) {
                 continue;
             }
+            if is_model_fallback && MODEL_FALLBACK_HEAD.contains(&k.as_str()) {
+                continue;
+            }
+            if is_refusal_fallback && REFUSAL_FALLBACK_HEAD.contains(&k.as_str()) {
+                continue;
+            }
             if is_compact_boundary && BOUNDARY_HEAD_EXTRA.contains(&k.as_str()) {
                 continue;
             }
-            if is_attachment && k == "attachment" {
+            if is_attachment && ["attachment", "rendered", "renderedRole"].contains(&k.as_str()) {
                 continue;
             }
             // Already emitted by the tool-result head above.
             if TOOL_RESULT_HEAD_EXTRA.contains(&k.as_str()) {
+                continue;
+            }
+            // `supersedesUuids` is a normal-assistant head field only. A
+            // foreign row of another kind must still round-trip it as an
+            // unrecognized sibling.
+            if is_assistant && !is_api_error && k == "supersedesUuids" {
                 continue;
             }
             map.serialize_entry(k, v)?;
@@ -563,6 +641,22 @@ impl Serialize for JsonlMessage {
 #[cfg(test)]
 mod attachment_envelope_tests {
     use super::JsonlMessage;
+
+    #[test]
+    fn captured_queued_rendering_precedes_trailer_in_both_native_rows() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/headless-fixtures/native-2.1.293-queued-command-jsonl.json"
+        )).unwrap();
+        let mut count = 0;
+        for entry in fixture["rows"].as_array().unwrap() {
+            let raw = entry["rawLine"].as_str().unwrap();
+            if !raw.contains("\"type\":\"attachment\"") { continue; }
+            let row: JsonlMessage = serde_json::from_str(raw).unwrap();
+            assert_eq!(serde_json::to_string(&row).unwrap(),raw);
+            count += 1;
+        }
+        assert_eq!(count,2);
+    }
 
     /// Real 2.1.220 `attachment` lines put the `attachment` payload BEFORE the
     /// `type` discriminator — outer key order
@@ -579,6 +673,7 @@ mod attachment_envelope_tests {
             serde_json::json!({"type": "hook_success", "hookName": "Stop"}),
         );
         let msg = JsonlMessage {
+            json_projection: None,
             message_type: "attachment".to_string(),
             uuid: "84c51927-5550-4d0c-bdff-16c5699c7d4c".to_string(),
             parent_uuid: Some("9fccb389-ff4d-4502-b0c4-e9ecb4459013".to_string()),
@@ -609,6 +704,7 @@ mod attachment_envelope_tests {
         let mut extra = serde_json::Map::new();
         extra.insert("attachment".to_string(), serde_json::json!({"type": "x"}));
         let msg = JsonlMessage {
+            json_projection: None,
             message_type: "attachment".to_string(),
             uuid: "u".to_string(),
             parent_uuid: None,
@@ -649,6 +745,7 @@ mod attachment_envelope_tests {
             serde_json::json!("daemon-worker"),
         );
         let msg = JsonlMessage {
+            json_projection: None,
             message_type: "user".to_string(),
             uuid: "u".to_string(),
             parent_uuid: None,
@@ -682,6 +779,7 @@ mod attachment_envelope_tests {
     #[test]
     fn absent_session_kind_emits_no_key() {
         let msg = JsonlMessage {
+            json_projection: None,
             message_type: "user".to_string(),
             uuid: "u".to_string(),
             parent_uuid: None,
@@ -719,6 +817,7 @@ mod tool_result_head_tests {
 
     fn base() -> JsonlMessage {
         JsonlMessage {
+            json_projection: None,
             parent_uuid: Some("p".into()),
             is_sidechain: false,
             message_type: "user".into(),
@@ -833,6 +932,42 @@ mod tool_result_head_tests {
         let s = serde_json::to_string(&base()).unwrap();
         assert!(!s.contains("toolDenialKind"));
         assert!(s.contains(r#""timestamp":"T","userType":"external""#));
+    }
+}
+
+#[cfg(test)]
+mod supersedes_head_tests {
+    use super::JsonlMessage;
+    use serde_json::{json, Map};
+
+    #[test]
+    fn server_stitch_supersedes_ids_precede_the_common_trailer() {
+        let mut extra = Map::new();
+        extra.insert("supersedesUuids".into(), json!(["old-row-1", "old-row-2"]));
+        let message = JsonlMessage {
+            json_projection: None,
+            message_type: "assistant".into(),
+            uuid: "new-row".into(),
+            parent_uuid: Some("parent".into()),
+            session_id: "session".into(),
+            timestamp: "2026-10-03T12:00:00.000Z".into(),
+            cwd: "/workspace".into(),
+            version: "0.12.0".into(),
+            message: json!({"id":"provider-message","role":"assistant","content":[]}),
+            is_sidechain: false,
+            user_type: Some("external".into()),
+            git_branch: None,
+            entrypoint: Some("cli".into()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&message).unwrap(),
+            r#"{"parentUuid":"parent","isSidechain":false,"message":{"id":"provider-message","role":"assistant","content":[]},"type":"assistant","uuid":"new-row","timestamp":"2026-10-03T12:00:00.000Z","supersedesUuids":["old-row-1","old-row-2"],"userType":"external","entrypoint":"cli","cwd":"/workspace","sessionId":"session","version":"0.12.0"}"#
+        );
     }
 }
 

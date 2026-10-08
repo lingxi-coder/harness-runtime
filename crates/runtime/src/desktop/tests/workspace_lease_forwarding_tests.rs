@@ -42,7 +42,7 @@ impl ToolInvoker for RecordingInvoker {
         workspace_lease_token: Option<u64>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         *self.seen.lock().unwrap() = Some(workspace_lease_token);
-        Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+        Ok(lingxi_core::host::tool_invoker::ToolInvocationResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             turn_end: None,
             is_error: false,
             data: serde_json::json!({"awaitingLeaderApproval": true}),

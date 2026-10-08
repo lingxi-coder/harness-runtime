@@ -246,7 +246,7 @@ where
             .and_then(|automation| automation.runs.into_iter().find(|run| run.id == request.run_id));
         let same_claim = persisted.as_ref().is_some_and(|run| run.claim_generation == Some(request.claim_generation));
         let queued = matches!(disposition, cron::AutomationFinishDisposition::Queued)
-            && persisted.as_ref().map_or(true, |run| run.claim_generation == Some(request.claim_generation) && run.status == cron::AutomationRunStatus::Queued);
+            && persisted.as_ref().is_none_or(|run| run.claim_generation == Some(request.claim_generation) && run.status == cron::AutomationRunStatus::Queued);
         // Binding may atomically cancel this exact claim before execution (for
         // example, pause or expiry). Completion then correctly returns false
         // because it must not overwrite that terminal record. Still surface
@@ -960,7 +960,7 @@ impl MobileCronStoreHandle {
             .as_millis() as u64;
         let mut changed = false;
         for task in &mut document.tasks {
-            let needs_defaults = task.automation.as_ref().map_or(true, |a| {
+            let needs_defaults = task.automation.as_ref().is_none_or(|a| {
                 a.model.is_empty()
                     && a.status_reason.as_deref()
                         == Some("Choose a model to enable this migrated task")
@@ -1323,9 +1323,9 @@ impl MobileCronStoreHandle {
 }
 
 pub(super) fn cron_task_active(task: &cron::CronTask) -> bool {
-    task.automation.as_ref().map_or(true, |automation| {
-        automation.status == cron::AutomationStatus::Active
-    })
+    task.automation
+        .as_ref()
+        .is_none_or(|automation| automation.status == cron::AutomationStatus::Active)
 }
 
 pub(super) fn decode_cron_automation(

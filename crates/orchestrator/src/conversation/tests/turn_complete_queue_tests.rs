@@ -100,7 +100,7 @@ async fn settle_main_turn(
     is_aborted: bool,
 ) {
     orchestrator.fire_mod_turn_start("question", turn_id).await;
-    let response = ConversationMessage::Assistant {
+    let response = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: answer.to_owned(), citations: None,

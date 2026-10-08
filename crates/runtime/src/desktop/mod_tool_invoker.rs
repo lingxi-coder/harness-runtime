@@ -9,13 +9,13 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hooks::HookRegistry;
 use hooks::mods::ModError;
+use hooks::HookRegistry;
 use lingxi_core::host::tool_invoker::{
-    SubagentInvocationContext, ToolInvocationResult, ToolInvoker, ToolInvokerError,
-    tool_call_ref_index,
+    tool_call_ref_index, SubagentInvocationContext, ToolInvocationResult, ToolInvoker,
+    ToolInvokerError,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
 pub(super) struct ModSubagentToolInvoker {
@@ -33,6 +33,87 @@ fn model_text(value: &Value) -> String {
     value
         .as_str()
         .map_or_else(|| value.to_string(), str::to_owned)
+}
+
+fn completed_text_projection(
+    result: &ToolInvocationResult,
+) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ModError> {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    let projection = if let Some(text) = &result.model_content {
+        let projection = result
+            .model_content_projection
+            .clone()
+            .unwrap_or_else(|| Utf16JsonProjection::plain(json!(text)));
+        if projection.value != json!(text) {
+            return Err(ModError::Protocol(
+                "Tool text projection does not match its display text".into(),
+            ));
+        }
+        projection
+    } else {
+        let projection = result
+            .data_projection
+            .clone()
+            .unwrap_or_else(|| Utf16JsonProjection::plain(result.data.clone()));
+        if projection.value != result.data {
+            return Err(ModError::Protocol(
+                "Tool result projection does not match its display data".into(),
+            ));
+        }
+        if projection.value.is_string() {
+            projection
+        } else {
+            Utf16JsonProjection::plain(json!(projection
+                .to_json_string()
+                .map_err(|error| ModError::Protocol(error.to_string()))?))
+        }
+    };
+    projection
+        .validate()
+        .map_err(|error| ModError::Protocol(error.to_string()))?;
+    Ok(projection)
+}
+
+fn projected_results_equal(
+    core: &ToolInvocationResult,
+    answer: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> bool {
+    let Ok(answer) = answer.subprojection("/result") else {
+        return false;
+    };
+    let data = &core.data;
+    let core = core.data_projection.clone().unwrap_or_else(|| {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(core.data.clone())
+    });
+    if &core.value != data {
+        return false;
+    }
+    match (core.to_json_string(), answer.to_json_string()) {
+        (Ok(core), Ok(answer)) => core == answer,
+        _ => false,
+    }
+}
+
+fn mapped_result_projection(
+    inner: &dyn ToolInvoker,
+    name: &str,
+    result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> (String, lingxi_core::types::utf16_json::Utf16JsonProjection) {
+    let text = inner
+        .map_result_text(name, &result.value)
+        .unwrap_or_else(|| {
+            result.value.as_str().map(str::to_owned).unwrap_or_else(|| {
+                result
+                    .to_json_string()
+                    .unwrap_or_else(|_| model_text(&result.value))
+            })
+        });
+    let projection = if result.value.as_str() == Some(text.as_str()) {
+        result.clone()
+    } else {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!(text))
+    };
+    (text, projection)
 }
 
 fn model_context(
@@ -226,37 +307,40 @@ impl ToolInvoker for ModSubagentToolInvoker {
                                 return Err(ModError::Hook(message));
                             }
                         };
-                        let text = result
-                            .model_content
-                            .clone()
-                            .unwrap_or_else(|| model_text(&result.data));
+                        let text_projection = completed_text_projection(&result)?;
+                        let text = text_projection.value.as_str().expect("text projection");
                         let mut completed = completed.lock().await;
                         // Native XIe `keep` assigns 1-based run references;
                         // `of(ref)` later indexes `entries[ref - 1]`.
                         let run_ref = completed.len().saturating_add(1);
                         let context = result.context.clone();
-                        let mut answer = hooks::mods::ModUtf16ValueProjection::plain(json!({
-                            "result": result.data,
-                            "text": text,
-                            "isError": result.is_error,
-                            "ref": run_ref,
-                            "context": context.value,
-                        }));
-                        answer
-                            .strings
-                            .extend(context.strings.into_iter().map(|sidecar| {
-                                hooks::mods::ModUtf16StringSidecar {
-                                    pointer: format!("/context{}", sidecar.pointer),
-                                    code_units: sidecar.code_units,
-                                }
+                        let mut exact_answer =
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({
+                                "result": result.data,
+                                "text": text,
+                                "isError": result.is_error,
+                                "ref": run_ref,
+                                "context": context.value,
                             }));
-                        answer.keys.extend(context.keys.into_iter().map(|sidecar| {
-                            hooks::mods::ModUtf16KeySidecar {
-                                pointer: format!("/context{}", sidecar.pointer),
-                                placeholder: sidecar.placeholder,
-                                code_units: sidecar.code_units,
+                        exact_answer
+                            .set_field("context", context)
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+                        if let Some(data) = result.data_projection.clone() {
+                            if data.value != result.data {
+                                return Err(hooks::mods::ModError::Protocol(
+                                    "Tool result projection does not match its display data".into(),
+                                ));
                             }
-                        }));
+                            exact_answer.set_field("result", data).map_err(|error| {
+                                hooks::mods::ModError::Protocol(error.to_string())
+                            })?;
+                        }
+                        exact_answer
+                            .set_field("text", text_projection)
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+                        let answer = hooks::mods::ModUtf16ValueProjection::from_core_projection(
+                            exact_answer,
+                        )?;
                         completed.push(result);
                         Ok(answer)
                     }
@@ -328,13 +412,16 @@ impl ToolInvoker for ModSubagentToolInvoker {
         if let Some(result) = answer.value.get("result") {
             let reuses_core = selected_core
                 .as_ref()
-                .is_some_and(|core| core.data == *result);
+                .is_some_and(|core| projected_results_equal(core, &answer));
             if !reuses_core {
                 if let Err(detail) = self.inner.validate_output(name, result) {
                     let message = format!(
                         "tool.call step resolved {name} with a result that does not match its output shape: {detail}"
                     );
                     return Ok(ToolInvocationResult {
+                        mcp_meta_projection: None,
+                        model_content_projection: None,
+                        data_projection: None,
                         is_error: true,
                         data: Value::String(format!("Error: {message}")),
                         model_content: Some(format!("<tool_use_error>{message}</tool_use_error>")),
@@ -354,14 +441,19 @@ impl ToolInvoker for ModSubagentToolInvoker {
             let changed_result = answer
                 .value
                 .get("result")
-                .is_some_and(|value| value != &core.data);
+                .is_some_and(|_| !projected_results_equal(&core, &answer));
             if changed_result {
                 core.data = answer.value.get("result").cloned().unwrap_or(core.data);
-                core.model_content = Some(
-                    self.inner
-                        .map_result_text(name, &core.data)
-                        .unwrap_or_else(|| model_text(&core.data)),
+                core.data_projection = answer.subprojection("/result").ok();
+                let (text, projection) = mapped_result_projection(
+                    self.inner.as_ref(),
+                    name,
+                    core.data_projection
+                        .as_ref()
+                        .expect("present result subtree"),
                 );
+                core.model_content = Some(text);
+                core.model_content_projection = Some(projection);
                 core.is_error = self
                     .inner
                     .map_result_is_error(name, &core.data)
@@ -376,7 +468,15 @@ impl ToolInvoker for ModSubagentToolInvoker {
             return Ok(core);
         }
         if let Some(result) = answer.value.get("result") {
+            let data_projection = answer
+                .subprojection("/result")
+                .map_err(|error| ToolInvokerError::Validation(error.to_string()))?;
+            let (text, text_projection) =
+                mapped_result_projection(self.inner.as_ref(), name, &data_projection);
             return Ok(ToolInvocationResult {
+                mcp_meta_projection: None,
+                model_content_projection: Some(text_projection),
+                data_projection: Some(data_projection),
                 is_error: self
                     .inner
                     .map_result_is_error(name, result)
@@ -388,11 +488,7 @@ impl ToolInvoker for ModSubagentToolInvoker {
                             .unwrap_or(false)
                     }),
                 data: result.clone(),
-                model_content: Some(
-                    self.inner
-                        .map_result_text(name, result)
-                        .unwrap_or_else(|| model_text(result)),
-                ),
+                model_content: Some(text),
                 turn_end: None,
                 new_messages: Vec::new(),
                 context_modifier: None,
@@ -405,6 +501,9 @@ impl ToolInvoker for ModSubagentToolInvoker {
         // synthetic result. The internal runs' opaque metadata belongs only
         // to a valid selected row and must not leak from the last attempted run.
         Ok(ToolInvocationResult {
+            mcp_meta_projection: None,
+            model_content_projection: answer.subprojection("/text").ok(),
+            data_projection: None,
             is_error: answer
                 .value
                 .get("isError")
@@ -437,6 +536,49 @@ mod tests {
     use lingxi_core::types::{AgentId, ConversationMessage, MessageId};
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn mod_replacement_identity_includes_exact_units_and_rejects_stale_carriers() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
+        let data = Projection::parse(r#"{"value":"\ud800"}"#).unwrap();
+        let mut core = ToolInvocationResult {
+            data: data.value.clone(),
+            data_projection: Some(data.clone()),
+            model_content: None,
+            model_content_projection: None,
+            mcp_meta: None,
+            mcp_meta_projection: None,
+            is_error: false,
+            new_messages: vec![],
+            context_modifier: None,
+            turn_end: None,
+            context: Projection::plain(json!([])),
+            context_state: None,
+        };
+        assert!(projected_results_equal(
+            &core,
+            &Projection::parse(r#"{"result":{"value":"\ud800"}}"#).unwrap()
+        ));
+        assert!(!projected_results_equal(
+            &core,
+            &Projection::parse(r#"{"result":{"value":"\ud801"}}"#).unwrap()
+        ));
+        let text = completed_text_projection(&core).unwrap();
+        assert_eq!(text.value, json!(r#"{"value":"\ud800"}"#));
+        core.data = json!({"changed":true});
+        assert!(!projected_results_equal(
+            &core,
+            &Projection::parse(r#"{"result":{"value":"\ud800"}}"#).unwrap()
+        ));
+        assert!(completed_text_projection(&core).is_err());
+        let source = Projection::parse(r#""\udfff""#).unwrap();
+        core.data = source.value.clone();
+        core.data_projection = Some(source);
+        assert_eq!(
+            completed_text_projection(&core).unwrap().string_units(""),
+            Some(vec![0xdfff])
+        );
+    }
 
     struct Session {
         cwd: PathBuf,
@@ -560,6 +702,9 @@ mod tests {
                 ))
             });
             Ok(ToolInvocationResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 is_error: false,
                 data: input,
                 model_content: Some("core text".into()),

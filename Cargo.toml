@@ -35,6 +35,7 @@ members = [
     "crates/memory",
     "crates/migrations",
     "crates/jsonrpc",
+    "crates/json-projection",
     "crates/mcp",
     "crates/llm-runtime",
     "crates/http-client",
@@ -150,7 +151,7 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi-coder/harness-runtime"
 
 [workspace.dependencies]
-lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client", rev = "67370eb9d10bf87c19fea424cff91d67d86cfa2c", default-features = false }
+lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "62dacf595defd02dd9611d2c5380ff39bfc5ee8e", default-features = false }
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
 mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9" }
 mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9" }
@@ -352,7 +353,7 @@ split-debuginfo = "unpacked"
 
 # Develop the shared SDK in its own Git submodule. Downstream workspaces keep
 # using the immutable Git dependency above because root patches do not propagate.
-[patch."https://github.com/lingxi-coder/llm-client"]
+[patch."https://github.com/lingxi-coder/llm-client.git"]
 lingxi-llm-client = { path = "../llm-client" }
 
 [profile.release]

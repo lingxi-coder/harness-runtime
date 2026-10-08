@@ -7,17 +7,17 @@
 
 use super::client_source::PreparedClientModules;
 use super::{
-    ModError, ModHost, ModSessionContext, ModUiInvalidationUpdate, ModUiRenderPace,
-    ModUtf16DispatchScope, core_projection_from_mod,
+    core_projection_from_mod, ModError, ModHost, ModSessionContext, ModUiInvalidationUpdate,
+    ModUiRenderPace, ModUtf16DispatchScope,
 };
 use crate::mod_ui_fault::{
-    ClientUiComponent, ClientUiFaultHost, ClientUiFaultRegistry, ClientUiIdentity,
-    ClientUiRenderGeneration, ClientUiRenderSite, UiClientFaultRequest, UiFaultHookEvent,
-    dispatch_client_ui_fault,
+    dispatch_client_ui_fault, ClientUiComponent, ClientUiFaultHost, ClientUiFaultRegistry,
+    ClientUiIdentity, ClientUiRenderGeneration, ClientUiRenderSite, UiClientFaultRequest,
+    UiFaultHookEvent,
 };
 use lingxi_core::host::orchestrator::ModUiControlOutcome;
 use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonString};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -3407,10 +3407,9 @@ impl ModHost {
                 }
             }
             "post" => {
-                let text = event
-                    .get("json")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| ModError::Protocol("Client post event has invalid JSON".into()))?;
+                let text = event.get("json").and_then(Value::as_str).ok_or_else(|| {
+                    ModError::Protocol("Client post event has invalid JSON".into())
+                })?;
                 let data = Utf16JsonProjection::parse(text)
                     .map_err(|error| ModError::Protocol(error.to_string()))?;
                 let mut request = Utf16JsonProjection::plain(json!({
@@ -3825,7 +3824,10 @@ mod tests {
         let mut wider_viewport_render = render();
         wider_viewport_render["viewport"]["columns"] = json!(120);
         let wider_viewport = host
-            .dispatch_client_ui_control(Utf16JsonProjection::plain(wider_viewport_render), session.as_ref())
+            .dispatch_client_ui_control(
+                Utf16JsonProjection::plain(wider_viewport_render),
+                session.as_ref(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -4247,10 +4249,16 @@ mod tests {
         let data = normalized.subprojection("/data").unwrap();
         let key = data.value.as_object().unwrap().keys().next().unwrap();
         assert_eq!(data.key_units("", key), vec![0xd800]);
-        assert_eq!(data.string_units(&pointer_child("", key)), Some(vec![0xdfff]));
+        assert_eq!(
+            data.string_units(&pointer_child("", key)),
+            Some(vec![0xdfff])
+        );
         let identity = client_identity_from_control(&normalized).unwrap();
         assert_eq!(identity.key_units(), &[0xd800]);
-        assert!(normalized.to_json_string().unwrap().contains(r#""client":"\ud800""#));
+        assert!(normalized
+            .to_json_string()
+            .unwrap()
+            .contains(r#""client":"\ud800""#));
     }
 
     #[tokio::test]
@@ -4367,8 +4375,8 @@ mod tests {
             "clients":[{"plugin":"utf16","key":"�","module":"card.tsx"}],
         }));
         commit.strings.push(Utf16JsonString {
-            pointer:"/clients/0/key".into(),
-            code_units:vec![0xd800],
+            pointer: "/clients/0/key".into(),
+            code_units: vec![0xd800],
         });
         commit.validate().unwrap();
         let committed = host
@@ -4377,10 +4385,11 @@ mod tests {
             .unwrap();
         assert_eq!(committed.value["handled"], true);
 
-        let frame = wait_for_client_frame(&session_impl, &runtime_id, "UTF-16 ui.message", |frame| {
-            tree_contains_text(&frame["tree"], "exact-utf16")
-        })
-        .await;
+        let frame =
+            wait_for_client_frame(&session_impl, &runtime_id, "UTF-16 ui.message", |frame| {
+                tree_contains_text(&frame["tree"], "exact-utf16")
+            })
+            .await;
         assert!(tree_contains_text(&frame["tree"], "exact-utf16"));
     }
 
@@ -4481,8 +4490,8 @@ mod tests {
             .unwrap();
         assert_eq!(frame.value["frameSequence"], 3);
         assert_eq!(frame.value["renderRevision"], 4);
-        assert!(
-            host.frame_for_worker_result(
+        assert!(host
+            .frame_for_worker_result(
                 "runtime-1",
                 4,
                 &Utf16JsonProjection::plain(json!({
@@ -4492,10 +4501,9 @@ mod tests {
                     "frameSequence":0,
                 })),
             )
-            .is_none()
-        );
-        assert!(
-            host.frame_for_worker_result(
+            .is_none());
+        assert!(host
+            .frame_for_worker_result(
                 "runtime-1",
                 4,
                 &Utf16JsonProjection::plain(json!({
@@ -4504,8 +4512,7 @@ mod tests {
                     "hasKeyListener":false,
                 })),
             )
-            .is_none()
-        );
+            .is_none());
     }
 
     #[tokio::test]
@@ -4608,7 +4615,10 @@ mod tests {
         // entering the Client mount/fault lifecycle.
         let original_props = json!({"invalid":true,"preserve":"original"});
         let invalid = host
-            .dispatch_client_ui_control(Utf16JsonProjection::plain(render(original_props.clone())), session.as_ref())
+            .dispatch_client_ui_control(
+                Utf16JsonProjection::plain(render(original_props.clone())),
+                session.as_ref(),
+            )
             .await
             .unwrap();
         assert_eq!(invalid.response.value["tree"]["type"], "engine");
@@ -4622,12 +4632,19 @@ mod tests {
         assert_eq!(host.ui_render_generation(), 0);
 
         let initial_render = host
-            .dispatch_client_ui_control(Utf16JsonProjection::plain(render(json!({}))), session.as_ref())
+            .dispatch_client_ui_control(
+                Utf16JsonProjection::plain(render(json!({}))),
+                session.as_ref(),
+            )
             .await
             .unwrap();
         let initial_epoch = initial_render.client_runtime_epochs["review"];
         assert!(initial_epoch > 0);
-        assert!(initial_render.response.value.get("clientRuntimeEpochs").is_none());
+        assert!(initial_render
+            .response
+            .value
+            .get("clientRuntimeEpochs")
+            .is_none());
         let first_manifest_hash = initial_render.response.value["client_modules"]["review"]
             .as_str()
             .unwrap()
@@ -4649,7 +4666,10 @@ mod tests {
         .await
         .unwrap();
         let reloaded_render = host
-            .dispatch_client_ui_control(Utf16JsonProjection::plain(render(json!({}))), session.as_ref())
+            .dispatch_client_ui_control(
+                Utf16JsonProjection::plain(render(json!({}))),
+                session.as_ref(),
+            )
             .await
             .unwrap();
         let reloaded_epoch = reloaded_render.client_runtime_epochs["review"];
@@ -4662,7 +4682,10 @@ mod tests {
         // A normal redraw advances renderRevision but keeps the environment
         // epoch stable.
         let rendered = host
-            .dispatch_client_ui_control(Utf16JsonProjection::plain(render(json!({}))), session.as_ref())
+            .dispatch_client_ui_control(
+                Utf16JsonProjection::plain(render(json!({}))),
+                session.as_ref(),
+            )
             .await
             .unwrap();
         assert_eq!(rendered.client_runtime_epochs["review"], reloaded_epoch);
@@ -4672,11 +4695,9 @@ mod tests {
         assert_eq!(client["type"], "Client");
         assert_eq!(client["client"]["plugin"], "review");
         assert_eq!(client_module, "card.tsx");
-        assert!(
-            std::fs::read_to_string(&entry)
-                .unwrap()
-                .contains("module: './card.tsx'")
-        );
+        assert!(std::fs::read_to_string(&entry)
+            .unwrap()
+            .contains("module: './card.tsx'"));
         let manifest = host
             .dispatch_client_ui_control(
                 Utf16JsonProjection::plain(json!({"subtype":"ui_client_module","plugin":"review"})),
@@ -4734,7 +4755,8 @@ mod tests {
             })
             .await;
         assert!(
-            posted["frameSequence"].as_u64().unwrap() > mount.value["frameSequence"].as_u64().unwrap()
+            posted["frameSequence"].as_u64().unwrap()
+                > mount.value["frameSequence"].as_u64().unwrap()
         );
 
         let reset = host
@@ -4750,7 +4772,8 @@ mod tests {
             .await
             .unwrap();
         assert!(tree_contains_text(&reset.value["tree"], "initial"));
-        let held = tree_first_held(&reset.value["tree"]).expect("rendered Button has a held action");
+        let held =
+            tree_first_held(&reset.value["tree"]).expect("rendered Button has a held action");
         let run = host
             .dispatch_client_ui_operation(
                 Utf16JsonProjection::plain(json!({
@@ -4770,7 +4793,8 @@ mod tests {
             })
             .await;
         assert!(
-            pressed["frameSequence"].as_u64().unwrap() > reset.value["frameSequence"].as_u64().unwrap()
+            pressed["frameSequence"].as_u64().unwrap()
+                > reset.value["frameSequence"].as_u64().unwrap()
         );
 
         // A run failure reports through one authoritative Host ui.fault
@@ -4778,7 +4802,10 @@ mod tests {
         // that runtime cannot produce a success frame, and a fresh mount is
         // the recovery boundary.
         let failed_run_parent = host
-            .dispatch_client_ui_control(Utf16JsonProjection::plain(render(json!({"failRun":true}))), session.as_ref())
+            .dispatch_client_ui_control(
+                Utf16JsonProjection::plain(render(json!({"failRun":true}))),
+                session.as_ref(),
+            )
             .await
             .unwrap();
         let failed_run_revision = failed_run_parent.render_revision.unwrap();
@@ -4800,7 +4827,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let failed_run_runtime = failed_run_mount.value["runtimeId"].as_str().unwrap().to_owned();
+        let failed_run_runtime = failed_run_mount.value["runtimeId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let failed_run_commit = host
             .dispatch_client_ui_operation(
                 Utf16JsonProjection::plain(json!({
@@ -4869,7 +4899,10 @@ mod tests {
         assert!(stale_after_run_fault.value.get("tree").is_none());
 
         let recovered_parent = host
-            .dispatch_client_ui_control(Utf16JsonProjection::plain(render(json!({}))), session.as_ref())
+            .dispatch_client_ui_control(
+                Utf16JsonProjection::plain(render(json!({}))),
+                session.as_ref(),
+            )
             .await
             .unwrap();
         let recovered_revision = recovered_parent.render_revision.unwrap();
@@ -4893,7 +4926,10 @@ mod tests {
             .unwrap();
         let recovered_runtime = recovered_mount.value["runtimeId"].as_str().unwrap();
         assert_ne!(recovered_runtime, failed_run_runtime);
-        assert!(tree_contains_text(&recovered_mount.value["tree"], "initial"));
+        assert!(tree_contains_text(
+            &recovered_mount.value["tree"],
+            "initial"
+        ));
         let recovered_commit = host
             .dispatch_client_ui_operation(
                 Utf16JsonProjection::plain(json!({
@@ -4914,7 +4950,10 @@ mod tests {
         // fault snapshot immediately, even though this plugin has no
         // ui.fault listener to trigger an invalidation.
         let timer_parent = host
-            .dispatch_client_ui_control(Utf16JsonProjection::plain(render(json!({"timerFault":true}))), session.as_ref())
+            .dispatch_client_ui_control(
+                Utf16JsonProjection::plain(render(json!({"timerFault":true}))),
+                session.as_ref(),
+            )
             .await
             .unwrap();
         let timer_revision = timer_parent.render_revision.unwrap();
@@ -5030,7 +5069,10 @@ mod tests {
         // Mount-time render failure uses the same one-shot fault path and
         // removes the incomplete runtime mapping before returning its union.
         let failed_parent = host
-            .dispatch_client_ui_control(Utf16JsonProjection::plain(render(json!({"fail":true}))), session.as_ref())
+            .dispatch_client_ui_control(
+                Utf16JsonProjection::plain(render(json!({"fail":true}))),
+                session.as_ref(),
+            )
             .await
             .unwrap();
         let failed_revision = failed_parent.render_revision.unwrap();
@@ -5059,11 +5101,9 @@ mod tests {
         assert!(!lock(&session_impl.frames).iter().any(|(runtime, frame)| {
             runtime == &failed_mount_runtime && frame.get("fault").is_some()
         }));
-        assert!(
-            !lock(&host.client_ui.data)
-                .instances
-                .contains_key(&failed_mount_runtime)
-        );
+        assert!(!lock(&host.client_ui.data)
+            .instances
+            .contains_key(&failed_mount_runtime));
         let after_mount_fault = host.ui_render_generation();
         let stale_after_mount_fault = host
             .dispatch_client_ui_operation(
@@ -5127,12 +5167,8 @@ mod tests {
     #[test]
     fn stale_mount_cleanup_does_not_remove_a_newer_runtime_mapping() {
         let site = ClientUiRenderSite::new(ClientUiComponent::Pane, "pane-1").unwrap();
-        let identity = ClientUiIdentity::new(
-            "plugin",
-            "view.ts",
-            "card".encode_utf16().collect(),
-        )
-        .unwrap();
+        let identity =
+            ClientUiIdentity::new("plugin", "view.ts", "card".encode_utf16().collect()).unwrap();
         let key = ClientUiInstanceKey { site, identity };
         let mut data = ClientUiHostData::default();
         data.instance_by_identity
@@ -5152,22 +5188,15 @@ mod tests {
         state.install_loaded_plugin("plugin", "plugin@user", None);
         state.install_loaded_plugin("plugin", "plugin@project", None);
         let site = ClientUiRenderSite::new(ClientUiComponent::Pane, "pane-1").unwrap();
-        let identity = ClientUiIdentity::new(
-            "plugin",
-            "view.ts",
-            "card".encode_utf16().collect(),
-        )
-        .unwrap();
+        let identity =
+            ClientUiIdentity::new("plugin", "view.ts", "card".encode_utf16().collect()).unwrap();
         lock(&state.data).parents.insert(
             site.clone(),
             ParentRender {
                 revision: 1,
                 token: None,
                 committed_generation: None,
-                clients: HashMap::from([(
-                    identity,
-                    Utf16JsonProjection::plain(json!({})),
-                )]),
+                clients: HashMap::from([(identity, Utf16JsonProjection::plain(json!({})))]),
             },
         );
 
@@ -5224,30 +5253,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
 
-        assert!(
-            host.preflight_parent_press_href(
+        assert!(host
+            .preflight_parent_press_href(
                 "www.Example.com:443/a/../b",
                 &["http://www.example.com:443/b".into()],
                 cwd,
             )
             .await
-            .unwrap()
-        );
-        assert!(
-            !host
-                .preflight_parent_press_href(
-                    "https://example.com/a",
-                    &["https://example.com/b".into()],
-                    cwd,
-                )
-                .await
-                .unwrap()
-        );
-        assert!(
-            host.preflight_parent_press_href("/tmp/a.md", &["file:///tmp/a.md".into()], cwd,)
-                .await
-                .unwrap()
-        );
+            .unwrap());
+        assert!(!host
+            .preflight_parent_press_href(
+                "https://example.com/a",
+                &["https://example.com/b".into()],
+                cwd,
+            )
+            .await
+            .unwrap());
+        assert!(host
+            .preflight_parent_press_href("/tmp/a.md", &["file:///tmp/a.md".into()], cwd,)
+            .await
+            .unwrap());
     }
 
     #[test]

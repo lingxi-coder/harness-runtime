@@ -197,6 +197,7 @@ mod tests {
             task_type: task_type.into(),
             status: status.into(),
             description: description.into(),
+            agent_facts: None,
             ..Default::default()
         }
     }
@@ -257,6 +258,7 @@ mod tests {
             status: "running".into(),
             description: "build it".into(),
             command: Some("cargo build".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let agent = TaskRecord {
@@ -267,6 +269,7 @@ mod tests {
             agent_type: Some("general-purpose".into()),
             forked_skill_name: None,
             is_backgrounded: Some(true),
+            agent_facts: None,
             ..Default::default()
         };
         let monitor = TaskRecord {
@@ -275,6 +278,7 @@ mod tests {
             status: "pending".into(),
             description: "watch".into(),
             server: Some("srv".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let workflow = TaskRecord {
@@ -283,6 +287,7 @@ mod tests {
             status: "running".into(),
             description: "flow".into(),
             name: Some("my-wf".into()),
+            agent_facts: None,
             ..Default::default()
         };
         let out = build_background_tasks(&[bash, agent, monitor, workflow]);
@@ -314,6 +319,7 @@ mod tests {
             status: "running".into(),
             description: long.clone(),
             command: Some(long.clone()),
+            agent_facts: None,
             ..Default::default()
         };
         let out = build_background_tasks(&[r]);

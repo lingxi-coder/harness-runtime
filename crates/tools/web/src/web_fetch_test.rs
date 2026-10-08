@@ -8,6 +8,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mod_replacement_validates_web_fetch_output_shape() {
+        let valid = json!({
+            "bytes":12,"code":200,"codeText":"OK","result":"fetched text",
+            "durationMs":4,"url":"https://example.com/",
+            "artifactRead":{"slug":"artifact","seeded":false}
+        });
+        assert!(tool_api::output_schema::validate(&OUTPUT_SCHEMA, &valid).is_ok());
+        let mut invalid = valid;
+        invalid["artifactRead"]["seeded"] = json!(true);
+        assert!(tool_api::output_schema::validate(&OUTPUT_SCHEMA, &invalid).is_err());
+    }
+
+    #[test]
     fn accepts_https_url() {
         let u = validate_url("https://example.com/path").expect("https must be allowed");
         assert_eq!(u.scheme(), "https");
@@ -384,6 +397,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
             include_examples: false,
             model: Some("claude-opus-4-8".into()),
             model_profile: None,
+            ..Default::default()
         };
 
         // Gate OFF (default): no exception in either variant.
@@ -435,6 +449,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
                 include_examples: false,
                 model: Some("claude-opus-4-8".into()),
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert!(

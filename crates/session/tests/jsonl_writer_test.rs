@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn make_msg(uuid: &str, parent: Option<&str>, n: u8) -> JsonlMessage {
-    JsonlMessage {
+    JsonlMessage { json_projection: None,
         message_type: "user".into(),
         uuid: uuid.into(),
         parent_uuid: parent.map(str::to_string),

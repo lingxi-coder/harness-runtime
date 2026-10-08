@@ -28,6 +28,12 @@ pub const REPEATED_529_ERROR_MESSAGE: &str = "Repeated 529 Overloaded errors";
 /// change the format string without a corresponding spec amendment.
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
+    /// The current query exhausted its structured-output correction budget.
+    #[error("Failed to provide valid structured output after {max_retries} attempts{detail}", detail = structured_retry_detail(last_error.as_deref()))]
+    MaxStructuredOutputRetries {
+        max_retries: i64,
+        last_error: Option<String>,
+    },
     /// The configured `max_turns` budget was exhausted before the model
     /// emitted `stop_reason == "end_turn"`.
     #[error("Reached maximum number of turns ({max_turns})")]
@@ -140,6 +146,12 @@ pub enum OrchestratorError {
         /// The pre-composed user-facing copy.
         message: String,
     },
+}
+
+fn structured_retry_detail(last_error: Option<&str>) -> String {
+    last_error
+        .map(|error| format!(" — last StructuredOutput error: {error}"))
+        .unwrap_or_default()
 }
 
 /// Convert `LlmError` → `OrchestratorError`.

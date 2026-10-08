@@ -211,7 +211,7 @@ mod tests {
     fn assistant(
         blocks: Vec<lingxi_core::types::ContentBlock>,
     ) -> lingxi_core::types::ConversationMessage {
-        lingxi_core::types::ConversationMessage::Assistant {
+        lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: blocks,
             stop_reason: None,
@@ -219,11 +219,11 @@ mod tests {
     }
 
     fn text(s: &str) -> lingxi_core::types::ContentBlock {
-        lingxi_core::types::ContentBlock::Text { text: s.into() }
+        lingxi_core::types::ContentBlock::Text { text: s.into(), citations: None }
     }
 
     fn tool_search() -> lingxi_core::types::ContentBlock {
-        lingxi_core::types::ContentBlock::ToolUse {
+        lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
             id: lingxi_core::types::ToolUseId::new(),
             name: "ToolSearch".into(),
             input: serde_json::json!({}),

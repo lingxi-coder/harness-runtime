@@ -3,7 +3,8 @@ mod model_preference_tests {
     use super::*;
 
     async fn selected_model(handle: &MobileEngineHandle) -> String {
-        let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> = handle.inner().orchestrator.clone();
+        let orch: Arc<dyn lingxi_core::host::OrchestratorHandle> =
+            handle.inner().orchestrator.clone();
         let snapshot = orch.get_status_snapshot().await;
         lingxi_core::host::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref())
     }
@@ -321,6 +322,20 @@ mod model_preference_tests {
                 })
                 .await
                 .is_err());
+            let session_id = handle.inner().orchestrator.current_session_id().await;
+            assert!(handle
+                .submit(ClientCommand::NewSession {
+                    cwd: None,
+                    model: Some(disabled.into()),
+                })
+                .await
+                .is_err());
+            assert_eq!(
+                handle.inner().orchestrator.current_session_id().await,
+                session_id,
+                "an unroutable new-session model must be rejected before clearing the session"
+            );
+            assert_ne!(selected_model(&handle).await, disabled);
             assert_eq!(model_preference::load(&home).as_deref(), Some(disabled));
             assert!(!drained(&listener)
                 .await

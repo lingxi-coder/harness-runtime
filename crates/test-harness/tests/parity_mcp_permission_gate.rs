@@ -223,7 +223,7 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
 
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![LlmContentBlock::ToolCall {
+            vec![LlmContentBlock::ToolCall { input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: "mcp__mock__a".into(),
                 input: serde_json::json!({ "x": 1 }),
@@ -233,7 +233,7 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "recovered".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -300,7 +300,7 @@ async fn allowed_fqn_tool_use_reaches_server_inner() {
 
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![LlmContentBlock::ToolCall {
+            vec![LlmContentBlock::ToolCall { input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: "mcp__mock__b".into(),
                 input: serde_json::json!({}),
@@ -310,7 +310,7 @@ async fn allowed_fqn_tool_use_reaches_server_inner() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),

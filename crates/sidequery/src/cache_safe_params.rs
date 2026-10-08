@@ -40,7 +40,7 @@ pub struct CacheSafeParams {
     pub tool_use_options: tool_api::ToolUseOptions,
     /// Tool schemas sent with the parent's prompt, in their original order.
     /// Compaction replays these even though it never executes tool calls.
-    pub tools: Vec<serde_json::Value>,
+    pub tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Effective output effort used by the parent's model request.
     pub effort: Option<serde_json::Value>,
     /// Conversation prefix forks must replay verbatim.

@@ -3,7 +3,7 @@ use lingxi_core::types::ContentBlock;
 
 fn text(s: &str) -> ContentBlock {
     ContentBlock::Text {
-        text: s.to_string(),
+        text: s.to_string(), citations: None,
     }
 }
 fn thinking(s: &str) -> ContentBlock {

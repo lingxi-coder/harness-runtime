@@ -166,7 +166,7 @@ fn render_mod_prompt_context(
 }
 
 fn prompt_tool_descriptions(
-    wire_tools: &[serde_json::Value],
+    wire_tools: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
 ) -> Vec<lingxi_core::host::PromptToolDescription> {
     let mut seen = std::collections::HashSet::new();
     wire_tools
@@ -909,7 +909,7 @@ impl ConversationOrchestrator {
     pub(crate) async fn record_prompt_snapshot_if_needed(
         &self,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
-        wire_tools: &[serde_json::Value],
+        wire_tools: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
     ) {
         if !self.prompt_snapshot_eligible()
             || self.prompt_snapshot_resume()
@@ -958,7 +958,7 @@ impl ConversationOrchestrator {
     /// retain their original descriptions and order forever.
     pub(crate) async fn record_inline_prompt_tools_after_success(
         &self,
-        wire_tools: &[serde_json::Value],
+        wire_tools: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
     ) {
         if !self.prompt_snapshot_eligible() || self.prompt_snapshot_resume() {
             return;
@@ -2185,6 +2185,9 @@ impl ConversationOrchestrator {
             crate::prompt::MemoryFile,
         >,
     ) -> Result<Option<ConversationMessage>, String> {
+        if self.config.bare {
+            return Ok(None);
+        }
         // `instructions` value = the assembled memory block (preamble + `Contents
         // of …:` blocks). Empty when no LINGXI.md files are loaded.
         //

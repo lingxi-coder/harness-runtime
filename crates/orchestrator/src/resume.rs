@@ -62,6 +62,48 @@ pub enum ResumeError {
 mod mod_session_turn_resume_tests {
     use super::*;
 
+    #[test]
+    fn captured_queued_human_attachment_cold_resume_restores_system_api_input() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../scripts/tests/headless-fixtures/native-2.1.293-queued-command-jsonl.json"
+        ))
+        .unwrap();
+        let mut count = 0;
+        for entry in fixture["rows"].as_array().unwrap() {
+            let raw = entry["rawLine"].as_str().unwrap();
+            if !raw.contains("\"type\":\"attachment\"") {
+                continue;
+            }
+            let loaded = session::jsonl::reader::route_lines(raw);
+            let row = &loaded.messages_in_order[0];
+            let source = row.extra["attachment"]["source_uuid"].as_str().unwrap();
+            let message =
+                hook_attachment_message_for_api(row, Uuid::parse_str(&row.uuid).unwrap()).unwrap();
+            assert_eq!(message.id().as_uuid().to_string(), source);
+            let ConversationMessage::User {
+                content,
+                api_message_override: Some(api),
+                ..
+            } = &message
+            else {
+                panic!("queued attachment API projection");
+            };
+            assert_eq!(*content, api.content);
+            let expected = row.extra["rendered"][0]["content"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("<system-reminder>\n")
+                .unwrap()
+                .strip_suffix("\n</system-reminder>")
+                .unwrap();
+            assert_eq!(message.text_content(), expected);
+            let model = llm_runtime::convert::to_llm_messages(vec![message]).unwrap();
+            assert_eq!(model[0].role, "system");
+            count += 1;
+        }
+        assert_eq!(count, 2);
+    }
+
     fn hook_attachment_row(session: Uuid, uuid: Uuid, attachment: Value) -> JsonlMessage {
         serde_json::from_value(serde_json::json!({
             "type":"attachment",
@@ -183,20 +225,17 @@ mod mod_session_turn_resume_tests {
             )
             .await
             .unwrap();
-        assert!(
-            prepared
-                .snapshot
-                .iter()
-                .all(|message| !message.text_content().contains("RESTORED SECRET"))
-        );
-        assert!(
-            orch.session
-                .lock()
-                .await
-                .history
-                .iter()
-                .any(|message| message.text_content().contains("RESTORED SECRET"))
-        );
+        assert!(prepared
+            .snapshot
+            .iter()
+            .all(|message| !message.text_content().contains("RESTORED SECRET")));
+        assert!(orch
+            .session
+            .lock()
+            .await
+            .history
+            .iter()
+            .any(|message| message.text_content().contains("RESTORED SECRET")));
     }
 
     fn user_row(session: &str, content: Value, flags: &[(&str, bool)]) -> JsonlMessage {
@@ -525,6 +564,7 @@ pub fn context_rendering_hint_from_messages(
 /// An in-progress run of consecutive per-block "assistant" JSONL rows that
 /// share one originating turn (see [`flush_pending_assistant`]).
 struct PendingAssistant {
+    per_turn_effort: Option<String>,
     /// Grouping key: the inner `message.id` shared by every row of the
     /// turn (or, for legacy/malformed rows with no inner id, that row's own
     /// top-level `uuid` — which degrades to "one row, one group", matching
@@ -565,6 +605,7 @@ fn flush_pending_assistant(state: &mut SessionState, pending: Option<PendingAssi
             state.model_context_excluded_messages.insert(message_id);
         }
         state.history.push(ConversationMessage::Assistant {
+            per_turn_effort: pending.per_turn_effort,
             id: message_id,
             content: pending.content,
             stop_reason: pending.stop_reason,
@@ -604,7 +645,10 @@ fn build_state_from_jsonl(
                     tracing::warn!(uuid = %m.uuid, "skipping invalid native Peer handback row");
                     continue;
                 }
-                restore_exact_history_strings(m, &mut content_blocks);
+                if let Err(error) = restore_exact_history_strings(m, &mut content_blocks) {
+                    tracing::warn!(uuid = %m.uuid, %error, "skipping invalid exact history row");
+                    continue;
+                }
                 // Restore the `isMeta` outer-envelope flag (claude-code persists
                 // it as a top-level field; we read it back from `extra`) so a
                 // resumed Stop-hook-feedback message stays meta/hidden.
@@ -662,6 +706,7 @@ fn build_state_from_jsonl(
                         .insert(MessageId::from_uuid(msg_uuid));
                 }
                 state.history.push(ConversationMessage::User {
+                    api_message_override: None,
                     id: MessageId::from_uuid(msg_uuid),
                     content: content_blocks,
                     is_meta,
@@ -670,9 +715,35 @@ fn build_state_from_jsonl(
                 });
                 last_uuid = Some(msg_uuid);
             }
+            "system"
+                if m.extra.get("subtype").and_then(serde_json::Value::as_str)
+                    == Some("api_system") =>
+            {
+                flush_pending_assistant(&mut state, pending_assistant.take());
+                let mut content = extract_content_blocks(&m.message, true);
+                if restore_exact_history_strings(m, &mut content).is_err() {
+                    continue;
+                }
+                let output_config = m
+                    .extra
+                    .get("outputConfig")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok());
+                state.history.push(ConversationMessage::api_system(
+                    MessageId::from_uuid(msg_uuid),
+                    lingxi_core::types::ApiSystemMessage {
+                        content,
+                        output_config,
+                    },
+                ));
+                last_uuid = Some(msg_uuid);
+            }
             "assistant" => {
                 let mut content_blocks = extract_content_blocks(&m.message, false);
-                restore_exact_history_strings(m, &mut content_blocks);
+                if let Err(error) = restore_exact_history_strings(m, &mut content_blocks) {
+                    tracing::warn!(uuid = %m.uuid, %error, "skipping invalid exact history row");
+                    continue;
+                }
                 // Recover the session's active model: each assistant line records
                 // the model that produced it, so the LAST one is the model the
                 // session was on at save time. Restoring it (over the
@@ -720,6 +791,16 @@ fn build_state_from_jsonl(
                 match &mut pending_assistant {
                     Some(pending) if pending.inner_key == inner_key => {
                         pending.content.extend(content_blocks);
+                        if m.extra.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
+                            if let Some(effort) = m
+                                .extra
+                                .get("perTurnEffort")
+                                .or_else(|| m.extra.get("effort"))
+                                .and_then(Value::as_str)
+                            {
+                                pending.per_turn_effort = Some(effort.to_owned());
+                            }
+                        }
                         if let Some(reason) = m.message.get("stop_reason").and_then(Value::as_str) {
                             pending.stop_reason = Some(reason.to_string());
                         }
@@ -733,6 +814,20 @@ fn build_state_from_jsonl(
                         flush_pending_assistant(&mut state, pending_assistant.take());
                         let message_id = Uuid::parse_str(&inner_key).unwrap_or(msg_uuid);
                         pending_assistant = Some(PendingAssistant {
+                            per_turn_effort: if m
+                                .extra
+                                .get("isApiErrorMessage")
+                                .and_then(Value::as_bool)
+                                == Some(true)
+                            {
+                                None
+                            } else {
+                                m.extra
+                                    .get("perTurnEffort")
+                                    .or_else(|| m.extra.get("effort"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            },
                             hook_grouping: (
                                 m.extra
                                     .get("isVirtual")
@@ -801,6 +896,7 @@ fn build_state_from_jsonl(
                             metadata
                         });
                     state.history.push(ConversationMessage::System {
+                        api_system: None,
                         id: MessageId::from_uuid(msg_uuid),
                         content,
                         subtype: Some("compact_boundary".to_string()),
@@ -817,6 +913,7 @@ fn build_state_from_jsonl(
                     // companion `user_meta` row is NOT excluded — it is the
                     // line the model is meant to read.
                     state.history.push(ConversationMessage::System {
+                        api_system: None,
                         id: MessageId::from_uuid(msg_uuid),
                         content: m
                             .extra
@@ -844,6 +941,7 @@ fn build_state_from_jsonl(
                     {
                         metadata.notice_timestamp = Some(m.timestamp.clone());
                         state.history.push(ConversationMessage::System {
+                            api_system: None,
                             id: MessageId::from_uuid(msg_uuid),
                             content: m
                                 .extra
@@ -878,6 +976,7 @@ fn build_state_from_jsonl(
                         m.extra.get("content").and_then(serde_json::Value::as_str),
                     ) {
                         state.history.push(ConversationMessage::System {
+                            api_system: None,
                             id: MessageId::from_uuid(msg_uuid),
                             content: content.into(),
                             subtype: Some("model_fallback".into()),
@@ -1049,6 +1148,7 @@ fn hook_attachment_message_for_api(
     }
     let attachment = message.extra.get("attachment")?;
     match attachment.get("type").and_then(Value::as_str)? {
+        "queued_command" => queued_human_attachment_message_for_api(message, message_uuid),
         "file" | "compact_file_reference" => ConversationOrchestrator::file_attachment_projection(
             MessageId::from_uuid(message_uuid),
             attachment,
@@ -1118,6 +1218,55 @@ fn hook_attachment_message_for_api(
         }
         _ => None,
     }
+}
+
+fn queued_human_attachment_message_for_api(
+    message: &JsonlMessage,
+    message_uuid: Uuid,
+) -> Option<ConversationMessage> {
+    use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonString};
+    let attachment = message.extra.get("attachment")?;
+    if attachment.get("commandMode").and_then(Value::as_str) != Some("prompt")
+        || message.extra.get("renderedRole").and_then(Value::as_str) != Some("system")
+        || attachment.get("isMeta").and_then(Value::as_bool) == Some(true)
+        || attachment
+            .get("renderedByBatchHead")
+            .and_then(Value::as_bool)
+            == Some(true)
+        || message
+            .extra
+            .get("rendered")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    {
+        return None;
+    }
+    let mut projection = message.json_projection.clone().unwrap_or_else(|| {
+        Utf16JsonProjection::plain(
+            serde_json::to_value(message).expect("queued attachment envelope"),
+        )
+    });
+    if projection.value.get("attachment") != Some(attachment) {
+        return None;
+    }
+    if message.json_projection.is_none() {
+        projection.strings.extend(
+            session::jsonl::exact_json::message_utf16_overrides(message)
+                .into_iter()
+                .map(|(pointer, code_units)| Utf16JsonString {
+                    pointer,
+                    code_units,
+                }),
+        );
+    }
+    projection.validate().ok()?;
+    let prompt = projection.subprojection("/attachment/prompt").ok()?;
+    let id = attachment
+        .get("source_uuid")
+        .and_then(Value::as_str)
+        .and_then(MessageId::parse_prefixed)
+        .unwrap_or_else(|| MessageId::from_uuid(message_uuid));
+    ConversationOrchestrator::queued_human_attachment_projection(id, &prompt).ok()
 }
 
 /// Restore the provenance of model-visible hook attachments from their JSONL
@@ -1397,6 +1546,7 @@ pub async fn replay_deferred_tools_after_resume(
     }
 
     let tool_results_msg = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: tool_results,
         is_meta: false,
@@ -1911,24 +2061,71 @@ fn restore_main_handback_content(
     Ok(())
 }
 
-fn restore_exact_history_strings(message: &JsonlMessage, content: &mut [ContentBlock]) {
-    let overrides = session::jsonl::exact_json::message_utf16_overrides(message);
-    if overrides.is_empty() {
-        return;
-    }
+fn restore_exact_history_strings(
+    message: &JsonlMessage,
+    content: &mut [ContentBlock],
+) -> Result<(), lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonProjectionError};
     let raw = message.message.get("content");
     let paths: Vec<_> = match raw {
         Some(Value::String(_)) => vec!["/message/content".to_owned()],
         Some(Value::Array(blocks)) => blocks
             .iter()
             .enumerate()
-            .filter(|(_, block)| {
-                block["type"] != "text" || block.get("text").is_some_and(Value::is_string)
-            })
+            .filter(|(_, block)| valid_resume_content_block(block))
             .map(|(index, _)| format!("/message/content/{index}"))
             .collect(),
-        _ => return,
+        _ => return Ok(()),
     };
+    if let Some(projection) = &message.json_projection {
+        projection.validate()?;
+        if projection.value.pointer("/message/content") != raw {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "history source content association changed",
+            ));
+        }
+        for (block, path) in content.iter_mut().zip(&paths) {
+            if let ContentBlock::ToolUse {
+                input,
+                input_projection,
+                ..
+            } = block
+            {
+                let projected = projection.subprojection(&format!("{path}/input"))?;
+                *input = projected.value.clone();
+                *input_projection = Some(projected);
+            }
+            if let ContentBlock::ToolResult {
+                content: text,
+                content_blocks,
+                content_projection,
+                ..
+            } = block
+            {
+                let mut projected = projection.subprojection(&format!("{path}/content"))?;
+                if let Some(blocks) = projected.value.as_array() {
+                    *content_blocks = Some(blocks.clone());
+                    *text = projected.to_json_string()?;
+                } else if let Some(value) = projected.value.as_str() {
+                    *text = value.to_owned();
+                    *content_blocks = None;
+                } else {
+                    // Resume turns native object-valued results into JSON text.
+                    // Stringify the exact source before associating that string.
+                    *text = crate::tool_result_text::normalized_tool_result_json_text(
+                        projected.to_json_string()?,
+                    );
+                    *content_blocks = None;
+                    projected = Utf16JsonProjection::plain(Value::String(text.clone()));
+                }
+                *content_projection = Some(projected);
+            }
+        }
+    }
+    let overrides = session::jsonl::exact_json::message_utf16_overrides(message);
+    if overrides.is_empty() {
+        return Ok(());
+    }
     for (block, path) in content.iter_mut().zip(paths) {
         match block {
             ContentBlock::Text { text, citations } => {
@@ -1950,8 +2147,12 @@ fn restore_exact_history_strings(message: &JsonlMessage, content: &mut [ContentB
             ContentBlock::ToolResult {
                 content,
                 content_blocks,
+                content_projection,
                 ..
             } => {
+                if content_projection.is_some() {
+                    continue;
+                }
                 if let Some(units) = overrides.get(&format!("{path}/content")).filter(|units| {
                     String::from_utf16(units).is_err()
                         && String::from_utf16_lossy(units) == *content
@@ -1964,6 +2165,12 @@ fn restore_exact_history_strings(message: &JsonlMessage, content: &mut [ContentB
             _ => {}
         }
     }
+    Ok(())
+}
+
+fn valid_resume_content_block(block: &Value) -> bool {
+    block.get("type").and_then(Value::as_str) != Some("text")
+        || block.get("text").is_some_and(Value::is_string)
 }
 
 /// Best-effort extraction of `content` from a JSONL `message` payload.
@@ -1996,21 +2203,26 @@ fn extract_content_blocks(
         // otherwise valid siblings (including tool calls and tool results).
         let content = content
             .iter()
-            .filter(|block| {
-                block.get("type").and_then(Value::as_str) != Some("text")
-                    || block.get("text").is_some_and(Value::is_string)
-            })
+            .filter(|block| valid_resume_content_block(block))
             .map(|block| {
                 let mut block = block.clone();
                 if normalize_tool_results
                     && block.get("type").and_then(Value::as_str) == Some("tool_result")
                 {
-                    if let Some(content) = block
-                        .get("content")
-                        .filter(|value| !value.is_null() && !value.is_string() && !value.is_array())
-                    {
-                        let text = crate::tool_result_text::normalized_tool_result_text(content);
-                        block["content"] = Value::String(text);
+                    if let Some(content) = block.get("content").cloned() {
+                        if let Value::Array(blocks) = &content {
+                            // Native MCP results persist their actual block
+                            // array in content. Admit it into the existing typed
+                            // carrier without filtering opaque result elements.
+                            block["content_blocks"] = content.clone();
+                            block["content"] = Value::String(
+                                serde_json::to_string(blocks).expect("JSON result blocks"),
+                            );
+                        } else if !content.is_null() && !content.is_string() {
+                            let text =
+                                crate::tool_result_text::normalized_tool_result_text(&content);
+                            block["content"] = Value::String(text);
+                        }
                     }
                 }
                 block
@@ -2288,10 +2500,45 @@ mod exact_history_string_tests {
         let source = format!(
             r#"{{"type":"{role}","uuid":"{id}","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"11111111-2222-3333-4444-555555555555","message":{{"id":"{id}","role":"{role}","content":{content}}}}}"#
         );
-        let exact = session::jsonl::exact_json::parse_exact_json(&source).unwrap();
-        let mut row = serde_json::from_value(exact.value).unwrap();
-        session::jsonl::exact_json::set_message_utf16_overrides(&mut row, exact.utf16_overrides);
-        row
+        let mut loaded = session::jsonl::route_lines(&source);
+        assert_eq!(loaded.malformed_line_count, 0);
+        assert_eq!(loaded.messages_in_order.len(), 1);
+        loaded.messages_in_order.pop().unwrap()
+    }
+
+    #[test]
+    fn cold_resume_keeps_admitted_effort_and_rich_api_system_control() {
+        let mut assistant = row("assistant", r#"[{"type":"text","text":"answer"}]"#);
+        assistant.extra.insert("effort".into(), "low".into());
+        assistant
+            .extra
+            .insert("perTurnEffort".into(), "medium".into());
+        let mut control = row("system", r#"[{"type":"text","text":"\ud800"}]"#);
+        control.extra.insert("subtype".into(), "api_system".into());
+        control
+            .extra
+            .insert("outputConfig".into(), serde_json::json!({"effort":"high"}));
+        let mut synthetic = row("assistant", r#"[{"type":"text","text":"API error"}]"#);
+        synthetic
+            .extra
+            .insert("isApiErrorMessage".into(), true.into());
+        synthetic
+            .extra
+            .insert("perTurnEffort".into(), "forged".into());
+        let state = state_from_messages(Uuid::new_v4(), &[assistant, control, synthetic]);
+        assert!(
+            matches!(&state.history[0], ConversationMessage::Assistant {per_turn_effort:Some(effort),..} if effort=="medium")
+        );
+        assert!(
+            matches!(&state.history[1], ConversationMessage::System {api_system:Some(payload),..} if payload.output_config.as_ref().and_then(|config|config.effort.as_deref())==Some("high") && matches!(&payload.content[0],ContentBlock::TextJsUtf16 {utf16_code_units,..} if utf16_code_units==&vec![0xD800]))
+        );
+        assert!(matches!(
+            &state.history[2],
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2313,20 +2560,139 @@ mod exact_history_string_tests {
                 matches!(&content[index], ContentBlock::TextJsUtf16 {utf16_code_units,..} if utf16_code_units==units)
             );
         }
-        let ContentBlock::ToolResult {
-            content_blocks: Some(blocks),
-            ..
-        } = &content[2]
-        else {
-            panic!()
-        };
-        assert_eq!(
-            lingxi_core::types::js_utf16::tool_result_units(&serde_json::json!(blocks)),
-            Some(vec![0xd802])
-        );
+        let result = content[2].projected_tool_result().unwrap().unwrap();
+        assert_eq!(result.to_json_string().unwrap(), r#""\ud802""#);
         assert!(
             matches!(&state.history[1], ConversationMessage::Assistant {content,..}
             if matches!(content.as_slice(), [ContentBlock::TextJsUtf16 {utf16_code_units,..}] if utf16_code_units==&vec![0xd803]))
+        );
+    }
+
+    #[test]
+    fn filtered_text_keeps_original_tool_input_and_result_projection_indices() {
+        let messages = [row(
+            "user",
+            r#"[{"type":"text","text":1},{"type":"tool_use","id":"call","name":"Read","input":{"\ud800":"\ud801"}},{"type":"text","text":null},{"type":"tool_result","tool_use_id":"call","content":"\ud802"}]"#,
+        )];
+        let state = state_from_messages(Uuid::new_v4(), &messages);
+        let ConversationMessage::User { content, .. } = &state.history[0] else {
+            panic!()
+        };
+        assert_eq!(content.len(), 2);
+        assert_eq!(
+            content[0]
+                .projected_tool_input()
+                .unwrap()
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"{"\ud800":"\ud801"}"#
+        );
+        assert_eq!(
+            content[1]
+                .projected_tool_result()
+                .unwrap()
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#""\ud802""#
+        );
+    }
+
+    #[test]
+    fn object_tool_result_resume_stringifies_exact_keys_and_values_before_association() {
+        let messages = [row(
+            "user",
+            r#"[{"type":"text","text":false},{"type":"tool_result","tool_use_id":"call","content":{"\ud800":"\udfff","plain":1}}]"#,
+        )];
+        let state = state_from_messages(Uuid::new_v4(), &messages);
+        let ConversationMessage::User { content, .. } = &state.history[0] else {
+            panic!()
+        };
+        assert_eq!(content.len(), 1);
+        let expected = r#"{"\ud800":"\udfff","plain":1}"#;
+        let exact = content[0].projected_tool_result().unwrap().unwrap();
+        assert_eq!(exact.value, serde_json::json!(expected));
+        assert_eq!(
+            exact.to_json_string().unwrap(),
+            serde_json::to_string(expected).unwrap()
+        );
+        let ContentBlock::ToolResult {
+            content_blocks,
+            content: text,
+            ..
+        } = &content[0]
+        else {
+            panic!()
+        };
+        assert!(content_blocks.is_none());
+        assert_eq!(text, expected);
+    }
+
+    #[test]
+    fn stale_history_projection_is_rejected_instead_of_replacing_accepted_input() {
+        let mut message = row(
+            "user",
+            r#"[{"type":"tool_use","id":"call","name":"Read","input":{"name":"\ud800"}}]"#,
+        );
+        message.message["content"][0]["input"] = serde_json::json!({"name":"changed"});
+        let mut content = extract_content_blocks(&message.message, true);
+        assert!(restore_exact_history_strings(&message, &mut content).is_err());
+        let ContentBlock::ToolUse {
+            input,
+            input_projection,
+            ..
+        } = &content[0]
+        else {
+            panic!()
+        };
+        assert_eq!(input, &serde_json::json!({"name":"changed"}));
+        assert!(input_projection.is_none());
+    }
+
+    #[test]
+    fn native_array_tool_result_resumes_exact_blocks_without_dropping_sibling_text() {
+        let messages = [row(
+            "user",
+            r#"[{"type":"text","text":null},{"type":"tool_result","tool_use_id":"call","content":[{"type":"text","text":"\ud800"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"YWJj"}},{"\ud801":"\udfff"}]},{"type":"text","text":"kept"}]"#,
+        )];
+        let state = state_from_messages(Uuid::new_v4(), &messages);
+        let ConversationMessage::User { content, .. } = &state.history[0] else {
+            panic!()
+        };
+        assert_eq!(content.len(), 2);
+        let exact = content[0].projected_tool_result().unwrap().unwrap();
+        let expected = r#"[{"type":"text","text":"\ud800"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"YWJj"}},{"\ud801":"\udfff"}]"#;
+        assert_eq!(exact.to_json_string().unwrap(), expected);
+        let ContentBlock::ToolResult {
+            content_blocks,
+            content: text,
+            ..
+        } = &content[0]
+        else {
+            panic!()
+        };
+        assert_eq!(content_blocks.as_ref().unwrap().len(), 3);
+        assert_eq!(text, expected);
+        assert!(matches!(&content[1], ContentBlock::Text {text,..} if text=="kept"));
+    }
+
+    #[test]
+    fn tool_result_array_preserves_opaque_elements_without_applying_message_text_filter() {
+        let messages = [row(
+            "user",
+            r#"[{"type":"text","text":1},{"type":"tool_result","tool_use_id":"call","content":[{"type":"text","text":1},{"type":"text"},null,3,{"vendor":{"\ud800":"\udfff"}}]}]"#,
+        )];
+        let state = state_from_messages(Uuid::new_v4(), &messages);
+        let ConversationMessage::User { content, .. } = &state.history[0] else {
+            panic!()
+        };
+        assert_eq!(content.len(), 1);
+        let exact = content[0].projected_tool_result().unwrap().unwrap();
+        assert_eq!(exact.value.as_array().unwrap().len(), 5);
+        assert_eq!(
+            exact.to_json_string().unwrap(),
+            r#"[{"type":"text","text":1},{"type":"text"},null,3,{"vendor":{"\ud800":"\udfff"}}]"#
         );
     }
 }

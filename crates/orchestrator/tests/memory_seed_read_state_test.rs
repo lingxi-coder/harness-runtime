@@ -114,16 +114,6 @@ fn disk_mtime_ms(p: &Path) -> i64 {
     tool_api::read_file_state::mtime_ms_floor(std::fs::metadata(p).unwrap().modified().unwrap())
 }
 
-fn now_ms() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap()
-}
-
 fn entry_for(map: &ReadFileStateMap, p: &Path) -> ReadFileEntry {
     tool_api::read_file_state::get(map, p)
         .unwrap_or_else(|| panic!("no seeded entry for {}", p.display()))
@@ -142,9 +132,8 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
     //     shape.
     let plain = cwd.join("LINGXI.md");
     std::fs::write(&plain, "# repo rules\nbe careful\n").unwrap();
-    // (b) A conditional (`paths:`-gated) rule: NOT rendered into context, so
-    //     `MLu` is false -> `seededFromContext: false` and the Date.now()
-    //     timestamp branch.
+    // (b) A conditional rule-directory file is absent from eager acquisition,
+    //     so startup does not seed its ReadState entry.
     let cond = cwd.join(".lingxi/rules/cond.md");
     std::fs::write(&cond, "---\npaths: src/**\n---\nscoped body\n").unwrap();
     // (c) An UNCONDITIONAL rule that still has frontmatter (no `paths:` key):
@@ -152,9 +141,8 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
     //     and the stored content is the RAW text INCLUDING the frontmatter.
     let fm = cwd.join(".lingxi/rules/withfm.md");
     std::fs::write(&fm, "---\ndescription: hi\n---\nplain body\n").unwrap();
-    // (d) A CRLF file: seeding must NOT collapse CRLF (LingXi's Read stores
-    //     `decode_utf8_strict`, which strips the BOM only), or the staleness
-    //     guard's content-equality fallback would fail forever.
+    // (d) Native jE normalizes an unchanged acquired disk body to LF when
+    //     seeding ReadState, independently of the raw memory-file payload.
     let crlf = cwd.join(".lingxi/rules/crlf.md");
     std::fs::write(&crlf, "alpha\r\nbeta\r\n").unwrap();
 
@@ -165,8 +153,8 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
         "fixture must load LINGXI.md: {paths:?}"
     );
     assert!(
-        paths.contains(&cond),
-        "fixture must load the conditional rule"
+        !paths.contains(&cond),
+        "native eager acquisition excludes conditional rule-directory entries"
     );
     assert!(
         paths.contains(&fm),
@@ -176,7 +164,6 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
 
     let map = tool_api::read_file_state::new_read_file_state_map();
     let o = orch(files, cwd.clone(), Arc::clone(&map));
-    let before = now_ms();
     o.fire_instructions_loaded().await;
 
     // (a) plain LINGXI.md -------------------------------------------------
@@ -199,20 +186,8 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
         "content must be the byte-exact disk text (trailing newline kept)"
     );
 
-    // (b) conditional rule -------------------------------------------------
-    let e = entry_for(&map, &cond);
-    assert!(
-        !e.seeded_from_context,
-        "a paths:-gated rule is NOT in model context -> seededFromContext false"
-    );
-    assert!(
-        e.mtime_ms >= before,
-        "non-rendered file uses the Date.now() branch"
-    );
-    assert!(
-        !map.lock().unwrap().model_context_keys().contains(&cond),
-        "the `...!jn && {{contentNotInModelContext:!0}}` spread -> not model-visible"
-    );
+    // (b) conditional rule is absent from the eager cache ------------------
+    assert!(tool_api::read_file_state::get(&map, &cond).is_none());
 
     // (c) unconditional-but-differing rule ---------------------------------
     let e = entry_for(&map, &fm);
@@ -232,14 +207,14 @@ async fn fire_instructions_loaded_seeds_memory_files_into_read_state() {
     // (d) CRLF -------------------------------------------------------------
     let e = entry_for(&map, &crlf);
     assert_eq!(
-        e.content, "alpha\r\nbeta\r\n",
-        "CRLF must be preserved (LingXi's Read stores BOM-stripped bytes only)"
+        e.content, "alpha\nbeta\n",
+        "native jE removes BOM and normalizes CRLF for an unchanged disk body"
     );
 
     // NO seeded memory file joins the model-context set — not even a rendered
     // one. That set is LingXi's post-compact RESTORE set
     // (`drain_model_context` -> `restore_post_compact_attachments`) and the
-    // input `conditional_rules_reminder_message` treats as "files touched this
+    // input `conditional_rules_reminder_messages` treats as "files touched this
     // turn". Memory files are re-injected by the SYSTEM PROMPT every turn, so
     // restoring them as attachments would duplicate them after every compaction,
     // and listing them as touched would fire conditional rules nobody opened.

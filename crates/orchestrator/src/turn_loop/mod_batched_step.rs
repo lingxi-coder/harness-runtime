@@ -26,7 +26,7 @@ pub(super) struct Request {
     pub profile: Option<String>,
     pub history: Vec<ConversationMessage>,
     pub rewriter: Option<Arc<dyn OutgoingHistoryRewriter>>,
-    pub tools: Vec<Value>,
+    pub tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     pub max_tokens: Option<u32>,
     pub deferred: Option<ConversationMessage>,
     pub date_change: Option<ConversationMessage>,
@@ -43,7 +43,7 @@ pub(super) struct Request {
 
 struct PhysicalObservation {
     system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
-    tools: Vec<Value>,
+    tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     cost_scope: Option<cost::CostSessionScope>,
     api_success_message_count: u32,
     api_success_message_tokens: u64,

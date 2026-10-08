@@ -149,6 +149,24 @@ impl PlanAwareInvoker {
 }
 #[async_trait]
 impl ToolInvoker for PlanAwareInvoker {
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.inner
+            .cleanup_computer_inputs(agent_id, origin_session_id)
+            .await
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        Some(PlanAwareInvoker::permission_mode(self))
+    }
+
+    fn tool_is_concurrency_safe(&self, name: &str, input: &Value) -> Option<bool> {
+        self.inner.tool_is_concurrency_safe(name, input)
+    }
+
     async fn invoke(
         &self,
         name: &str,
@@ -179,17 +197,20 @@ impl ToolInvoker for PlanAwareInvoker {
             .invoke_detailed(name, input, self.context(context), lease)
             .await
     }
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: Value,
+        context: SubagentInvocationContext,
+        lease: Option<u64>,
+        supplied: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
+        self.inner
+            .invoke_supplied_detailed(name, input, self.context(context), lease, supplied)
+            .await
+    }
     fn as_any(&self) -> &dyn std::any::Any {
         self
-    }
-    async fn cleanup_computer_inputs(
-        &self,
-        agent_id: lingxi_core::types::AgentId,
-        origin_session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
-        self.inner
-            .cleanup_computer_inputs(agent_id, origin_session_id)
-            .await
     }
 }
 #[async_trait]

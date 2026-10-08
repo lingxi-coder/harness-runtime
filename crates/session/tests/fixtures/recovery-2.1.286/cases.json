@@ -1,0 +1,2631 @@
+[
+  {
+    "name": "legacy_parallel_recovery_order",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "answer"
+    ]
+  },
+  {
+    "name": "crash_after_parallel_batch",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": "r2"
+      },
+      {
+        "uuid": "followup",
+        "type": "user",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "user",
+          "content": "followup"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "followup",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "followup",
+      "answer"
+    ]
+  },
+  {
+    "name": "checkpoint_with_newer_timestamp",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:59.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": "r2"
+      },
+      {
+        "uuid": "followup",
+        "type": "user",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "user",
+          "content": "followup"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "followup",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "followup",
+      "answer"
+    ]
+  },
+  {
+    "name": "source_order_ignores_clock_skew",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:58.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "answer"
+    ]
+  },
+  {
+    "name": "call_id_recovers_misparented_result",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "answer"
+    ]
+  },
+  {
+    "name": "call_id_does_not_cross_agents",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        },
+        "agentId": "other"
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "answer"
+    ]
+  },
+  {
+    "name": "orphan_metadata_tail",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "hook",
+        "type": "attachment",
+        "parentUuid": "r2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "attachment"
+        },
+        "attachment": {
+          "type": "hook_success"
+        }
+      },
+      {
+        "uuid": "tail",
+        "type": "attachment",
+        "parentUuid": "hook",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "attachment"
+        },
+        "attachment": {
+          "type": "hook_success"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:07.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "hook",
+      "tail",
+      "answer"
+    ]
+  },
+  {
+    "name": "ambiguous_metadata_tail",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "hook",
+        "type": "attachment",
+        "parentUuid": "r2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "attachment"
+        },
+        "attachment": {
+          "type": "hook_success"
+        }
+      },
+      {
+        "uuid": "tail1",
+        "type": "attachment",
+        "parentUuid": "hook",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "attachment"
+        },
+        "attachment": {
+          "type": "hook_success"
+        }
+      },
+      {
+        "uuid": "tail2",
+        "type": "attachment",
+        "parentUuid": "hook",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "attachment"
+        },
+        "attachment": {
+          "type": "hook_success"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:07.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "answer"
+    ]
+  },
+  {
+    "name": "explicit_checkpoint_blocks_sibling_jump",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": "r2",
+        "explicit": true
+      },
+      {
+        "uuid": "followup",
+        "type": "user",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "user",
+          "content": "followup"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "followup",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "r2",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2"
+    ]
+  },
+  {
+    "name": "explicit_checkpoint_allows_direct_continuation",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": "r2",
+        "explicit": true
+      },
+      {
+        "uuid": "followup",
+        "type": "user",
+        "parentUuid": "r2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "user",
+          "content": "followup"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "followup",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "followup",
+      "answer"
+    ]
+  },
+  {
+    "name": "checkpoint_after_newer_rows",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "followup",
+        "type": "user",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "user",
+          "content": "followup"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "followup",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": "r2",
+        "explicit": true
+      }
+    ],
+    "tip": "r2",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2"
+    ]
+  },
+  {
+    "name": "clear_to_empty",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": null,
+        "explicit": true
+      }
+    ],
+    "tip": null,
+    "expected": []
+  },
+  {
+    "name": "clear_then_new_turn",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": null,
+        "explicit": true
+      },
+      {
+        "uuid": "fresh",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:07.000Z",
+        "message": {
+          "role": "user",
+          "content": "fresh"
+        }
+      }
+    ],
+    "tip": "fresh",
+    "expected": [
+      "fresh"
+    ]
+  },
+  {
+    "name": "checkpoint_metadata_in_batch",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "hook",
+        "type": "attachment",
+        "parentUuid": "r2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "attachment"
+        },
+        "attachment": {
+          "type": "hook_success"
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": "hook"
+      },
+      {
+        "uuid": "followup",
+        "type": "user",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "user",
+          "content": "followup"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "followup",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:07.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "hook",
+      "followup",
+      "answer"
+    ]
+  },
+  {
+    "name": "metadata_after_tip",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "tail",
+        "type": "attachment",
+        "parentUuid": "answer",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:07.000Z",
+        "message": {
+          "role": "attachment"
+        },
+        "attachment": {
+          "type": "hook_success"
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "answer",
+      "tail"
+    ]
+  },
+  {
+    "name": "duplicate_indirect_result_is_not_replayed",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "duplicate",
+        "type": "user",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "duplicate"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "answer"
+    ]
+  },
+  {
+    "name": "ambiguous_call_id_is_not_recovered",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "other",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "other-batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "answer"
+    ]
+  },
+  {
+    "name": "metadata_tail_does_not_cross_sidechains",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a1",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "a2",
+        "type": "assistant",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:02.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a2",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "foreign-hook",
+        "type": "attachment",
+        "parentUuid": "r2",
+        "sessionId": "fixture-session",
+        "isSidechain": true,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "attachment"
+        },
+        "attachment": {
+          "type": "hook_success"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a1",
+      "a2",
+      "r1",
+      "r2",
+      "answer"
+    ]
+  },
+  {
+    "name": "unsplit_parallel_batch",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            },
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r2",
+        "type": "user",
+        "parentUuid": "a",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call2",
+              "content": "r2"
+            }
+          ]
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": "r2"
+      },
+      {
+        "uuid": "followup",
+        "type": "user",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "user",
+          "content": "followup"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "followup",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a",
+      "r1",
+      "r2",
+      "followup",
+      "answer"
+    ]
+  },
+  {
+    "name": "tool_attachment_checkpoint",
+    "entries": [
+      {
+        "uuid": "root",
+        "type": "user",
+        "parentUuid": null,
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:00.000Z",
+        "message": {
+          "role": "user",
+          "content": "root"
+        }
+      },
+      {
+        "uuid": "a",
+        "type": "assistant",
+        "parentUuid": "root",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:01.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "batch",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "call1",
+              "name": "Read",
+              "input": {}
+            },
+            {
+              "type": "tool_use",
+              "id": "call2",
+              "name": "Read",
+              "input": {}
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "r1",
+        "type": "user",
+        "parentUuid": "a",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:03.000Z",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "call1",
+              "content": "r1"
+            }
+          ]
+        }
+      },
+      {
+        "uuid": "tool-hook",
+        "type": "attachment",
+        "parentUuid": "a",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:04.000Z",
+        "message": {
+          "role": "attachment"
+        },
+        "attachment": {
+          "type": "hook_success",
+          "toolUseID": "call2"
+        }
+      },
+      {
+        "type": "last-prompt",
+        "leafUuid": "tool-hook"
+      },
+      {
+        "uuid": "followup",
+        "type": "user",
+        "parentUuid": "r1",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:05.000Z",
+        "message": {
+          "role": "user",
+          "content": "followup"
+        }
+      },
+      {
+        "uuid": "answer",
+        "type": "assistant",
+        "parentUuid": "followup",
+        "sessionId": "fixture-session",
+        "isSidechain": false,
+        "timestamp": "2026-09-30T00:00:06.000Z",
+        "message": {
+          "role": "assistant",
+          "id": "next",
+          "content": [
+            {
+              "type": "text",
+              "text": "answer"
+            }
+          ]
+        }
+      }
+    ],
+    "tip": "answer",
+    "expected": [
+      "root",
+      "a",
+      "r1",
+      "tool-hook",
+      "followup",
+      "answer"
+    ]
+  }
+]

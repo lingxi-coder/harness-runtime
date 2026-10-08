@@ -39,6 +39,7 @@
 
 use std::path::Path;
 
+use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonProjectionError};
 use mcp::normalization::normalize_name_for_mcp;
 use mcp::{binary_blob_saved_message, decode_base64, persist_binary_content, PersistBinaryResult};
 use serde_json::{json, Value};
@@ -103,6 +104,75 @@ pub fn transform_result_content(content: &Value, server_name: &str, ctx: Persist
         out.extend(transform_block(item, server_name, ctx));
     }
     Value::Array(out)
+}
+
+/// The same block transform, retaining exact source subtrees at each emitted
+/// block. One source block may expand into several model-facing blocks.
+pub fn transform_result_content_projected(
+    content: &Utf16JsonProjection,
+    server_name: &str,
+    ctx: PersistContext,
+) -> Result<Utf16JsonProjection, Utf16JsonProjectionError> {
+    content.validate()?;
+    let Some(items) = content.value.as_array() else {
+        return Ok(content.clone());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for (index, value) in items.iter().enumerate() {
+        let source = content.subprojection(&format!("/{index}"))?;
+        let transformed = transform_block(value, server_name, ctx);
+        for value in transformed {
+            let mut projected = source.clone();
+            projected.rebase_display_value(value.clone())?;
+            if source.value.get("type").and_then(Value::as_str) == Some("resource") {
+                if let Some(text) = value.get("text").and_then(Value::as_str) {
+                    let uri_display = source
+                        .value
+                        .pointer("/resource/uri")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let prefix = format!("[Resource from {server_name} at {uri_display}] ");
+                    if let Some(rest) = text.strip_prefix(&prefix) {
+                        let mut units = format!("[Resource from {server_name} at ")
+                            .encode_utf16()
+                            .collect::<Vec<_>>();
+                        units.extend(source.string_units("/resource/uri").unwrap_or_default());
+                        units.extend("] ".encode_utf16());
+                        if source
+                            .value
+                            .pointer("/resource/text")
+                            .and_then(Value::as_str)
+                            == Some(rest)
+                        {
+                            units.extend(source.string_units("/resource/text").unwrap_or_default());
+                        } else {
+                            units.extend(rest.encode_utf16());
+                        }
+                        projected.set_field(
+                            "text",
+                            Utf16JsonProjection::root_string(text.to_owned(), units)?,
+                        )?;
+                    }
+                }
+            }
+            // Images map source data into a nested provider block. Invalid
+            // image data follows the existing no-op path and remains exact.
+            if value.get("type").and_then(Value::as_str) == Some("image") {
+                for (source_path, target_path) in [
+                    ("/data", "/source/data"),
+                    ("/resource/blob", "/source/data"),
+                ] {
+                    if source.value.pointer(source_path) == value.pointer(target_path)
+                        && source.value.pointer(source_path).is_some()
+                    {
+                        projected.set_pointer(target_path, source.subprojection(source_path)?)?;
+                    }
+                }
+            }
+            out.push(projected);
+        }
+    }
+    Utf16JsonProjection::array(out)
 }
 
 /// Transform ONE content block, returning the model-facing block(s).

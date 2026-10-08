@@ -545,6 +545,7 @@ impl SubagentSpawner for MockSubagentSpawner {
 
 /// In-memory recording mock for `TaskRegistryHandle`.
 pub struct MockTaskRegistryHandle {
+    statistics: Mutex<HashMap<lingxi_core::types::SessionId, Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>>>,
     resume_recipes: Mutex<HashMap<String, (SubagentSpawnRequest, SubagentInheritance)>>,
     reject_resume_recipe: std::sync::atomic::AtomicBool,
     killers: Mutex<HashMap<String, Arc<dyn lingxi_core::host::task_registry::TaskKiller>>>,
@@ -590,6 +591,7 @@ impl MockTaskRegistryHandle {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            statistics: Default::default(),
             resume_recipes: Mutex::new(HashMap::new()),
             reject_resume_recipe: Default::default(),
             killers: Mutex::new(HashMap::new()),
@@ -637,6 +639,10 @@ impl Default for MockTaskRegistryHandle {
 
 #[async_trait]
 impl TaskRegistryHandle for MockTaskRegistryHandle {
+    fn agent_session_statistics(&self, session_id: lingxi_core::types::SessionId) -> Option<Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>> {
+        Some(self.statistics.lock().unwrap().entry(session_id).or_default().clone())
+    }
+
     async fn register_agent_resume_recipe(
         &self,
         id: &str,

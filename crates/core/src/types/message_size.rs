@@ -75,11 +75,12 @@ mod tests {
 
     #[test]
     fn system_message_returns_content_length() {
-        let m = ConversationMessage::System {
+        let m = ConversationMessage::System { api_system: None,
             id: MessageId::new(),
             content: "abc".into(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         assert_eq!(text_byte_size(&m), 3);
@@ -87,7 +88,7 @@ mod tests {
 
     #[test]
     fn image_block_sized_by_base64_data_len() {
-        let m = ConversationMessage::User {
+        let m = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Image {
                 source: crate::types::ImageSource::Base64 {
@@ -104,9 +105,9 @@ mod tests {
 
     #[test]
     fn tool_use_block_sized_as_json() {
-        let m = ConversationMessage::Assistant {
+        let m = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: ToolUseId::new(),
                 name: "Read".into(),
                 input: serde_json::json!({"path": "/a"}),
@@ -139,7 +140,7 @@ mod tests {
             truncated: false,
         };
         let expected = serde_json::to_string(&analysis).unwrap().len() as u64;
-        let message = ConversationMessage::User {
+        let message = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::MediaAnalysis { analysis }],
             is_meta: true,

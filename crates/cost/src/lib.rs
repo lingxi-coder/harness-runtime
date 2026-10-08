@@ -39,6 +39,7 @@ pub mod summary;
 pub mod token_usage_replay;
 pub mod tracker;
 pub mod usage;
+mod safety;
 
 pub use attempt::{
     calculate_pinned_attempt_cost, AttemptBillingMode, AttemptContribution, AttemptDisposition,

@@ -121,7 +121,7 @@ fn content_blocks_to_api(
                 name,
                 input,
                 provider_id,
-            } => {
+             .. } => {
                 // Replay the verbatim provider id when preserved; else the
                 // serde form of the minted `ToolUseId` (bare uuid).
                 let wire_id = provider_id
@@ -135,7 +135,7 @@ fn content_blocks_to_api(
                 is_error,
                 provider_tool_use_id,
                 content_blocks,
-            } => {
+             .. } => {
                 let wire_id = provider_tool_use_id
                     .clone()
                     .map_or_else(|| json!(tool_use_id), Value::String);
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn request_projection_preserves_exact_user_and_history_text() {
         let mut session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
-        session.history.push(ConversationMessage::User {
+        session.history.push(ConversationMessage::User { api_message_override: None,
             id: MessageId::nil(),
             content: vec![ContentBlock::TextJsUtf16 {
                 text: "past�".into(),

@@ -59,6 +59,7 @@ fn drivable_connection() -> (Arc<Connection>, mpsc::Sender<Bytes>, mpsc::Receive
 /// transport emits, so the registry's rewrite is exercised).
 struct BridgeMock {
     tools: Vec<McpToolDto>,
+    server_metadata: Option<lingxi_core::host::McpServerMetadataDto>,
     resources: Vec<McpResourceDto>,
     prompts: Vec<McpPromptDto>,
     // §26a — canned `resources/templates/list` rows and the capability
@@ -107,6 +108,7 @@ struct BridgeMock {
     tool_call_peers: TestMutex<HashMap<ConnId, mpsc::Receiver<Bytes>>>,
     listen_writer_failures_remaining: AtomicUsize,
     connect_failures_remaining: AtomicUsize,
+    connect_auth_status: AtomicUsize,
     disconnect_failures_remaining: AtomicUsize,
     /// §11 Stage 2 — how many times `McpTransport::disconnect` actually
     /// ran, so a test can prove a `Cached` server's teardown does NOT
@@ -137,6 +139,7 @@ impl BridgeMock {
             .collect();
         Self {
             tools,
+            server_metadata: None,
             resources: Vec::new(),
             prompts: Vec::new(),
             resource_templates: Vec::new(),
@@ -172,6 +175,7 @@ impl BridgeMock {
             tool_call_peers: TestMutex::new(HashMap::new()),
             listen_writer_failures_remaining: AtomicUsize::new(0),
             connect_failures_remaining: AtomicUsize::new(0),
+            connect_auth_status: AtomicUsize::new(0),
             disconnect_failures_remaining: AtomicUsize::new(0),
             disconnect_calls: AtomicUsize::new(0),
         }
@@ -227,6 +231,9 @@ impl BridgeMock {
         mock.tools = tools
             .iter()
             .map(|(name, schema)| McpToolDto {
+                input_schema_projection: None,
+                definition_projection: None,
+
                 full_name: format!("mcp____{name}"),
                 server_name: String::new(),
                 tool_name: (*name).to_string(),
@@ -275,6 +282,13 @@ impl McpTransport for BridgeMock {
             return Err(McpError::Connection(
                 "bridge mock forced connect failure".into(),
             ));
+        }
+        let auth_status = self.connect_auth_status.load(Ordering::SeqCst);
+        if auth_status != 0 {
+            return Err(McpError::HttpResponse {
+                status: auth_status as u16,
+                www_authenticate: None,
+            });
         }
         let id = ConnId::new();
         if self.drivable_calls {
@@ -399,6 +413,8 @@ impl McpTransport for BridgeMock {
         _i: Value,
     ) -> Result<McpToolResultDto, McpError> {
         Ok(McpToolResultDto {
+            result_projection: None,
+
             content: Value::Null,
             is_error: false,
             ..Default::default()
@@ -462,6 +478,14 @@ impl McpTransport for BridgeMock {
     fn supported_transports(&self) -> Vec<McpTransportKind> {
         vec![McpTransportKind::Stdio]
     }
+    fn server_metadata(&self, id: ConnId) -> Option<lingxi_core::host::McpServerMetadataDto> {
+        self.conns
+            .lock()
+            .unwrap()
+            .contains_key(&id)
+            .then(|| self.server_metadata.clone())
+            .flatten()
+    }
 }
 
 impl RawConnectionProvider for BridgeMock {
@@ -514,6 +538,9 @@ impl McpTransport for DirectInProcessMock {
 
     async fn list_tools(&self, _conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
         Ok(vec![McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: String::new(),
             tool_name: "list".into(),
             description: "list local apps".into(),
@@ -551,6 +578,8 @@ impl McpTransport for DirectInProcessMock {
             .unwrap()
             .push((tool.into(), input.clone()));
         Ok(McpToolResultDto {
+            result_projection: None,
+
             content: serde_json::json!([{"type":"text","text":"ok"}]),
             structured_content: Some(serde_json::json!({"tool": tool, "input": input})),
             is_error: false,
@@ -1327,7 +1356,7 @@ async fn inprocess_server_dispatches_directly_without_jsonrpc_client() {
         .call_tool_with_auth_retry(
             "local_apps",
             "mcp__local_apps__list",
-            serde_json::json!({"limit": 5}),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({"limit": 5})),
             None,
             None,
         )
@@ -1566,6 +1595,9 @@ async fn mixed_catalog_failures_keep_successful_catalogs_and_preserve_cached_fai
             extensions: HashMap::new(),
         },
         vec![McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: "srv".into(),
             tool_name: "cached_tool".into(),
             description: "cached tool".into(),
@@ -2795,6 +2827,9 @@ async fn lagged_catalog_listener_recovers_all_supported_catalogs_for_current_gen
                 version: "2025-11-25".into(),
             },
             tools: vec![McpToolDto {
+                input_schema_projection: None,
+                definition_projection: None,
+
                 server_name: "srv".into(),
                 tool_name: "old".into(),
                 description: "old".into(),
@@ -3053,6 +3088,28 @@ async fn modern_listen_request_is_filtered_and_ack_opens_from_zero() {
     let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
     let (connection, peer_tx, mut peer_rx) = drivable_connection();
     let connection_id = ConnId::new();
+    // Live installation publishes this generation-bound capability authority
+    // before starting its listener.
+    let client = Arc::new(
+        McpClient::new(
+            "srv",
+            std::path::PathBuf::from("/tmp/work"),
+            connection.clone(),
+        )
+        .await
+        .with_negotiated_protocol(modern_negotiated())
+        .with_elicitation_capabilities(lingxi_core::host::McpElicitationCapabilities {
+            legacy: lingxi_core::host::McpElicitationMode::Bare,
+            modern: lingxi_core::host::McpElicitationMode::FormAndUrl,
+        }),
+    );
+    registry.clients.write().await.insert(
+        "srv".into(),
+        RegisteredClient {
+            connection_id: Some(connection_id),
+            client,
+        },
+    );
     let mut changes = registry.subscribe_catalog_changes();
     registry.spawn_catalog_change_listener(
         "srv".into(),
@@ -3073,6 +3130,11 @@ async fn modern_listen_request_is_filtered_and_ack_opens_from_zero() {
         .expect("listen request frame");
     let request: Value = serde_json::from_slice(&request_frame).unwrap();
     assert_eq!(request["method"], serde_json::json!("subscriptions/listen"));
+    assert_eq!(
+        request["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"],
+        serde_json::json!({"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}),
+        "modern listener retains its frozen Full capability despite Bare initialize"
+    );
     assert_eq!(
         request["params"]["notifications"],
         serde_json::json!({
@@ -3122,6 +3184,57 @@ async fn modern_listen_request_is_filtered_and_ack_opens_from_zero() {
             && event.payload.get("attempts") == Some(&serde_json::json!(0))
             && event.payload.get("trigger") == Some(&serde_json::json!("connect"))
     }));
+}
+
+#[tokio::test]
+async fn modern_catalog_listener_does_not_borrow_replaced_generation_capability_authority() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+    let (connection, _peer_tx, mut peer_rx) = drivable_connection();
+    let stale_connection_id = ConnId::new();
+    let current_connection_id = ConnId::new();
+    let client = Arc::new(
+        McpClient::new(
+            "srv",
+            std::path::PathBuf::from("/tmp/work"),
+            connection.clone(),
+        )
+        .await
+        .with_negotiated_protocol(modern_negotiated()),
+    );
+    registry.clients.write().await.insert(
+        "srv".into(),
+        RegisteredClient {
+            connection_id: Some(current_connection_id),
+            client,
+        },
+    );
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        registry.run_modern_catalog_change_listener(
+            "srv".into(),
+            stale_connection_id,
+            connection.clone(),
+            connection.notifications(),
+            caps(true, true, false),
+            modern_negotiated(),
+            ModernListenOpenTelemetry {
+                outcome: telemetry::tengu::mcp::ListenReopenOutcome::OpenedFromZero,
+                attempts: 0,
+                trigger: telemetry::tengu::mcp::ListenReopenTrigger::Connect,
+            },
+        ),
+    )
+    .await
+    .expect("a replaced-generation listener must exit before opening a subscription");
+    assert!(
+        matches!(
+            peer_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ),
+        "a stale listener must not send using another generation's capability authority"
+    );
+    connection.close();
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -3929,6 +4042,22 @@ async fn connected_prompts_cache_generation_reaches_l1_twice_and_cleans_up_on_di
     assert_eq!(prompts[0].0, "srv");
     assert_eq!(prompts[0].1, cached_id);
     assert_eq!(prompts[0].2.name, "draft");
+    // An agent-scoped registry key reuses the server's config name but must
+    // not advertise its prompt in the global slash-command catalog.
+    let agent_state = registry
+        .connections
+        .read()
+        .await
+        .get("srv")
+        .cloned()
+        .unwrap();
+    registry
+        .connections
+        .write()
+        .await
+        .insert("agent:demo:srv".into(), agent_state);
+    assert_eq!(registry.connected_prompts().await.len(), 1);
+    registry.connections.write().await.remove("agent:demo:srv");
 
     let responder = {
         let prompt_mock = prompt_mock.clone();
@@ -4618,6 +4747,9 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
             version: "2025-11-25".into(),
         };
         let tool = |name: &str| McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: cfg.name.clone(),
             tool_name: name.into(),
             description: name.into(),
@@ -4643,6 +4775,7 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
                 crate::protocol_negotiation::NegotiationMode::Legacy,
                 Some(&grant),
                 Some(&protocol),
+                None,
             )
             .await;
         let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
@@ -4665,6 +4798,7 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
                 crate::protocol_negotiation::NegotiationMode::Legacy,
                 Some(&grant),
                 Some(&protocol),
+                None,
             )
             .await;
         let saved = store.load_partitioned(&cache_key, &partition.partition_key);
@@ -4779,6 +4913,7 @@ async fn oauth_without_refresh_grant_is_not_partition_or_write_eligible() {
             crate::protocol_negotiation::NegotiationMode::Legacy,
             None,
             None,
+            None,
         )
         .await;
     assert!(
@@ -4851,6 +4986,10 @@ async fn connect_persists_a_discovery_cache_entry_for_an_eligible_server() {
     assert_eq!(entry.cache_key, cache_key);
     assert_eq!(entry.consecutive_refresh_failures, 0);
     assert!(
+        entry.server_info.is_none(),
+        "the existing metadata-free handshake stays absent"
+    );
+    assert!(
         entry.capabilities.tools,
         "the mock declares the tools capability"
     );
@@ -4863,6 +5002,81 @@ async fn connect_persists_a_discovery_cache_entry_for_an_eligible_server() {
         vec!["alpha"],
         "the persisted entry must carry the ACTUAL discovered catalog"
     );
+}
+
+#[tokio::test]
+async fn discovery_cache_roundtrip_retains_only_server_info_identity() {
+    let _guard = crate::discovery_cache::tests_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let env = DiscoveryCacheEnvGuard::new();
+    env.set(crate::discovery_cache::ENV_ENABLED, "true");
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+    let config = http_cfg("srv", "https://mcp.example.com/v1");
+    let cache_key = crate::discovery_cache::logical_cache_key(&config);
+    let mut transport = BridgeMock::new(&["alpha"]);
+    let metadata = lingxi_core::host::McpServerMetadataDto {
+        server_info: Some(serde_json::json!({
+            "name": "calendar-server",
+            "version": "1.2.3",
+            "title": "LIVE_ONLY title",
+            "icons": [{"src": "LIVE_ONLY icon"}],
+            "description": "LIVE_ONLY description",
+            "instructions": "LIVE_ONLY nested instructions"
+        })),
+        raw_capabilities: Some(serde_json::json!({"LIVE_ONLY": "capability details"})),
+        instructions: Some("LIVE_ONLY server instructions".into()),
+        discovery: Some(serde_json::json!({"LIVE_ONLY": "discovery result"})),
+    };
+    transport.server_metadata = Some(metadata.clone());
+    let live_transport = Arc::new(transport);
+    let live = McpRegistry::with_raw_conn(
+        live_transport.clone() as Arc<dyn McpTransport>,
+        live_transport.clone() as Arc<dyn RawConnectionProvider>,
+    )
+    .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+    live.connect(config.clone()).await.unwrap();
+    assert_eq!(live_transport.connect_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(live.server_metadata("srv").await, Some(metadata));
+
+    let entry = match load_test_entry(&store, &cache_key) {
+        crate::discovery_cache::EntryLookup::Found(entry) => entry,
+        other => panic!("live discovery did not persist an entry: {other:?}"),
+    };
+    let identity = serde_json::json!({"name": "calendar-server", "version": "1.2.3"});
+    assert_eq!(serde_json::to_value(&entry.server_info).unwrap(), identity);
+    assert!(!serde_json::to_string(&entry).unwrap().contains("LIVE_ONLY"));
+    // Explicit disconnect purges the cache by design; dropping the old registry
+    // simulates the next host startup without removing its persisted discovery.
+    drop(live);
+    drop(live_transport);
+
+    // A new registry must obtain identity from the persisted cache, not a retained transport.
+    let cached_transport = Arc::new(BridgeMock::new(&["should_never_be_dialed"]));
+    let cached = McpRegistry::with_raw_conn(
+        cached_transport.clone() as Arc<dyn McpTransport>,
+        cached_transport.clone() as Arc<dyn RawConnectionProvider>,
+    )
+    .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+    cached.connect(config).await.unwrap();
+    assert!(matches!(
+        cached.connections.read().await.get("srv"),
+        Some(McpConnectionState::Cached { .. })
+    ));
+    assert_eq!(cached_transport.connect_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        cached.server_metadata("srv").await,
+        Some(lingxi_core::host::McpServerMetadataDto {
+            server_info: Some(identity),
+            ..Default::default()
+        }),
+        "cached metadata must expose only name/version, without live capabilities/instructions/discovery"
+    );
+    assert!(cached.server_instruction_blocks().await.is_empty());
+    cached.set_disabled("srv", true).await.unwrap();
+    assert!(cached.server_metadata("srv").await.is_none());
+    assert_eq!(cached_transport.connect_calls.load(Ordering::SeqCst), 0);
 }
 
 /// A gate-ineligible server (stdio: [`crate::discovery_cache::CacheGateReason::Transport`])
@@ -4959,6 +5173,7 @@ async fn persist_or_purge_removes_an_existing_entry_when_the_gate_is_headers_hel
             &[],
             &[],
             crate::protocol_negotiation::NegotiationMode::Legacy,
+            None,
             None,
             None,
         )
@@ -5098,8 +5313,7 @@ async fn discovery_cache_false_purges_then_dials_without_rewriting() {
     );
 }
 
-/// Oracle `_6e` strikes belong only to stale background revalidation that
-/// actually fails the connection. A catalog failure after successful
+/// A cached dial strikes only when the connection fails. A catalog failure after successful
 /// initialize must not strike an existing cache entry.
 #[tokio::test]
 async fn an_ordinary_partial_connect_does_not_strike_an_existing_entry() {
@@ -5157,6 +5371,10 @@ async fn an_ordinary_partial_connect_does_not_strike_an_existing_entry() {
 
 #[test]
 fn stale_refresh_strikes_only_the_partition_that_served_the_hit() {
+    let _guard = crate::discovery_cache::tests_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env = DiscoveryCacheEnvGuard::new();
     let dir = tempfile::tempdir().expect("tempdir");
     let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
     let cfg = http_cfg("srv", "https://mcp.example.com/v1");
@@ -5204,15 +5422,14 @@ fn stale_refresh_strikes_only_the_partition_that_served_the_hit() {
 
     registry.record_discovery_cache_refresh_failure(&cfg, &old_partition);
 
-    let old = match store.load_partitioned(&logical_key, &old_partition.partition_key) {
-        crate::discovery_cache::EntryLookup::Found(entry) => entry,
-        other => panic!("expected old partition, got {other:?}"),
-    };
+    assert_eq!(
+        store.load_partitioned(&logical_key, &old_partition.partition_key),
+        crate::discovery_cache::EntryLookup::Absent
+    );
     let new = match store.load_partitioned(&logical_key, &new_partition.partition_key) {
         crate::discovery_cache::EntryLookup::Found(entry) => entry,
         other => panic!("expected rotated partition, got {other:?}"),
     };
-    assert_eq!(old.consecutive_refresh_failures, 1);
     assert_eq!(
         new.consecutive_refresh_failures, 0,
         "a refresh-token rotation must not move the strike to the new partition"
@@ -5501,7 +5718,20 @@ fn seed_entry_with_catalog(
 
 fn default_test_partition_key(cache_key: &str) -> String {
     let fingerprint = crate::discovery_cache::fingerprint("grant:none");
-    crate::discovery_cache::partition_key(cache_key, &fingerprint)
+    let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+    let mode = crate::protocol_negotiation::resolve_for_spec_with_transport(
+        &cfg.spec,
+        None,
+        mcp_connection_timeout().as_millis() as u64,
+    );
+    crate::discovery_cache::partition_key_for_era(
+        cache_key,
+        &fingerprint,
+        match mode {
+            crate::protocol_negotiation::NegotiationMode::Auto { .. } => "modern",
+            crate::protocol_negotiation::NegotiationMode::Legacy => "legacy",
+        },
+    )
 }
 
 fn store_test_entry(
@@ -5535,6 +5765,9 @@ fn seed_entry(store: &crate::discovery_cache::DiscoveryCacheStore, cache_key: &s
             extensions: HashMap::new(),
         },
         vec![McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: "srv".into(),
             tool_name: "alpha".into(),
             description: "alpha tool".into(),
@@ -5613,6 +5846,10 @@ async fn a_fresh_cache_hit_serves_without_dialing() {
     assert!(
         registry.has_callable_server("srv").await,
         "a Cached server must report callable"
+    );
+    assert!(
+        registry.server_metadata("srv").await.is_none(),
+        "old seeded cache entries must not fabricate server identity"
     );
 }
 
@@ -5962,6 +6199,353 @@ async fn background_start_detects_an_existing_foreground_owner_without_redialing
     drop(env);
 }
 
+// Claude Code 2.1.286: Ma/wo (src_210493918.js @102151/@97307),
+// cached-row failure adoption (src_202066919.js @291749), and WRt
+// (src_193120212.js @24956). These exercise real cache -> dial -> settlement
+// paths, including disk reuse by a new registry, rather than only the writer.
+#[tokio::test]
+async fn fresh_cached_dial_failure_purges_entry_and_rebuilt_registry_dials_live() {
+    let _guard = crate::discovery_cache::tests_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let env = DiscoveryCacheEnvGuard::new();
+    env.set(crate::discovery_cache::ENV_ENABLED, "true");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+    let config = http_cfg("srv", "https://mcp.example.com/v1");
+    let key = crate::discovery_cache::logical_cache_key(&config);
+    seed_entry(&store, &key, 0);
+    let mock = Arc::new(BridgeMock::new(&["rebuilt"]));
+    mock.connect_failures_remaining.store(1, Ordering::SeqCst);
+    let make_registry = || {
+        McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()))
+    };
+    let registry = make_registry();
+    let cached_id = registry
+        .connect(config.clone())
+        .await
+        .expect("fresh cache hit");
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
+    let mut events = registry.subscribe_catalog_changes();
+    assert!(
+        registry.ensure_connected_client("srv").await.is_err(),
+        "cached dial fails"
+    );
+    assert_eq!(
+        load_test_entry(&store, &key),
+        crate::discovery_cache::EntryLookup::Absent
+    );
+    assert!(registry.servers_with_tools().await.is_empty());
+    assert!(registry.connected_prompts().await.is_empty());
+    assert!(registry.cached_discovery_contexts.read().await.is_empty());
+    assert!(matches!(registry.connections.read().await.get("srv"),
+        Some(McpConnectionState::Disconnected { last_error: Some(error), .. })
+            if error.contains("forced connect failure")));
+    let event = events.try_recv().expect("catalog retirement");
+    assert_eq!(event.retired_connection_id, Some(cached_id));
+    assert!(
+        events.try_recv().is_err(),
+        "one owner publishes one retirement"
+    );
+
+    let rebuilt = make_registry();
+    let live_id = rebuilt
+        .connect(config)
+        .await
+        .expect("new registry dials live");
+    assert_ne!(live_id, cached_id);
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 2);
+    assert!(matches!(rebuilt.connections.read().await.get("srv"),
+        Some(McpConnectionState::Connected { tools, .. }) if tools[0].tool_name == "rebuilt"));
+    assert!(
+        matches!(load_test_entry(&store, &key), crate::discovery_cache::EntryLookup::Found(entry)
+        if entry.consecutive_refresh_failures == 0 && entry.tools[0].tool_name == "rebuilt")
+    );
+}
+
+#[tokio::test]
+async fn stale_cached_failure_with_foreground_waiter_retires_catalog_and_strikes_once() {
+    let _guard = crate::discovery_cache::tests_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let env = DiscoveryCacheEnvGuard::new();
+    env.set(crate::discovery_cache::ENV_ENABLED, "true");
+    env.set(crate::discovery_cache::ENV_STRIKES, "3");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+    let config = http_cfg("srv", "https://mcp.example.com/v1");
+    let key = crate::discovery_cache::logical_cache_key(&config);
+    seed_entry(&store, &key, 1_000_000);
+    let crate::discovery_cache::EntryLookup::Found(mut entry) = load_test_entry(&store, &key)
+    else {
+        panic!("seeded catalog");
+    };
+    entry.prompts.push(prompt("cached-command"));
+    entry
+        .resources
+        .push(resource("cached-resource", "test://cached"));
+    store_test_entry(&store, &entry);
+    let mock = Arc::new(BridgeMock::new(&[]));
+    mock.block_connect.store(true, Ordering::SeqCst);
+    mock.connect_failures_remaining.store(1, Ordering::SeqCst);
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock.clone() as Arc<dyn RawConnectionProvider>,
+    )
+    .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+    let cached_id = registry.connect(config).await.expect("stale cache hit");
+    tokio::time::timeout(Duration::from_secs(2), mock.connect_started.notified())
+        .await
+        .expect("cached dial reaches transport");
+    assert_eq!(registry.servers_with_tools().await, ["srv"]);
+    assert_eq!(registry.connected_prompts().await.len(), 1);
+    let mut events = registry.subscribe_catalog_changes();
+    let mut foreground = Box::pin(registry.ensure_dialed_from_cache("srv"));
+    assert!(futures_util::poll!(foreground.as_mut()).is_pending());
+    mock.block_connect.store(false, Ordering::SeqCst);
+    mock.connect_release.notify_one();
+    let error = foreground.await.expect_err("shared cached dial fails");
+    assert!(error.to_string().contains("forced connect failure"));
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
+    assert!(registry.servers_with_tools().await.is_empty());
+    assert!(registry.connected_prompts().await.is_empty());
+    assert!(matches!(
+        registry.connections.read().await.get("srv"),
+        Some(McpConnectionState::Disconnected { .. })
+    ));
+    assert!(
+        matches!(load_test_entry(&store, &key), crate::discovery_cache::EntryLookup::Found(entry)
+        if entry.consecutive_refresh_failures == 1)
+    );
+    assert_eq!(
+        events.try_recv().expect("retirement").retired_connection_id,
+        Some(cached_id)
+    );
+    assert!(events.try_recv().is_err());
+    assert!(registry.lazy_upgrade_slots.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn repeated_fresh_cached_failures_delete_at_the_configured_strike_threshold() {
+    let _guard = crate::discovery_cache::tests_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let env = DiscoveryCacheEnvGuard::new();
+    env.set(crate::discovery_cache::ENV_ENABLED, "true");
+    env.set(crate::discovery_cache::ENV_STRIKES, "2");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+    let config = http_cfg("srv", "https://mcp.example.com/v1");
+    let key = crate::discovery_cache::logical_cache_key(&config);
+    seed_entry(&store, &key, 0);
+    let mock = Arc::new(BridgeMock::new(&[]));
+    mock.connect_failures_remaining.store(2, Ordering::SeqCst);
+    for attempt in 1..=2 {
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+        registry
+            .connect(config.clone())
+            .await
+            .expect("fresh cache hit below threshold");
+        registry
+            .ensure_dialed_from_cache("srv")
+            .await
+            .expect_err("cached dial failure");
+        let persisted = load_test_entry(&store, &key);
+        if attempt == 1 {
+            assert!(
+                matches!(persisted, crate::discovery_cache::EntryLookup::Found(entry)
+                if entry.consecutive_refresh_failures == 1)
+            );
+        } else {
+            assert_eq!(persisted, crate::discovery_cache::EntryLookup::Absent);
+        }
+    }
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cached_failure_after_grant_rotation_preserves_both_identity_partitions() {
+    let _guard = crate::discovery_cache::tests_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let env = DiscoveryCacheEnvGuard::new();
+    env.set(crate::discovery_cache::ENV_ENABLED, "true");
+    for age_ms in [0, 1_000_000] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let mut config = http_cfg("srv", "https://mcp.example.com/v1");
+        let McpTransportSpec::Http { oauth, .. } = &mut config.spec else {
+            unreachable!()
+        };
+        *oauth = Some(lingxi_core::host::McpOAuthConfigDto {
+            client_id: None,
+            callback_port: None,
+            auth_server_metadata_url: None,
+            scopes: None,
+            xaa: None,
+        });
+        let storage =
+            Arc::new(XaaMemStorage::default()) as Arc<dyn lingxi_core::host::SecureStorage>;
+        let clock =
+            Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn lingxi_core::host::Clock>;
+        let oauth_key = oauth::server_key(&config.name, &config.spec);
+        let save_grant = |refresh: &str| {
+            let storage = storage.clone();
+            let clock = clock.clone();
+            let oauth_key = oauth_key.clone();
+            let refresh = refresh.to_string();
+            async move {
+                oauth::store_tokens(
+                    &storage,
+                    &clock,
+                    &oauth_key,
+                    &oauth::StoredTokens {
+                        access_token: "test-access".into(),
+                        refresh_token: Some(refresh),
+                        expires_at_unix: 3600,
+                        client_id: None,
+                        client_secret: None,
+                        step_up_scope: None,
+                    },
+                )
+                .await
+                .expect("save grant");
+            }
+        };
+        save_grant("old-grant").await;
+        let mock = Arc::new(BridgeMock::new(&[]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        mock.connect_failures_remaining.store(1, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_oauth(OAuthDeps {
+            http: GatedXaaHttp::new() as Arc<dyn lingxi_core::host::HttpTransport>,
+            clock: clock.clone(),
+            storage: storage.clone(),
+            on_authorization_url: Arc::new(|_| {}),
+            xaa_config: None,
+        })
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+        let mode = crate::protocol_negotiation::resolve_for_spec_with_transport(
+            &config.spec,
+            None,
+            mcp_connection_timeout().as_millis() as u64,
+        );
+        let old_partition = registry
+            .discovery_cache_partition_for(&config, mode)
+            .await
+            .expect("old grant partition");
+        seed_entry(&store, &old_partition.logical_key, age_ms);
+        let crate::discovery_cache::EntryLookup::Found(entry) =
+            load_test_entry(&store, &old_partition.logical_key)
+        else {
+            panic!("seed entry");
+        };
+        store
+            .store_partitioned(&entry, &old_partition.partition_key)
+            .expect("seed old grant");
+        registry
+            .connect(config.clone())
+            .await
+            .expect("old grant cache hit");
+        // A fresh cache may sit idle across a grant rotation; a stale refresh
+        // instead captures its grant before the in-flight dial is released.
+        if age_ms == 0 {
+            save_grant("new-grant").await;
+        }
+        let mut foreground = Box::pin(registry.ensure_dialed_from_cache("srv"));
+        assert!(futures_util::poll!(foreground.as_mut()).is_pending());
+        tokio::time::timeout(Duration::from_secs(2), mock.connect_started.notified())
+            .await
+            .expect("cached dial reaches transport");
+        if age_ms != 0 {
+            save_grant("new-grant").await;
+        }
+        let new_partition = registry
+            .discovery_cache_partition_for(&config, mode)
+            .await
+            .expect("new grant partition");
+        assert_ne!(old_partition.partition_key, new_partition.partition_key);
+        store
+            .store_partitioned(&entry, &new_partition.partition_key)
+            .expect("seed new grant");
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        foreground.await.expect_err("old cached dial failed");
+        for partition in [&old_partition, &new_partition] {
+            assert!(
+                matches!(store.load_partitioned(&partition.logical_key, &partition.partition_key),
+                crate::discovery_cache::EntryLookup::Found(entry) if entry.consecutive_refresh_failures == 0),
+                "a rotated grant refuses the old failure strike altogether"
+            );
+        }
+        assert!(registry.servers_with_tools().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn cached_auth_failure_adopts_needs_auth_and_purges_rejected_catalog() {
+    let _guard = crate::discovery_cache::tests_env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let env = DiscoveryCacheEnvGuard::new();
+    env.set(crate::discovery_cache::ENV_ENABLED, "true");
+    // Auth purge precedes and is independent of WRt's ordinary strike limit.
+    env.set(crate::discovery_cache::ENV_STRIKES, "3");
+    for (age_ms, status) in [(0, 401), (1_000_000, 403)] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let config = http_cfg("srv", "https://mcp.example.com/v1");
+        let key = crate::discovery_cache::logical_cache_key(&config);
+        seed_entry(&store, &key, age_ms);
+        let mock = Arc::new(BridgeMock::new(&[]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        mock.connect_auth_status.store(status, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+        registry.connect(config).await.expect("cache hit");
+        let mut foreground = Box::pin(registry.ensure_dialed_from_cache("srv"));
+        assert!(futures_util::poll!(foreground.as_mut()).is_pending());
+        tokio::time::timeout(Duration::from_secs(2), mock.connect_started.notified())
+            .await
+            .expect("cached dial reaches transport");
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        foreground.await.expect_err("authentication required");
+        let state = registry
+            .connections
+            .read()
+            .await
+            .get("srv")
+            .cloned()
+            .expect("settled state");
+        assert!(matches!(state, McpConnectionState::NeedsAuth { .. }));
+        assert_eq!(
+            project_action_state(&state),
+            lingxi_core::host::McpActionState::NeedsAuth
+        );
+        assert!(registry.servers_with_tools().await.is_empty());
+        assert!(registry.servers_pending().await.is_empty());
+        assert_eq!(
+            load_test_entry(&store, &key),
+            crate::discovery_cache::EntryLookup::Absent
+        );
+    }
+}
+
 #[tokio::test]
 async fn foreground_lazy_upgrade_panic_recovers_to_disconnected_and_unblocks_waiters() {
     let _guard = crate::discovery_cache::tests_env_lock()
@@ -6076,7 +6660,7 @@ async fn foreground_initialize_panic_disconnects_the_known_transport() {
 }
 
 #[tokio::test]
-async fn background_lazy_upgrade_panic_keeps_cached_state_and_records_a_refresh_failure() {
+async fn background_lazy_upgrade_panic_retires_cached_state_and_purges_the_entry() {
     let _guard = crate::discovery_cache::tests_env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6099,14 +6683,10 @@ async fn background_lazy_upgrade_panic_keeps_cached_state_and_records_a_refresh_
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path())),
     );
 
-    let cached_id = registry.connect(cfg).await.expect("stale hit connect");
+    registry.connect(cfg).await.expect("stale hit connect");
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let entry = match load_test_entry(&store, &cache_key) {
-                crate::discovery_cache::EntryLookup::Found(entry) => entry,
-                other => panic!("expected entry, got {other:?}"),
-            };
-            if entry.consecutive_refresh_failures == 1
+            if load_test_entry(&store, &cache_key) == crate::discovery_cache::EntryLookup::Absent
                 && registry.lazy_upgrade_slots.read().await.is_empty()
             {
                 break;
@@ -6121,9 +6701,9 @@ async fn background_lazy_upgrade_panic_keeps_cached_state_and_records_a_refresh_
     assert!(
         matches!(
             registry.connections.read().await.get("srv"),
-            Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == cached_id
+            Some(McpConnectionState::Disconnected { .. })
         ),
-        "background panic must keep the cached state available"
+        "background panic must retire the unusable cached state"
     );
 }
 
@@ -6151,15 +6731,11 @@ async fn background_post_connect_panic_disconnects_the_known_transport() {
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path())),
     );
 
-    let cached_id = registry.connect(cfg).await.expect("stale cache hit");
+    registry.connect(cfg).await.expect("stale cache hit");
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let struck = match load_test_entry(&store, &cache_key) {
-                crate::discovery_cache::EntryLookup::Found(entry) => {
-                    entry.consecutive_refresh_failures == 1
-                }
-                other => panic!("expected entry, got {other:?}"),
-            };
+            let struck =
+                load_test_entry(&store, &cache_key) == crate::discovery_cache::EntryLookup::Absent;
             if struck
                 && registry.lazy_upgrade_slots.read().await.is_empty()
                 && mock.disconnect_calls.load(Ordering::SeqCst) == 1
@@ -6177,9 +6753,9 @@ async fn background_post_connect_panic_disconnects_the_known_transport() {
     assert!(
         matches!(
             registry.connections.read().await.get("srv"),
-            Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == cached_id
+            Some(McpConnectionState::Disconnected { .. })
         ),
-        "background post-connect panic must keep the cached generation available"
+        "background post-connect panic must retire the cached generation"
     );
 }
 
@@ -6199,7 +6775,7 @@ async fn stale_background_failure_does_not_strike_a_replaced_cached_generation()
 
     let mock = Arc::new(BridgeMock::new(&["alpha"]));
     mock.block_connect.store(true, Ordering::SeqCst);
-    mock.list_tools_fails.store(true, Ordering::SeqCst);
+    mock.connect_failures_remaining.store(1, Ordering::SeqCst);
     let registry = Arc::new(
         McpRegistry::with_raw_conn(
             mock.clone() as Arc<dyn McpTransport>,
@@ -6218,6 +6794,7 @@ async fn stale_background_failure_does_not_strike_a_replaced_cached_generation()
         McpConnectionState::Cached {
             config: http_cfg("srv", "https://mcp.example.com/v1"),
             connection_id: replacement_id,
+            server_info: None,
             capabilities: ServerCapabilitiesDto {
                 tools: true,
                 resources: false,
@@ -6232,6 +6809,9 @@ async fn stale_background_failure_does_not_strike_a_replaced_cached_generation()
                 version: "2025-11-25".into(),
             },
             tools: vec![McpToolDto {
+                input_schema_projection: None,
+                definition_projection: None,
+
                 server_name: "srv".into(),
                 tool_name: "replacement".into(),
                 description: "replacement".into(),
@@ -6266,6 +6846,9 @@ async fn stale_background_failure_does_not_strike_a_replaced_cached_generation()
             extensions: HashMap::new(),
         },
         vec![McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: "srv".into(),
             tool_name: "replacement".into(),
             description: "replacement".into(),
@@ -6297,6 +6880,7 @@ async fn stale_background_failure_does_not_strike_a_replaced_cached_generation()
                 .iter()
                 .any(|tool| tool.tool_name == "replacement")
                 && entry.consecutive_refresh_failures == 0
+                && registry.lazy_upgrade_slots.read().await.is_empty()
             {
                 break;
             }
@@ -6348,6 +6932,7 @@ async fn rejected_background_cleanup_does_not_hold_the_lifecycle_lock() {
         McpConnectionState::Cached {
             config: http_cfg("srv", "https://mcp.example.com/v2"),
             connection_id: cached_id,
+            server_info: None,
             capabilities: ServerCapabilitiesDto {
                 tools: true,
                 resources: false,
@@ -6523,6 +7108,7 @@ async fn catalog_refresh_snapshot_excludes_agent_scoped_entries() {
         McpConnectionState::Cached {
             config: http_cfg("srv", "https://mcp.example.com/v1"),
             connection_id: scoped_id,
+            server_info: None,
             capabilities: ServerCapabilitiesDto {
                 tools: true,
                 resources: false,
@@ -6537,6 +7123,9 @@ async fn catalog_refresh_snapshot_excludes_agent_scoped_entries() {
                 version: "2025-11-25".into(),
             },
             tools: vec![McpToolDto {
+                input_schema_projection: None,
+                definition_projection: None,
+
                 server_name: "srv".into(),
                 tool_name: "scoped".into(),
                 description: "scoped".into(),
@@ -6762,6 +7351,7 @@ async fn background_revalidation_cas_rejects_a_reconfigured_cached_state() {
         McpConnectionState::Cached {
             config: reconfigured,
             connection_id: cached_id,
+            server_info: None,
             capabilities: ServerCapabilitiesDto {
                 tools: true,
                 resources: false,
@@ -6776,6 +7366,9 @@ async fn background_revalidation_cas_rejects_a_reconfigured_cached_state() {
                 version: "2025-11-25".into(),
             },
             tools: vec![McpToolDto {
+                input_schema_projection: None,
+                definition_projection: None,
+
                 server_name: "srv".into(),
                 tool_name: "old".into(),
                 description: "old tool".into(),
@@ -6881,6 +7474,7 @@ async fn background_cas_reject_disconnect_retries_until_success() {
         McpConnectionState::Cached {
             config: http_cfg("srv", "https://mcp.example.com/v2"),
             connection_id: cached_id,
+            server_info: None,
             capabilities: ServerCapabilitiesDto {
                 tools: true,
                 resources: false,
@@ -7003,6 +7597,7 @@ async fn background_cleanup_retries_stop_and_can_be_kicked_again() {
         McpConnectionState::Cached {
             config: http_cfg("srv", "https://mcp.example.com/v2"),
             connection_id: cached_id,
+            server_info: None,
             capabilities: ServerCapabilitiesDto {
                 tools: true,
                 resources: false,
@@ -7453,7 +8048,7 @@ async fn first_tool_call_against_a_cached_server_dials_exactly_once() {
     // fail — this test only asserts that the DIAL happened, not that the
     // round-trip succeeded.
     let _ = registry
-        .call_tool_with_auth_retry("srv", "mcp__srv__alpha", serde_json::json!({}), None, None)
+        .call_tool_with_auth_retry("srv", "mcp__srv__alpha", lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({})), None, None)
         .await;
     drop(env);
 
@@ -7595,7 +8190,7 @@ async fn call_tool_rereads_the_live_client_after_publish_race() {
         let input = input.clone();
         tokio::spawn(async move {
             registry
-                .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+                .call_tool_with_auth_retry("srv", "mcp__srv__alpha", lingxi_core::types::utf16_json::Utf16JsonProjection::plain(input), None, None)
                 .await
         })
     };
@@ -7691,7 +8286,7 @@ async fn call_tool_publish_race_client_still_retries_a_first_auth_challenge() {
         let input = input.clone();
         tokio::spawn(async move {
             registry
-                .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+                .call_tool_with_auth_retry("srv", "mcp__srv__alpha", lingxi_core::types::utf16_json::Utf16JsonProjection::plain(input), None, None)
                 .await
         })
     };
@@ -7779,7 +8374,7 @@ async fn cached_lazy_dial_client_still_retries_a_first_auth_challenge() {
     let responder =
         spawn_tool_call_auth_then_success(mock.clone(), None, "alpha", input.clone(), 401);
     let result = registry
-        .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+        .call_tool_with_auth_retry("srv", "mcp__srv__alpha", lingxi_core::types::utf16_json::Utf16JsonProjection::plain(input), None, None)
         .await
         .expect("tool call succeeds after cached lazy-dial auth retry");
     responder.await.expect("auth retry responder");
@@ -7849,7 +8444,7 @@ async fn http_tool_call_session_expired_reconnects_once_and_retries() {
     let responder =
         spawn_tool_call_session_expired_then_success(mock.clone(), None, "alpha", input.clone());
     let result = registry
-        .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+        .call_tool_with_auth_retry("srv", "mcp__srv__alpha", lingxi_core::types::utf16_json::Utf16JsonProjection::plain(input), None, None)
         .await
         .expect("tool call succeeds after session-expired reconnect");
     responder.await.expect("session expired responder");
@@ -8094,7 +8689,7 @@ async fn second_auth_failure_emits_tool_call_auth_error() {
     let input = serde_json::json!({"city": "sf"});
     let responder = spawn_tool_call_auth_then_auth(mock.clone(), None, "alpha", input.clone(), 403);
     let error = registry
-        .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+        .call_tool_with_auth_retry("srv", "mcp__srv__alpha", lingxi_core::types::utf16_json::Utf16JsonProjection::plain(input), None, None)
         .await
         .expect_err("second auth failure must surface");
     responder.await.expect("double-auth responder");
@@ -8160,7 +8755,7 @@ async fn concurrent_tool_calls_against_a_cached_server_dial_only_once() {
                 .call_tool_with_auth_retry(
                     "srv",
                     "mcp__srv__alpha",
-                    serde_json::json!({}),
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({})),
                     None,
                     None,
                 )
@@ -8174,7 +8769,7 @@ async fn concurrent_tool_calls_against_a_cached_server_dial_only_once() {
                 .call_tool_with_auth_retry(
                     "srv",
                     "mcp__srv__alpha",
-                    serde_json::json!({}),
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({})),
                     None,
                     None,
                 )
@@ -8608,6 +9203,9 @@ fn server_config_invalid_payload_carries_the_raw_transport_kind_and_fixed_field(
 fn tools_listed_payload_counts_off_the_final_list() {
     let tools = vec![
         McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             tool_name: "a".into(),
             full_name: "mcp__srv__a".into(),
             server_name: "srv".into(),
@@ -8622,6 +9220,9 @@ fn tools_listed_payload_counts_off_the_final_list() {
             requires_user_interaction: false,
         },
         McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             tool_name: "b".into(),
             full_name: "mcp__srv__b".into(),
             server_name: "srv".into(),
@@ -8636,6 +9237,9 @@ fn tools_listed_payload_counts_off_the_final_list() {
             requires_user_interaction: false,
         },
         McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             tool_name: "c".into(),
             full_name: "mcp__srv__c".into(),
             server_name: "srv".into(),

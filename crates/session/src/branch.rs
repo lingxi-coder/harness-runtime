@@ -22,6 +22,9 @@ use lingxi_core::host::FileSystem;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::jsonl::exact_json::{
+    native_message_bytes, parse_exact_json, to_vec_with_overrides, Utf16Overrides,
+};
 use crate::jsonl::re_append::iso_now;
 #[cfg(test)]
 use crate::jsonl::JsonlMessage;
@@ -166,7 +169,7 @@ async fn create_branch_in(
     let carried_replacements = carried_content_replacements(&content, src_sid.as_str());
     let mut parent: Option<String> = None;
     let message_count = routed.messages_in_order.len();
-    let carries_content_replacements = !carried_replacements.is_empty();
+    let carries_content_replacements = !carried_replacements.values.is_empty();
     let carries_relocated =
         target_cwd == source_cwd && routed.relocated_cwds.contains_key(src_sid.as_str());
     let carries_atis = routed.atis_latches.contains_key(src_sid.as_str());
@@ -210,18 +213,28 @@ async fn create_branch_in(
         );
         // JsonlMessage's hand-written Serialize emits claude's per-kind key order
         // and never fails for a well-formed message.
-        lines.push(serde_json::to_string(&entry).expect("JsonlMessage serializes"));
+        lines.push(
+            String::from_utf8(
+                native_message_bytes(&entry)
+                    .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?,
+            )
+            .expect("native JSON encoder emits UTF-8"),
+        );
         parent = Some(original_uuid);
     }
 
-    if !carried_replacements.is_empty() {
-        lines.push(
-            serde_json::to_string(&json!({
+    if !carried_replacements.values.is_empty() {
+        let value = json!({
                 "type": "content-replacement",
                 "sessionId": new_sid,
-                "replacements": carried_replacements,
-            }))
-            .expect("content-replacement serializes"),
+                "replacements": carried_replacements.values,
+        });
+        lines.push(
+            String::from_utf8(
+                to_vec_with_overrides(&value, &carried_replacements.utf16_overrides)
+                    .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?,
+            )
+            .expect("native JSON encoder emits UTF-8"),
         );
     }
 
@@ -289,12 +302,19 @@ async fn create_branch_in(
     })
 }
 
-fn carried_content_replacements(content: &str, src_sid: &str) -> Vec<serde_json::Value> {
-    let mut carried = Vec::new();
+#[derive(Default)]
+struct CarriedReplacements {
+    values: Vec<serde_json::Value>,
+    utf16_overrides: Utf16Overrides,
+}
+
+fn carried_content_replacements(content: &str, src_sid: &str) -> CarriedReplacements {
+    let mut carried = CarriedReplacements::default();
     for line in content.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(exact) = parse_exact_json(line) else {
             continue;
         };
+        let value = exact.value;
         if value.get("type").and_then(serde_json::Value::as_str) != Some("content-replacement") {
             continue;
         }
@@ -312,7 +332,29 @@ fn carried_content_replacements(content: &str, src_sid: &str) -> Vec<serde_json:
             .get("replacements")
             .and_then(serde_json::Value::as_array)
         {
-            carried.extend(replacements.iter().cloned());
+            let offset = carried.values.len();
+            for (pointer, units) in exact.utf16_overrides {
+                let Some(relative) = pointer.strip_prefix("/replacements/") else {
+                    continue;
+                };
+                let (index, tail) = relative
+                    .split_once('/')
+                    .map_or((relative, ""), |(index, tail)| (index, tail));
+                let Ok(index) = index.parse::<usize>() else {
+                    continue;
+                };
+                if index < replacements.len() {
+                    let suffix = if tail.is_empty() {
+                        String::new()
+                    } else {
+                        format!("/{tail}")
+                    };
+                    carried
+                        .utf16_overrides
+                        .insert(format!("/replacements/{}{suffix}", offset + index), units);
+                }
+            }
+            carried.values.extend(replacements.iter().cloned());
         }
     }
     carried
@@ -394,6 +436,71 @@ mod tests {
         });
         value[field] = json!(payload);
         value.to_string()
+    }
+
+    #[tokio::test]
+    async fn branch_preserves_exact_native_peer_body_and_model_text() {
+        use crate::jsonl::exact_json::{
+            message_utf16_overrides, parse_exact_json, PRIVATE_UTF16_KEY,
+        };
+        let home = tempfile::tempdir().unwrap();
+        let cwd = "/native-fixture";
+        let src = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+        let fixture = include_str!("../tests/fixtures/handback_exact_utf16_2_1_286.jsonl");
+        let source = session_path(home.path(), cwd, &src.to_string());
+        tokio::fs::create_dir_all(source.parent().unwrap())
+            .await
+            .unwrap();
+        let body = format!("{fixture}{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ud83d\"}}]}}\n{{\"type\":\"content-replacement\",\"sessionId\":\"{src}\",\"replacements\":[{{\"text\":\"\\ude00\"}}]}}\n");
+        tokio::fs::write(&source, &body).await.unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
+        let fork = create_branch(home.path(), cwd, src, Some("Exact peer history"), fs)
+            .await
+            .unwrap();
+        assert_eq!(fork.message_count, 4);
+        let written = tokio::fs::read_to_string(session_path(
+            home.path(),
+            cwd,
+            &fork.new_session_id.to_string(),
+        ))
+        .await
+        .unwrap();
+        let restored = route_lines(&written);
+        assert_eq!(restored.malformed_line_count, 0);
+        assert_eq!(restored.messages_in_order.len(), 4);
+        for ((native, original), message) in written
+            .lines()
+            .take(4)
+            .zip(fixture.lines())
+            .zip(&restored.messages_in_order)
+        {
+            let native = parse_exact_json(native).unwrap();
+            let original = parse_exact_json(original).unwrap();
+            assert_eq!(native.utf16_overrides, original.utf16_overrides);
+            assert_eq!(message_utf16_overrides(message), original.utf16_overrides);
+            assert_eq!(native.value["message"], original.value["message"]);
+            assert_eq!(native.value["origin"], original.value["origin"]);
+            assert_eq!(native.value["origin"]["kind"], "peer");
+            assert_eq!(native.value["sessionId"], fork.new_session_id.to_string());
+            assert!(native.value.get(PRIVATE_UTF16_KEY).is_none());
+            assert!(native.value.get("deliveryId").is_none());
+        }
+        let replacement = written
+            .lines()
+            .find_map(|line| {
+                let exact = parse_exact_json(line).ok()?;
+                (exact.value["type"] == "content-replacement").then_some(exact)
+            })
+            .unwrap();
+        assert_eq!(
+            replacement.utf16_overrides,
+            Utf16Overrides::from([
+                ("/replacements/0/text".into(), vec![0xd83d]),
+                ("/replacements/1/text".into(), vec![0xde00]),
+            ])
+        );
+        assert!(replacement.value.get(PRIVATE_UTF16_KEY).is_none());
+        assert_eq!(tokio::fs::read_to_string(source).await.unwrap(), body);
     }
 
     #[tokio::test]

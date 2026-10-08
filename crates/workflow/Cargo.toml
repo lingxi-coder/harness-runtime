@@ -11,6 +11,7 @@ license.workspace = true
 # semantics as claude-code's AsyncFunction-based executor.
 
 [dependencies]
+branding.workspace = true
 core = { path = "../core" }
 # The Workflow tool description + authoring reference (`description.rs`) live
 # here because both the tool and the `workflow-authoring` bundled skill read

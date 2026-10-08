@@ -68,9 +68,9 @@ fn orch_with_seed(seed: Vec<DiscoveredSkill>) -> ConversationOrchestrator {
 /// Push an assistant message that requested an `Edit` so `find_write_pivot`
 /// reports a write pivot and the prefetch fires.
 async fn push_write_pivot(orch: &ConversationOrchestrator) {
-    let msg = ConversationMessage::Assistant {
+    let msg = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
-        content: vec![ContentBlock::ToolUse {
+        content: vec![ContentBlock::ToolUse { input_projection: None,
             id: lingxi_core::types::ToolUseId::new(),
             name: "Edit".into(),
             input: serde_json::json!({}),

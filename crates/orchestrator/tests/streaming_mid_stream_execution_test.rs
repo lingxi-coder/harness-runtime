@@ -113,7 +113,7 @@ impl Tool for ProbeTool {
         // in-flight future), so it lands BEFORE the trailing-text marker the
         // test records once the whole turn completes.
         self.log.lock().unwrap().push("tool-started".to_string());
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({"ok": true}),
             model_content: None,
             new_messages: vec![],
@@ -167,7 +167,7 @@ async fn tool_call_body_runs_before_stream_end() {
     registry.register_builtin(Arc::new(ProbeTool { log: log.clone() }));
     let tools = Arc::new(registry);
 
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api.clone(),
@@ -177,7 +177,7 @@ async fn tool_call_body_runs_before_stream_end() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
 
     let _ = orch.run_turn_streaming("call a tool").await.expect("ok");
 

@@ -108,17 +108,23 @@ async fn mid_turn_peer_arrivals_are_screened_before_joining_with_human_input() {
     .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)))
     .with_mid_turn_input(Arc::new(ReceivedMidTurnBatch(std::sync::Mutex::new(Some(
         vec![
-            MidTurnInput {
+            MidTurnInput { queue_delivery: None,
                 text: "hello".into(),
                 origin_kind: Some("peer"),
+                projected_content: None,
+                source_message_uuid: None,
             },
-            MidTurnInput {
+            MidTurnInput { queue_delivery: None,
                 text: "muted".into(),
                 origin_kind: Some("peer"),
+                projected_content: None,
+                source_message_uuid: None,
             },
-            MidTurnInput {
+            MidTurnInput { queue_delivery: None,
                 text: "human".into(),
                 origin_kind: None,
+                projected_content: None,
+                source_message_uuid: None,
             },
         ],
     )))));

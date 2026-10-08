@@ -946,14 +946,14 @@ mod tests {
 
     #[async_trait]
     impl OutputStream for NoopOutput {
-        async fn emit_text(&self, _text: &str) {}
+        async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
 
         async fn emit_tool_call(
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _input: &serde_json::Value,
-        ) {
+         _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
         }
 
         async fn emit_tool_result(
@@ -962,7 +962,7 @@ mod tests {
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
-        ) {
+         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
         }
 
         async fn emit_end_turn(&self, _stop_reason: &str, _cost: &lingxi_core::host::CostSnapshot) {
@@ -971,6 +971,7 @@ mod tests {
 
     fn request(name: Option<&str>) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: Default::default(),
             agent_spawn_provenance: Default::default(),
             teammate_color: None,

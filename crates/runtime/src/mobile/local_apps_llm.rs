@@ -925,14 +925,14 @@ fn lower_messages(messages: Vec<ChatMessage>) -> Vec<ConversationMessage> {
             let content: Vec<lingxi_core::types::ContentBlock> =
                 message.content.into_iter().map(chat_part_block).collect();
             match message.role {
-                ChatRole::User => ConversationMessage::User {
+                ChatRole::User => ConversationMessage::User { api_message_override: None,
                     id: MessageId::new(),
                     content,
                     is_meta: false,
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
                 },
-                ChatRole::Assistant => ConversationMessage::Assistant {
+                ChatRole::Assistant => ConversationMessage::Assistant { per_turn_effort: None,
                     id: MessageId::new(),
                     content,
                     stop_reason: None,

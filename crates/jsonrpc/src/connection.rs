@@ -260,6 +260,27 @@ impl Connection {
         Ok(self.router.start_call_unbounded(method, params)?)
     }
 
+    /// Start a call while retaining exact JSON parameters.
+    pub fn start_call_projected(
+        &self,
+        method: &str,
+        params: json_projection::Utf16JsonProjection,
+    ) -> Result<StartedCall, ConnectionError> {
+        Ok(self.router.start_call_projected(method, params)?)
+    }
+    /// Run the existing request owner with exact parameters and result.
+    pub async fn call_projected_with_timeout(
+        &self,
+        method: &str,
+        params: json_projection::Utf16JsonProjection,
+        timeout: Duration,
+    ) -> Result<json_projection::Utf16JsonProjection, ConnectionError> {
+        Ok(self
+            .router
+            .call_projected_with_timeout(method, params, timeout)
+            .await?)
+    }
+
     /// Build parameters using the assigned id before enqueueing the request.
     pub fn start_call_with_params(
         &self,

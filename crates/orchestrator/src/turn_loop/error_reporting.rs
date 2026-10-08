@@ -343,9 +343,12 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
         .and_then(crate::api_error_copy::automatic_compaction_failed_text)
         .unwrap_or_else(|| PROMPT_TOO_LONG_ERROR_MESSAGE.to_string());
     let assistant_id = MessageId::new();
-    let assistant_msg = ConversationMessage::Assistant {
+    let assistant_msg = ConversationMessage::Assistant { per_turn_effort: None,
         id: assistant_id,
-        content: vec![ContentBlock::Text { text: text.clone(), citations: None }],
+        content: vec![ContentBlock::Text {
+            text: text.clone(),
+            citations: None,
+        }],
         stop_reason: Some("prompt_too_long".to_string()),
     };
     {
@@ -357,7 +360,7 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
     // assistant line (here a single text block → one line either way) — the
     // per-block split is streaming-only.
     orch.persist_message_to_jsonl(&assistant_msg).await;
-    orch.output.emit_text(&text).await;
+    orch.output.emit_text(&text, None).await;
     assistant_id
 }
 
@@ -373,10 +376,11 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
 /// message + emit), so the turn ends cleanly.
 pub(crate) async fn surface_rapid_refill_thrashing(orch: &ConversationOrchestrator) -> MessageId {
     let assistant_id = MessageId::new();
-    let assistant_msg = ConversationMessage::Assistant {
+    let assistant_msg = ConversationMessage::Assistant { per_turn_effort: None,
         id: assistant_id,
         content: vec![ContentBlock::Text {
-            text: compaction::RAPID_REFILL_THRASHING_MESSAGE.to_string(), citations: None,
+            text: compaction::RAPID_REFILL_THRASHING_MESSAGE.to_string(),
+            citations: None,
         }],
         // The binary surfaces this as `error:"invalid_request"`.
         stop_reason: Some("invalid_request".to_string()),
@@ -387,7 +391,7 @@ pub(crate) async fn surface_rapid_refill_thrashing(orch: &ConversationOrchestrat
     }
     orch.persist_message_to_jsonl(&assistant_msg).await;
     orch.output
-        .emit_text(compaction::RAPID_REFILL_THRASHING_MESSAGE)
+        .emit_text(compaction::RAPID_REFILL_THRASHING_MESSAGE, None)
         .await;
     assistant_id
 }
@@ -581,9 +585,12 @@ pub(crate) async fn surface_terminal_api_error(
         stop_details,
     )?;
     let assistant_id = MessageId::new();
-    let assistant_msg = ConversationMessage::Assistant {
+    let assistant_msg = ConversationMessage::Assistant { per_turn_effort: None,
         id: assistant_id,
-        content: vec![ContentBlock::Text { text: text.clone(), citations: None }],
+        content: vec![ContentBlock::Text {
+            text: text.clone(),
+            citations: None,
+        }],
         stop_reason: Some(stop_reason.to_string()),
     };
     {
@@ -617,7 +624,7 @@ pub(crate) async fn surface_terminal_api_error(
     };
     orch.persist_api_error_message_to_jsonl(&assistant_msg, env)
         .await;
-    orch.output.emit_text(&text).await;
+    orch.output.emit_text(&text, None).await;
     Some(assistant_id)
 }
 
@@ -724,6 +731,7 @@ pub(crate) async fn surface_model_error(
     orch: &ConversationOrchestrator,
     error_text: &str,
     env: ApiErrorEnvelope,
+    provider_status: Option<u16>,
 ) -> MessageId {
     if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
         let mut metadata = telemetry::LogEventMetadata::new();
@@ -734,7 +742,11 @@ pub(crate) async fn surface_model_error(
         metadata.insert("queryDepth".into(), telemetry::AnalyticsValue::Int(0));
         bus.log_event("tengu_query_error", metadata).await;
     }
-    surface_api_error_notice(orch, error_text, env).await
+    let message_id = surface_api_error_notice(orch, error_text, env).await;
+    // Ordinary/API assistant commits replace the prior row's marker. Restore
+    // this error's actual provider status only after its row has been accepted.
+    orch.note_turn_api_error_status(provider_status);
+    message_id
 }
 
 /// Persist + emit an api-error assistant message (the `createAssistantAPIErrorMessage`
@@ -755,9 +767,12 @@ pub(crate) async fn surface_api_error_notice(
         error_text.to_string()
     };
     let assistant_id = MessageId::new();
-    let assistant_msg = ConversationMessage::Assistant {
+    let assistant_msg = ConversationMessage::Assistant { per_turn_effort: None,
         id: assistant_id,
-        content: vec![ContentBlock::Text { text: text.clone(), citations: None }],
+        content: vec![ContentBlock::Text {
+            text: text.clone(),
+            citations: None,
+        }],
         stop_reason: Some("model_error".to_string()),
     };
     {
@@ -773,6 +788,6 @@ pub(crate) async fn surface_api_error_notice(
     // TYPED error and passed in here (the classifier deferral is now CLOSED).
     orch.persist_api_error_message_to_jsonl(&assistant_msg, env)
         .await;
-    orch.output.emit_text(&text).await;
+    orch.output.emit_text(&text, None).await;
     assistant_id
 }

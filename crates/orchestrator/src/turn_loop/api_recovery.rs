@@ -89,7 +89,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     profile: Option<&str>,
     mut history_snapshot: Vec<ConversationMessage>,
     outgoing_history_rewriter: Option<Arc<dyn crate::conversation::OutgoingHistoryRewriter>>,
-    tools: Vec<serde_json::Value>,
+    tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     max_tokens_override: Option<u32>,
     // This step's transient deferred-tool delta. Like the date-change reminder,
     // it must be reattached when a retry rebuilds from raw session history.

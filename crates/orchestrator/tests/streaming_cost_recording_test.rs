@@ -86,7 +86,7 @@ fn make_streaming_orch_with_tracker(
     let mut cfg = OrchestratorConfig::default();
     cfg.model = "claude-opus-4-6".into(); // priced in builtin_reference catalog
 
-    let orch = Arc::new(
+    let orch = ConversationOrchestrator::into_shared(
         ConversationOrchestrator::new_with_streaming(
             cfg,
             batched,

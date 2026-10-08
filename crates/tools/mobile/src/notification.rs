@@ -151,7 +151,7 @@ impl Tool for NotificationTool {
             .await
             .map_err(|e| map_notification_err(&e))?;
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "posted": true }),
             model_content: None,
             new_messages: vec![],

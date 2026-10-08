@@ -1677,11 +1677,28 @@ mod command_arm_tests {
     }
 
     #[tokio::test]
+    async fn user_prompt_submit_preserves_exact_js_utf16_text() {
+        let projection =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""before\ud800after""#)
+                .unwrap();
+        let stdin = dispatch_and_capture(
+            HookEventType::UserPromptSubmit,
+            HookEvent::UserPromptSubmit {
+                prompt: projection.value.as_str().unwrap().to_owned(),
+                prompt_projection: Some(projection),
+            },
+        )
+        .await;
+        assert!(stdin.contains(r#""prompt":"before\ud800after""#), "{stdin}");
+    }
+
+    #[tokio::test]
     async fn user_prompt_submit_event_serializes_prompt() {
         let stdin = dispatch_and_capture(
             HookEventType::UserPromptSubmit,
             HookEvent::UserPromptSubmit {
                 prompt: "do the thing".into(),
+                prompt_projection: None,
             },
         )
         .await;
@@ -1870,11 +1887,10 @@ mod command_arm_tests {
             .await;
 
         assert_eq!(agg.decision, Some(HookDecision::Block));
-        assert!(
-            agg.reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("timed out"))
-        );
+        assert!(agg
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("timed out")));
     }
 
     #[tokio::test]
@@ -1932,7 +1948,9 @@ mod command_arm_tests {
         assert_eq!(agg.decision, None, "post decisions never gate");
         assert_eq!(
             agg.additional_contexts,
-            vec![crate::response::ExactHookText::from_text("warm the new model")]
+            vec![crate::response::ExactHookText::from_text(
+                "warm the new model"
+            )]
         );
     }
 
@@ -2257,7 +2275,10 @@ mod command_arm_tests {
                 "TeammateIdle",
             ),
             (
-                HookEvent::UserPromptSubmit { prompt: "p".into() },
+                HookEvent::UserPromptSubmit {
+                    prompt: "p".into(),
+                    prompt_projection: None,
+                },
                 "UserPromptSubmit",
             ),
             (
@@ -2494,9 +2515,14 @@ mod command_arm_tests {
 
         // A non-Stop lifecycle event NEVER carries the keys even with a populated
         // context (the fields live only on the Stop / SubagentStop payloads).
-        let (_, ups_body) =
-            build_envelope_body(&HookEvent::UserPromptSubmit { prompt: "p".into() }, &ctx)
-                .expect("ups serializes");
+        let (_, ups_body) = build_envelope_body(
+            &HookEvent::UserPromptSubmit {
+                prompt: "p".into(),
+                prompt_projection: None,
+            },
+            &ctx,
+        )
+        .expect("ups serializes");
         assert!(
             !ups_body.contains("background_tasks"),
             "UserPromptSubmit must omit bg: {ups_body}"
@@ -3422,14 +3448,14 @@ mod async_path_tests {
 
     #[async_trait]
     impl lingxi_core::host::OutputStream for AsyncProgressObserver {
-        async fn emit_text(&self, _text: &str) {}
+        async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
 
         async fn emit_tool_call(
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _input: &serde_json::Value,
-        ) {
+         _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
         }
 
         async fn emit_tool_result(
@@ -3438,7 +3464,7 @@ mod async_path_tests {
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
-        ) {
+         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
         }
 
         async fn emit_end_turn(&self, _stop_reason: &str, _cost: &lingxi_core::host::CostSnapshot) {
@@ -3664,7 +3690,9 @@ mod async_path_tests {
         assert_eq!(agg.decision, Some(HookDecision::Block));
         assert_eq!(agg.reason.as_deref(), Some("[hook.sh]: first blocker"));
         assert!(
-            agg.system_messages.iter().any(|m| m.display == "second ran"),
+            agg.system_messages
+                .iter()
+                .any(|m| m.display == "second ran"),
             "the later hook's systemMessage must survive the earlier Block: {:?}",
             agg.system_messages,
         );
@@ -3777,14 +3805,14 @@ mod once_and_status_message_tests {
 
     #[async_trait]
     impl lingxi_core::host::OutputStream for ProgressObserver {
-        async fn emit_text(&self, _text: &str) {}
+        async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
 
         async fn emit_tool_call(
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _input: &serde_json::Value,
-        ) {
+         _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
         }
 
         async fn emit_tool_result(
@@ -3793,7 +3821,7 @@ mod once_and_status_message_tests {
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
-        ) {
+         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
         }
 
         async fn emit_end_turn(&self, _stop_reason: &str, _cost: &lingxi_core::host::CostSnapshot) {
@@ -4716,7 +4744,11 @@ mod http_agent_dispatch_tests {
         let weak = Arc::downgrade(&binding);
         exec.attach_agent_spawner(weak.clone());
         drop(binding);
-        assert_eq!(Arc::strong_count(&spawner), 1, "the hook executor borrows its owner");
+        assert_eq!(
+            Arc::strong_count(&spawner),
+            1,
+            "the hook executor borrows its owner"
+        );
 
         // The Agent arm needs the inheritance bundle on the context.
         let ctx = HookContext {
@@ -4767,10 +4799,19 @@ mod http_agent_dispatch_tests {
         assert!(matches!(r.outcome, HookOutcome::Success));
         assert_eq!(Arc::strong_count(&spawner), 1);
         drop(spawner);
-        assert!(weak.upgrade().is_none(), "the hook binding cannot retain the spawner graph");
+        assert!(
+            weak.upgrade().is_none(),
+            "the hook binding cannot retain the spawner graph"
+        );
         let expired = exec.execute(pre_event(), ctx).await;
-        assert!(matches!(expired.all_results[0].1.outcome, HookOutcome::Error));
-        assert!(expired.all_results[0].1.stderr.contains("agent executor not wired"));
+        assert!(matches!(
+            expired.all_results[0].1.outcome,
+            HookOutcome::Error
+        ));
+        assert!(expired.all_results[0]
+            .1
+            .stderr
+            .contains("agent executor not wired"));
     }
 }
 
@@ -5063,10 +5104,9 @@ mod prompt_dispatch_tests {
         assert_eq!(calls[0].transcript.as_ref().unwrap().last_usage_tokens, 321);
         drop(calls);
         assert!(exec.take_agent_prompt_transcript(session, child).is_none());
-        assert!(
-            exec.take_agent_prompt_transcript(lingxi_core::types::SessionId::new(), other)
-                .is_none()
-        );
+        assert!(exec
+            .take_agent_prompt_transcript(lingxi_core::types::SessionId::new(), other)
+            .is_none());
         exec.clear_session_hooks(session).await;
         assert!(exec.take_agent_prompt_transcript(session, other).is_none());
     }

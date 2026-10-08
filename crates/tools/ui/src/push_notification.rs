@@ -376,7 +376,7 @@ fn result(
     }
     data.insert("sentAt".into(), json!(sent_at));
 
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data: Value::Object(data),
         // The faithful model-facing render (binary mapToolResultToToolResultBlockParam).
         model_content: Some(render(disabled_reason, local_sent, has_focus, idle_sec)),

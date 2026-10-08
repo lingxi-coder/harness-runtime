@@ -7,11 +7,11 @@
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
-use lingxi_core::host::CancellationToken;
 use lingxi_core::host::tool_invoker::{
     SubagentInvocationContext, ToolInvocationResult, ToolInvokerError,
 };
 use lingxi_core::host::tool_use_lifecycle::{ToolUseRemoval, ToolUseRemovalReason};
+use lingxi_core::host::CancellationToken;
 use lingxi_core::types::ToolUseId;
 use serde_json::Value;
 use std::sync::Arc;
@@ -350,6 +350,7 @@ mod tests {
 
     fn invocation_context() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            input_projection: None,
             cancellation_token: CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
@@ -399,6 +400,9 @@ mod tests {
         context_state: lingxi_core::host::tool_invoker::ToolInvocationContextState,
     ) -> ToolInvocationResult {
         ToolInvocationResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             is_error: false,
             data: Value::Null,
             model_content: None,
@@ -519,14 +523,12 @@ mod tests {
         ));
         executor.record_completion(0, Ok(result_with_context(state)), &dispatch);
 
-        assert!(
-            executor
-                .call(1)
-                .expect("queued call remains registered")
-                .context
-                .tool_context_state
-                .is_none()
-        );
+        assert!(executor
+            .call(1)
+            .expect("queued call remains registered")
+            .context
+            .tool_context_state
+            .is_none());
     }
 
     #[tokio::test]

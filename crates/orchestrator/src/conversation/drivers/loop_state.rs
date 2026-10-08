@@ -49,6 +49,7 @@ impl LoopGuardOrder {
 /// types — batched returns `Ok(TurnOutcome::MaxTurns)`, streaming returns
 /// `Err(OrchestratorError::MaxTurnsReached)` — and §3.2 keeps that difference.
 pub(crate) enum GuardVerdict {
+    StructuredOutputRetries(OrchestratorError),
     /// Run the model step.
     Proceed,
     /// `max_turns` reached before this step.
@@ -58,12 +59,23 @@ pub(crate) enum GuardVerdict {
 }
 
 impl ConversationOrchestrator {
+    pub(crate) async fn admit_structured_output_completion(&self, state: &mut TurnLoopState) {
+        {
+            let session = self.session.lock().await;
+            state.structured_output_retry.observe(&session.history);
+        }
+        if state.structured_output_retry.admit_completion() {
+            state.turn_count = state.turn_count.saturating_add(1);
+            self.note_turn_count(state.turn_count);
+        }
+    }
+
     /// Run the drain/limit/increment guards in `order`, returning what they
     /// decided.
     ///
-    /// The turn counter is incremented ONLY on `Proceed`, matching all three
-    /// entries today: a turn stopped by a limit does not count the step it
-    /// never ran.
+    /// The turn counter records admitted query cycles: a turn stopped by a
+    /// limit does not count the step it never ran; a structured retry terminal
+    /// counts the cycle admitted before deciding not to issue another API call.
     pub(crate) async fn run_turn_loop_guards(
         &self,
         order: LoopGuardOrder,
@@ -74,6 +86,10 @@ impl ConversationOrchestrator {
             // previous step is not dropped by `max_turns` or the budget.
             self.drain_mid_turn_input().await;
         }
+        {
+            let session = self.session.lock().await;
+            state.structured_output_retry.observe(&session.history);
+        }
         if self.config.max_turns != 0 && state.turn_count >= self.config.max_turns {
             return GuardVerdict::MaxTurns;
         }
@@ -81,6 +97,16 @@ impl ConversationOrchestrator {
             return GuardVerdict::OverBudget;
         }
         state.turn_count = state.turn_count.saturating_add(1);
+        self.note_turn_count(state.turn_count);
+        if let Some(error) = state
+            .structured_output_retry
+            .exhausted(self.config.max_structured_output_retries)
+        {
+            let cost = self.snapshot_cost_real().await;
+            self.emit_turn_terminal("structured_output_retry_exhausted", &cost)
+                .await;
+            return GuardVerdict::StructuredOutputRetries(error);
+        }
         GuardVerdict::Proceed
     }
 }

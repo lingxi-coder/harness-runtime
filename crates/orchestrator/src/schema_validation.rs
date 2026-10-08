@@ -102,14 +102,60 @@ pub(crate) fn validate_tool_schema_detailed(
     if let Some(parsed) = tool.parse_native_input(input) {
         return parsed.map(|_| ());
     }
+    validate_tool_schema_values(tool, tool.input_validation_schema(), input)
+}
+
+/// Validate exact inputs and schemas in one reversible consumer namespace.
+pub(crate) fn validate_tool_schema_projected(
+    tool: &dyn tool_api::Tool,
+    input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<(), ToolSchemaError> {
+    use lingxi_core::types::utf16_json::{Utf16JsonConsumer, Utf16JsonProjection};
+    let schema = tool
+        .input_schema_projection()
+        .filter(|schema| &schema.value == tool.input_validation_schema())
+        .unwrap_or_else(|| Utf16JsonProjection::plain(tool.input_validation_schema().clone()));
+    if schema.strings.is_empty()
+        && schema.keys.is_empty()
+        && input.strings.is_empty()
+        && input.keys.is_empty()
+    {
+        return validate_tool_schema_detailed(tool, &input.value);
+    }
+    let error = |message: String| ToolSchemaError {
+        raw: message.clone(),
+        display: message,
+    };
+    // Rust regex engines cannot represent JavaScript's isolated surrogate
+    // character classes. Do not turn a failed regex compilation into PASS.
+    let mut pending = vec![&schema.value];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::Object(object) => {
+                if object.contains_key("pattern") || object.contains_key("patternProperties") {
+                    return Err(error(
+                        "Exact UTF-16 schema regex validation is unavailable".into(),
+                    ));
+                }
+                pending.extend(object.values());
+            }
+            serde_json::Value::Array(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    let consumer =
+        Utf16JsonConsumer::new(&[&schema, input]).map_err(|cause| error(cause.to_string()))?;
+    validate_tool_schema_values(tool, &consumer.values()[0], &consumer.values()[1])
+}
+
+fn validate_tool_schema_values(
+    tool: &dyn tool_api::Tool,
+    schema: &serde_json::Value,
+    input: &serde_json::Value,
+) -> Result<(), ToolSchemaError> {
     let mut issues = Vec::new();
-    let fallback = validate_tool_input_schema(tool.input_validation_schema(), input).err();
-    if !collect_issues(
-        tool.input_validation_schema(),
-        Some(input),
-        &[],
-        &mut issues,
-    ) {
+    let fallback = validate_tool_input_schema(schema, input).err();
+    if !collect_issues(schema, Some(input), &[], &mut issues) {
         return fallback.map_or(Ok(()), |display| {
             Err(ToolSchemaError {
                 raw: display.clone(),
@@ -133,7 +179,7 @@ pub(crate) fn validate_tool_schema_detailed(
     }
     issues.sort_by_key(|issue| {
         declaration_order(
-            tool.input_validation_schema(),
+            schema,
             issue["path"].as_array().map_or(&[][..], Vec::as_slice),
         )
     });
@@ -513,37 +559,7 @@ pub(crate) fn validate_tool_output_schema(
     schema: &serde_json::Value,
     output: &serde_json::Value,
 ) -> Result<(), String> {
-    const URL: &str = "mem://tool-output-schema";
-    let mut schemas = Schemas::new();
-    let mut compiler = Compiler::new();
-
-    if let Err(e) = compiler.add_resource(URL, schema.clone()) {
-        tracing::warn!(
-            error = %e,
-            "tool output_schema failed to load (treating as PASS — `LingXi` schema bug, not hook output error)"
-        );
-        return Ok(());
-    }
-    let sch = match compiler.compile(URL, &mut schemas) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "tool output_schema failed to compile (treating as PASS — `LingXi` schema bug, not hook output error)"
-            );
-            return Ok(());
-        }
-    };
-
-    if let Err(err) = schemas.validate(output, sch) {
-        let mut out = Vec::new();
-        flatten(&err, &mut out);
-        if out.is_empty() {
-            out.push(err.kind.to_string());
-        }
-        return Err(out.join("; "));
-    }
-    Ok(())
+    tool_api::output_schema::validate(schema, output)
 }
 
 #[cfg(test)]
@@ -554,11 +570,17 @@ mod tests {
     use serde_json::json;
 
     struct NativeCronSchema {
+        projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         name: String,
         schema: serde_json::Value,
     }
     #[async_trait::async_trait]
     impl tool_api::Tool for NativeCronSchema {
+        fn input_schema_projection(
+            &self,
+        ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+            self.projection.clone()
+        }
         fn name(&self) -> &str {
             &self.name
         }
@@ -605,6 +627,54 @@ mod tests {
     }
 
     #[test]
+    fn projected_schema_matches_exact_keys_required_enums_and_utf16_lengths() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
+        let projection = Projection::parse(r#"{"type":"object","properties":{"\ud800":{"type":"string","enum":["\ud801"],"minLength":1,"maxLength":1},"\ue000":{"type":"string"}},"required":["\ud800"],"additionalProperties":false}"#).unwrap();
+        let tool = NativeCronSchema {
+            name: "Exact".into(),
+            schema: projection.value.clone(),
+            projection: Some(projection),
+        };
+        for raw in [
+            r#"{"\ud800":"\ud801"}"#,
+            r#"{"\ue000":"plain","\ud800":"\ud801"}"#,
+        ] {
+            assert!(
+                super::validate_tool_schema_projected(&tool, &Projection::parse(raw).unwrap())
+                    .is_ok(),
+                "{raw}"
+            );
+        }
+        for raw in [
+            r#"{"\ud801":"\ud801"}"#,
+            r#"{"\ud800":"\ud800"}"#,
+            r#"{"\ue000":"\ud801"}"#,
+            r#"{"\ud800":"\ud801","\ud802":"extra"}"#,
+        ] {
+            assert!(
+                super::validate_tool_schema_projected(&tool, &Projection::parse(raw).unwrap())
+                    .is_err(),
+                "{raw}"
+            );
+        }
+        let projection = Projection::parse(
+            r#"{"type":"object","properties":{"value":{"type":"string","pattern":"\\uE000"}}}"#,
+        )
+        .unwrap();
+        let tool = NativeCronSchema {
+            name: "Exact".into(),
+            schema: projection.value.clone(),
+            projection: Some(projection),
+        };
+        let error = super::validate_tool_schema_projected(
+            &tool,
+            &Projection::parse(r#"{"value":"\ud800"}"#).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.display.contains("regex validation is unavailable"));
+    }
+
+    #[test]
     fn cron_outer_diagnostics_match_executed_native_2_1_270_zod() {
         let oracle: serde_json::Value = serde_json::from_str(include_str!(
             "../../tools/cron/tests/fixtures/malformed_input_2_1_270.json"
@@ -613,6 +683,7 @@ mod tests {
         for (index, case) in oracle["cases"].as_array().unwrap().iter().enumerate() {
             let name = case["tool"].as_str().unwrap();
             let tool = NativeCronSchema {
+                projection: None,
                 name: name.into(),
                 schema: oracle["schemas"][name].clone(),
             };
@@ -647,6 +718,7 @@ mod tests {
         let mut registry = tool_api::registry::ToolRegistry::new();
         for name in ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList"] {
             registry.register_builtin(Arc::new(NativeCronSchema {
+                projection: None,
                 name: name.into(),
                 schema: oracle["schemas"][name].clone(),
             }));
@@ -685,7 +757,7 @@ mod tests {
             else {
                 panic!("expected tool result")
             };
-            assert!(*is_error);
+            assert!(is_error.unwrap_or(false));
             assert_eq!(
                 content,
                 &format!(
@@ -766,7 +838,7 @@ mod tests {
             else {
                 panic!("expected tool result")
             };
-            assert!(*is_error);
+            assert!(is_error.unwrap_or(false));
             assert_eq!(
                 content,
                 &format!(

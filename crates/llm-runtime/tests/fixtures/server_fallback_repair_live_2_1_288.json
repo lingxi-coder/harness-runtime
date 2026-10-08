@@ -1,0 +1,227 @@
+{
+  "version": "2.1.288",
+  "native_sha256": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750",
+  "scope": "Actual native CLI over localhost-only HTTP mocks using fake credentials. Each provider receives the same 400 category-beta error and must log the shared r3e retry. No signed cloud request or live provider is exercised.",
+  "scenarios": [
+    {
+      "provider": "first_party",
+      "exit_code": 1,
+      "repair_retry_logs": [
+        "[server-fallback] 400 attributed (category_beta_header) — stripping and retrying"
+      ],
+      "api_request_count": 4,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": "claude-sonnet-4-6",
+          "stream": true,
+          "fallbacks": null,
+          "anthropic_version": null,
+          "anthropic_beta": null
+        },
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-display-updates-2026-08-18,afk-mode-2026-01-31",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": "claude-sonnet-4-6",
+          "stream": true,
+          "fallbacks": null,
+          "anthropic_version": null,
+          "anthropic_beta": null
+        },
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,dangerous-tool-use-2026-09-03,afk-mode-2026-01-31",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": "claude-sonnet-4-6",
+          "stream": true,
+          "fallbacks": null,
+          "anthropic_version": null,
+          "anthropic_beta": null
+        },
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,afk-mode-2026-01-31",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": "claude-sonnet-4-6",
+          "stream": true,
+          "fallbacks": null,
+          "anthropic_version": null,
+          "anthropic_beta": null
+        }
+      ]
+    },
+    {
+      "provider": "bedrock",
+      "exit_code": 1,
+      "repair_retry_logs": [
+        "[server-fallback] 400 attributed (category_beta_header) — stripping and retrying"
+      ],
+      "api_request_count": 2,
+      "requests": [
+        {
+          "method": "GET",
+          "path": "/inference-profiles?type=SYSTEM_DEFINED",
+          "status": 400,
+          "headers": {},
+          "model": null,
+          "stream": null,
+          "fallbacks": null,
+          "anthropic_version": null,
+          "anthropic_beta": null
+        },
+        {
+          "method": "POST",
+          "path": "/model/us.anthropic.claude-sonnet-4-6/invoke-with-response-stream",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,effort-2025-11-24",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": null,
+          "stream": null,
+          "fallbacks": null,
+          "anthropic_version": "bedrock-2023-05-31",
+          "anthropic_beta": [
+            "interleaved-thinking-2025-05-14"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/model/us.anthropic.claude-sonnet-4-6/invoke-with-response-stream",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,effort-2025-11-24",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": null,
+          "stream": null,
+          "fallbacks": null,
+          "anthropic_version": "bedrock-2023-05-31",
+          "anthropic_beta": [
+            "interleaved-thinking-2025-05-14"
+          ]
+        }
+      ]
+    },
+    {
+      "provider": "vertex",
+      "exit_code": 1,
+      "repair_retry_logs": [
+        "[server-fallback] 400 attributed (category_beta_header) — stripping and retrying"
+      ],
+      "api_request_count": 2,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/projects/fixture-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,web-search-2025-03-05,effort-2025-11-24",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": null,
+          "stream": true,
+          "fallbacks": null,
+          "anthropic_version": "vertex-2023-10-16",
+          "anthropic_beta": null
+        },
+        {
+          "method": "POST",
+          "path": "/projects/fixture-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,web-search-2025-03-05,effort-2025-11-24",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": null,
+          "stream": true,
+          "fallbacks": null,
+          "anthropic_version": "vertex-2023-10-16",
+          "anthropic_beta": null
+        }
+      ]
+    },
+    {
+      "provider": "foundry",
+      "exit_code": 1,
+      "repair_retry_logs": [
+        "[server-fallback] 400 attributed (category_beta_header) — stripping and retrying"
+      ],
+      "api_request_count": 3,
+      "requests": [
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,effort-2025-11-24,thinking-display-updates-2026-08-18",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": "claude-sonnet-4-6",
+          "stream": true,
+          "fallbacks": null,
+          "anthropic_version": null,
+          "anthropic_beta": null
+        },
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,effort-2025-11-24,thinking-display-updates-2026-08-18",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": "claude-sonnet-4-6",
+          "stream": true,
+          "fallbacks": null,
+          "anthropic_version": null,
+          "anthropic_beta": null
+        },
+        {
+          "method": "POST",
+          "path": "/v1/messages?beta=true",
+          "status": 400,
+          "headers": {
+            "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,context-management-2025-06-27,web-search-2025-03-05,prompt-caching-scope-2026-01-05,effort-2025-11-24",
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+          },
+          "model": "claude-sonnet-4-6",
+          "stream": true,
+          "fallbacks": null,
+          "anthropic_version": null,
+          "anthropic_beta": null
+        }
+      ]
+    }
+  ]
+}

@@ -1144,6 +1144,7 @@ pub(crate) struct ToolResultFramePublication {
     pub(crate) tool: String,
     pub(crate) model_text: String,
     pub(crate) result: serde_json::Value,
+    pub(crate) projection: Option<lingxi_core::host::ToolResultProjection>,
     pub(crate) denial_kind: Option<String>,
 }
 
@@ -1153,11 +1154,11 @@ pub(crate) struct ToolResultFramePublication {
 #[derive(Clone)]
 pub(crate) struct ToolResultPublication {
     pub(crate) tool_use_id: ToolUseId,
-    pub(crate) tool_use_result: Option<serde_json::Value>,
-    pub(crate) mcp_meta: Option<serde_json::Value>,
+    pub(crate) tool_use_result: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    pub(crate) mcp_meta: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     pub(crate) turn_end: Option<tool_api::tool_trait::ToolResultTurnEnd>,
     pub(crate) denial_kind: Option<String>,
-    pub(crate) permission_denial: Option<(String, serde_json::Value)>,
+    pub(crate) permission_denial: Option<(String, Utf16JsonProjection)>,
     pub(crate) frame: Option<ToolResultFramePublication>,
 }
 
@@ -1175,7 +1176,7 @@ impl ToolResultPublication {
             turn_end: None,
             denial_kind: None,
             permission_denial: None,
-            frame: Some(ToolResultFramePublication {
+            frame: Some(ToolResultFramePublication { projection: None,
                 tool: tool.to_owned(),
                 model_text: model_text.to_owned(),
                 result,
@@ -1216,6 +1217,7 @@ impl ToolResultPublication {
                 &frame.model_text,
                 &frame.result,
                 frame.denial_kind.as_deref(),
+                frame.projection.as_ref(),
             )
             .await;
         }
@@ -1258,6 +1260,7 @@ impl DeferredToolDispatch {
                         &frame.model_text,
                         &frame.result,
                         frame.denial_kind.as_deref(),
+                        frame.projection.as_ref(),
                     ))
                     .await
                 {
@@ -1289,7 +1292,7 @@ async fn finish_mod_result_stage(
     id: &ToolUseId,
     name: &str,
     stage: crate::conversation::ModResultStage,
-    replacement: Option<(serde_json::Value, String)>,
+    replacement: Option<(lingxi_core::host::ToolResultProjection, String)>,
 ) {
     if fence.is_some() {
         all.publications
@@ -1371,7 +1374,7 @@ impl ConversationOrchestrator {
         }
     }
 
-    async fn dispatch_mod_surface_event(&self, event_name: &str, input: serde_json::Value) {
+    pub(crate) async fn dispatch_mod_surface_event(&self, event_name: &str, input: serde_json::Value) {
         let Some(registry) = &self.lifecycle_runtime.hook_registry else {
             return;
         };
@@ -1421,7 +1424,7 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
         &self,
         input: hooks::mods::ModAgentSpawnInput,
         context: hooks::mods::ModAgentSpawnContext,
-    ) -> Result<serde_json::Value, hooks::mods::ModError> {
+    ) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
         self.mod_agent_spawn(input, context).await
     }
 
@@ -1437,6 +1440,10 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
                 }
                 None => serde_json::json!({"text":selection.text}),
             }))
+    }
+
+    async fn remote_ui_operation(&self, event: &str, input: lingxi_core::types::utf16_json::Utf16JsonProjection, plugin: &str) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::mods::ModError> {
+        self.remote_mod_ui_operation(event, input, plugin).await
     }
 
     async fn model_fork(
@@ -1603,22 +1610,24 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
     async fn tool_call(
         &self,
         plugin: &str,
-        input: serde_json::Value,
+        input: hooks::mods::ModUtf16ValueProjection,
         context: &hooks::mods::ModToolCallContext,
-    ) -> Result<serde_json::Value, hooks::mods::ModError> {
+    ) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
         dispatch_mod_session_tool_call(self, None, plugin, input, context).await
     }
 
     async fn project_tool_call_api_result(
         &self,
-        input: serde_json::Value,
-        accepted_answer: serde_json::Value,
+        input: hooks::mods::ModUtf16ValueProjection,
+        accepted_answer: hooks::mods::ModUtf16ValueProjection,
         context: &hooks::mods::ModToolCallContext,
-    ) -> Result<serde_json::Value, hooks::mods::ModError> {
+    ) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
+        let input = input.into_core_projection()?;
+        let source = accepted_answer.clone().into_core_projection()?;
         if input.get("tool").and_then(serde_json::Value::as_str) != Some(AGENT_TOOL_NAME) {
             return Ok(accepted_answer);
         }
-        let Some(raw_result) = accepted_answer.get("result") else {
+        let Some(raw_result) = source.get("result") else {
             return Ok(accepted_answer);
         };
         if raw_result.get("status").and_then(serde_json::Value::as_str) != Some("async_launched") {
@@ -1632,9 +1641,9 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
         };
         let plugin = mod_tool_call_hook_caller(context)?;
         let Some(registry) = self.task_registry.as_ref() else {
-            return Ok(mod_tool_call_agent_error(format!(
+            return Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(format!(
                 "{plugin}: $.agent.spawn: no answer within 10 minutes"
-            )));
+            ))));
         };
         let outcome = registry
             .wait_for_agent_terminal(
@@ -1651,29 +1660,26 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
 
         use lingxi_core::host::task_registry::{AgentTerminalWaitOutcome, AgentTerminalWaitReason};
         match outcome {
-            AgentTerminalWaitOutcome::Completed(snapshot) => Ok(serde_json::json!({
-                "result": mod_tool_call_agent_result(agent_id, raw_result),
-                "text": snapshot.native_transcript_text,
-            })),
+            AgentTerminalWaitOutcome::Completed(snapshot) => mod_agent_wait_answer_projection(&source, agent_id, &snapshot.native_transcript_text),
             AgentTerminalWaitOutcome::Failed(snapshot) => {
-                Ok(mod_tool_call_agent_error(mod_tool_call_agent_failure_text(
+                Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(mod_tool_call_agent_failure_text(
                     &plugin,
                     "failed",
                     snapshot
                         .error
                         .as_deref()
                         .or(Some(snapshot.native_transcript_text.as_str())),
-                )))
+                ))))
             }
             AgentTerminalWaitOutcome::Killed(snapshot) => {
-                Ok(mod_tool_call_agent_error(mod_tool_call_agent_failure_text(
+                Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(mod_tool_call_agent_failure_text(
                     &plugin,
                     "killed",
                     snapshot
                         .error
                         .as_deref()
                         .or(Some(snapshot.native_transcript_text.as_str())),
-                )))
+                ))))
             }
             AgentTerminalWaitOutcome::Interrupted { reason, .. } => {
                 let text = match reason {
@@ -1685,17 +1691,14 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
                         format!("{plugin}: $.agent.spawn: no answer within 10 minutes")
                     }
                 };
-                Ok(mod_tool_call_agent_error(text))
+                Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(text)))
             }
             AgentTerminalWaitOutcome::Evicted {
                 native_transcript_text: Some(text),
-            } if !text.is_empty() => Ok(serde_json::json!({
-                "result": mod_tool_call_agent_result(agent_id, raw_result),
-                "text": text,
-            })),
-            AgentTerminalWaitOutcome::Evicted { .. } => Ok(mod_tool_call_agent_error(format!(
+            } if !text.is_empty() => mod_agent_wait_answer_projection(&source, agent_id, &text),
+            AgentTerminalWaitOutcome::Evicted { .. } => Ok(hooks::mods::ModUtf16ValueProjection::plain(mod_tool_call_agent_error(format!(
                 "{plugin}: $.agent.spawn: the subagent's record was evicted before its answer was read"
-            ))),
+            )))),
         }
     }
 
@@ -2129,13 +2132,21 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
     }
 }
 
+fn mod_agent_wait_answer_projection(source: &Utf16JsonProjection, agent_id: &str, text: &str) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
+    let mut result = source.subprojection("/result").map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+    result.rebase_display_value(mod_tool_call_agent_result(agent_id, &result.value)).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+    let mut answer = Utf16JsonProjection::plain(serde_json::json!({"result":result.value,"text":text}));
+    answer.set_pointer("/result", result).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+    hooks::mods::ModUtf16ValueProjection::from_core_projection(answer)
+}
+
 async fn dispatch_mod_session_tool_call(
     orch: &ConversationOrchestrator,
     publication_guard: Option<std::sync::Arc<dyn HookPublicationGuard>>,
     plugin: &str,
-    input: serde_json::Value,
+    input: hooks::mods::ModUtf16ValueProjection,
     context: &hooks::mods::ModToolCallContext,
-) -> Result<serde_json::Value, hooks::mods::ModError> {
+) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
     if publication_guard
         .as_ref()
         .is_some_and(|fence| !fence.is_current())
@@ -2145,6 +2156,8 @@ async fn dispatch_mod_session_tool_call(
         ));
     }
 
+    let source = input.into_core_projection()?;
+    let input = &source.value;
     let tool_name = input
         .get("tool")
         .and_then(serde_json::Value::as_str)
@@ -2178,7 +2191,9 @@ async fn dispatch_mod_session_tool_call(
         ));
     }
     let consent = prepared.consent().map(str::to_owned);
-    let input_args = mod_tool_call_arguments(&input);
+    let input_args = mod_tool_call_arguments(input);
+    let mut input_projection = source.clone();
+    input_projection.rebase_display_value(serde_json::Value::Object(input_args.clone())).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
     let tool_use_id = ToolUseId::from(context.virtual_tool_use_id.clone());
     let assistant_message_id = MessageId::parse_prefixed(&context.virtual_assistant_uuid)
         .ok_or_else(|| {
@@ -2192,6 +2207,10 @@ async fn dispatch_mod_session_tool_call(
         serde_json::Value::Object(input_args),
         None,
     )];
+    let history = { orch.session.lock().await.history.clone() };
+    let mut inherited = streaming_tool_context_base(orch, history).await;
+    inherited.tool_use_id = Some(tool_use_id.clone());
+    inherited.input_projection = Some(input_projection);
     let cancellation = context.cancellation.clone();
     let (dispatch, stage) = with_virtual_mod_result_stage(
         &tool_use_id,
@@ -2204,6 +2223,7 @@ async fn dispatch_mod_session_tool_call(
             consent,
             Some(context.agent_spawn_provenance.clone()),
             std::sync::Arc::clone(tool),
+            Some(inherited),
             publication_guard,
         ),
     )
@@ -2231,20 +2251,11 @@ else {
     if stage.denial_kind().is_some() {
         let reason = content.strip_prefix("<tool_use_error>").unwrap_or(&content);
         let reason = reason.strip_suffix("</tool_use_error>").unwrap_or(reason);
-        return Ok(serde_json::json!({"deny":reason}));
+        return Ok(hooks::mods::ModUtf16ValueProjection::plain(serde_json::json!({"deny":reason})));
     }
-    let mut result = serde_json::Map::new();
-    result.insert(
-        "result".into(),
-        stage
-            .tool_use_result
-            .unwrap_or_else(|| serde_json::Value::String(content.clone())),
-    );
-    result.insert("text".into(), serde_json::Value::String(content));
-    if is_error.unwrap_or(false) {
-        result.insert("isError".into(), serde_json::Value::Bool(true));
-    }
-    Ok(serde_json::Value::Object(result))
+    let mut result = stage.mod_answer_projection(&content).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+    if is_error.unwrap_or(false) { result.value.as_object_mut().unwrap().insert("isError".into(), serde_json::Value::Bool(true)); }
+    hooks::mods::ModUtf16ValueProjection::from_core_projection(result)
 }
 
 /// Per-W1 Mod session view. A Mod worker can issue session-backed UI operations
@@ -2287,6 +2298,14 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
 
     async fn ui_selection(&self) -> Result<Option<serde_json::Value>, hooks::mods::ModError> {
         hooks::mods::ModSessionContext::ui_selection(self.inner.as_ref()).await
+    }
+
+    async fn remote_ui_operation(&self, event: &str, input: lingxi_core::types::utf16_json::Utf16JsonProjection, plugin: &str) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::mods::ModError> {
+        let cancellation = self.publication_guard.generation_cancellation_token();
+        tokio::select! {
+            result = self.inner.remote_mod_ui_operation(event, input, plugin) => result,
+            () = async {match cancellation {Some(token) => token.cancelled().await, None => std::future::pending().await}} => Err(hooks::mods::ModError::Unavailable("Mod generation ended".into())),
+        }
     }
 
     fn ui_invalidation_context(
@@ -2441,7 +2460,7 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
         &self,
         input: hooks::mods::ModAgentSpawnInput,
         context: hooks::mods::ModAgentSpawnContext,
-    ) -> Result<serde_json::Value, hooks::mods::ModError> {
+    ) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
         hooks::mods::ModSessionContext::agent_spawn_api(self.inner.as_ref(), input, context).await
     }
 
@@ -2465,9 +2484,9 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
     async fn tool_call(
         &self,
         plugin: &str,
-        input: serde_json::Value,
+        input: hooks::mods::ModUtf16ValueProjection,
         context: &hooks::mods::ModToolCallContext,
-    ) -> Result<serde_json::Value, hooks::mods::ModError> {
+    ) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
         dispatch_mod_session_tool_call(
             self.inner.as_ref(),
             Some(std::sync::Arc::clone(&self.publication_guard)),
@@ -2480,10 +2499,10 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
 
     async fn project_tool_call_api_result(
         &self,
-        input: serde_json::Value,
-        accepted_answer: serde_json::Value,
+        input: hooks::mods::ModUtf16ValueProjection,
+        accepted_answer: hooks::mods::ModUtf16ValueProjection,
         context: &hooks::mods::ModToolCallContext,
-    ) -> Result<serde_json::Value, hooks::mods::ModError> {
+    ) -> Result<hooks::mods::ModUtf16ValueProjection, hooks::mods::ModError> {
         hooks::mods::ModSessionContext::project_tool_call_api_result(
             self.inner.as_ref(),
             input,
@@ -3433,7 +3452,7 @@ fn dispatch_facts_for_tool_index(
             tool_uses
                 .iter()
                 .take(tool_index)
-                .map(|(id, name, input, provider_id)| ContentBlock::ToolUse {
+                .map(|(id, name, input, provider_id)| ContentBlock::ToolUse { input_projection: None,
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
@@ -3441,6 +3460,31 @@ fn dispatch_facts_for_tool_index(
                 }),
         );
     Some(facts)
+}
+
+async fn dispatch_input_projection(
+    orch: &ConversationOrchestrator,
+    id: &ToolUseId,
+    input: &serde_json::Value,
+    facts: Option<&ToolUseDispatchFacts>,
+    inherited: Option<&ToolUseContext>,
+) -> Result<Utf16JsonProjection, OrchestratorError> {
+    if let Some(context) = inherited.filter(|context| context.tool_use_id.as_ref() == Some(id) && context.input_projection.is_some()) {
+        return context.projected_input(input).map_err(|error| OrchestratorError::Internal(error.to_string()));
+    }
+    let find = |message: &ConversationMessage| match message {
+        ConversationMessage::Assistant { content, .. } => content.iter().find(|block| matches!(block, ContentBlock::ToolUse { id: candidate, input: original, .. } if candidate == id && original == input)).cloned(),
+        _ => None,
+    };
+    let source = if let Some(facts) = facts {
+        find(&facts.assistant_message)
+    } else {
+        orch.session.lock().await.history.iter().rev().find_map(find)
+    };
+    source.map_or_else(|| Ok(Utf16JsonProjection::plain(input.clone())), |block| {
+        block.projected_tool_input().map_err(|error| OrchestratorError::Internal(error.to_string()))
+            .map(|projection| projection.expect("selected tool use has input"))
+    })
 }
 
 pub(crate) async fn streaming_tool_context_base(
@@ -3769,34 +3813,16 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                 // accepts and publishes them.
                                 publication.commit(orch).await;
                             }
-                            let mut result = serde_json::Map::new();
-                            if let Some(ContentBlock::ToolResult {
-                                content, is_error, ..
-                            }) = dispatched.results.first()
-                            {
-                                result.insert(
-                                    "result".into(),
-                                    stage.tool_use_result.clone().unwrap_or_else(|| {
-                                        serde_json::Value::String(content.clone())
-                                    }),
-                                );
-                                result.insert(
-                                    "text".into(),
-                                    serde_json::Value::String(content.clone()),
-                                );
-                                if is_error.unwrap_or(false) {
-                                    result.insert("isError".into(), serde_json::Value::Bool(true));
-                                }
-                            } else {
-                                result.insert("result".into(), serde_json::Value::Null);
-                            }
+                            let mut result = if let Some(ContentBlock::ToolResult { content, is_error, .. }) = dispatched.results.first() {
+                                let mut result = stage.mod_answer_projection(content).map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+                                if is_error.unwrap_or(false) { result.value.as_object_mut().unwrap().insert("isError".into(), serde_json::Value::Bool(true)); }
+                                result
+                            } else { Utf16JsonProjection::plain(serde_json::json!({"result":null})) };
                             let mut completed = completed.lock().await;
                             let index = completed.len() + 1;
                             completed.push(ModCoreRun { dispatched, stage });
-                            result.insert("ref".into(), serde_json::json!(index));
-                            Ok(hooks::mods::ModUtf16ValueProjection::plain(
-                                serde_json::Value::Object(result),
-                            ))
+                            result.value.as_object_mut().unwrap().insert("ref".into(), serde_json::json!(index));
+                            hooks::mods::ModUtf16ValueProjection::from_core_projection(result)
                         }
                     },
                     move |plugin, line| {
@@ -3928,7 +3954,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                     .first()
                                     .and_then(|block| match block {
                                         ContentBlock::ToolResult { content, .. } => {
-                                            Some(serde_json::Value::String(content.clone()))
+                                            Some(Utf16JsonProjection::plain(serde_json::Value::String(content.clone())))
                                         }
                                         _ => None,
                                     })
@@ -3938,7 +3964,11 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                             // the core's stop signal without validating an output.
                             original
                                 .as_ref()
-                                .map_or(result.is_null(), |original| original == result)
+                                .map_or(result.is_null(), |original| {
+                                    let selected = answer.subprojection("/result").and_then(|p| p.to_json_string());
+                                    let original = original.to_json_string();
+                                    matches!((selected, original), (Ok(selected), Ok(original)) if selected == original)
+                                })
                         })
                 };
                 if reuses_core {
@@ -3967,7 +3997,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             if let Some(message) = schema_error {
                 let content = format!("<tool_use_error>{message}</tool_use_error>");
                 if completed.lock().await.is_empty() {
-                    orch.output.emit_tool_call(id, name, input).await;
+                    orch.output.emit_tool_call(id, name, input, None).await;
                 }
                 let mut publication = ToolResultPublication::frame_only(
                     id,
@@ -3975,7 +4005,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     &content,
                     serde_json::json!({"error":message}),
                 );
-                publication.tool_use_result = Some(serde_json::json!(format!("Error: {message}")));
+                publication.tool_use_result = Some((serde_json::json!(format!("Error: {message}"))).into());
                 publish_or_defer_tool_result(
                     orch,
                     publication_fence.as_deref(),
@@ -3983,7 +4013,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     publication,
                 )
                 .await;
-                all.results.push(ContentBlock::ToolResult {
+                all.results.push(ContentBlock::ToolResult { content_projection: None,
                     tool_use_id: id.clone(),
                     content: content.clone(),
                     is_error: Some(true),
@@ -4015,6 +4045,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     if let Some(ContentBlock::ToolResult {
                         content,
                         content_blocks,
+                        content_projection,
                         is_error,
                         ..
                     }) = core.dispatched.results.first_mut()
@@ -4024,15 +4055,16 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                             .stage
                             .tool_use_result
                             .clone()
-                            .unwrap_or_else(|| serde_json::Value::String(original.clone()));
-                        let changed_result = answer_value
-                            .get("result")
-                            .is_some_and(|result| result != &original_raw);
+                            .unwrap_or_else(|| serde_json::Value::String(original.clone()).into());
+                        let selected_raw = answer.subprojection("/result").ok();
+                        let changed_result = selected_raw.as_ref().is_some_and(|result| {
+                            result.to_json_string().ok() != original_raw.to_json_string().ok()
+                        });
                         // Claude 2.1.287 `oLn` reuses core's message verbatim when
                         // `ref` names a run and `result` is unchanged. `text` is
                         // descriptive data on `next(e)`, not a replacement channel.
                         if changed_result {
-                            let raw = answer_value.get("result").cloned().unwrap_or(original_raw);
+                            let raw = selected_raw.unwrap_or(original_raw);
                             let (new_text, mapped_blocks, mapped_error) =
                                 map_mod_result_for_model(orch, name, &raw, prepared_tool.as_ref());
                             *content = new_text.clone();
@@ -4049,7 +4081,9 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                         Some(serde_json::Value::String(new_text.clone()));
                                 }
                             }
-                            replacement = Some((raw, new_text));
+                            let carrier = mod_result_projection(raw.clone(), &new_text, content_blocks.as_ref());
+                            *content_projection = Some(carrier.content.clone());
+                            replacement = Some((carrier, new_text));
                         }
                     }
                     for call in &mut core.dispatched.post_tool_batch_calls {
@@ -4083,17 +4117,18 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     content.clone(),
                     None,
                     true,
-                    serde_json::Value::String(content),
+                    Utf16JsonProjection::plain(serde_json::Value::String(content)),
                     serde_json::json!({"error":reason}),
                 )
             } else if let Some(result) = answer_value.get("result") {
+                let projected_result = answer.subprojection("/result").map_err(|error| OrchestratorError::Internal(error.to_string()))?;
                 let (text, blocks, mapped_error) =
-                    map_mod_result_for_model(orch, name, result, prepared_tool.as_ref());
+                    map_mod_result_for_model(orch, name, &projected_result, prepared_tool.as_ref());
                 (
                     text,
                     blocks,
                     mapped_error.unwrap_or(false),
-                    result.clone(),
+                    projected_result,
                     result.clone(),
                 )
             } else {
@@ -4134,16 +4169,18 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 continue;
             };
             if completed.lock().await.is_empty() {
-                orch.output.emit_tool_call(id, name, input).await;
+                orch.output.emit_tool_call(id, name, input, None).await;
             }
+            let mut carrier = mod_result_projection(raw_result.clone(), &content, content_blocks.as_ref());
+            if carrier.data.value != frame_result { carrier.data = frame_result.clone().into(); }
             let publication = ToolResultPublication {
                 tool_use_id: id.clone(),
-                tool_use_result: Some(raw_result),
+                tool_use_result: Some(raw_result.into()),
                 mcp_meta: None,
                 turn_end: None,
                 denial_kind: None,
                 permission_denial: None,
-                frame: Some(ToolResultFramePublication {
+                frame: Some(ToolResultFramePublication { projection: Some(carrier.clone()),
                     tool: name.clone(),
                     model_text: content.clone(),
                     result: frame_result,
@@ -4158,7 +4195,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             )
             .await;
             let tool_response = serde_json::Value::String(content.clone());
-            all.results.push(ContentBlock::ToolResult {
+            all.results.push(ContentBlock::ToolResult { content_projection: Some(carrier.content.clone()),
                 tool_use_id: id.clone(),
                 content,
                 is_error: Some(is_error),
@@ -4178,12 +4215,26 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
     })
 }
 
+fn mod_result_projection(data: Utf16JsonProjection, text: &str, blocks: Option<&Vec<serde_json::Value>>) -> lingxi_core::host::ToolResultProjection {
+    let model_text = if data.value.as_str() == Some(text) { data.clone() } else {
+        ["/model_content", "/content", "/result"].iter()
+            .filter_map(|path| data.subprojection(path).ok())
+            .find(|source| source.value.as_str() == Some(text))
+            .unwrap_or_else(|| Utf16JsonProjection::plain(serde_json::Value::String(text.to_owned())))
+    };
+    let content_value = blocks.map(|blocks| serde_json::Value::Array(blocks.clone())).unwrap_or_else(|| model_text.value.clone());
+    let mut content = if blocks.is_some() && data.value.is_array() { data.clone() } else { model_text.clone() };
+    content.rebase_display_value(content_value).expect("validated Mod result mapping");
+    lingxi_core::host::ToolResultProjection { data, content, model_text: Some(model_text), mcp_meta: None }
+}
+
 fn map_mod_result_for_model(
     orch: &ConversationOrchestrator,
     name: &str,
-    result: &serde_json::Value,
+    projected_result: &Utf16JsonProjection,
     prepared_tool: Option<&std::sync::Arc<dyn tool_api::tool_trait::Tool>>,
 ) -> (String, Option<Vec<serde_json::Value>>, Option<bool>) {
+    let result = &projected_result.value;
     let tool = prepared_tool
         .map(std::sync::Arc::clone)
         .or_else(|| orch.tools.find_by_name(name));
@@ -4194,7 +4245,15 @@ fn map_mod_result_for_model(
             result
                 .as_str()
                 .map(str::to_owned)
-                .unwrap_or_else(|| tool_result_to_model_text(result))
+                .unwrap_or_else(|| {
+                    if ["model_content", "content", "result"].iter().any(|key| result.get(key).is_some_and(serde_json::Value::is_string)) {
+                        tool_result_to_model_text(result)
+                    } else {
+                        let json = projected_result.to_json_string().expect("validated Mod result owns exact JSON");
+                        if result.is_array() || result.is_null() { json }
+                        else { crate::tool_result_text::normalized_tool_result_json_text(json) }
+                    }
+                })
         });
     let blocks = match tool.as_ref() {
         Some(tool) if tool.is_mcp() => tool_api::tool_result_media::media_content_blocks(result),
@@ -4366,6 +4425,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_with_tool(
     permission_consent: Option<String>,
     agent_spawn_provenance: Option<lingxi_core::host::subagent_spawn::AgentSpawnProvenance>,
     prepared_tool: std::sync::Arc<dyn tool_api::tool_trait::Tool>,
+    inherited_context: Option<ToolUseContext>,
     publication_fence: Option<std::sync::Arc<dyn HookPublicationGuard>>,
 ) -> Result<DeferredToolDispatch, OrchestratorError> {
     super::boxed_turn_future(|| {
@@ -4379,7 +4439,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_with_tool(
             permission_consent,
             agent_spawn_provenance,
             Some(prepared_tool),
-            None,
+            inherited_context,
             publication_fence,
         )
     })
@@ -4451,8 +4511,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         let tool_dispatch_facts =
             dispatch_facts_for_tool_index(tool_uses, dispatch_facts.as_ref(), tool_index);
         let suppress_virtual_output = active_mod_result_stage_is_virtual().await;
+        let mut input_projection = dispatch_input_projection(orch, tool_use_id, input, tool_dispatch_facts.as_ref(), inherited_context.as_ref()).await?;
         if !suppress_virtual_output {
-            orch.output.emit_tool_call(tool_use_id, name, input).await;
+            orch.output.emit_tool_call(tool_use_id, name, input, Some(&input_projection)).await;
         }
 
         // claude-code order (`toolExecution.ts` runToolUse ~401 +
@@ -4508,9 +4569,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 &model_text,
                 serde_json::json!({ "error": format!("tool not found: {name}") }),
             );
-            publication.tool_use_result = Some(serde_json::Value::String(format!(
+            publication.tool_use_result = Some((serde_json::Value::String(format!(
                 "Error: No such tool available: {name}{suffix}"
-            )));
+            ))).into());
             publish_or_defer_tool_result(
                 orch,
                 publication_fence.as_deref(),
@@ -4546,15 +4607,6 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // the value for a future wiring.
         // A retained scheduler context may belong to a previous sibling call.
         // Only an explicitly associated current-call carrier is admitted here.
-        let mut input_projection = match inherited_context
-            .as_ref()
-            .filter(|context| context.tool_use_id.as_ref() == Some(tool_use_id))
-        {
-            Some(context) => context
-                .projected_input(input)
-                .map_err(|error| OrchestratorError::Internal(error.to_string()))?,
-            None => Utf16JsonProjection::plain(input.clone()),
-        };
         let coerced_input = tool_handle.coerce_input(input);
         let input: &serde_json::Value = coerced_input.as_ref().map_or(input, |c| &c.input);
         let normalized_input = tool_handle.parse_native_input(input).and_then(Result::ok);
@@ -4572,7 +4624,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // malformed tool schema is treated as PASS (logged) — see
         // [`crate::schema_validation::validate_tool_input_schema`].
         if let Err(schema_error) =
-            crate::schema_validation::validate_tool_schema_detailed(tool_handle.as_ref(), input)
+            crate::schema_validation::validate_tool_schema_projected(tool_handle.as_ref(), &input_projection)
         {
             let detail = &schema_error.display;
             tool_handle
@@ -4584,7 +4636,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 .await;
             let model_text =
                 format!("<tool_use_error>InputValidationError: {detail}</tool_use_error>");
-            let result_block = ContentBlock::ToolResult {
+            let result_block = ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: tool_use_id.clone(),
                 content: model_text.clone(),
                 is_error: Some(true),
@@ -4599,10 +4651,10 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 &model_text,
                 serde_json::json!({ "error": detail }),
             );
-            publication.tool_use_result = Some(serde_json::Value::String(format!(
+            publication.tool_use_result = Some((serde_json::Value::String(format!(
                 "InputValidationError: {}",
                 schema_error.raw
-            )));
+            ))).into());
             publish_or_defer_tool_result(
                 orch,
                 publication_fence.as_deref(),
@@ -4659,7 +4711,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // pre-hook context to fold.
         if let Err(tool_api::ValidationError(msg)) = tool_handle.validate_input(input, &ctx).await {
             let model_text = format!("<tool_use_error>{msg}</tool_use_error>");
-            let result_block = ContentBlock::ToolResult {
+            let result_block = ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: tool_use_id.clone(),
                 content: model_text.clone(),
                 is_error: Some(true),
@@ -4675,7 +4727,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 &model_text,
                 serde_json::json!({ "error": msg }),
             );
-            publication.tool_use_result = Some(serde_json::Value::String(format!("Error: {msg}")));
+            publication.tool_use_result = Some((serde_json::Value::String(format!("Error: {msg}"))).into());
             publish_or_defer_tool_result(
                 orch,
                 publication_fence.as_deref(),
@@ -4695,7 +4747,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // and `continue` without pushing to `post_tool_batch_calls` (tool
         // didn't run). A `None` cancel token → guard never fires.
         if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
-            let result_block = ContentBlock::ToolResult {
+            let result_block = ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: tool_use_id.clone(),
                 content: CANCEL_MESSAGE.to_string(),
                 is_error: Some(true),
@@ -4715,7 +4767,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 serde_json::json!({ "error": CANCEL_MESSAGE }),
             );
             publication.denial_kind = Some("cancelled".into());
-            publication.tool_use_result = Some(serde_json::Value::String(CANCEL_MESSAGE.into()));
+            publication.tool_use_result = Some((serde_json::Value::String(CANCEL_MESSAGE.into())).into());
             if let Some(frame) = publication.frame.as_mut() {
                 frame.denial_kind = Some("cancelled".into());
             }
@@ -5073,7 +5125,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 duration_ms = pre_dur_ms,
             );
             let model_text = format!("PreToolUse:{name} hook error: {reason}");
-            let result_block = ContentBlock::ToolResult {
+            let result_block = ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: tool_use_id.clone(),
                 content: model_text.clone(),
                 is_error: Some(true),
@@ -6085,7 +6137,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 // denied." — built by the gate via `deny_reason_string`, or the
                 // tool's explicit `explanation`), NOT wrapped in a
                 // "Permission denied: " prefix.
-                let result_block = ContentBlock::ToolResult {
+                let result_block = ContentBlock::ToolResult { content_projection: None,
                     tool_use_id: tool_use_id.clone(),
                     content: reason.clone(),
                     is_error: Some(true),
@@ -6114,9 +6166,13 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     serde_json::json!({ "error": reason }),
                 );
                 publication.denial_kind = Some(denial_kind.to_owned());
-                publication.permission_denial = Some((name.to_owned(), effective_input.clone()));
+                publication.permission_denial = Some((
+                    name.to_owned(),
+                    ctx.projected_input(&effective_input)
+                        .map_err(|error| OrchestratorError::Internal(error.to_string()))?,
+                ));
                 publication.tool_use_result =
-                    Some(serde_json::Value::String(format!("Error: {reason}")));
+                    Some((serde_json::Value::String(format!("Error: {reason}"))).into());
                 if let Some(frame) = publication.frame.as_mut() {
                     frame.denial_kind = Some(denial_kind.to_owned());
                 }
@@ -6337,9 +6393,9 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         let (execution_record, tool_outcome) = {
             // Hooks and approval may rewrite parameters after the initial
             // gates. Validate the exact input that is about to execute.
-            let final_validation = match crate::schema_validation::validate_tool_schema_detailed(
+            let final_validation = match crate::schema_validation::validate_tool_schema_projected(
                 tool_handle.as_ref(),
-                &effective_input,
+                &ctx.projected_input(&effective_input).map_err(|error| OrchestratorError::Internal(error.to_string()))?,
             ) {
                 Err(error) => Err(tool_api::ToolError::InvalidInput(format!(
                     "InputValidationError: {}",
@@ -6420,9 +6476,11 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         #[allow(clippy::cast_possible_truncation)]
         let tool_duration_ms = tool_started.elapsed().as_millis() as u64;
 
+        let mut accepted_projection = None;
         let (content, is_error, emit_payload, is_abort, tool_use_result, mcp_meta, turn_end) =
             match tool_outcome {
                 Ok(result) => {
+                    result.validate_projection().map_err(|error| OrchestratorError::Internal(error.to_string()))?;
                     // The 2.1.286 AGENTS plugin wraps successful Read calls, not
                     // text-read state. Its context is a durable tool.call hook
                     // attachment, rendered beside the result and retained in live
@@ -6468,10 +6526,37 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         result.is_error,
                         result.mcp_meta.as_ref(),
                     );
-                    let text = result
+                    let mut text = result
                         .model_content
                         .clone()
                         .unwrap_or_else(|| tool_result_to_model_text(&result.data));
+                    let data_projection = result.data_projection.clone()
+                        .unwrap_or_else(|| Utf16JsonProjection::plain(result.data.clone()));
+                    if data_projection.value != result.data {
+                        return Err(OrchestratorError::Internal("tool result data projection association changed".into()));
+                    }
+                    data_projection.validate().map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                    if result.model_content.is_none() && !data_projection.value.is_string()
+                        && !["model_content", "content", "result"].iter().any(|key| data_projection.value.get(key).is_some_and(serde_json::Value::is_string)) {
+                        let json = data_projection.to_json_string().map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                        text = if data_projection.value.is_array() || data_projection.value.is_null() { json }
+                            else { crate::tool_result_text::normalized_tool_result_json_text(json) };
+                    }
+                    let model_projection = result.model_content_projection.clone()
+                        .or_else(|| (data_projection.value.as_str() == Some(text.as_str())).then(|| data_projection.clone()))
+                        .or_else(|| ["/model_content", "/content", "/result"].iter().filter_map(|path| data_projection.subprojection(path).ok()).find(|field| field.value.as_str() == Some(text.as_str())))
+                        .unwrap_or_else(|| Utf16JsonProjection::plain(serde_json::Value::String(text.clone())));
+                    if model_projection.value != serde_json::Value::String(text.clone()) {
+                        return Err(OrchestratorError::Internal("tool result model content projection association changed".into()));
+                    }
+                    model_projection.validate().map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                    let exact_meta = result.mcp_meta.as_ref().map(|meta| result.mcp_meta_projection.clone().unwrap_or_else(|| meta.clone().into()));
+                    accepted_projection = Some(lingxi_core::host::ToolResultProjection { model_text: Some(model_projection.clone()), mcp_meta: exact_meta.clone(),
+                        data: data_projection.clone(),
+                        content: if tool_handle.is_mcp() && result.data.is_array() {
+                            data_projection.clone()
+                        } else { model_projection },
+                    });
                     // SKILLEXEC.3 (Part A): stash any tool-injected conversation
                     // messages so the caller can append them after this batch's
                     // tool_result user message. Non-empty only for the Skill tool
@@ -6499,8 +6584,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     }
                     // O1: carry the RAW structured result and MCP sidecars to Tn;
                     // Native publishes them only after the executor accepts the row.
-                    let raw_result = result.data.clone();
-                    let mcp_meta = result.mcp_meta.clone();
+                    let raw_result = data_projection;
+                    let mcp_meta = exact_meta;
                     // `is_error` rides on the result (set by MCP tools from the
                     // server's `isError`; `false` for every native success). A native
                     // FAILURE is an `Err` handled below — this Ok arm only flags an
@@ -6542,7 +6627,11 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     // branch.
                     let is_abort = matches!(err, tool_api::ToolError::Aborted);
                     let bare = err.model_facing_message();
-                    let text = format!("Error: {bare}");
+                    let text = if name == crate::structured_output::STRUCTURED_OUTPUT_TOOL_NAME {
+                        bare.to_owned()
+                    } else {
+                        format!("Error: {bare}")
+                    };
                     let emit_payload = match &err {
                         tool_api::ToolError::SubagentFailed {
                             agent_id,
@@ -6565,7 +6654,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                         true,
                         emit_payload,
                         is_abort,
-                        Some(serde_json::Value::String(text)),
+                        Some(Utf16JsonProjection::plain(serde_json::Value::String(text))),
                         None,
                         None,
                     )
@@ -6583,6 +6672,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         publication.denial_kind = denial_kind.clone();
         if let Some(frame) = publication.frame.as_mut() {
             frame.denial_kind = denial_kind;
+            frame.projection = accepted_projection.clone();
         }
         publish_or_defer_tool_result(
             orch,
@@ -7181,7 +7271,13 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         } else {
             (persistence.content, content_blocks)
         };
-        results.push(ContentBlock::ToolResult {
+        let final_value = content_blocks.as_ref().map(|blocks| serde_json::Value::Array(blocks.clone()))
+            .unwrap_or_else(|| serde_json::Value::String(final_content.clone()));
+        let content_projection = accepted_projection.and_then(|projected| {
+            (!mutated && !persistence.replaced && projected.content.value == final_value)
+                .then_some(projected.content)
+        });
+        results.push(ContentBlock::ToolResult { content_projection,
             tool_use_id: tool_use_id.clone(),
             content: final_content,
             is_error: Some(is_error),
@@ -7569,7 +7665,7 @@ mod final_input_validation_tests {
             }),
         )));
         let response = crate::test_support::mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: "toolu_cooperative".into(),
                 name: "input_spy".into(),
                 input: json!({"action":"wait"}),
@@ -7784,5 +7880,28 @@ mod native_tool_check_metadata_tests {
             matches!(checked, PermissionResolution::Allow { .. }),
             "Mod must receive the captured rule from the preflight snapshot, not the replacement overlay"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod rich_mod_result_projection_tests {
+    use super::*;
+
+    #[test]
+    fn model_result_field_preserves_lone_units_and_raw_object_keys() {
+        let source = Utf16JsonProjection::parse(r#"{"\ud800":"key","content":"A\udfff"}"#).unwrap();
+        let result = mod_result_projection(source, "A�", None);
+        assert_eq!(result.data.to_json_string().unwrap(), r#"{"\ud800":"key","content":"A\udfff"}"#);
+        assert_eq!(result.content.to_json_string().unwrap(), r#""A\udfff""#);
+        assert_eq!(result.model_text.unwrap().to_json_string().unwrap(), r#""A\udfff""#);
+    }
+
+    #[test]
+    fn authored_model_text_replacement_does_not_retain_old_lone_units() {
+        let source = Utf16JsonProjection::parse(r#""A\udfff""#).unwrap();
+        let result = mod_result_projection(source, "new", None);
+        assert_eq!(result.content.to_json_string().unwrap(), r#""new""#);
+        assert_eq!(result.model_text.unwrap().to_json_string().unwrap(), r#""new""#);
     }
 }

@@ -31,7 +31,7 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
         is_meta,
         is_compact_summary,
         is_visible_in_transcript_only,
-    } = message
+     .. } = message
     else {
         return message;
     };
@@ -50,7 +50,7 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
                 is_error,
                 provider_tool_use_id,
                 content_blocks: Some(blocks),
-            } => ContentBlock::ToolResult {
+             .. } => ContentBlock::ToolResult { content_projection: None,
                 tool_use_id,
                 content,
                 is_error,
@@ -64,7 +64,7 @@ fn strip_one(message: ConversationMessage) -> ConversationMessage {
             other => other,
         })
         .collect();
-    ConversationMessage::User {
+    ConversationMessage::User { api_message_override: None,
         id,
         content: new_content,
         is_meta,
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn user_image_block_becomes_placeholder_text() {
-        let msg = ConversationMessage::User {
+        let msg = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -126,7 +126,7 @@ mod tests {
     fn assistant_messages_are_not_stripped() {
         // TS only strips `user` messages; an assistant message is returned as-is
         // even if it (hypothetically) carried an image block.
-        let assistant = ConversationMessage::Assistant {
+        let assistant = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![image_block()],
             stop_reason: None,
@@ -138,9 +138,9 @@ mod tests {
     #[test]
     fn strips_nested_media_without_changing_tool_result_identity_or_text() {
         let id = lingxi_core::types::ToolUseId::new();
-        let input = ConversationMessage::User {
+        let input = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: id.clone(),
                 content: "read result".into(),
                 is_error: Some(false),

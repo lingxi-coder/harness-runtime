@@ -490,14 +490,14 @@ mod projection_tests {
 
     #[test]
     fn an_assistant_turn_contributes_its_text_and_each_tool_call() {
-        let msg = ConversationMessage::Assistant {
+        let msg = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
                     text: "thinking".into(),
                     citations: None,
                 },
-                ContentBlock::ToolUse {
+                ContentBlock::ToolUse { input_projection: None,
                     id: ToolUseId::new(),
                     name: "Bash".into(),
                     input: serde_json::json!({"command": "ls"}),
@@ -514,7 +514,7 @@ mod projection_tests {
 
     #[test]
     fn opaque_anthropic_text_is_observed_once_as_assistant_text() {
-        let msg = ConversationMessage::Assistant {
+        let msg = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ProviderContent {
                 protocol: "anthropic_messages".into(),
@@ -539,10 +539,10 @@ mod projection_tests {
     /// digested as results, not as user text.
     #[test]
     fn a_user_turn_contributes_text_and_tool_results_separately() {
-        let msg = ConversationMessage::User {
+        let msg = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![
-                ContentBlock::ToolResult {
+                ContentBlock::ToolResult { content_projection: None,
                     tool_use_id: ToolUseId::new(),
                     content: "file listing".into(),
                     is_error: Some(false),
@@ -569,7 +569,7 @@ mod projection_tests {
     /// the call.
     #[test]
     fn empty_text_is_not_activity() {
-        let msg = ConversationMessage::Assistant {
+        let msg = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "  \n".into(),
@@ -584,7 +584,7 @@ mod projection_tests {
     /// observed agent's system prompt.
     #[test]
     fn a_system_message_contributes_nothing() {
-        let msg = ConversationMessage::System {
+        let msg = ConversationMessage::System { api_system: None,
             id: MessageId::new(),
             content: "you are…".into(),
             subtype: None,

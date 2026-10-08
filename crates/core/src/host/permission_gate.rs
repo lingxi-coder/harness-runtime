@@ -39,6 +39,9 @@ pub struct PermissionDenial {
     pub tool_use_id: String,
     /// The input the model supplied, verbatim.
     pub tool_input: Value,
+    /// Exact UTF-16 source associated with `tool_input`. Never a wire field.
+    #[serde(skip)]
+    pub tool_input_projection: Option<Utf16JsonProjection>,
 }
 
 /// Receives only time spent waiting on a permission prompt transport.

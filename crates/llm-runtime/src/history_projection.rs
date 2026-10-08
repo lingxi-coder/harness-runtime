@@ -7,7 +7,7 @@ use crate::upstream::{error, usage};
 use crate::*;
 use lingxi_llm_client::providers::anthropic::stream_observation::{self, NativeDelta, TextBlock};
 use lingxi_llm_client::{self as client, protocol as wire};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 fn invalid(error: impl std::fmt::Display) -> LlmError {
@@ -143,12 +143,28 @@ fn host_block(block: wire::ContentBlock) -> Result<ContentBlock, LlmError> {
         }
         wire::ContentBlock::RedactedThinking { data } => ContentBlock::RedactedThinking { data },
         wire::ContentBlock::ToolUse {
-            id, name, input, ..
-        } => ContentBlock::ToolCall {
-            id: id.as_str().into(),
+            id,
             name,
             input,
-        },
+            input_json,
+            ..
+        } => {
+            let input_projection = input_json
+                .as_ref()
+                .map(|raw| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw))
+                .transpose()
+                .map_err(|error| LlmError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+            ContentBlock::ToolCall {
+                id: id.as_str().into(),
+                name,
+                input: input_projection
+                    .as_ref()
+                    .map_or(input, |projection| projection.value.clone()),
+                input_projection,
+            }
+        }
         wire::ContentBlock::ProviderContent {
             protocol,
             mut value,
@@ -707,6 +723,7 @@ impl HistoryProjector {
                     self.start(
                         index,
                         ContentBlock::ToolCall {
+                            input_projection: None,
                             id: id.as_str().into(),
                             name,
                             input: json!({}),
@@ -961,6 +978,7 @@ fn clear_host_projection_fields(metadata: &mut Value) {
         .and_then(Value::as_object_mut)
     {
         namespace.remove("server_fallback_events");
+        namespace.remove("per_turn_effort");
         namespace.remove("response_model");
         namespace.remove(crate::history::SERVER_FALLBACK_COST_QUOTE_KEY);
     }
@@ -973,6 +991,7 @@ pub(crate) fn project_model_response(
     request_id: Option<String>,
 ) -> Result<HistoryResponse, LlmError> {
     clear_computer_binding(&mut metadata);
+    clear_host_projection_fields(&mut metadata);
     let native_stop_details = decoded.anthropic_stop_details().cloned();
     if let Some(fallback) = decoded.anthropic_fallback() {
         upstream_metadata(&mut metadata).insert(
@@ -1181,13 +1200,11 @@ mod tests {
             "lingxi_computer_abandoned",
             "lingxi_native_content",
         ] {
-            assert!(
-                host_block(wire::ContentBlock::ProviderContent {
-                    protocol: wire::ProtocolFamily::AnthropicMessages,
-                    value: json!({"type":kind})
-                })
-                .is_err()
-            );
+            assert!(host_block(wire::ContentBlock::ProviderContent {
+                protocol: wire::ProtocolFamily::AnthropicMessages,
+                value: json!({"type":kind})
+            })
+            .is_err());
         }
     }
 
@@ -1318,11 +1335,9 @@ mod tests {
             response.response_id.as_ref().map(|id| id.as_str()),
             Some("resp-inner-two")
         );
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, HistoryEvent::ServerFallback { .. }))
-        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::ServerFallback { .. })));
     }
 
     #[test]
@@ -1438,7 +1453,7 @@ mod tests {
         ))
         .await
         .unwrap();
-        assert!(response.content.iter().any(|block| matches!(block, ContentBlock::ToolCall { id, name, input } if id == "call-real" && name == "lookup" && input == &json!({"q":"answer"}))));
+        assert!(response.content.iter().any(|block| matches!(block, ContentBlock::ToolCall { id, name, input , .. } if id == "call-real" && name == "lookup" && input == &json!({"q":"answer"}))));
         assert!(!response.content.iter().any(|block| matches!(block, ContentBlock::ToolCall { id, name, .. } if id.is_empty() || name.is_empty())));
     }
 
@@ -1573,13 +1588,11 @@ mod stop_delta_tests {
                 inference: Default::default(),
             })])
             .unwrap();
-        assert!(
-            !end.iter()
-                .any(|event| matches!(event, HistoryEvent::MessageDelta { .. }))
-        );
-        assert!(
-            end.iter()
-                .any(|event| matches!(event, HistoryEvent::MessageStop))
-        );
+        assert!(!end
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::MessageDelta { .. })));
+        assert!(end
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::MessageStop)));
     }
 }

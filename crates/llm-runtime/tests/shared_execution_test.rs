@@ -102,14 +102,14 @@ async fn shared_execution_sends_exact_tool_result_string_without_internal_sideca
     request.input.max_tokens = Some(100);
     assign_history(
         &mut request,
-        &[Message {
+        &[Message { api_output_config: None,
             role: "user".into(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { output_projection: None,
                 tool_call_id: "call-1".into(),
                 output: serde_json::Value::Array(
                     ::lingxi_core::types::js_utf16::tool_result_sidecar(vec![65, 0xd83d, 10]),
                 ),
-                is_error: false,
+                is_error: Some(false),
                 cache_control: Some(CacheControl::Ephemeral),
                 cache_reference: None,
             }],

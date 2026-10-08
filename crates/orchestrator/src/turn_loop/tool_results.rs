@@ -462,15 +462,16 @@ pub(super) async fn apply_tool_result_persistence(
 /// the TUI payload — e.g. Read's cat -n + reminders, where the TUI shows raw
 /// content) or, failing that, the verbatim `content` string (Bash stdout,
 /// Edit/Write confirmations, where the model and TUI strings coincide). Tools
-/// that expose neither fall back to the JSON object — the legacy behavior, kept
-/// for structured-only results that have no human-facing string.
+/// that expose neither fall back to bounded JavaScript-compatible JSON text,
+/// matching Claude 2.1.286 for non-text tool and hook results. Raw string
+/// replacements are retained verbatim.
 ///
 /// The full `result.data` object still flows to the TUI (`emit_tool_result`)
 /// and the `PostToolUse` hook unchanged; only the model-facing string is derived
 /// here.
 pub(super) fn tool_result_to_model_text(data: &serde_json::Value) -> String {
-    data.get("model_content")
-        .and_then(|v| v.as_str())
+    data.as_str()
+        .or_else(|| data.get("model_content").and_then(|v| v.as_str()))
         .or_else(|| data.get("content").and_then(|v| v.as_str()))
         // `result` is WebFetch's content field (claude-code's WebFetch result
         // `data` names the model-facing markdown `result`, byte-faithful to the
@@ -479,7 +480,13 @@ pub(super) fn tool_result_to_model_text(data: &serde_json::Value) -> String {
         // to the JSON dump below and show the model the whole object.
         .or_else(|| data.get("result").and_then(|v| v.as_str()))
         .map_or_else(
-            || serde_json::to_string(data).unwrap_or_else(|_| "<unserializable>".into()),
+            || {
+                if data.is_null() || data.is_array() {
+                    serde_json::to_string(data).expect("JSON tool output")
+                } else {
+                    crate::tool_result_text::normalized_tool_result_text(data)
+                }
+            },
             std::string::ToString::to_string,
         )
 }
@@ -533,33 +540,5 @@ pub(super) fn image_tool_result_blocks(data: &serde_json::Value) -> Option<Vec<s
 pub(super) fn bash_image_tool_result_blocks(
     data: &serde_json::Value,
 ) -> Option<Vec<serde_json::Value>> {
-    use base64::Engine as _;
-    if data.get("isImage") != Some(&serde_json::Value::Bool(true)) {
-        return None;
-    }
-    let stdout = data.get("stdout").and_then(serde_json::Value::as_str)?;
-    // `Xyu`: /^data:([^;]+);base64,(.+)$/ on the trimmed string.
-    let rest = stdout.trim().strip_prefix("data:")?;
-    let semi = rest.find(';')?;
-    if semi == 0 {
-        return None;
-    }
-    let payload = rest[semi..].strip_prefix(";base64,")?;
-    if payload.is_empty() {
-        return None;
-    }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .ok()?;
-    // `Wfe` — magic-byte sniff (shared impl in tool-api, same fn the Bash
-    // tool's image gate uses, so gate and mapper always agree).
-    let media_type = tool_api::util::image_sniff::sniff_image_media_type(&bytes)?;
-    Some(vec![serde_json::json!({
-        "type": "image",
-        "source": {
-            "type": "base64",
-            "media_type": media_type,
-            "data": payload,
-        },
-    })])
+    tool_api::tool_result_media::bash_image_content_blocks(data)
 }

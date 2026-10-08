@@ -544,7 +544,13 @@ async fn api_service_override_prices_omitted_and_explicit_zero_reasoning() {
             ))),
         );
         let response = service
-            .messages_create("custom", Some("reasoning-test"), None, vec![], vec![])
+            .messages_create(llm_runtime::MessagesCreateRequest::new(
+                "custom",
+                Some("reasoning-test"),
+                None,
+                vec![],
+                vec![],
+            ))
             .await
             .expect("decoded response with SDK quote");
         assert_eq!(response.usage.counts().output_tokens, 40_000);

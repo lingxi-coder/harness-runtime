@@ -11,7 +11,7 @@
 
 use crate::agent_executor::{AgentExecutionSignal, AgentExecutor};
 use crate::async_registry::{
-    AsyncHookRegistry, HookCompletion, HookWork, DEFAULT_ASYNC_HOOK_TIMEOUT_MS,
+    AsyncHookRegistry, DEFAULT_ASYNC_HOOK_TIMEOUT_MS, HookCompletion, HookWork,
 };
 use crate::attachment::{
     self, CancellationTimeout, HookAttachmentIdentity, HookAttachmentSink, HookPublicationGuard,
@@ -19,8 +19,8 @@ use crate::attachment::{
 use crate::definition::{HookDefinition, HookExecutor};
 use crate::events::HookEvent;
 use crate::hook_payload::{
-    parse_response, ConfigChangePayload, CwdChangedPayload, DirectoryAddedPayload,
-    ElicitationPayload, ElicitationResultPayload, FileChangedPayload, HookEventNameConfigChange,
+    ConfigChangePayload, CwdChangedPayload, DirectoryAddedPayload, ElicitationPayload,
+    ElicitationResultPayload, FileChangedPayload, HookEventNameConfigChange,
     HookEventNameCwdChanged, HookEventNameDirectoryAdded, HookEventNameElicitation,
     HookEventNameElicitationResult, HookEventNameFileChanged, HookEventNameInstructionsLoaded,
     HookEventNameMessageDisplay, HookEventNameNotification, HookEventNamePermissionDenied,
@@ -38,12 +38,12 @@ use crate::hook_payload::{
     SessionStartPayload, SetupPayload, StopFailurePayload, StopPayload, SubagentStartPayload,
     SubagentStopPayload, TaskCompletedPayload, TaskCreatedPayload, TeammateIdlePayload,
     UserPromptExpansionPayload, UserPromptSubmitPayload, WorktreeCreatePayload,
-    WorktreeRemovePayload,
+    WorktreeRemovePayload, parse_response,
 };
 use crate::http_executor::{HttpExecutionSignal, HttpExecutor, HttpHookPolicy};
 use crate::mcp_invoker::{HookMcpInvocation, HookMcpInvocationResult, HookMcpInvoker};
 use crate::prompt_executor::{
-    HookPromptRunner, PromptExecutionSignal, PromptExecutor, HOOK_PROMPT_TIMEOUT_MS,
+    HOOK_PROMPT_TIMEOUT_MS, HookPromptRunner, PromptExecutionSignal, PromptExecutor,
 };
 use crate::registry::{HookContext, HookRegistry};
 use crate::response::{
@@ -293,7 +293,21 @@ impl AgentSpawnerBinding {
     }
 }
 
+/// Admission-time authority lookup for new, context-light hook events.
+/// Existing task/session contexts always retain their captured authority.
+pub type HookModelSafetyProvider = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
+                    > + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
 pub struct HookExecutorImpl {
+    model_safety_provider: std::sync::Mutex<Option<HookModelSafetyProvider>>,
     agent_prompt_transcripts: std::sync::Mutex<AgentPromptTranscripts>,
     subagent_stop_firers: std::sync::Mutex<
         HashMap<
@@ -384,6 +398,34 @@ pub struct HookExecutorImpl {
 }
 
 impl HookExecutorImpl {
+    /// Bind the host through a weak owner after composition. This callback is
+    /// consulted at hook admission, never at model response completion.
+    pub fn set_model_safety_provider(&self, provider: HookModelSafetyProvider) {
+        *self
+            .model_safety_provider
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provider);
+    }
+
+    async fn capture_model_safety(&self, ctx: &mut HookContext) {
+        if ctx.model_safety_observer.is_some() {
+            return;
+        }
+        ctx.model_safety_observer =
+            lingxi_core::host::model_safety::current_model_safety_observer();
+        if ctx.model_safety_observer.is_some() {
+            return;
+        }
+        let provider = self
+            .model_safety_provider
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(provider) = provider {
+            ctx.model_safety_observer = provider().await;
+        }
+    }
+
     /// The live Mod worker shared with the owning session, when loaded.
     pub async fn mod_host(&self) -> Option<Arc<crate::mods::ModHost>> {
         self.registry.read().await.mod_host()
@@ -401,6 +443,7 @@ impl HookExecutorImpl {
         runtime: Arc<dyn RuntimeSpawner>,
     ) -> Self {
         Self {
+            model_safety_provider: std::sync::Mutex::new(None),
             agent_prompt_transcripts: std::sync::Mutex::new(HashMap::new()),
             subagent_stop_firers: std::sync::Mutex::new(HashMap::new()),
             registry,
@@ -935,8 +978,9 @@ impl HookExecutorImpl {
     pub async fn execute_session_end(
         &self,
         event: HookEvent,
-        ctx: HookContext,
+        mut ctx: HookContext,
     ) -> AggregateHookResult {
+        self.capture_model_safety(&mut ctx).await;
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips the
         // SessionEnd batch entirely (the binary's `cH` head runs before the
         // SessionEnd deadline race too).
@@ -1178,9 +1222,10 @@ impl HookExecutorImpl {
     pub async fn execute_excluding_hook(
         &self,
         event: HookEvent,
-        ctx: HookContext,
+        mut ctx: HookContext,
         excluded: Option<lingxi_core::types::HookId>,
     ) -> AggregateHookResult {
+        self.capture_model_safety(&mut ctx).await;
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips
         // ALL hooks before any matching/dispatch.
         if let Some(skipped) = self.policy_disable_gate(&event) {
@@ -1351,9 +1396,10 @@ impl HookExecutorImpl {
     pub async fn execute_agent_scoped(
         &self,
         event: HookEvent,
-        ctx: HookContext,
+        mut ctx: HookContext,
         agent_id: lingxi_core::types::AgentId,
     ) -> AggregateHookResult {
+        self.capture_model_safety(&mut ctx).await;
         // #41 runner-head gate (`h$`).
         if let Some(skipped) = self.policy_disable_gate(&event) {
             return skipped;
@@ -1460,6 +1506,7 @@ impl HookExecutorImpl {
         mut ctx: HookContext,
         exclude_agent_id: lingxi_core::types::AgentId,
     ) -> AggregateHookResult {
+        self.capture_model_safety(&mut ctx).await;
         if matches!(&event, HookEvent::SubagentStop { agent_id, .. } if *agent_id == exclude_agent_id)
         {
             // Consume even if hooks are disabled or none match.
@@ -1898,6 +1945,25 @@ impl Dispatcher {
         reason = "arm dispatch fan-out — splitting hurts readability"
     )]
     async fn dispatch(
+        &self,
+        hook: &HookDefinition,
+        event: &HookEvent,
+        ctx: &HookContext,
+        progress_id: Option<&str>,
+    ) -> HookResult {
+        let observer = ctx
+            .model_safety_observer
+            .clone()
+            .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
+        let work = Box::pin(self.dispatch_in_origin_scope(hook, event, ctx, progress_id));
+        if let Some(observer) = observer {
+            lingxi_core::host::model_safety::scope_model_safety(observer, work).await
+        } else {
+            work.await
+        }
+    }
+
+    async fn dispatch_in_origin_scope(
         &self,
         hook: &HookDefinition,
         event: &HookEvent,
@@ -5189,10 +5255,12 @@ mod attachment_wiring_tests {
         let stdout_aggregate = stdout_executor
             .execute(event.clone(), HookContext::default())
             .await;
-        assert!(stdout_aggregate.hook_attachments[0].value["content"]
-            .as_str()
-            .unwrap()
-            .starts_with("<persisted-output>"));
+        assert!(
+            stdout_aggregate.hook_attachments[0].value["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("<persisted-output>")
+        );
 
         let response = serde_json::json!({
             "systemMessage": system,
@@ -5222,27 +5290,35 @@ mod attachment_wiring_tests {
             .await;
 
         assert_eq!(sink.large_outputs.lock().unwrap().len(), 4);
-        assert!(response_aggregate.system_messages[0]
-            .display
-            .starts_with("<persisted-output>"));
-        assert!(response_aggregate.additional_contexts[0]
-            .display
-            .starts_with("<persisted-output>"));
-        assert!(response_aggregate
-            .initial_user_message
-            .as_ref()
-            .unwrap()
-            .display
-            .starts_with("<persisted-output>"));
+        assert!(
+            response_aggregate.system_messages[0]
+                .display
+                .starts_with("<persisted-output>")
+        );
+        assert!(
+            response_aggregate.additional_contexts[0]
+                .display
+                .starts_with("<persisted-output>")
+        );
+        assert!(
+            response_aggregate
+                .initial_user_message
+                .as_ref()
+                .unwrap()
+                .display
+                .starts_with("<persisted-output>")
+        );
         let system_attachment = response_aggregate
             .hook_attachments
             .iter()
             .find(|item| item.value["type"] == "hook_system_message")
             .expect("systemMessage transcript row");
-        assert!(system_attachment.value["content"]
-            .as_str()
-            .unwrap()
-            .starts_with("<persisted-output>"));
+        assert!(
+            system_attachment.value["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("<persisted-output>")
+        );
     }
 
     #[tokio::test]

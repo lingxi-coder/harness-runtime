@@ -86,7 +86,7 @@ impl BuiltinHookHandler for StopBlockHandler {
             reason: Some("do X first".to_string()),
             // A transcript-only systemMessage that must NOT reach the model — the
             // continuation must come from `reason` (blockingError), never this.
-            system_message: Some("[stop-hook] please continue".to_string()),
+            system_message: Some("[stop-hook] please continue".into()),
             ..Default::default()
         });
         HookResult {
@@ -220,7 +220,7 @@ fn streaming_orch(
     hooks: Arc<HookExecutorImpl>,
     config: OrchestratorConfig,
 ) -> Arc<ConversationOrchestrator> {
-    Arc::new(ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         config,
         Arc::new(MockApiClient::new(Vec::new())),
         Arc::new(orchestrator::test_support::MockStreamingApiClient::with_turns(streams)),
@@ -254,6 +254,7 @@ fn end_turn(text: &str) -> llm_runtime::HistoryResponse {
         vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )
@@ -266,6 +267,7 @@ fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_runtime::Hist
         content: vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
@@ -1306,7 +1308,7 @@ impl tool_api::tool_trait::Tool for EndsTurnTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: tool_api::progress::ToolProgressSender,
     ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
-        Ok(tool_api::tool_trait::ToolCallResult {
+        Ok(tool_api::tool_trait::ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: serde_json::json!({ "content": "done" }),
             model_content: None,
             new_messages: vec![],
@@ -1360,7 +1362,7 @@ async fn a_blocking_stop_hook_does_not_reopen_a_tool_requested_end() {
     .await;
     let mut cfg = OrchestratorConfig::default();
     cfg.max_turns = 2;
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         cfg,
         Arc::new(MockApiClient::new(Vec::new())),
         api.clone(),
@@ -1370,7 +1372,7 @@ async fn a_blocking_stop_hook_does_not_reopen_a_tool_requested_end() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
 
     let result = orch.run_turn_streaming("go").await;
     assert!(

@@ -36,8 +36,8 @@
 use lingxi_core::types::ToolUseId;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
-    mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-    StaticMemoryProvider,
+    mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -138,7 +138,7 @@ impl Tool for StubTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({"ok": true}),
             model_content: None,
             new_messages: vec![],
@@ -169,9 +169,10 @@ fn wakeup_orch(
     responses: Vec<llm_runtime::HistoryResponse>,
     tools: Vec<(&'static str, bool)>,
 ) -> (
-    ConversationOrchestrator,
+    Arc<ConversationOrchestrator>,
     Arc<AtomicBool>,
     Arc<MockApiClient>,
+    Arc<MockStreamingApiClient>,
 ) {
     wakeup_orch_with_model(GATED_MODEL, responses, tools)
 }
@@ -184,38 +185,83 @@ fn wakeup_orch_with_model(
     responses: Vec<llm_runtime::HistoryResponse>,
     tools: Vec<(&'static str, bool)>,
 ) -> (
-    ConversationOrchestrator,
+    Arc<ConversationOrchestrator>,
     Arc<AtomicBool>,
     Arc<MockApiClient>,
+    Arc<MockStreamingApiClient>,
 ) {
     let mut registry = ToolRegistry::new();
     for (name, ends_turn) in tools {
         registry.register_builtin(Arc::new(StubTool { name, ends_turn }));
     }
+    let stream_api = Arc::new(MockStreamingApiClient::with_turns(
+        responses
+            .iter()
+            .map(|response| {
+                use orchestrator::test_support_stream::{
+                    content_block_start_text, content_block_start_tool_use, content_block_stop,
+                    input_json_delta, message_delta_stop, message_start, message_stop, text_delta,
+                };
+                let mut events = vec![message_start(&response.id, &response.model)];
+                for (index, block) in response.content.iter().enumerate() {
+                    let index = index as u32;
+                    match block {
+                        LlmContentBlock::ToolCall {
+                            id, name, input, ..
+                        } => {
+                            events.push(content_block_start_tool_use(
+                                index,
+                                ToolUseId::from(id.as_str()),
+                                name,
+                            ));
+                            events.push(input_json_delta(
+                                index,
+                                &serde_json::to_string(input).unwrap(),
+                            ));
+                        }
+                        LlmContentBlock::Text { text, .. } => {
+                            events.push(content_block_start_text(index));
+                            events.push(text_delta(index, text));
+                        }
+                        _ => panic!("unsupported fixture block"),
+                    }
+                    events.push(content_block_stop(index));
+                }
+                events.push(message_delta_stop(
+                    response.stop_reason.as_deref().unwrap_or("end_turn"),
+                ));
+                events.push(message_stop());
+                events
+            })
+            .collect(),
+    ));
     let api = Arc::new(MockApiClient::new(responses));
     let slot = Arc::new(AtomicBool::new(true)); // armed
-    let orch = ConversationOrchestrator::new(
-        OrchestratorConfig {
-            model: model.into(),
-            ..OrchestratorConfig::default()
-        },
-        api.clone(),
-        Arc::new(registry),
-        noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
-        Arc::new(StaticMemoryProvider::empty()),
-        PathBuf::from("/tmp"),
-    )
-    .with_loop_wakeup_armed_slot(slot.clone());
-    (orch, slot, api)
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig {
+                model: model.into(),
+                ..OrchestratorConfig::default()
+            },
+            api.clone(),
+            stream_api.clone(),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_loop_wakeup_armed_slot(slot.clone()),
+    );
+    (orch, slot, api, stream_api)
 }
 
 fn tool_round(calls: &[(&str, ToolUseId)]) -> llm_runtime::HistoryResponse {
     mock_message_response(
         calls
             .iter()
-            .map(|(name, id)| LlmContentBlock::ToolCall {
+            .map(|(name, id)| LlmContentBlock::ToolCall { input_projection: None,
                 id: id.to_string(),
                 name: (*name).into(),
                 input: json!({}),
@@ -230,6 +276,7 @@ fn text_end(text: &str) -> llm_runtime::HistoryResponse {
         vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )
@@ -243,7 +290,7 @@ fn text_end(text: &str) -> llm_runtime::HistoryResponse {
 #[test]
 fn a_lone_schedule_wakeup_ends_the_turn_and_consumes_the_flag() {
     run_with_large_stack(|| async {
-        let (orch, slot, api) = wakeup_orch(
+        let (orch, slot, api, _stream_api) = wakeup_orch(
             vec![
                 tool_round(&[("ScheduleWakeup", ToolUseId::new())]),
                 text_end("should never be requested"),
@@ -266,6 +313,83 @@ fn a_lone_schedule_wakeup_ends_the_turn_and_consumes_the_flag() {
     });
 }
 
+#[test]
+fn current_fable_5_lone_wakeup_ends_turn() {
+    run_with_large_stack(|| async {
+        for streaming in [false, true] {
+            let (orch, slot, api, stream_api) = wakeup_orch_with_model(
+                "claude-fable-5",
+                vec![
+                    tool_round(&[("ScheduleWakeup", ToolUseId::new())]),
+                    text_end("unused"),
+                ],
+                vec![("ScheduleWakeup", false)],
+            );
+            if streaming {
+                orch.run_turn_streaming("ping")
+                    .await
+                    .expect("streaming turn");
+            } else {
+                orch.run_turn("ping").await.expect("batched turn");
+            }
+            assert_eq!(
+                if streaming {
+                    stream_api.captured_calls().await.len()
+                } else {
+                    api.captured_msgs().await.len()
+                },
+                1
+            );
+            assert!(!slot.load(Ordering::SeqCst));
+        }
+    });
+}
+
+#[test]
+fn loop_prompt_and_turn_end_use_selected_route_identity() {
+    run_with_large_stack(|| async {
+        for streaming in [false, true] {
+            let (orch, _, api, stream_api) = wakeup_orch_with_model(
+                "host-display-fable",
+                vec![
+                    tool_round(&[("ScheduleWakeup", ToolUseId::new())]),
+                    text_end("unused"),
+                ],
+                vec![("ScheduleWakeup", false)],
+            );
+            api.set_effort_command_snapshot(Some(
+                lingxi_core::host::effort::EffortCommandSnapshot {
+                    model: "host-display-fable".into(),
+                    settings_key: "claude-fable-5".into(),
+                    session: lingxi_core::host::effort_table::SessionEffort::Inherit,
+                    primary: None,
+                    capabilities: Default::default(),
+                    state: Default::default(),
+                    user_settings_path: None,
+                    save_default: false,
+                    organization_start_effort: None,
+                },
+            ));
+            assert_eq!(orch.bundled_prompt_model().await.unwrap(), "claude-fable-5");
+            if streaming {
+                orch.run_turn_streaming("ping")
+                    .await
+                    .expect("streaming turn");
+            } else {
+                orch.run_turn("ping").await.expect("batched turn");
+            }
+            assert_eq!(
+                if streaming {
+                    stream_api.captured_calls().await.len()
+                } else {
+                    api.captured_msgs().await.len()
+                },
+                1
+            );
+        }
+    });
+}
+
 /// The flag is consumed even when the verdict is "not a lone wakeup".
 ///
 /// `take_lone_wakeup_turn_end` swaps the slot before it inspects anything, so a
@@ -275,7 +399,7 @@ fn a_lone_schedule_wakeup_ends_the_turn_and_consumes_the_flag() {
 #[test]
 fn a_wakeup_beside_another_tool_still_consumes_the_flag_without_ending_the_turn() {
     run_with_large_stack(|| async {
-        let (orch, slot, api) = wakeup_orch(
+        let (orch, slot, api, _stream_api) = wakeup_orch(
             vec![
                 tool_round(&[
                     ("ScheduleWakeup", ToolUseId::new()),
@@ -324,7 +448,7 @@ fn a_wakeup_beside_another_tool_still_consumes_the_flag_without_ending_the_turn(
 #[test]
 fn a_tool_requested_end_leaves_the_wakeup_flag_armed_for_the_next_turn() {
     run_with_large_stack(|| async {
-        let (orch, slot, api) = wakeup_orch(
+        let (orch, slot, api, _stream_api) = wakeup_orch(
             vec![
                 tool_round(&[
                     ("ScheduleWakeup", ToolUseId::new()),
@@ -365,7 +489,7 @@ fn a_model_outside_the_gate_continues_the_turn_but_still_consumes_the_flag() {
         // `claude-mythos-5`, so `lone_wakeup_ends_turn_model` refuses it. The
         // stock default `claude-opus-4-8` would do just as well — which is why
         // the other tests here pin `GATED_MODEL` explicitly.
-        let (orch, slot, api) = wakeup_orch_with_model(
+        let (orch, slot, api, _stream_api) = wakeup_orch_with_model(
             "claude-3-5-sonnet",
             vec![
                 tool_round(&[("ScheduleWakeup", ToolUseId::new())]),

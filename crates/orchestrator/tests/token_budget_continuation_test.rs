@@ -21,6 +21,7 @@ fn end_turn_with_output_tokens(output_tokens: u64) -> HistoryResponse {
         content: vec![LlmContentBlock::Text {
             text: "done".into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,
@@ -66,7 +67,7 @@ fn count_nudge_user_messages(snapshot: &[ConversationMessage]) -> usize {
         .iter()
         .filter(|m| match m {
             ConversationMessage::User { content, .. } => content.iter().any(
-                |b| matches!(b, lingxi_core::types::ContentBlock::Text { text } if text == NUDGE),
+                |b| matches!(b, lingxi_core::types::ContentBlock::Text { text, .. } if text == NUDGE),
             ),
             _ => false,
         })
@@ -223,7 +224,7 @@ async fn budget_on_resets_recovery_count_on_continuation() {
                 ConversationMessage::User { content, .. }
                     if content.iter().any(|b| matches!(
                         b,
-                        lingxi_core::types::ContentBlock::Text { text }
+                        lingxi_core::types::ContentBlock::Text { text, .. }
                             if text.starts_with("Stopped at")
                                 && text.contains('\u{2014}')
                     ))
@@ -308,7 +309,7 @@ async fn streaming_budget_on_continues_then_stops_at_threshold() {
         enable_token_budget: true,
         ..OrchestratorConfig::default()
     };
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         cfg,
         Arc::new(MockApiClient::new(Vec::new())),
         api.clone(),
@@ -318,7 +319,7 @@ async fn streaming_budget_on_continues_then_stops_at_threshold() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
 
     let outcome = orch.run_turn_streaming("do it").await.expect("ok");
     match outcome {

@@ -240,7 +240,7 @@ impl Tool for REPLTool {
                 meta.insert("truncated".into(), AnalyticsValue::Bool(truncated));
                 self.ctx.bus.log_event(REPL_COMPLETED, meta).await;
 
-                Ok(ToolCallResult {
+                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     data: json!({
                         "language":  lang,
                         "exit_code": out.exit_code,

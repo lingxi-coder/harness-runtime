@@ -15,11 +15,9 @@
 //! 3. an explicit `"auto"` applies only to `Kr = {"http","claudeai-proxy",
 //!    "ccr-proxy","stdio"}` — every other label is forced back to legacy
 //!    even though the env var asked for auto;
-//! 4. otherwise (var unset or invalid), each of the THREE remote labels that
-//!    have their own flag falls through to a per-transport `tengu_mcp_
-//!    protocol_negotiation_{http,claudeai,ccr}` gate (default off); `stdio`,
-//!    `sse`, `ws`, `ide`, `in-process`, `sdk-control` are unconditionally
-//!    legacy here — no flag can turn auto on for them;
+//! 4. otherwise (var unset or invalid), HTTP uses its per-transport gate
+//!    (default on in 2.1.286); stdio and the two proxy labels have separate
+//!    gates (default off). SSE, WS, IDE, in-process and SDK-control stay legacy;
 //! 5. when — and ONLY when — the FLAG-GATED decision in (4) lands on
 //!    `auto`, a final server-denylist check
 //!    (`tengu_mcp_negotiation_server_denylist`, an ARRAY flag: a list of
@@ -43,13 +41,14 @@
 //! revision returned by an `auto`-mode server. The transport performs the
 //! `server/discover` probe and one pinned-revision corrective retry, while the
 //! registry carries this immutable mode and probe budget through cache and
-//! handshake decisions. Legacy remains the fixed default when no negotiation
-//! flag is enabled.
+//! handshake decisions. A legacy handshake still requests 2025-11-25.
 
 use lingxi_core::host::{McpTransportKind, McpTransportSpec};
 
-/// `tengu_mcp_protocol_negotiation_http` — default off.
+/// `tengu_mcp_protocol_negotiation_http` — default on in 2.1.286.
 const FLAG_HTTP: &str = "tengu_mcp_protocol_negotiation_http";
+/// `tengu_mcp_protocol_negotiation_stdio` — default off.
+const FLAG_STDIO: &str = "tengu_mcp_protocol_negotiation_stdio";
 /// `tengu_mcp_protocol_negotiation_claudeai` — default off.
 const FLAG_CLAUDEAI: &str = "tengu_mcp_protocol_negotiation_claudeai";
 /// `tengu_mcp_protocol_negotiation_ccr` — default off. The compatible HTTP
@@ -145,10 +144,11 @@ fn gated_mode(label: &str, base_timeout_ms: u64) -> NegotiationMode {
     };
     let gate_on = |flag: &str| telemetry::flag_bool(flag, false);
     match label {
-        "http" if gate_on(FLAG_HTTP) => auto(),
+        "http" if telemetry::flag_bool(FLAG_HTTP, true) => auto(),
+        "stdio" if gate_on(FLAG_STDIO) => auto(),
         "claudeai-proxy" if gate_on(FLAG_CLAUDEAI) => auto(),
         "ccr-proxy" if gate_on(FLAG_CCR) => auto(),
-        // Either the gate above was off, or the label is one of `stdio` /
+        // Either the gate above was off, or the label is one of
         // `sse` / `ws` / `ide` / `in-process` / `sdk-control` (always
         // legacy), or an unrecognized label (never produced by
         // `transport_label`, kept only so the match is exhaustive).
@@ -486,6 +486,13 @@ mod tests {
     fn gated_mode_http_follows_its_own_flag() {
         let _guard = flag_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         telemetry::test_clear_flag(FLAG_HTTP);
+        assert_eq!(
+            gated_mode("http", 30_000),
+            NegotiationMode::Auto {
+                probe_timeout_ms: 5_000
+            }
+        );
+        telemetry::test_set_flag(FLAG_HTTP, false);
         assert_eq!(gated_mode("http", 30_000), NegotiationMode::Legacy);
         telemetry::test_set_flag(FLAG_HTTP, true);
         assert_eq!(
@@ -495,6 +502,69 @@ mod tests {
             }
         );
         telemetry::test_clear_flag(FLAG_HTTP);
+    }
+
+    #[test]
+    fn gated_mode_stdio_has_its_own_default_off_flag() {
+        let _guard = flag_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        telemetry::test_clear_flag(FLAG_STDIO);
+        assert_eq!(gated_mode("stdio", 30_000), NegotiationMode::Legacy);
+        telemetry::test_set_flag(FLAG_STDIO, true);
+        assert_eq!(
+            gated_mode("stdio", 30_000),
+            NegotiationMode::Auto {
+                probe_timeout_ms: 3_000
+            }
+        );
+        telemetry::test_clear_flag(FLAG_STDIO);
+    }
+
+    #[test]
+    fn policy_matches_pinned_upstream_execution() {
+        let _guard = flag_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../platforms/posix/tests/fixtures/mcp_negotiation_286_oracle.json"
+        ))
+        .unwrap();
+        for case in fixture["policyCases"].as_array().unwrap() {
+            for flag in [FLAG_HTTP, FLAG_STDIO, FLAG_CLAUDEAI, FLAG_CCR] {
+                telemetry::test_clear_flag(flag);
+            }
+            if let Some(flags) = case["flags"].as_object() {
+                for (flag, value) in flags {
+                    telemetry::test_set_flag(flag, value.as_bool().unwrap());
+                }
+            }
+            let out = resolve(
+                case["transport"].as_str().unwrap(),
+                case.pointer("/server/url")
+                    .and_then(serde_json::Value::as_str),
+                case["timeout"].as_u64().unwrap_or(30_000),
+                case["environment"].as_str(),
+                Some(case["denylisted"].as_bool().unwrap_or(false)),
+            );
+            let policy = match out.mode {
+                NegotiationMode::Legacy => serde_json::json!({"mode":"legacy"}),
+                NegotiationMode::Auto { probe_timeout_ms } => {
+                    serde_json::json!({"mode":"auto", "probe":{"timeoutMs":probe_timeout_ms}})
+                }
+            };
+            assert_eq!(policy, case["expected"]["policy"], "{}", case["name"]);
+            let warnings: Vec<String> = out
+                .env_warning
+                .into_iter()
+                .chain(out.denylist_warning)
+                .collect();
+            assert_eq!(
+                serde_json::json!(warnings),
+                case["expected"]["warnings"],
+                "{}",
+                case["name"]
+            );
+        }
+        for flag in [FLAG_HTTP, FLAG_STDIO, FLAG_CLAUDEAI, FLAG_CCR] {
+            telemetry::test_clear_flag(flag);
+        }
     }
 
     // ── denylist ─────────────────────────────────────────────────────────
@@ -578,7 +648,12 @@ mod tests {
         let _guard = flag_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         telemetry::test_clear_flag(FLAG_HTTP);
         let out = resolve("http", None, 30_000, Some("nonsense"), None);
-        assert_eq!(out.mode, NegotiationMode::Legacy);
+        assert_eq!(
+            out.mode,
+            NegotiationMode::Auto {
+                probe_timeout_ms: 5_000
+            }
+        );
         assert_eq!(
             out.env_warning.as_deref(),
             Some("MCP_PROTOCOL_NEGOTIATION=nonsense is invalid; expected 'legacy' or 'auto' — ignoring")
@@ -743,6 +818,13 @@ mod tests {
         std::env::remove_var(ENV_VAR);
         telemetry::test_clear_flag(FLAG_HTTP);
         let spec = http_spec("https://mcp.example.com");
+        assert_eq!(
+            resolve_for_spec(&spec, 30_000),
+            NegotiationMode::Auto {
+                probe_timeout_ms: 5_000
+            }
+        );
+        telemetry::test_set_flag(FLAG_HTTP, false);
         assert_eq!(resolve_for_spec(&spec, 30_000), NegotiationMode::Legacy);
         telemetry::test_set_flag(FLAG_HTTP, true);
         assert_eq!(
@@ -758,7 +840,7 @@ mod tests {
     fn metadata_transport_selects_only_compatible_proxy_gates() {
         let _guard = flag_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var(ENV_VAR);
-        telemetry::test_clear_flag(FLAG_HTTP);
+        telemetry::test_set_flag(FLAG_HTTP, false);
         telemetry::test_set_flag(FLAG_CLAUDEAI, true);
         telemetry::test_set_flag(FLAG_CCR, true);
         let spec = http_spec("https://mcp.example.com");
@@ -793,6 +875,7 @@ mod tests {
             NegotiationMode::Legacy
         );
 
+        telemetry::test_clear_flag(FLAG_HTTP);
         telemetry::test_clear_flag(FLAG_CLAUDEAI);
         telemetry::test_clear_flag(FLAG_CCR);
     }

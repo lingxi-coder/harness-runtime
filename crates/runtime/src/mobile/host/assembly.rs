@@ -2992,7 +2992,7 @@ pub fn build_mobile_engine_inner(
     // reserved address space, not resident memory.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_stack_size(8 * 1024 * 1024)
+        .thread_stack_size(crate::RUNTIME_THREAD_STACK_SIZE)
         .build()
         .map_err(|e| MobileEngineError::Internal(format!("tokio runtime build failed: {e}")))?;
 

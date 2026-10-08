@@ -121,6 +121,8 @@ fn build_orchestrator_with_api(
 
 #[tokio::test]
 async fn single_turn_no_tools_completes_with_end_turn() {
+    use lingxi_core::types::{ContentBlock, ConversationMessage};
+
     let f = load();
     let s = f
         .scenarios
@@ -132,6 +134,7 @@ async fn single_turn_no_tools_completes_with_end_turn() {
         vec![LlmContentBlock::Text {
             text: "Hello!".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -154,23 +157,84 @@ async fn single_turn_no_tools_completes_with_end_turn() {
         _ => panic!("expected EndTurn for scenario {}", s.name),
     }
 
-    // The session should have user + assistant = 2 messages.
     let captured = api.captured_msgs().await;
     assert_eq!(
         captured.len(),
         1,
         "exactly one API call for single-turn scenario"
     );
-    // R-P1: every outgoing API call LEADS with the additional-context
-    // `<system-reminder>` meta (claudeMd/gitStatus/currentDate — currentDate is
-    // unconditional, so the meta is always present), so the API receives that
-    // meta and TRAILS with the transient total-tokens reminder around the
-    // user message(s), before the assistant is appended.
-    let user_msgs_before_assistant = s.expected_session_messages.unwrap_or(2) - 1;
+    // .286 normal Or routing announces the known-empty context anchor and
+    // date after the human prompt. There are no context_sections for this
+    // empty host context, and the durable total-token attachment trails them.
+    let oracle: serde_json::Value = serde_json::from_str(include_str!(
+        "../../core/tests/fixtures/instruction_announcements_2_1_286.json"
+    ))
+    .unwrap();
+    let native = oracle["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == "successful-empty-initial")
+        .unwrap();
+    assert_eq!(native["expected"].as_array().unwrap().len(), 2);
     assert_eq!(
-        captured[0].len(),
-        user_msgs_before_assistant + 2,
-        "API receives additional-context + user messages + total-tokens reminder"
+        native["expected"][0]["attachment"]["type"],
+        "session_context"
+    );
+    assert_eq!(
+        native["expected"][0]["attachment"]["context"],
+        serde_json::json!({})
+    );
+    assert_eq!(native["expected"][0]["rendered"], serde_json::json!([]));
+    assert_eq!(native["expected"][1]["attachment"]["type"], "date");
+    let date = orchestrator::prompt::env_meta::current_date_string();
+    let date_body = native["expected"][1]["rendered"][0]
+        .as_str()
+        .unwrap()
+        .replace(
+            native["expected"][1]["attachment"]["date"]
+                .as_str()
+                .unwrap(),
+            &date,
+        );
+    let sent = &captured[0];
+    assert_eq!(
+        sent.len(),
+        4,
+        "human prompt, empty session_context projection, native date, total-token attachment"
+    );
+    assert!(
+        matches!(&sent[0], ConversationMessage::User { content, is_meta: false, .. }
+        if content == &[ContentBlock::Text { text: s.user_prompt.clone().unwrap(), citations: None }])
+    );
+    assert!(
+        matches!(&sent[1], ConversationMessage::System { content, subtype, compact_metadata: None, refusal_fallback: None, .. }
+        if content.is_empty() && subtype.as_deref() == Some("model_reminder_attachment"))
+    );
+    assert!(
+        matches!(&sent[2], ConversationMessage::User { content, is_meta: true, .. }
+        if content == &[ContentBlock::Text { text: date_body, citations: None }])
+    );
+    assert!(
+        matches!(&sent[3], ConversationMessage::User { content, is_meta: true, .. }
+        if content == &[ContentBlock::Text { text: "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>".into(), citations: None }])
+    );
+    let history = orch.session().lock().await.history.clone();
+    assert_eq!(
+        history.len(),
+        5,
+        "all three durable attachments survive completion"
+    );
+    assert_eq!(&history[..4], sent.as_slice());
+    assert!(
+        matches!(&history[4], ConversationMessage::Assistant { content, stop_reason, .. }
+        if content == &[ContentBlock::Text { text: "Hello!".into(), citations: None }]
+            && stop_reason.as_deref() == Some("end_turn"))
+    );
+    assert_eq!(
+        s.expected_session_messages,
+        Some(2),
+        "fixture's human + assistant scenario"
     );
 
     assert_eq!(s.expected_outcome.as_deref(), Some("EndTurn"));
@@ -202,6 +266,7 @@ async fn max_turns_cap_returns_max_turns_reached_error() {
                 vec![LlmContentBlock::Text {
                     text: "still going".into(),
                     cache_control: None,
+                    citations: None,
                 }],
                 Some("max_tokens"),
             )
@@ -324,6 +389,7 @@ async fn parity_cost_after_one_turn() {
         content: vec![LlmContentBlock::Text {
             text: "Done.".into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
@@ -472,10 +538,11 @@ async fn parity_force_compact_50_messages() {
                     format!("turn-{i} padding to push token count past the autocompact threshold"),
                 ));
             } else {
-                hist.history.push(ConversationMessage::Assistant {
+                hist.history.push(ConversationMessage::Assistant { per_turn_effort: None,
                     id: MessageId::new(),
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: format!("reply-{i}"),
+                        citations: None,
                     }],
                     stop_reason: Some("end_turn".into()),
                 });

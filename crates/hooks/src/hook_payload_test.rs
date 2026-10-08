@@ -401,12 +401,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            r.system_message.as_deref(),
+            r.system_message.as_ref().map(|text| text.display.as_str()),
             Some("hello"),
             "systemMessage stays on its own field (transcript-facing, not the model)"
         );
         assert_eq!(
-            r.additional_context.as_deref(),
+            r.additional_context.as_ref().map(|text| text.display.as_str()),
             Some("world"),
             "additionalContext stays on its own field (model-facing)"
         );
@@ -608,7 +608,12 @@ mod tests {
             "SessionStart",
         )
         .unwrap();
-        assert_eq!(r.initial_user_message.as_deref(), Some("hi there"));
+        assert_eq!(
+            r.initial_user_message
+                .as_ref()
+                .map(|text| text.display.as_str()),
+            Some("hi there")
+        );
         assert_eq!(r.reload_skills, Some(true));
         // Scoped to SessionStart: the same keys on another event are ignored.
         let r2 = parse_response(
@@ -766,7 +771,9 @@ mod tests {
         .unwrap();
         assert_eq!(post.decision, None);
         assert_eq!(
-            post.additional_context.as_deref(),
+            post.additional_context
+                .as_ref()
+                .map(|text| text.display.as_str()),
             Some("use the new model")
         );
     }
@@ -1355,7 +1362,12 @@ mod tests {
             let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
             let r = parse_response(&raw, leaked).unwrap();
             // `additionalContext` now lands on its own field (NOT system_message).
-            assert_eq!(r.additional_context.as_deref(), Some("x"));
+            assert_eq!(
+                r.additional_context
+                    .as_ref()
+                    .map(|text| text.display.as_str()),
+                Some("x")
+            );
 
             // A mismatched name is rejected.
             let err = parse_response(
@@ -2417,5 +2429,23 @@ mod tests {
         assert_eq!(validation_hint(&j(r#"{"decision":"block"}"#)), None);
         assert_eq!(validation_hint(&j(r#"{}"#)), None);
         assert_eq!(validation_hint(&j(r#"[]"#)), None);
+    }
+
+    #[test]
+    fn parse_response_keeps_exact_js_utf16_for_all_fse_response_fields() {
+        let response = parse_response(
+            r#"{"systemMessage":"\ud800x","hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"a\udc00","initialUserMessage":"\ud800"}}"#,
+            "SessionStart",
+        )
+        .unwrap();
+        let system = response.system_message.unwrap();
+        assert_eq!(system.display, "�x");
+        assert_eq!(system.utf16_code_units, [0xD800, u16::from(b'x')]);
+        let additional = response.additional_context.unwrap();
+        assert_eq!(additional.display, "a�");
+        assert_eq!(additional.utf16_code_units, [u16::from(b'a'), 0xDC00]);
+        let initial = response.initial_user_message.unwrap();
+        assert_eq!(initial.display, "�");
+        assert_eq!(initial.utf16_code_units, [0xD800]);
     }
 }

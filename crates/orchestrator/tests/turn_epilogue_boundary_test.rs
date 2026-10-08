@@ -155,7 +155,7 @@ impl tool_api::tool_trait::Tool for CancellingTool {
         _tx: tool_api::progress::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
         self.0.cancel();
-        Ok(tool_api::ToolCallResult {
+        Ok(tool_api::ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: serde_json::json!({"ok": true}),
             model_content: None,
             new_messages: vec![],
@@ -227,7 +227,7 @@ impl tool_api::tool_trait::Tool for NoopTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: tool_api::progress::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
-        Ok(tool_api::ToolCallResult {
+        Ok(tool_api::ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: serde_json::json!({"ok": true}),
             model_content: None,
             new_messages: vec![],
@@ -297,21 +297,23 @@ fn streamed_end_turn(id: &str) -> Vec<llm_runtime::HistoryEvent> {
 fn streaming_persists_a_file_history_snapshot_after_a_normal_turn() {
     run_with_large_stack(|| async {
         let f = fixture();
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            Arc::new(MockStreamingApiClient::with_turns(vec![streamed_end_turn(
-                "m1",
-            )])),
-            Arc::new(ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            f.dir.path().to_path_buf(),
-        )
-        .with_jsonl_writer(f.writer.clone())
-        .with_file_history(f.file_history.clone());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(MockStreamingApiClient::with_turns(vec![streamed_end_turn(
+                    "m1",
+                )])),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                f.dir.path().to_path_buf(),
+            )
+            .with_jsonl_writer(f.writer.clone())
+            .with_file_history(f.file_history.clone()),
+        );
 
         orch.run_turn_streaming("ping").await.expect("streaming");
 
@@ -342,6 +344,7 @@ fn the_batched_entries_persist_no_file_history_snapshot() {
                     vec![LlmContentBlock::Text {
                         text: "answer".into(),
                         cache_control: None,
+                        citations: None,
                     }],
                     Some("end_turn"),
                 )])),
@@ -390,23 +393,25 @@ fn the_streaming_return_arm_skips_the_epilogue() {
         let f = fixture();
         let end_slot: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            Arc::new(MockStreamingApiClient::with_turns(vec![
-                streamed_tool_round("m1", "Noop"),
-                streamed_end_turn("m2"),
-            ])),
-            epilogue_tool_registry(),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            f.dir.path().to_path_buf(),
-        )
-        .with_jsonl_writer(f.writer.clone())
-        .with_file_history(f.file_history.clone())
-        .with_end_conversation_slot(end_slot.clone());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(MockStreamingApiClient::with_turns(vec![
+                    streamed_tool_round("m1", "Noop"),
+                    streamed_end_turn("m2"),
+                ])),
+                epilogue_tool_registry(),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                f.dir.path().to_path_buf(),
+            )
+            .with_jsonl_writer(f.writer.clone())
+            .with_file_history(f.file_history.clone())
+            .with_end_conversation_slot(end_slot.clone()),
+        );
 
         orch.run_turn_streaming("ping").await.expect("streaming");
 
@@ -452,21 +457,23 @@ fn the_loop_top_guard_emits_aborted_streaming_and_runs_the_epilogue() {
         let f = fixture();
         let token = tokio_util::sync::CancellationToken::new();
         let out = Arc::new(MockOutputStream::new());
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            Arc::new(MockStreamingApiClient::with_turns(vec![streamed_end_turn(
-                "m1",
-            )])),
-            Arc::new(ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            out.clone(),
-            Arc::new(StaticMemoryProvider::empty()),
-            f.dir.path().to_path_buf(),
-        )
-        .with_jsonl_writer(f.writer.clone())
-        .with_file_history(f.file_history.clone());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(MockStreamingApiClient::with_turns(vec![streamed_end_turn(
+                    "m1",
+                )])),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                out.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                f.dir.path().to_path_buf(),
+            )
+            .with_jsonl_writer(f.writer.clone())
+            .with_file_history(f.file_history.clone()),
+        );
         orch.set_mid_turn_input(Arc::new(CancelsOnDrain(token.clone())));
 
         orch.run_turn_streaming_with_cancel("ping", token.clone())
@@ -530,22 +537,24 @@ fn the_post_drive_abort_emits_aborted_streaming_and_runs_the_epilogue() {
         registry.register_builtin(Arc::new(CancellingTool(token.clone())));
         let out = Arc::new(MockOutputStream::new());
 
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            Arc::new(MockStreamingApiClient::with_turns(vec![
-                streamed_tool_round("m1", "CancelsTurn"),
-                streamed_end_turn("m2"),
-            ])),
-            Arc::new(registry),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            out.clone(),
-            Arc::new(StaticMemoryProvider::empty()),
-            f.dir.path().to_path_buf(),
-        )
-        .with_jsonl_writer(f.writer.clone())
-        .with_file_history(f.file_history.clone());
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(MockStreamingApiClient::with_turns(vec![
+                    streamed_tool_round("m1", "CancelsTurn"),
+                    streamed_end_turn("m2"),
+                ])),
+                Arc::new(registry),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                out.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                f.dir.path().to_path_buf(),
+            )
+            .with_jsonl_writer(f.writer.clone())
+            .with_file_history(f.file_history.clone()),
+        );
 
         orch.run_turn_streaming_with_cancel("ping", token.clone())
             .await

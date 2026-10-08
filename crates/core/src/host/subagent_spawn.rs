@@ -115,6 +115,9 @@ pub enum SubagentStopScope {
 /// input, keeping the spawner independent of the tool implementation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SubagentSpawnRequest {
+    /// Agent-tool admission capability; absent for skills, workflows and internal agents.
+    #[serde(skip)]
+    pub agent_spawn_token: Option<crate::host::agent_statistics::AgentSpawnToken>,
     /// Trusted consumer scope; model/plugin JSON cannot claim lifecycle ownership.
     #[serde(skip)]
     pub stop_hook_scope: SubagentStopScope,

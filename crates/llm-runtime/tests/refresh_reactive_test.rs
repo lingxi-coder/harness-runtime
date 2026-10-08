@@ -70,7 +70,8 @@ fn make_state(initial_access: &str) -> (Arc<AuthState>, Arc<AtomicU32>) {
         cfg,
         Secret::new(initial_access.to_string()),
         Some(Secret::new("INITIAL_REFRESH".to_string())),
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_010), // expires in 10s
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_010),
+        lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0).scopes, // expires in 10s
         transport,
         clock,
         None, // no AnalyticsBus in this smoke test

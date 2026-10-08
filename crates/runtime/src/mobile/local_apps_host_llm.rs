@@ -476,11 +476,11 @@ impl LocalAppsHostBroker {
                     HistoryEvent::ContentBlockDelta {
                         delta: HistoryContentDelta::TextDelta { text },
                         ..
-                    } => output.emit_text(&text).await,
+                    } => output.emit_text(&text, None).await,
                     HistoryEvent::ContentBlockDelta {
-                        delta: HistoryContentDelta::TextJsUtf16Delta { text, .. },
+                        delta: HistoryContentDelta::TextJsUtf16Delta { text, utf16_code_units },
                         ..
-                    } => output.emit_text(&text).await,
+                    } => output.emit_text(&text, Some(&utf16_code_units)).await,
                     HistoryEvent::MessageDelta { delta, .. } => {
                         stop_reason = delta.stop_reason.or(stop_reason);
                     }

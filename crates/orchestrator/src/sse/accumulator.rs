@@ -37,6 +37,7 @@ pub enum BlockKind {
     },
     /// A `tool_use` block — accumulates `input_json_delta` chunks.
     ToolUse {
+        input_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         /// Stable identifier echoed back in the matching `ToolResult`.
         id: ToolUseId,
         /// Tool name (e.g. `"Read"`).
@@ -85,6 +86,7 @@ pub enum CompletedBlock {
     },
     /// Tool invocation, with reassembled JSON input.
     ToolUse {
+        input_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         /// Tool use identifier.
         id: ToolUseId,
         /// Tool name.
@@ -389,11 +391,12 @@ impl BlockAccumulator {
                 id,
                 name,
                 provider_id,
-            } => {
-                let input = if state.json_buf.is_empty() {
-                    Value::Object(serde_json::Map::new())
+                input_projection,
+             .. } => {
+                let input_projection = if state.json_buf.is_empty() {
+                    input_projection.unwrap_or_else(|| lingxi_core::types::utf16_json::Utf16JsonProjection::plain(Value::Object(serde_json::Map::new())))
                 } else {
-                    serde_json::from_str::<Value>(&state.json_buf).map_err(|e| {
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&state.json_buf).map_err(|e| {
                         StreamingError::ToolUseJsonParse {
                             index,
                             reason: e.to_string(),
@@ -402,9 +405,10 @@ impl BlockAccumulator {
                     })?
                 };
                 CompletedBlock::ToolUse {
+                    input: input_projection.value.clone(),
+                    input_projection: Some(input_projection),
                     id,
                     name,
-                    input,
                     provider_id,
                 }
             }

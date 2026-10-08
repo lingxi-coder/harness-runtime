@@ -109,7 +109,7 @@ impl agent::SubagentApiClient for Model {
             } else {
                 assert!(tools.iter().any(|tool| tool["name"] == HANDBACK_TOOL_NAME));
                 Ok(response(
-                    llm_runtime::ContentBlock::ToolCall {
+                    llm_runtime::ContentBlock::ToolCall { input_projection: None,
                         id: "restored-handback".into(),
                         name: HANDBACK_TOOL_NAME.into(),
                         input: serde_json::json!({"message":"fresh report from restored child"}),

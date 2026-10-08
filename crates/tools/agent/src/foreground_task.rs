@@ -209,6 +209,9 @@ impl SubagentSpawnObserver for Observer {
             {
                 Ok(handle) => {
                     let id = handle.task_id.clone();
+                    if let Some(token) = request.agent_spawn_token.clone() {
+                        self.0.registry.bind_agent_spawn_token(&id, token);
+                    }
                     self.0
                         .registry
                         .set_agent_display(
@@ -291,11 +294,13 @@ impl SubagentSpawnObserver for Observer {
 struct CancelOnDrop(
     Option<tokio::task::AbortHandle>,
     Arc<std::sync::atomic::AtomicBool>,
+    Option<lingxi_core::host::agent_statistics::AgentSpawnToken>,
 );
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         if let Some(handle) = self.0.take() {
             self.1.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(token) = &self.2 { token.cancelled_after_completion(); }
             handle.abort();
         }
     }
@@ -352,7 +357,7 @@ pub(super) async fn run(
             .spawn_with_observer(request, inherit, Some(progress), Some(observer))
             .await
     });
-    let mut guard = CancelOnDrop(Some(worker.abort_handle()), control.stop_requested.clone());
+    let mut guard = CancelOnDrop(Some(worker.abort_handle()), control.stop_requested.clone(), control.request.agent_spawn_token.clone());
     *control.abort.lock().unwrap() = Some(worker.abort_handle());
     let _ = release_worker.send(());
     let completion_control = control.clone();

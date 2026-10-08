@@ -481,7 +481,7 @@ pub fn filter_messages_to_fingerprints<S: BuildHasher>(
                 is_meta,
                 is_compact_summary,
                 is_visible_in_transcript_only,
-            } => Ok(ConversationMessage::User {
+             .. } => Ok(ConversationMessage::User { api_message_override: None,
                 id,
                 content: filter_blocks_to_fingerprints(content, wanted)?,
                 is_meta,
@@ -492,7 +492,7 @@ pub fn filter_messages_to_fingerprints<S: BuildHasher>(
                 id,
                 content,
                 stop_reason,
-            } => Ok(ConversationMessage::Assistant {
+             .. } => Ok(ConversationMessage::Assistant { per_turn_effort: None,
                 id,
                 content: filter_blocks_to_fingerprints(content, wanted)?,
                 stop_reason,
@@ -521,7 +521,7 @@ fn filter_blocks_to_fingerprints<S: BuildHasher>(
                 is_error,
                 provider_tool_use_id,
                 content_blocks: Some(content_blocks),
-            } => {
+             .. } => {
                 let filtered = content_blocks
                     .into_iter()
                     .filter_map(|value| match extract_image_source(&value) {
@@ -534,7 +534,7 @@ fn filter_blocks_to_fingerprints<S: BuildHasher>(
                         None => Some(Ok(value)),
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                out.push(ContentBlock::ToolResult {
+                out.push(ContentBlock::ToolResult { content_projection: None,
                     tool_use_id,
                     content,
                     is_error,
@@ -774,7 +774,7 @@ fn rewrite_message_for_nonvision(
             is_meta,
             is_compact_summary,
             is_visible_in_transcript_only,
-        } => Ok(ConversationMessage::User {
+         .. } => Ok(ConversationMessage::User { api_message_override: None,
             id,
             content: rewrite_blocks_for_nonvision(content, documents_supported)?,
             is_meta,
@@ -785,7 +785,7 @@ fn rewrite_message_for_nonvision(
             id,
             content,
             stop_reason,
-        } => Ok(ConversationMessage::Assistant {
+         .. } => Ok(ConversationMessage::Assistant { per_turn_effort: None,
             id,
             content: rewrite_blocks_for_nonvision(content, documents_supported)?,
             stop_reason,
@@ -815,8 +815,8 @@ fn rewrite_blocks_for_nonvision(
                 is_error,
                 provider_tool_use_id,
                 content_blocks: Some(blocks),
-            } => {
-                rewritten.push(ContentBlock::ToolResult {
+             .. } => {
+                rewritten.push(ContentBlock::ToolResult { content_projection: None,
                     tool_use_id,
                     content,
                     is_error,
@@ -901,7 +901,7 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
         remaining_prior_bytes = remaining_prior_bytes.saturating_sub(text.len());
         messages.push(match role {
             MessageRole::User => ConversationMessage::user(MessageId::new(), text),
-            MessageRole::Assistant => ConversationMessage::Assistant {
+            MessageRole::Assistant => ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text { text, citations: None }],
                 stop_reason: None,
@@ -929,7 +929,7 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
         content.push(ContentBlock::Text { text: label, citations: None });
         content.push(item.block.clone());
     }
-    messages.push(ConversationMessage::User {
+    messages.push(ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
         content,
         is_meta: false,
@@ -1560,7 +1560,7 @@ mod tests {
     }
 
     fn user_message(content: Vec<ContentBlock>) -> ConversationMessage {
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content,
             is_meta: false,
@@ -1586,7 +1586,7 @@ mod tests {
                     url: "https://example.com/top.png".into(),
                 },
             }]),
-            user_message(vec![ContentBlock::ToolResult {
+            user_message(vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "tool output".into(),
                 is_error: Some(false),
@@ -1754,7 +1754,7 @@ mod tests {
     fn rewrite_replaces_top_level_and_nested_media() {
         let messages = vec![user_message(vec![
             image_block("YWI="),
-            ContentBlock::ToolResult {
+            ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: String::new(),
                 is_error: Some(false),

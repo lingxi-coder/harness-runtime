@@ -928,7 +928,7 @@ impl ConversationOrchestrator {
 
     pub(super) async fn emit_mod_prompt_drop(&self, reason: &str) {
         self.output
-            .emit_text(&format!("Prompt dropped by a hook: {reason}"))
+            .emit_text(&format!("Prompt dropped by a hook: {reason}"), None)
             .await;
     }
     pub(crate) async fn upsert_active_goal_stop_hook_for_session(
@@ -1100,6 +1100,7 @@ impl ConversationOrchestrator {
         // user input, which `current_prompt_id` reproduces exactly.
         let prompt_id = self.prompt_runtime.current_prompt_id.lock().await.clone();
         HookContext {
+            model_safety_observer: self.model_safety_observer().await,
             prompt_transcript: Some(self.prompt_hook_transcript().await),
             model_selection: Some(model_selection),
             inherit: self.hook_agent_inheritance.clone(),
@@ -1294,7 +1295,7 @@ impl ConversationOrchestrator {
             } else {
                 format!("{base}\n\nOriginal prompt: {prompt}")
             };
-            self.output.emit_text(&warning).await;
+            self.output.emit_text(&warning, None).await;
         }
         blocked
     }
@@ -1685,7 +1686,7 @@ impl ConversationOrchestrator {
             ),
             // `Set` never tears a goal down, and `NotMet` leaves it running.
             lingxi_core::host::GoalStatusKind::Set | lingxi_core::host::GoalStatusKind::NotMet => {
-                return
+                return;
             }
         };
         let duration_ms = std::time::SystemTime::now()
@@ -2384,7 +2385,7 @@ impl ConversationOrchestrator {
                     let warning = format!(
                         "A hook blocked the turn from ending {next_count} consecutive times — overriding and ending turn. For Stop/SubagentStop hooks, check stop_hook_active in the input and return success while it's true. Set LINGXI_STOP_HOOK_BLOCK_CAP to raise this limit."
                     );
-                    self.output.emit_text(&warning).await;
+                    self.output.emit_text(&warning, None).await;
                     if goal_blocked {
                         self.handle_goal_interruption(
                             crate::prompt::goal_interruption::GoalInterruption::Pause(
@@ -2808,12 +2809,14 @@ impl ConversationOrchestrator {
             return Vec::new();
         }
         let body = ExactHookText::join(&agg.additional_contexts, "\n");
-        vec![ExactHookText::wrapped(
-            "<system-reminder>\nSessionStart hook additional context: ",
-            &body,
-            "\n</system-reminder>",
-        )
-        .to_conversation_message(MessageId::new(), true)]
+        vec![
+            ExactHookText::wrapped(
+                "<system-reminder>\nSessionStart hook additional context: ",
+                &body,
+                "\n</system-reminder>",
+            )
+            .to_conversation_message(MessageId::new(), true),
+        ]
     }
 
     /// Fire SessionStart and append its model-facing additional context, then
@@ -3443,8 +3446,8 @@ impl lingxi_core::host::uds_inbox::PeerReceiveGate for ConversationOrchestrator 
 mod model_switch_metadata_tests {
     use super::*;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-        StaticMemoryProvider,
+        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        noop_hook_executor,
     };
 
     #[tokio::test]

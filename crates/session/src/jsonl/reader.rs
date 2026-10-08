@@ -4,6 +4,7 @@
 //! (`readSessionLite` head path) — we only need the head because the fields
 //! we extract (`sessionId`, `cwd`, `type`) live on line 1.
 
+use crate::jsonl::exact_json::{Utf16Overrides, PRIVATE_UTF16_KEY};
 use crate::jsonl::schema::JsonlMessage;
 use lingxi_core::host::{FileSystem, FsError};
 use serde_json::Value;
@@ -131,6 +132,10 @@ pub struct LoadedTranscript {
     /// branch-aware DAG walk ([`crate::jsonl::loader::build_conversation_chain`]).
     /// Last-write-wins on a duplicate uuid, mirroring TS `messages.set(uuid, …)`.
     pub by_uuid: HashMap<String, JsonlMessage>,
+    /// Exact string leaves from native escaped UTF-16, indexed by transcript
+    /// UUID. The corresponding message retains the same private data through
+    /// loader clones; neither carrier is emitted as a native JSON field.
+    pub utf16_by_uuid: HashMap<String, Utf16Overrides>,
     /// `summary` entries keyed by their `leafUuid` (`sessionStorage.ts` routing
     /// loop: `summaries.set(entry.leafUuid, entry.summary)`). Lets the picker
     /// link a session's stored summary to its chain tip.
@@ -155,19 +160,22 @@ pub struct LoadedTranscript {
     /// Pull-request repository identifier keyed by `sessionId`.
     pub pr_repositories: HashMap<String, String>,
 
-    // ── Gap #1 fix: last-prompt resume tip ──────────────────────────────────
-    /// The last `last-prompt` entry whose `explicit===true` flag is set.
-    /// Binary `Yle` routing: `else if(N.type==="last-prompt"){if(N.leafUuid)
-    /// L=N.explicit===true||L&&N.leafUuid===O, O=N.leafUuid}` where `O` ends up
-    /// as the forced resume tip uuid and `L` (explicit) gates whether we force.
-    /// We store the raw last-seen `leafUuid` and the cumulative `explicit` flag
-    /// so `find_tip` can replicate the TS logic precisely.
-    ///
-    /// `None` when no `last-prompt` entry with a `leafUuid` was encountered.
+    /// Latest non-empty `last-prompt.leafUuid`, cleared by an explicit empty
+    /// checkpoint or a compact boundary. Ordinary checkpoints are eligible for
+    /// batch-aware continuation recovery (Claude Code 2.1.286 `jln` / `yan`).
     pub last_prompt_leaf_uuid: Option<String>,
-    /// Whether the last-prompt entry (or any prior one with the same leafUuid)
-    /// had `explicit===true`. Mirrors the TS `L` accumulation variable.
+    /// Active explicit checkpoint, accumulated for the same leaf UUID and
+    /// cleared when a subsequent main-thread transcript row is admitted.
     pub last_prompt_explicit: bool,
+    /// An explicit checkpoint keeps its branch boundary after later rows arrive.
+    /// Unlike `last_prompt_explicit`, this flag is not cleared by a new message.
+    pub last_prompt_was_explicit: bool,
+    /// Whether any `last-prompt` record supplied a `leafUuid` field.
+    pub last_prompt_seen: bool,
+    /// Explicit `leafUuid:null` marks an intentionally cleared conversation.
+    pub cleared_to_empty: bool,
+    /// Last admitted main-thread row in write order, excluding fork briefings.
+    pub last_transcript_uuid: Option<String>,
 
     // ── Gap #5 fix: feature side-maps present in LingXi ─────────────────────
     /// `tag` entries: keyed by `sessionId`, LAST-WRITE-WINS single value.
@@ -233,15 +241,6 @@ pub enum ReaderError {
     /// Underlying filesystem error.
     #[error(transparent)]
     Fs(#[from] FsError),
-    /// Line `n` (0-indexed) failed to parse as `JsonlMessage`.
-    ///
-    /// RETAINED for API/back-compat only. As of the tolerant-reader gap fix the
-    /// load path NEVER produces this — malformed and non-message lines are
-    /// skipped (see [`route_lines`] / `JsonlReader::read_all`), matching
-    /// `claude-code`'s `parseJSONL` (`json.ts:155`). Kept so any external match
-    /// on `ReaderError` stays exhaustive.
-    #[error("parse failure at line {0}: {1}")]
-    Parse(usize, String),
     /// First line didn't contain a required metadata field.
     #[error("lite read: missing field {0}")]
     LiteMissing(&'static str),
@@ -292,8 +291,8 @@ impl JsonlReader {
     /// Metadata + unknown + malformed lines are dropped here — use
     /// [`Self::read_routed`] when the side-maps (summaries / titles) are needed.
     ///
-    /// The function is now infallible-on-content (no `ReaderError::Parse`); the
-    /// only error path left is the underlying [`FsError`] from the read itself.
+    /// Content errors are skipped; this method fails only when reading the
+    /// file produces an underlying [`FsError`].
     pub async fn read_all(&self) -> Result<Vec<JsonlMessage>, ReaderError> {
         Ok(self.read_routed().await?.messages_in_order)
     }
@@ -392,26 +391,73 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
             continue;
         }
         // Phase 1 — tolerant JSON parse; skip malformed lines (no error).
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+        let Ok(mut projection) = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line) else {
             out.malformed_line_count += 1;
             continue;
         };
+        let mut exact = crate::jsonl::exact_json::ExactJsonValue { value: projection.value.clone(), utf16_overrides: projection.string_overrides() };
+        // Never adopt a caller-supplied private carrier from an outward row.
+        // Only the native JSON escapes establish these exact code units.
+        if let Some(object) = exact.value.as_object_mut() {
+            object.remove(PRIVATE_UTF16_KEY);
+        }
+        let private_pointer = format!("/{PRIVATE_UTF16_KEY}");
+        exact.utf16_overrides.retain(|pointer, _| {
+            pointer != &private_pointer
+                && !pointer
+                    .strip_prefix(&private_pointer)
+                    .is_some_and(|tail| tail.starts_with('/'))
+        });
+        projection.rebase_display_value(exact.value.clone()).expect("removing a private carrier preserves native projection");
+        let value = exact.value;
         let ty = value.get("type").and_then(Value::as_str).unwrap_or("");
         if is_transcript_message_type(ty) {
             // Phase 2a — chain participant. Route by `type` first, so we only
             // attempt the strict `JsonlMessage` parse on lines that are SUPPOSED
             // to be messages; a failure here means a corrupt transcript line, so
             // skip it (still no hard error, matching the tolerant contract).
-            let Ok(msg) = serde_json::from_value::<JsonlMessage>(value) else {
+            let Ok(mut msg) = serde_json::from_value::<JsonlMessage>(value) else {
                 out.malformed_line_count += 1;
                 continue;
             };
+            if !projection.strings.is_empty() || !projection.keys.is_empty() {
+                msg.json_projection = Some(projection);
+            }
+            if exact.utf16_overrides.is_empty() {
+                out.utf16_by_uuid.remove(&msg.uuid);
+            } else {
+                msg.extra.insert(
+                    PRIVATE_UTF16_KEY.to_string(),
+                    serde_json::to_value(&exact.utf16_overrides)
+                        .expect("UTF-16 pointer map serializes"),
+                );
+                out.utf16_by_uuid
+                    .insert(msg.uuid.clone(), exact.utf16_overrides);
+            }
             // A full compact boundary makes every earlier collapse span stale:
             // its archived UUIDs are outside the new active chain. Claude's
             // forward reader clears both side stores at this exact point; later
             // marble records in the file build the post-boundary state anew.
             let clears_context_collapse = msg.message_type == "system"
                 && msg.extra.get("subtype").and_then(Value::as_str) == Some("compact_boundary");
+            if !msg.is_sidechain
+                && !(msg.message_type == "attachment"
+                    && msg
+                        .extra
+                        .get("attachment")
+                        .and_then(|a| a.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("fork_briefing"))
+            {
+                out.last_transcript_uuid = Some(msg.uuid.clone());
+                out.last_prompt_explicit = false;
+                out.cleared_to_empty = false;
+            }
+            if clears_context_collapse {
+                out.last_prompt_leaf_uuid = None;
+                out.last_prompt_explicit = false;
+                out.last_prompt_was_explicit = false;
+            }
             out.by_uuid.insert(msg.uuid.clone(), msg.clone());
             out.messages_in_order.push(msg);
             if clears_context_collapse {
@@ -477,26 +523,25 @@ pub fn route_lines(content: &str) -> LoadedTranscript {
 
         // ── Gap #1 fix: last-prompt → explicit resume tip ────────────────────
         } else if ty == "last-prompt" {
-            // Binary `Yle` (@ 206473264):
-            //   `else if(N.type==="last-prompt"){if(N.leafUuid)
-            //      L=N.explicit===true||L&&N.leafUuid===O, O=N.leafUuid}`
-            // L = explicit flag, O = forced tip uuid.
-            // We replicate: on each last-prompt entry that has a leafUuid:
-            //   - new_explicit = entry.explicit===true
-            //                    || (prior_explicit && leafUuid == prior_tip)
-            //   - update last_prompt_leaf_uuid to the new leafUuid
-            //   - update last_prompt_explicit to new_explicit
-            if let Some(leaf_uuid) = value.get("leafUuid").and_then(Value::as_str) {
-                let entry_explicit = value
-                    .get("explicit")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let prev_explicit = out.last_prompt_explicit;
-                let prev_uuid = out.last_prompt_leaf_uuid.as_deref().unwrap_or("");
-                // TS: L = N.explicit===true || L && N.leafUuid===O
-                let new_explicit = entry_explicit || (prev_explicit && leaf_uuid == prev_uuid);
-                out.last_prompt_leaf_uuid = Some(leaf_uuid.to_string());
-                out.last_prompt_explicit = new_explicit;
+            // Claude 2.1.286 jln: a new main-thread row clears the active
+            // explicit checkpoint, but an explicit branch boundary persists.
+            out.last_prompt_seen |= value.get("leafUuid").is_some();
+            let explicit = value.get("explicit").and_then(Value::as_bool) == Some(true);
+            if let Some(leaf_uuid) = value
+                .get("leafUuid")
+                .and_then(Value::as_str)
+                .filter(|uuid| !uuid.is_empty())
+            {
+                let same = out.last_prompt_leaf_uuid.as_deref() == Some(leaf_uuid);
+                out.last_prompt_explicit = explicit || (out.last_prompt_explicit && same);
+                out.last_prompt_was_explicit = explicit || (out.last_prompt_was_explicit && same);
+                out.last_prompt_leaf_uuid = Some(leaf_uuid.to_owned());
+                out.cleared_to_empty = false;
+            } else if value.get("leafUuid").is_some_and(Value::is_null) && explicit {
+                out.cleared_to_empty = true;
+                out.last_prompt_leaf_uuid = None;
+                out.last_prompt_explicit = false;
+                out.last_prompt_was_explicit = false;
             }
 
         // ── Gap #5 fix: feature side-maps present in LingXi ─────────────────

@@ -70,6 +70,7 @@ fn text_response(text: &str) -> HistoryResponse {
         content: vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
@@ -106,12 +107,13 @@ impl ScriptedApi {
 impl OrchestratorApiClient for ScriptedApi {
     async fn messages_create(
         &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        request: orchestrator::OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
+        let msgs = match request {
+            orchestrator::OrchestratorApiRequest::Main(request) => request.messages,
+            orchestrator::OrchestratorApiRequest::HookPrompt(request) => request.messages,
+        };
+
         self.captured.lock().await.push(msgs);
         self.script.lock().await.pop_front().unwrap_or_else(|| {
             Err(LlmError::Transport {
@@ -276,10 +278,11 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
             lingxi_core::types::MessageId::new(),
             format!("round-{i} user message with filler text to give the round a token estimate"),
         ));
-        s.history.push(ConversationMessage::Assistant {
+        s.history.push(ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: format!("round-{i} assistant reply with filler text to give it weight"),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         });
@@ -376,6 +379,72 @@ fn a_ptl_retry_reuses_this_steps_reminders_without_redraining_them() {
     });
 }
 
+#[test]
+fn a_reactive_overflow_honors_session_compact_mod_skip() {
+    run_with_large_stack(|| async {
+        let dir = tempfile::tempdir().expect("mod directory");
+        let module = dir.path().join("skip-compact.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+                on('session.compact', async ($, e, next) => {
+                    await $.ui.log(`reactive:${e.trigger}`);
+                    return { skip: 'keep the conversation' };
+                });
+            }"#,
+        )
+        .expect("mod source");
+        let host = hooks::mods::ModHost::start(None).await.expect("mod host");
+        host.load("skip-compact", dir.path(), &module, serde_json::json!({}))
+            .await
+            .expect("load mod");
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let api = Arc::new(ScriptedApi::new(
+            (0..8)
+                .map(|_| Err(LlmError::ContextOverflow { token_gap: 100 }))
+                .collect(),
+        ));
+        let output = Arc::new(MockOutputStream::new());
+        let orch = with_reactive_recovery(
+            ConversationOrchestrator::new(
+                OrchestratorConfig::default(),
+                api,
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                dir.path().to_path_buf(),
+            )
+            .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry))),
+        );
+        seed_rounds(&orch, 8).await;
+
+        orch.run_turn("ping")
+            .await
+            .expect("overflow is a terminal outcome");
+
+        let events = output.snapshot().await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::OutputEvent::ModLog { text, .. } if text == "reactive:auto"
+        )));
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            lingxi_core::host::OutputEvent::CompactionCompleted { .. }
+        )));
+        assert!(
+            !output
+                .compaction_phase_snapshot()
+                .await
+                .iter()
+                .any(|phase| phase == "summarizing"),
+            "a session.compact skip must avoid the summary request"
+        );
+    });
+}
+
 /// The streaming path's non-streaming fallback must reuse the same way.
 ///
 /// The stream open returns `ContextOverflow`, which drops the turn into the same
@@ -394,21 +463,23 @@ fn a_stream_fallback_reuses_this_steps_reminders_without_redraining_them() {
         ));
         let batched = Arc::new(MockApiClient::new(vec![text_response("recovered")]));
 
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            batched.clone(),
-            streaming.clone(),
-            Arc::new(ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
-        .with_new_diagnostics_source(Arc::new(CountingDiagnostics {
-            block: block.to_string(),
-            drains: drains.clone(),
-        }));
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                batched.clone(),
+                streaming.clone(),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            )
+            .with_new_diagnostics_source(Arc::new(CountingDiagnostics {
+                block: block.to_string(),
+                drains: drains.clone(),
+            })),
+        );
 
         orch.run_turn_streaming("ping")
             .await

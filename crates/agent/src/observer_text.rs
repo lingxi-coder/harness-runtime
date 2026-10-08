@@ -449,12 +449,12 @@ pub enum ObservedActivity {
 pub fn render_activity(entry: &ObservedActivity) -> String {
     match entry {
         ObservedActivity::AssistantText { text } => escape_tags(text),
-        ObservedActivity::ToolCall { name, input } => format!(
+        ObservedActivity::ToolCall { name, input , .. } => format!(
             "<tool-call name=\"{}\">\n{}\n</tool-call>",
             envelope_name(name),
             escape_tags(&truncate_activity(input))
         ),
-        ObservedActivity::ToolResult { content } => {
+        ObservedActivity::ToolResult { content , .. } => {
             format!("<tool-result>\n{}\n</tool-result>", escape_tags(content))
         }
         ObservedActivity::UserMessage { text } => format!(

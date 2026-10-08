@@ -16,6 +16,7 @@ async-trait.workspace = true
 branding.workspace = true
 mobile-linux-api.workspace = true
 jsonrpc = { path = "../jsonrpc" }
+json-projection = { path = "../json-projection" }
 secrecy = { version = "0.10", features = ["serde"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 zeroize = "1.8"

@@ -1516,7 +1516,7 @@ fn lsp_tool_result(
         data.insert("resultCount".to_string(), json!(result_count));
         data.insert("fileCount".to_string(), json!(file_count));
     }
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data: Value::Object(data),
         model_content: Some(result),
         new_messages: vec![],

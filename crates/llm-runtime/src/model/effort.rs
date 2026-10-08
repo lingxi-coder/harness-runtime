@@ -119,14 +119,9 @@ pub(crate) fn command_snapshot(
         return None;
     }
     let provider = match protocol {
-        ProtocolFamily::AnthropicMessages
-            if *provider_id == ProviderId::AnthropicFirstParty
-                && url::Url::parse(&profile.base_url).is_ok_and(|url| {
-                    url.scheme() == "https"
-                        && url.host_str() == Some("api.anthropic.com")
-                        && url.port_or_known_default() == Some(443)
-                }) =>
-        {
+        // A native first-party identity remains native with a configured base
+        // URL. Endpoint trust is relevant to auth/security, not effort defaults.
+        ProtocolFamily::AnthropicMessages if *provider_id == ProviderId::AnthropicFirstParty => {
             Provider::Anthropic
         }
         ProtocolFamily::FoundryClaude => Provider::Foundry,
@@ -383,5 +378,37 @@ mod tests {
 
     fn json_result(caps: EffortCapabilities) -> Value {
         serde_json::json!({"supported": caps.supported, "max":caps.max,"xhigh":caps.xhigh})
+    }
+    #[test]
+    fn native_identity_keeps_effort_with_base_override_but_custom_provider_does_not_gain_it() {
+        let mut profile = lingxi_llm_client::builtin_providers()
+            .unwrap()
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .unwrap();
+        profile.base_url = "http://configured-anthropic-base.test".into();
+        let mut request = LlmRequest::new("claude-sonnet-5-5");
+        request.execution.resolve_native_effort = true;
+        let policy = prepare(
+            &request,
+            ProtocolFamily::AnthropicMessages,
+            &ProviderId::AnthropicFirstParty,
+            &profile,
+            "claude-sonnet-5-5",
+        )
+        .unwrap();
+        assert!(policy.supported);
+        assert_eq!(policy.value, Some(serde_json::json!("medium")));
+        let custom = ProviderId::Custom {
+            name: "custom".into(),
+        };
+        assert!(prepare(
+            &request,
+            ProtocolFamily::AnthropicMessages,
+            &custom,
+            &profile,
+            "claude-sonnet-5-5"
+        )
+        .is_none());
     }
 }

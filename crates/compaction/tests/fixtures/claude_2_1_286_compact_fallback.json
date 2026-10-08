@@ -1,0 +1,902 @@
+{
+  "version": "2.1.286",
+  "sha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+  "sourceByteRanges": [
+    {
+      "signature": "var Jxt=",
+      "start": 185528574,
+      "end": 185528837
+    },
+    {
+      "signature": "function A0(",
+      "start": 185515206,
+      "end": 185515473
+    },
+    {
+      "signature": "function rAt(",
+      "start": 185534454,
+      "end": 185534589
+    },
+    {
+      "signature": "function Kho(",
+      "start": 185534589,
+      "end": 185534703
+    },
+    {
+      "signature": "function sAt(",
+      "start": 185534703,
+      "end": 185534787
+    },
+    {
+      "signature": "function Vho(",
+      "start": 185534787,
+      "end": 185534838
+    },
+    {
+      "signature": "function iAt(",
+      "start": 185534838,
+      "end": 185534982
+    },
+    {
+      "signature": "function bIe(",
+      "start": 185534982,
+      "end": 185535041
+    },
+    {
+      "signature": "function nAt(",
+      "start": 185535041,
+      "end": 185535186
+    },
+    {
+      "signature": "function Xho(",
+      "start": 185535186,
+      "end": 185535468
+    },
+    {
+      "signature": "function Qho(",
+      "start": 185535468,
+      "end": 185535761
+    },
+    {
+      "signature": "function oAt(",
+      "start": 185535761,
+      "end": 185535817
+    },
+    {
+      "signature": "function $re(",
+      "start": 185535817,
+      "end": 185535913
+    },
+    {
+      "signature": "async function Hre(",
+      "start": 185535913,
+      "end": 185541137
+    },
+    {
+      "signature": "function Bre(",
+      "start": 185580374,
+      "end": 185580782
+    }
+  ],
+  "scope": "Hre/Qho/nAt/Xho request-history, opening-round rescue and preserved-tail traces with a stub summarizer; excludes model prompts, virtual/API-error metadata, provider traffic and UI. Repeated plain-text fixtures use lossless text/repeat descriptors.",
+  "cases": [
+    {
+      "name": "one-exchange",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "only reply"
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            "q1",
+            "only reply"
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "pending-last-user",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "answer"
+        },
+        {
+          "role": "user",
+          "text": "queued one"
+        },
+        {
+          "role": "user",
+          "text": "queued two"
+        },
+        {
+          "role": "user",
+          "text": "meta context",
+          "meta": true
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            "q1",
+            "answer",
+            "queued one"
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          "queued two",
+          "meta context"
+        ],
+        "splitKind": "summarize_all",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "round-ladder-exhausted",
+      "messages": [
+        {
+          "role": "user",
+          "text": "oldest"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        },
+        {
+          "role": "user",
+          "text": "q2"
+        },
+        {
+          "role": "assistant",
+          "text": "a2"
+        }
+      ],
+      "responses": [
+        "prompt_too_long"
+      ],
+      "expected": {
+        "requests": [
+          [
+            "oldest",
+            "a1",
+            "q2"
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            "a1",
+            "q2",
+            "a2"
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "synthetic-marker-retry-bound",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        }
+      ],
+      "responses": [
+        "prompt_too_long",
+        "prompt_too_long"
+      ],
+      "expected": {
+        "requests": [
+          [
+            "q1",
+            "a1"
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            "a1"
+          ]
+        ],
+        "ok": false,
+        "reason": "exhausted"
+      }
+    },
+    {
+      "name": "empty",
+      "messages": [],
+      "responses": [],
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "unanswered",
+      "messages": [
+        {
+          "role": "user",
+          "text": "unanswered"
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "explicit-opt-out",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        }
+      ],
+      "responses": [],
+      "allowFallback": false,
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "interruption-only",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q1"
+        },
+        {
+          "role": "assistant",
+          "text": "[Request interrupted by user]"
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "pending-user-cannot-validate-fresh-summary",
+      "messages": [
+        {
+          "role": "user",
+          "text": "q"
+        },
+        {
+          "role": "assistant",
+          "text": "[Request interrupted by user]"
+        },
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 5000
+        }
+      ],
+      "responses": [],
+      "expected": {
+        "requests": [],
+        "ok": false,
+        "reason": "too_few_groups"
+      }
+    },
+    {
+      "name": "opening-round-before-initial-head-drop",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "initialTokenGap": 10000,
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          {
+            "text": "a",
+            "repeat": 80000
+          }
+        ],
+        "splitKind": "round",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "opening-round-after-full-overflow",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          {
+            "text": "a",
+            "repeat": 80000
+          }
+        ],
+        "splitKind": "round",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "opening-round-untagged-response",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        {
+          "summary": "plain response without a summary block"
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "opening-round-analysis-only-summary",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        {
+          "summary": "<analysis><summary>not a real summary</summary></analysis>"
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "opening-round-error",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        {
+          "reason": "error",
+          "errorKind": "test-error"
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "opening-round-repeated-media-error",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        "media_too_large",
+        "media_too_large"
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "opening-round-second-overflow",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 10000
+        },
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 4000
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            },
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ],
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "opening-round-threshold-inclusive",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "initialTokenGap": 20000,
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            {
+              "text": "x",
+              "repeat": 400000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [
+          {
+            "text": "a",
+            "repeat": 80000
+          }
+        ],
+        "splitKind": "round",
+        "headTruncations": 0
+      }
+    },
+    {
+      "name": "opening-round-threshold-exceeded",
+      "messages": [
+        {
+          "role": "user",
+          "text": "x",
+          "repeat": 400000
+        },
+        {
+          "role": "assistant",
+          "text": "a",
+          "repeat": 80000
+        }
+      ],
+      "initialTokenGap": 20001,
+      "responses": [],
+      "expected": {
+        "requests": [
+          [
+            "[earlier conversation truncated for compaction retry]",
+            {
+              "text": "a",
+              "repeat": 80000
+            }
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "latest-round-gap-replaces-old-gap",
+      "messages": [
+        {
+          "role": "user",
+          "text": "oldest"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        },
+        {
+          "role": "user",
+          "text": "q2"
+        },
+        {
+          "role": "assistant",
+          "text": "a2"
+        },
+        {
+          "role": "user",
+          "text": "q3"
+        },
+        {
+          "role": "assistant",
+          "text": "a3"
+        },
+        {
+          "role": "user",
+          "text": "q4"
+        },
+        {
+          "role": "assistant",
+          "text": "a4"
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 1000
+        },
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 1
+        }
+      ],
+      "expected": {
+        "requests": [
+          [
+            "oldest",
+            "a1",
+            "q2",
+            "a2",
+            "q3",
+            "a3",
+            "q4"
+          ],
+          [
+            "oldest",
+            "a1",
+            "q2"
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            "a3",
+            "q4",
+            "a4"
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    },
+    {
+      "name": "unknown-round-gap-replaces-old-gap",
+      "messages": [
+        {
+          "role": "user",
+          "text": "oldest"
+        },
+        {
+          "role": "assistant",
+          "text": "a1"
+        },
+        {
+          "role": "user",
+          "text": "q2"
+        },
+        {
+          "role": "assistant",
+          "text": "a2"
+        },
+        {
+          "role": "user",
+          "text": "q3"
+        },
+        {
+          "role": "assistant",
+          "text": "a3"
+        },
+        {
+          "role": "user",
+          "text": "q4"
+        },
+        {
+          "role": "assistant",
+          "text": "a4"
+        }
+      ],
+      "responses": [
+        {
+          "reason": "prompt_too_long",
+          "tokenGap": 1000
+        },
+        "prompt_too_long"
+      ],
+      "expected": {
+        "requests": [
+          [
+            "oldest",
+            "a1",
+            "q2",
+            "a2",
+            "q3",
+            "a3",
+            "q4"
+          ],
+          [
+            "oldest",
+            "a1",
+            "q2"
+          ],
+          [
+            "[earlier conversation truncated for compaction retry]",
+            "a1",
+            "q2",
+            "a2",
+            "q3",
+            "a3",
+            "q4",
+            "a4"
+          ]
+        ],
+        "ok": true,
+        "kept": [],
+        "splitKind": "summarize_all",
+        "headTruncations": 1
+      }
+    }
+  ]
+}

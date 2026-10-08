@@ -14,17 +14,22 @@
 
 use async_trait::async_trait;
 use jsonrpc::{Connection, ConnectionError, InboundHandler, Request, Response, RouterError};
+use lingxi_core::host::mcp_result::{
+    decode_modern_result, drive_modern_request, DecodedMcpResult, JsonrpcMcpResultIo,
+    McpInputRequiredOptions, McpResultError,
+};
 use lingxi_core::host::{
     ElicitRequestDto, ElicitResultDto, McpConnectOptions, McpConnectResult, McpError,
     McpNegotiatedProtocol, McpNotificationDto, McpNotificationStream, McpPromptDto, McpProtocolEra,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto, McpToolDto,
-    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
+    McpServerMetadataDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
+    McpTransportSpec, ServerCapabilitiesDto,
 };
 use lingxi_core::types::McpConnectionId;
 use platform_common::mcp_remote::{
-    capabilities_from_wire, initialize_params_for_version, modern_meta, modern_probe_params,
-    modern_request_requires_meta, validate_modern_envelope, MCP_PROTOCOL_VERSION,
-    MODERN_PROTOCOL_VERSION,
+    initialize_params_for_version, modern_meta, modern_probe_error, modern_probe_params,
+    modern_request_requires_meta, parse_legacy_initialize, parse_modern_discovery, ModernDiscovery,
+    ModernProbeErrorAction, MCP_PROTOCOL_VERSION,
 };
 use platform_common::mcp_stdio::{StderrRing, StdioConfig};
 use platform_common::RemoteMcpTransport;
@@ -41,6 +46,7 @@ use tokio::sync::Mutex as AsyncMutex;
 /// `"Anthropic's agentic coding tool"`). The canonical
 /// `mcp::identity::ClientInfo` model does not (yet) carry a `description`
 /// field, so the literal lives here at the posix wire boundary.
+#[cfg(test)]
 const CLIENT_DESCRIPTION: &str = "An agentic coding tool";
 const MCP_SKILLS_EXTENSION_KEY: &str = "io.modelcontextprotocol/skills";
 
@@ -50,17 +56,19 @@ const MCP_SKILLS_EXTENSION_KEY: &str = "io.modelcontextprotocol/skills";
 /// without a live connection. Mirrors claude-code's SDK `Client` construction
 /// (`services/mcp/client.ts:985-1002`):
 ///
-/// * `capabilities` advertises the `roots` and `elicitation` markers as bare
-///   empty objects `{}` (NOT `null`, NOT `{form:{},url:{}}` — the Java MCP SDK
-///   rejects unknown elicitation props). The posix `McpClient` already
-///   registers `roots/list` + `elicitation/create` handlers, so advertising
-///   these lets spec-compliant servers issue those requests.
+/// * `capabilities` advertises roots and the current form/URL elicitation
+///   modes. The connection's explicit initialize capability choice is passed
+///   separately during the combined handshake.
 /// * `clientInfo` carries claude-code's identity literals — reused from the
 ///   canonical `mcp::identity` constants (`name`, `title`, `websiteUrl`) plus
 ///   the `description` literal — while `version` stays this build's own
 ///   product version (we do NOT impersonate claude-code's release number).
+#[cfg(test)]
 fn initialize_params() -> Value {
-    initialize_params_for_version(MCP_PROTOCOL_VERSION)
+    initialize_params_for_version(
+        MCP_PROTOCOL_VERSION,
+        lingxi_core::host::McpElicitationMode::FormAndUrl,
+    )
 }
 
 fn modern_request_requires_result_type(method: &str) -> bool {
@@ -102,6 +110,8 @@ pub(crate) enum PosixMcpConnection {
         /// force-terminate a non-cooperative server. `Mutex<Option<…>>`
         /// because the oneshot sender is consumed on the first send.
         reaper_kill: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+        /// Completion acknowledgement used before replacing a probe sibling.
+        reaper_done: tokio::sync::watch::Receiver<bool>,
     },
 }
 
@@ -116,6 +126,9 @@ pub(crate) enum PosixMcpConnection {
 pub struct PosixMcpTransport {
     connections: Arc<Mutex<HashMap<McpConnectionId, PosixMcpConnection>>>,
     negotiated: Arc<Mutex<HashMap<McpConnectionId, McpNegotiatedProtocol>>>,
+    metadata: Arc<Mutex<HashMap<McpConnectionId, McpServerMetadataDto>>>,
+    elicitation:
+        Arc<Mutex<HashMap<McpConnectionId, lingxi_core::host::McpElicitationCapabilities>>>,
     /// Shared HTTP/SSE implementation. POSIX only owns process/reaper state;
     /// remote JSON-RPC and protocol negotiation live in platform-common.
     remote: Arc<RemoteMcpTransport>,
@@ -129,6 +142,9 @@ struct ConnectionCleanupGuard {
     id: McpConnectionId,
     connections: Arc<Mutex<HashMap<McpConnectionId, PosixMcpConnection>>>,
     negotiated: Arc<Mutex<HashMap<McpConnectionId, McpNegotiatedProtocol>>>,
+    metadata: Arc<Mutex<HashMap<McpConnectionId, McpServerMetadataDto>>>,
+    elicitation:
+        Arc<Mutex<HashMap<McpConnectionId, lingxi_core::host::McpElicitationCapabilities>>>,
     connection: Arc<Connection>,
     reaper_kill: Option<Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>>,
     armed: bool,
@@ -159,6 +175,12 @@ impl Drop for ConnectionCleanupGuard {
         if let Ok(mut guard) = self.negotiated.lock() {
             guard.remove(&self.id);
         }
+        if let Ok(mut guard) = self.metadata.lock() {
+            guard.remove(&self.id);
+        }
+        if let Ok(mut guard) = self.elicitation.lock() {
+            guard.remove(&self.id);
+        }
     }
 }
 
@@ -178,6 +200,30 @@ impl PosixMcpTransport {
         }
     }
 
+    fn elicitation_for(
+        &self,
+        id: McpConnectionId,
+    ) -> Result<lingxi_core::host::McpElicitationCapabilities, McpError> {
+        self.elicitation
+            .lock()
+            .map_err(|_| McpError::Internal("MCP capability map poisoned".into()))?
+            .get(&id)
+            .copied()
+            .ok_or_else(|| McpError::Internal(format!("missing MCP capability authority for {id}")))
+    }
+
+    fn set_elicitation(
+        &self,
+        id: McpConnectionId,
+        capabilities: lingxi_core::host::McpElicitationCapabilities,
+    ) -> Result<(), McpError> {
+        self.elicitation
+            .lock()
+            .map_err(|_| McpError::Internal("MCP capability map poisoned".into()))?
+            .insert(id, capabilities);
+        Ok(())
+    }
+
     fn negotiated_for(&self, id: McpConnectionId) -> Option<McpNegotiatedProtocol> {
         self.negotiated.lock().ok()?.get(&id).cloned()
     }
@@ -186,16 +232,24 @@ impl PosixMcpTransport {
         self.remote.connection_for(id).is_some()
     }
 
-    fn decorate_params(&self, id: McpConnectionId, method: &str, params: Value) -> Value {
+    fn decorate_params(
+        &self,
+        id: McpConnectionId,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, McpError> {
         let Some(protocol) = self.negotiated_for(id) else {
-            return params;
+            return Ok(params);
         };
         if protocol.era == McpProtocolEra::Modern && modern_request_requires_meta(method) {
             let mut object = params.as_object().cloned().unwrap_or_default();
-            object.insert("_meta".into(), modern_meta(&protocol.version));
-            Value::Object(object)
+            object.insert(
+                "_meta".into(),
+                modern_meta(&protocol.version, self.elicitation_for(id)?.modern),
+            );
+            Ok(Value::Object(object))
         } else {
-            params
+            Ok(params)
         }
     }
 
@@ -206,23 +260,31 @@ impl PosixMcpTransport {
         params: Value,
     ) -> Result<Value, McpError> {
         let connection = self.connection_for_result(conn.connection_id)?;
-        let mut result = connection
-            .call(
+        let params = self.decorate_params(conn.connection_id, method, params)?;
+        if self.negotiated_for(conn.connection_id).is_some_and(|p| {
+            p.era == McpProtocolEra::Modern && modern_request_requires_result_type(method)
+        }) {
+            drive_modern_request(
+                &JsonrpcMcpResultIo {
+                    connection,
+                    client_capabilities: modern_meta(
+                        platform_common::mcp_remote::MODERN_PROTOCOL_VERSION,
+                        self.elicitation_for(conn.connection_id)?.modern,
+                    )["io.modelcontextprotocol/clientCapabilities"]
+                        .clone(),
+                },
                 method,
-                self.decorate_params(conn.connection_id, method, params),
+                params,
+                McpInputRequiredOptions::default(),
             )
             .await
-            .map_err(|e| map_call_err(&e))?;
-        if self
-            .negotiated_for(conn.connection_id)
-            .is_some_and(|protocol| {
-                protocol.era == McpProtocolEra::Modern
-                    && modern_request_requires_result_type(method)
-            })
-        {
-            validate_modern_envelope(&mut result)?;
+            .map_err(map_result_err)
+        } else {
+            connection
+                .call(method, params)
+                .await
+                .map_err(|error| map_call_err(&error))
         }
-        Ok(result)
     }
 
     /// Clone the JSON-RPC [`Connection`] for `id` out of the map, dropping the
@@ -270,6 +332,8 @@ impl PosixMcpTransport {
             id,
             connections: Arc::clone(&self.connections),
             negotiated: Arc::clone(&self.negotiated),
+            metadata: Arc::clone(&self.metadata),
+            elicitation: Arc::clone(&self.elicitation),
             connection,
             reaper_kill,
             armed: true,
@@ -303,119 +367,62 @@ impl PosixMcpTransport {
         conn: &McpRawConnection,
         version: &str,
         deadline: tokio::time::Instant,
-    ) -> Result<ServerCapabilitiesDto, McpError> {
+    ) -> Result<ServerCapabilitiesDto, (McpError, Option<jsonrpc::ResponseError>)> {
         let Some(remaining) = Self::remaining(deadline) else {
-            return Err(McpError::Connection(
-                "MCP connection deadline exceeded".into(),
+            return Err((
+                McpError::Connection("MCP connection deadline exceeded".into()),
+                None,
             ));
         };
-        match tokio::time::timeout(
+        tokio::time::timeout(
             remaining,
-            self.initialize_with_version(conn, version, remaining),
+            self.initialize_with_version_detailed(conn, version, remaining),
         )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(McpError::Connection(
-                "MCP connection deadline exceeded".into(),
-            )),
-        }
+        .map_err(|_| {
+            (
+                McpError::Connection("MCP connection deadline exceeded".into()),
+                None,
+            )
+        })?
     }
 
     async fn probe_modern(
         &self,
         conn: &McpRawConnection,
         deadline: tokio::time::Instant,
-        closed_is_compatibility: bool,
-    ) -> Result<Option<String>, McpError> {
+        probe_timeout: Duration,
+    ) -> Result<(Option<ModernDiscovery>, bool), McpError> {
         let rpc = self.connection_for_result(conn.connection_id)?;
-        let mut probe = modern_probe_params();
         let mut corrective_retry = false;
         loop {
             let Some(timeout) = Self::remaining(deadline) else {
-                return Err(McpError::Connection(
-                    "MCP connection deadline exceeded".into(),
-                ));
+                return Ok((None, true));
             };
-            let result = rpc
-                .call_with_timeout_probe::<Value, Value>("server/discover", probe.clone(), timeout)
-                .await;
-            match result {
-                Ok(reply) => {
-                    return Ok(reply
-                        .get("protocolVersion")
-                        .and_then(Value::as_str)
-                        .filter(|version| *version == MODERN_PROTOCOL_VERSION)
-                        .map(str::to_string));
-                }
+            let timeout = timeout.min(probe_timeout);
+            match rpc
+                .call_with_timeout_probe_ignoring_unknown_ids::<Value, Value>(
+                    "server/discover",
+                    modern_probe_params(self.elicitation_for(conn.connection_id)?.modern),
+                    timeout,
+                )
+                .await
+            {
+                Ok(reply) => return Ok((parse_modern_discovery(reply), false)),
                 Err(ConnectionError::Router(RouterError::Remote(error))) => {
-                    if matches!(http_status(&error.data), Some(401 | 403)) {
-                        return Err(handshake_error(&ConnectionError::Router(
-                            RouterError::Remote(error),
-                        )));
+                    match modern_probe_error(&error, corrective_retry)? {
+                        ModernProbeErrorAction::Legacy => return Ok((None, false)),
+                        ModernProbeErrorAction::Retry => corrective_retry = true,
                     }
-                    if error.code == -32022 {
-                        if corrective_retry {
-                            return Ok(None);
-                        }
-                        corrective_retry = true;
-                        let supported = error
-                            .data
-                            .as_ref()
-                            .and_then(|data| data.get("supported"))
-                            .and_then(Value::as_array)
-                            .and_then(|items| {
-                                items.iter().find_map(|value| {
-                                    value
-                                        .as_str()
-                                        .filter(|version| *version == MODERN_PROTOCOL_VERSION)
-                                })
-                            });
-                        if let Some(version) = supported {
-                            probe["_meta"]["io.modelcontextprotocol/protocolVersion"] =
-                                Value::String(version.to_string());
-                            probe["protocolVersion"] = Value::String(version.to_string());
-                            continue;
-                        }
-                        return Ok(None);
-                    }
-                    if is_modern_compatibility_error(error.code) {
-                        return Ok(None);
-                    }
-                    return Err(McpError::Internal(format!(
-                        "MCP modern discovery failed: code={}, message={}",
-                        error.code, error.message
-                    )));
                 }
-                Err(ConnectionError::Router(RouterError::Deserialize(_))) => {
-                    // A syntactically valid JSON-RPC result with the wrong
-                    // shape is compatibility evidence, not a transport fault.
-                    return Ok(None);
+                Err(ConnectionError::Router(
+                    RouterError::Deserialize(_) | RouterError::WrongResponseId { .. },
+                )) => return Ok((None, false)),
+                Err(ConnectionError::Router(RouterError::WriterClosed)) if rpc.is_closed() => {
+                    return Ok((None, false))
                 }
-                Err(ConnectionError::Router(RouterError::WrongResponseId { .. })) => {
-                    return Ok(None);
-                }
-                Err(ConnectionError::Router(RouterError::WriterClosed))
-                    if closed_is_compatibility && rpc.is_closed() =>
-                {
-                    return Ok(None);
-                }
-                Err(ConnectionError::Router(RouterError::Timeout(_)))
-                    if closed_is_compatibility =>
-                {
-                    // A stdio peer that emits a response with the wrong id
-                    // leaves the router waiting until the probe budget. It is
-                    // indistinguishable from an old server that ignores the
-                    // probe, and both are compatibility fallback cases. A
-                    // remote timeout remains fatal below.
-                    return Ok(None);
-                }
-                Err(error) => {
-                    // Network and timeout errors are intentionally not
-                    // compatibility fallbacks: an unreachable server must be
-                    // reported instead of being redialed as legacy.
-                    return Err(map_call_err(&error));
-                }
+                Err(ConnectionError::Router(RouterError::Timeout(_))) => return Ok((None, true)),
+                Err(error) => return Err(map_call_err(&error)),
             }
         }
     }
@@ -426,29 +433,61 @@ impl PosixMcpTransport {
         version: &str,
         timeout: Duration,
     ) -> Result<ServerCapabilitiesDto, McpError> {
-        let connection = self.connection_for_result(conn.connection_id)?;
+        self.initialize_with_version_detailed(conn, version, timeout)
+            .await
+            .map_err(|(error, _)| error)
+    }
+
+    async fn initialize_with_version_detailed(
+        &self,
+        conn: &McpRawConnection,
+        version: &str,
+        timeout: Duration,
+    ) -> Result<ServerCapabilitiesDto, (McpError, Option<jsonrpc::ResponseError>)> {
+        let connection = self
+            .connection_for_result(conn.connection_id)
+            .map_err(|error| (error, None))?;
         let result: Value = connection
             .call_with_timeout(
                 "initialize",
                 self.decorate_params(
                     conn.connection_id,
                     "initialize",
-                    initialize_params_for_version(version),
-                ),
+                    initialize_params_for_version(
+                        version,
+                        self.elicitation_for(conn.connection_id)
+                            .map_err(|error| (error, None))?
+                            .legacy,
+                    ),
+                )
+                .map_err(|error| (error, None))?,
                 timeout,
             )
             .await
-            .map_err(|e| handshake_error(&e))?;
-        let caps = result
-            .get("capabilities")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                McpError::Handshake("initialize result missing `capabilities` object".into())
+            .map_err(|error| {
+                let remote = match &error {
+                    ConnectionError::Router(RouterError::Remote(remote)) => Some(remote.clone()),
+                    _ => None,
+                };
+                (handshake_error(&error), remote)
             })?;
-        let dto = capabilities_from_wire(caps, result.get("capabilities"));
+        let (dto, selected_version, metadata) =
+            parse_legacy_initialize(result).map_err(|error| (error, None))?;
+        if let Ok(mut map) = self.negotiated.lock() {
+            map.insert(
+                conn.connection_id,
+                McpNegotiatedProtocol {
+                    era: McpProtocolEra::Legacy,
+                    version: selected_version,
+                },
+            );
+        }
+        if let Ok(mut map) = self.metadata.lock() {
+            map.insert(conn.connection_id, metadata);
+        }
         connection
             .notify("notifications/initialized", json!({}))
-            .map_err(|e| McpError::Handshake(e.to_string()))?;
+            .map_err(|e| (McpError::Handshake(e.to_string()), None))?;
         Ok(dto)
     }
 }
@@ -518,6 +557,9 @@ impl RawTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             full_name: format!("mcp____{}", self.name),
             server_name: String::new(),
             tool_name: self.name,
@@ -635,19 +677,19 @@ struct RawPromptArgument {
 /// Map a [`ConnectionError`] from an outbound call into the generic
 /// [`McpError::Internal`] surface (used by every method except the ones with
 /// a more specific mapping, e.g. `call_tool`'s timeout / not-found paths).
+fn map_result_err(error: McpResultError) -> McpError {
+    match error {
+        McpResultError::Connection(error) => map_call_err(&error),
+        McpResultError::Sdk(error) => McpError::Result(error),
+        McpResultError::Local(error) => McpError::Internal(format!(
+            "local handler: code={}, message={}",
+            error.code, error.message
+        )),
+    }
+}
+
 fn map_call_err(e: &ConnectionError) -> McpError {
     McpError::Internal(e.to_string())
-}
-
-fn http_status(data: &Option<Value>) -> Option<u16> {
-    data.as_ref()
-        .and_then(|data| data.get("httpStatus"))
-        .and_then(Value::as_u64)
-        .and_then(|status| u16::try_from(status).ok())
-}
-
-fn is_modern_compatibility_error(code: i32) -> bool {
-    matches!(code, jsonrpc::METHOD_NOT_FOUND | -32001 | -32020 | -32021)
 }
 
 /// Recover structured HTTP status / `WWW-Authenticate` metadata from a failed
@@ -748,6 +790,7 @@ impl McpTransport for PosixMcpTransport {
                         connection,
                         stderr: handles.stderr,
                         reaper_kill: Arc::new(Mutex::new(Some(handles.reaper_kill))),
+                        reaper_done: handles.reaper_done,
                     },
                 );
             }
@@ -762,14 +805,32 @@ impl McpTransport for PosixMcpTransport {
             }
             other => return Err(McpError::UnsupportedTransport(map_kind(other))),
         }
+        if let Err(error) = self.set_elicitation(
+            id,
+            lingxi_core::host::McpElicitationCapabilities::for_transport(spec.transport_kind()),
+        ) {
+            self.disconnect_sync(id);
+            return Err(error);
+        }
         Ok(McpRawConnection { connection_id: id })
     }
 
     async fn connect_and_initialize(
         &self,
         spec: &McpTransportSpec,
-        options: McpConnectOptions,
+        mut options: McpConnectOptions,
     ) -> Result<McpConnectResult, McpError> {
+        if options.expected_era.is_none() {
+            match mcp::protocol_negotiation::resolve_for_spec(spec, options.deadline_ms) {
+                mcp::protocol_negotiation::NegotiationMode::Auto { probe_timeout_ms } => {
+                    options.expected_era = Some(McpProtocolEra::Modern);
+                    options.probe_timeout_ms = Some(probe_timeout_ms);
+                }
+                mcp::protocol_negotiation::NegotiationMode::Legacy => {
+                    options.expected_era = Some(McpProtocolEra::Legacy)
+                }
+            }
+        }
         if matches!(
             spec,
             McpTransportSpec::Sse { .. }
@@ -791,146 +852,149 @@ impl McpTransport for PosixMcpTransport {
                     mcp::protocol_negotiation::NegotiationMode::Legacy => McpProtocolEra::Legacy,
                 },
             );
-        let mut negotiated = McpNegotiatedProtocol {
-            era: McpProtocolEra::Legacy,
-            version: MCP_PROTOCOL_VERSION.to_string(),
-        };
-
+        let mut discovery = None;
+        let mut probe_timed_out = false;
         if requested == McpProtocolEra::Modern {
-            // Probe a disposable sibling. The probe must never become the
-            // live session: stdio servers may bind per-process state and
-            // remote servers may issue a session id on the first request.
+            // Only stdio probes on a disposable sibling; HTTP is handled by
+            // platform-common and retains its original connection.
             let probe_connection = self.connect_before(spec, deadline).await?;
-            let probe_guard = match self.cleanup_guard(probe_connection.connection_id) {
-                Ok(guard) => guard,
-                Err(error) => {
-                    self.disconnect_sync(probe_connection.connection_id);
-                    return Err(error);
-                }
-            };
-            let default_probe_cap = if matches!(spec, McpTransportSpec::Stdio { .. }) {
-                3_000
-            } else {
-                5_000
-            };
-            let probe_cap = Duration::from_millis(
-                options
-                    .probe_timeout_ms
-                    .unwrap_or(default_probe_cap)
-                    .min(default_probe_cap),
-            );
-            let probe_deadline = std::cmp::min(
-                deadline,
-                tokio::time::Instant::now()
-                    .checked_add(probe_cap)
-                    .ok_or_else(|| {
-                        McpError::Connection("MCP connection deadline overflow".into())
-                    })?,
-            );
+            let probe_guard = self.cleanup_guard(probe_connection.connection_id)?;
+            self.set_elicitation(probe_connection.connection_id, options.elicitation)?;
+            let probe_cap =
+                Duration::from_millis(options.probe_timeout_ms.unwrap_or(3_000).min(3_000));
+            (discovery, probe_timed_out) = self
+                .probe_modern(&probe_connection, deadline, probe_cap)
+                .await?;
+            let reaped = self.connections.lock().ok().and_then(|connections| {
+                connections
+                    .get(&probe_connection.connection_id)
+                    .map(|PosixMcpConnection::Stdio { reaper_done, .. }| reaper_done.clone())
+            });
+            drop(probe_guard);
+            if let Some(mut reaped) = reaped {
+                // The disposable sibling must exit before a live child can
+                // claim the same server resources (ports, files or locks).
+                tokio::time::timeout_at(deadline, reaped.wait_for(|done| *done))
+                    .await
+                    .map_err(|_| {
+                        McpError::Connection("MCP probe cleanup deadline exceeded".into())
+                    })?
+                    .map_err(|_| {
+                        McpError::Connection("MCP probe reaper closed before cleanup".into())
+                    })?;
+            }
+        }
+        let connection = self.connect_before(spec, deadline).await?;
+        let live_guard = self.cleanup_guard(connection.connection_id)?;
+        self.set_elicitation(connection.connection_id, options.elicitation)?;
+        if discovery.is_none() {
             match self
-                .probe_modern(
-                    &probe_connection,
-                    probe_deadline,
-                    matches!(spec, McpTransportSpec::Stdio { .. }),
-                )
+                .initialize_before(&connection, MCP_PROTOCOL_VERSION, deadline)
                 .await
             {
-                Ok(Some(version)) => {
-                    negotiated = McpNegotiatedProtocol {
-                        era: McpProtocolEra::Modern,
-                        version,
+                Ok(capabilities) => {
+                    let negotiated = self
+                        .negotiated_for(connection.connection_id)
+                        .ok_or_else(|| McpError::Handshake("missing negotiated protocol".into()))?;
+                    live_guard.disarm();
+                    return Ok(McpConnectResult {
+                        connection,
+                        capabilities,
+                        negotiated,
+                    });
+                }
+                Err((error, remote)) if probe_timed_out => {
+                    if let Some(remote) = remote.filter(|error| error.code == -32022) {
+                        let supported = remote
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("supported"))
+                            .and_then(Value::as_array)
+                            .filter(|versions| {
+                                !versions.is_empty() && versions.iter().all(Value::is_string)
+                            });
+                        if supported.is_some_and(|versions| {
+                            !versions.iter().any(|version| {
+                                version == platform_common::mcp_remote::MODERN_PROTOCOL_VERSION
+                            })
+                        }) {
+                            return Err(error);
+                        }
+                    }
+                    // An old server can ignore discovery, while a modern peer
+                    // can reject initialize after a slow probe. The upstream
+                    // client tries discovery once on the live process then.
+                    let recovery_deadline = std::cmp::min(
+                        deadline,
+                        tokio::time::Instant::now()
+                            + Duration::from_millis(
+                                options.probe_timeout_ms.unwrap_or(3_000).min(3_000),
+                            ),
+                    );
+                    let rpc = self.connection_for_result(connection.connection_id)?;
+                    let timeout = Self::remaining(recovery_deadline).unwrap_or_default();
+                    // This is a connected discover, not another raw probe: one
+                    // request, a complete-result envelope, no corrective retry.
+                    discovery = match rpc
+                        .call_with_timeout::<_, Value>(
+                            "server/discover",
+                            modern_probe_params(options.elicitation.modern),
+                            timeout,
+                        )
+                        .await
+                    {
+                        Ok(reply) => match decode_modern_result("server/discover", reply) {
+                            Ok(DecodedMcpResult::Complete(reply)) => parse_modern_discovery(reply),
+                            _ => None,
+                        },
+                        _ => None,
                     };
+                    if discovery.is_none() {
+                        return Err(error);
+                    }
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    drop(probe_guard);
-                    return Err(error);
-                }
+                Err((error, _)) => return Err(error),
             }
-            drop(probe_guard);
         }
-
-        // A fallback (or a successful probe) always redials the live session
-        // with the selected revision; no probe child/socket survives.
-        let connection = self.connect_before(spec, deadline).await?;
-        let live_guard = match self.cleanup_guard(connection.connection_id) {
-            Ok(guard) => guard,
-            Err(error) => {
-                self.disconnect_sync(connection.connection_id);
-                return Err(error);
-            }
+        let discovery = discovery.expect("modern discovery was checked");
+        let negotiated = McpNegotiatedProtocol {
+            era: McpProtocolEra::Modern,
+            version: discovery.version,
         };
-        if let Ok(mut guard) = self.negotiated.lock() {
-            guard.insert(connection.connection_id, negotiated.clone());
+        if let Ok(mut map) = self.negotiated.lock() {
+            map.insert(connection.connection_id, negotiated.clone());
         }
-        let capabilities = match self
-            .initialize_before(&connection, &negotiated.version, deadline)
-            .await
-        {
-            Ok(capabilities) => capabilities,
-            Err(error) => {
-                drop(live_guard);
-                return Err(error);
-            }
-        };
+        if let Ok(mut map) = self.metadata.lock() {
+            map.insert(connection.connection_id, discovery.metadata);
+        }
         live_guard.disarm();
         Ok(McpConnectResult {
             connection,
-            capabilities,
+            capabilities: discovery.capabilities,
             negotiated,
         })
+    }
+
+    fn server_metadata(&self, id: McpConnectionId) -> Option<McpServerMetadataDto> {
+        if self.is_remote_connection(id) {
+            return self.remote.server_metadata(id);
+        }
+        self.metadata.lock().ok()?.get(&id).cloned()
     }
 
     async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
         if self.is_remote_connection(conn.connection_id) {
             return self.remote.initialize(conn).await;
         }
-        let connection = self.connection_for_result(conn.connection_id)?;
-
-        // Send the MCP `initialize` request. The advertised capabilities and
-        // `clientInfo` identity match claude-code 1:1 (see `initialize_params`).
-        let version = self
-            .negotiated_for(conn.connection_id)
-            .map(|protocol| protocol.version)
-            .unwrap_or_else(|| MCP_PROTOCOL_VERSION.to_string());
-        let result: Value = connection
-            .call(
-                "initialize",
-                self.decorate_params(
-                    conn.connection_id,
-                    "initialize",
-                    initialize_params_for_version(&version),
-                ),
-            )
+        if let Some(discovery) = self
+            .server_metadata(conn.connection_id)
+            .and_then(|metadata| metadata.discovery)
+            .and_then(parse_modern_discovery)
+        {
+            return Ok(discovery.capabilities);
+        }
+        self.initialize_with_version(conn, MCP_PROTOCOL_VERSION, Duration::from_secs(60))
             .await
-            // A failed initialize is a handshake failure — UNLESS the
-            // Streamable HTTP writer task (`mcp_http.rs::http_error_message`)
-            // turned a non-2xx POST response into a synthetic JSON-RPC error
-            // carrying `data: {httpStatus, wwwAuthenticate}`; surface that
-            // structurally as `McpError::HttpResponse` (see `handshake_error`)
-            // so 401/403 classification never has to substring-match a
-            // stringified error. SSE's connect() arm already returns this
-            // structurally via `SseConnectError::HttpResponse` for the
-            // pre-flight GET; this closes the matching gap for `Http`.
-            .map_err(|e| handshake_error(&e))?;
-        // The server's declared capabilities live under `result.capabilities`
-        // as a presence map (e.g. `{ "tools": {} }`). Map by presence.
-        let caps = result
-            .get("capabilities")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                McpError::Handshake("initialize result missing `capabilities` object".into())
-            })?;
-
-        let dto = capabilities_from_wire(caps, result.get("capabilities"));
-
-        // Per the MCP spec, the client sends `notifications/initialized` once
-        // the handshake result is in hand (fire-and-forget, synchronous).
-        connection
-            .notify("notifications/initialized", json!({}))
-            .map_err(|e| McpError::Handshake(e.to_string()))?;
-
-        Ok(dto)
     }
 
     async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
@@ -1037,45 +1101,65 @@ impl McpTransport for PosixMcpTransport {
         // (the `MCP_TOOL_TIMEOUT` env var, else the ~27.8h default). Previously a
         // hardcoded 60s, which spuriously timed out legitimately long MCP tools.
         let timeout = mcp::client::mcp_tool_timeout();
-        let raw: Value = connection
-            .call_with_timeout(
+        let params = self.decorate_params(
+            conn.connection_id,
+            "tools/call",
+            json!({"name":tool,"arguments":input}),
+        )?;
+        let raw: Value = if self
+            .negotiated_for(conn.connection_id)
+            .is_some_and(|p| p.era == McpProtocolEra::Modern)
+        {
+            drive_modern_request(
+                &JsonrpcMcpResultIo {
+                    connection,
+                    client_capabilities: modern_meta(
+                        platform_common::mcp_remote::MODERN_PROTOCOL_VERSION,
+                        self.elicitation_for(conn.connection_id)?.modern,
+                    )["io.modelcontextprotocol/clientCapabilities"]
+                        .clone(),
+                },
                 "tools/call",
-                self.decorate_params(
-                    conn.connection_id,
-                    "tools/call",
-                    json!({ "name": tool, "arguments": input }),
-                ),
-                timeout,
+                params,
+                McpInputRequiredOptions {
+                    per_request_timeout: timeout,
+                    max_total_timeout: Some(timeout),
+                    ..Default::default()
+                },
             )
             .await
-            .map_err(|e| match &e {
-                // Honor the per-call budget with the load-bearing Display
-                // string. `tool` is the unprefixed name; no logical server
-                // name is available at this layer, so it is left empty. `secs`
-                // reports the actual resolved budget (ceil to ≥1, as the
-                // McpClient path does).
-                ConnectionError::Router(RouterError::Timeout(_)) => McpError::Timeout {
-                    server: String::new(),
-                    tool: tool.to_string(),
-                    secs: timeout.as_secs().max(1),
-                },
-                // The server reports an unknown tool via -32601.
-                _ if is_method_not_found(&e) => McpError::ToolNotFound(tool.to_string()),
-                _ => map_call_err(&e),
-            })?;
-        let mut raw = raw;
-        if self
-            .negotiated_for(conn.connection_id)
-            .is_some_and(|protocol| {
-                protocol.era == McpProtocolEra::Modern
-                    && modern_request_requires_result_type("tools/call")
-            })
-        {
-            validate_modern_envelope(&mut raw)?;
-        }
+            .map_err(|error| match error {
+                McpResultError::Sdk(error) if error.code == "REQUEST_TIMEOUT" => {
+                    McpError::Timeout {
+                        server: String::new(),
+                        tool: tool.to_owned(),
+                        secs: timeout.as_secs().max(1),
+                    }
+                }
+                McpResultError::Connection(error) if is_method_not_found(&error) => {
+                    McpError::ToolNotFound(tool.to_owned())
+                }
+                error => map_result_err(error),
+            })?
+        } else {
+            connection
+                .call_with_timeout("tools/call", params, timeout)
+                .await
+                .map_err(|error| match &error {
+                    ConnectionError::Router(RouterError::Timeout(_)) => McpError::Timeout {
+                        server: String::new(),
+                        tool: tool.to_owned(),
+                        secs: timeout.as_secs().max(1),
+                    },
+                    _ if is_method_not_found(&error) => McpError::ToolNotFound(tool.to_owned()),
+                    _ => map_call_err(&error),
+                })?
+        };
         let parsed: ToolCallResult =
             serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
         Ok(McpToolResultDto {
+            result_projection: None,
+
             content: parsed.content,
             is_error: parsed.is_error,
             meta: parsed.meta,
@@ -1226,6 +1310,12 @@ impl McpTransport for PosixMcpTransport {
         if let Ok(mut guard) = self.negotiated.lock() {
             guard.remove(&conn_id);
         }
+        if let Ok(mut guard) = self.metadata.lock() {
+            guard.remove(&conn_id);
+        }
+        if let Ok(mut guard) = self.elicitation.lock() {
+            guard.remove(&conn_id);
+        }
         let entry = self
             .connections
             .lock()
@@ -1346,6 +1436,8 @@ pub struct StdioHandles {
     /// ignores stdin-EOF: the reaper owns the `Child`, so `kill_on_drop(true)`
     /// alone never fires until full runtime shutdown.
     pub reaper_kill: tokio::sync::oneshot::Sender<()>,
+    /// Becomes true after the reaper has observed and reaped the child exit.
+    pub reaper_done: tokio::sync::watch::Receiver<bool>,
 }
 
 // Re-export the shared WebSocket connector so callers can use a single path
@@ -1427,6 +1519,7 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
     // reaper call `child.start_kill()` and await exit — this force-kills a
     // server that would otherwise ignore stdin-EOF and run forever.
     let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
+    let (reaper_done_tx, reaper_done) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         tokio::select! {
             wait = child.wait() => match wait {
@@ -1458,12 +1551,14 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
                 },
             }
         }
+        let _ = reaper_done_tx.send(true);
     });
 
     Ok(StdioHandles {
         connection,
         stderr: stderr_ring,
         reaper_kill: kill_tx,
+        reaper_done,
     })
 }
 
@@ -1481,13 +1576,14 @@ mod initialize_params_tests {
     //! MCP `initialize` request payload parity with claude-code
     //! `services/mcp/client.ts:985-1002`.
     use super::{initialize_params, CLIENT_DESCRIPTION, MCP_PROTOCOL_VERSION};
+    use serde_json::json;
     // Imported here, not at file scope: the lib target has no other user, so a
     // file-level `use` reads as an unused import and gets deleted — which then
     // breaks these tests, since they reached it through `super::`.
     use platform_common::mcp_remote::directory_read_capability;
 
     #[test]
-    fn capabilities_advertise_bare_empty_roots_and_elicitation() {
+    fn capabilities_advertise_roots_and_current_elicitation_modes() {
         let params = initialize_params();
         let caps = &params["capabilities"];
         assert!(caps.is_object(), "capabilities must be a JSON object");
@@ -1499,22 +1595,16 @@ mod initialize_params_tests {
             "capabilities must have exactly 2 keys (roots, elicitation), got {:?}",
             caps_obj.keys().collect::<Vec<_>>(),
         );
-        // Each marker is the LITERAL empty object `{}` — not null, not missing,
-        // not `{form:{},url:{}}` (the Java MCP SDK rejects unknown props).
         assert!(caps["roots"].is_object(), "roots must be an object");
-        assert_eq!(
-            caps["roots"].as_object().unwrap().len(),
-            0,
-            "roots must be EMPTY"
-        );
+        assert_eq!(caps["roots"], json!({"listChanged": true}));
         assert!(
             caps["elicitation"].is_object(),
             "elicitation must be an object"
         );
         assert_eq!(
-            caps["elicitation"].as_object().unwrap().len(),
-            0,
-            "elicitation must be EMPTY",
+            caps["elicitation"],
+            json!({"form": {}, "url": {}}),
+            "current default includes both form and URL elicitation",
         );
     }
 
@@ -1839,7 +1929,7 @@ mod protocol_era_tests {
 
     #[test]
     fn modern_probe_carries_the_required_meta_keys() {
-        let value = modern_probe_params();
+        let value = modern_probe_params(lingxi_core::host::McpElicitationMode::FormAndUrl);
         let meta = value.get("_meta").and_then(Value::as_object).unwrap();
         assert_eq!(
             meta.len(),
@@ -1849,13 +1939,22 @@ mod protocol_era_tests {
         assert!(meta.contains_key("io.modelcontextprotocol/protocolVersion"));
         assert!(meta.contains_key("io.modelcontextprotocol/clientInfo"));
         assert!(meta.contains_key("io.modelcontextprotocol/clientCapabilities"));
-        assert_eq!(value["protocolVersion"], MODERN_PROTOCOL_VERSION);
+        assert_eq!(
+            meta["io.modelcontextprotocol/protocolVersion"],
+            platform_common::mcp_remote::MODERN_PROTOCOL_VERSION
+        );
+        assert_eq!(value.as_object().unwrap().len(), 1);
     }
 
     #[test]
     fn modern_result_envelope_is_strict_and_strips_complete_marker() {
-        let mut complete = json!({"resultType": "complete", "tools": []});
-        validate_modern_envelope(&mut complete).expect("complete envelope");
+        let complete =
+            json!({"resultType": "complete", "ttlMs":0,"cacheScope":"private","tools": []});
+        let DecodedMcpResult::Complete(complete) =
+            decode_modern_result("tools/list", complete).expect("complete envelope")
+        else {
+            panic!("complete expected")
+        };
         assert!(!complete.as_object().unwrap().contains_key("resultType"));
 
         for invalid in [
@@ -1863,8 +1962,7 @@ mod protocol_era_tests {
             json!({"resultType": "partial"}),
             json!(null),
         ] {
-            let mut invalid = invalid;
-            assert!(validate_modern_envelope(&mut invalid).is_err());
+            assert!(decode_modern_result("tools/list", invalid).is_err());
         }
     }
 }

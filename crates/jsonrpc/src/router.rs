@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use dashmap::DashMap;
+use json_projection::{Utf16JsonProjection, Utf16JsonProjectionError};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -45,6 +46,9 @@ pub enum RouterError {
     /// Serializing the params into JSON failed.
     #[error("serialize params: {0}")]
     Serialize(serde_json::Error),
+    /// An exact payload has an invalid or stale sidecar association.
+    #[error("JSON-RPC projection: {0}")]
+    Projection(#[from] Utf16JsonProjectionError),
     /// Deserializing the result into the caller's type failed.
     #[error("deserialize result: {0}")]
     Deserialize(serde_json::Error),
@@ -62,7 +66,7 @@ pub trait PerRequestCancellation: Send + Sync {
 }
 type RequestCancellation = Arc<RwLock<Option<Arc<dyn PerRequestCancellation>>>>;
 
-type PendingMap = Arc<DashMap<Id, oneshot::Sender<Result<Value, ResponseError>>>>;
+type PendingMap = Arc<DashMap<Id, oneshot::Sender<Result<Utf16JsonProjection, ResponseError>>>>;
 type UnknownResponseMap = Arc<DashMap<Id, oneshot::Sender<Option<Id>>>>;
 
 /// Outbound JSON-RPC router. Holds an atomic counter for outbound IDs and a
@@ -118,7 +122,7 @@ pub enum OutboundMessage {
 /// whose response will be awaited later by the caller.
 pub struct StartedCall {
     id: Id,
-    outcome: oneshot::Receiver<Result<Value, ResponseError>>,
+    outcome: oneshot::Receiver<Result<Utf16JsonProjection, ResponseError>>,
     drop_guard: DropGuard,
 }
 
@@ -130,7 +134,7 @@ impl StartedCall {
     }
 
     /// Await the raw JSON result.
-    pub async fn wait_value(self) -> Result<Value, RouterError> {
+    pub async fn wait_projected(self) -> Result<Utf16JsonProjection, RouterError> {
         let StartedCall {
             outcome,
             mut drop_guard,
@@ -146,6 +150,11 @@ impl StartedCall {
             Ok(Err(remote)) => Err(RouterError::Remote(remote)),
             Err(_recv_err) => Err(RouterError::WriterClosed),
         }
+    }
+
+    /// Await the ordinary display view when a typed consumer owns that conversion.
+    pub async fn wait_value(self) -> Result<Value, RouterError> {
+        Ok(self.wait_projected().await?.value)
     }
 
     /// Await and deserialize the JSON result into the caller's type.
@@ -255,9 +264,13 @@ impl Router {
             self.signal_unknown_response_id(Some(id));
             return;
         };
-        let outcome = match (resp.result, resp.error) {
-            (Some(v), None) => Ok(v),
-            (None, Some(e)) => Err(e),
+        let outcome = match (&resp.result, &resp.error) {
+            (Some(_), None) => resp.projected_result().map_err(|error| ResponseError {
+                code: crate::messages::INTERNAL_ERROR,
+                message: error.to_string(),
+                data: None,
+            }),
+            (None, Some(e)) => Err(e.clone()),
             // Edge case: both or neither — surface as InternalError.
             _ => Err(ResponseError {
                 code: crate::messages::INTERNAL_ERROR,
@@ -308,6 +321,34 @@ impl Router {
         params: P,
     ) -> Result<StartedCall, RouterError> {
         self.start_call(method, params)
+    }
+
+    /// Admit exact params through the same request owner and cancellation guard.
+    pub fn start_call_projected(
+        &self,
+        method: &str,
+        params: Utf16JsonProjection,
+    ) -> Result<StartedCall, RouterError> {
+        params.validate()?;
+        let id = Id::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let mut request = Request::new(method, Some(params.value.clone()), id);
+        let mut envelope = crate::messages::Message::Request(request.clone()).projected()?;
+        envelope.set_field("params", params)?;
+        request.projection = Some(envelope);
+        self.start_call_with_request(request)
+    }
+
+    /// Call through the normal request lifecycle with exact JSON.
+    pub async fn call_projected_with_timeout(
+        &self,
+        method: &str,
+        params: Utf16JsonProjection,
+        timeout: Duration,
+    ) -> Result<Utf16JsonProjection, RouterError> {
+        let started = self.start_call_projected(method, params)?;
+        tokio::time::timeout(timeout, started.wait_projected())
+            .await
+            .map_err(|_| RouterError::Timeout(timeout))?
     }
 
     /// Allocate a request id before constructing protocol-specific metadata.
@@ -401,7 +442,12 @@ impl Router {
         let outcome = if let Some(timeout) = timeout {
             if let Some(unknown_id_rx) = unknown_id_rx {
                 enum ProbeOutcome {
-                    Response(Result<Result<Value, ResponseError>, oneshot::error::RecvError>),
+                    Response(
+                        Result<
+                            Result<Utf16JsonProjection, ResponseError>,
+                            oneshot::error::RecvError,
+                        >,
+                    ),
                     Wrong(Result<Option<Id>, oneshot::error::RecvError>),
                 }
                 match tokio::time::timeout(timeout, async move {
@@ -449,7 +495,7 @@ impl Router {
             Err(_recv_err) => return Err(RouterError::WriterClosed),
         };
 
-        serde_json::from_value(value).map_err(RouterError::Deserialize)
+        serde_json::from_value(value.value).map_err(RouterError::Deserialize)
     }
 
     fn start_call<P: Serialize>(
@@ -472,6 +518,14 @@ impl Router {
         }
         let params_value = serde_json::to_value(params).map_err(RouterError::Serialize)?;
         let req = Request::new(method, Some(params_value), id.clone());
+        self.start_call_with_request(req)
+    }
+
+    fn start_call_with_request(&self, req: Request) -> Result<StartedCall, RouterError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RouterError::WriterClosed);
+        }
+        let id = req.id.clone();
         let (tx, rx) = oneshot::channel();
         self.pending.insert(id.clone(), tx);
 
@@ -827,6 +881,7 @@ mod tests {
                 let id_value = match &req.id {
                     Id::Number(n) => serde_json::json!(n),
                     Id::String(s) => serde_json::json!(s),
+                    Id::StringUtf16(s) => serde_json::json!(String::from_utf16_lossy(s)),
                 };
                 let resp = Response::success(req.id, json!({"echo": id_value}));
                 router_clone.dispatch_response(resp);

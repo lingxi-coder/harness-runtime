@@ -3914,6 +3914,7 @@ mod outer_err_arm_realized_tokens_tests {
                 unresolved_questions: vec![],
             };
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
                 usage: SubagentUsage {
@@ -4154,6 +4155,7 @@ were genuinely dispatched before cancellation, not None or a subset — got \
                 unresolved_questions: vec![],
             };
             Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: lingxi_core::types::AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
                 usage: SubagentUsage {

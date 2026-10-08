@@ -76,7 +76,7 @@ use super::{
 /// connection snapshot that serves prompts/get. Holding both read/write guards
 /// while projecting prevents a concurrent plugin disable from restoring a
 /// retired prompt after it has removed the server.
-async fn reconcile_mcp_prompt_catalog(
+pub(super) async fn reconcile_mcp_prompt_catalog(
     mcp_registry: &mcp::McpRegistry,
     command_registry: &Arc<RwLock<CommandRegistry>>,
 ) {
@@ -327,6 +327,9 @@ pub async fn build_with_credential_stack(
     let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
         let mut seed = cfg.clone();
         seed.session_writer_lease = None;
+        seed.session_transcript_path = None;
+        seed.session_resume_snapshot = None;
+        seed.session_resume_cost = None;
         (seed, permission_sink.clone())
     });
     // Consume the construction-only writer claim before any config-derived
@@ -395,11 +398,13 @@ pub async fn build_with_credential_stack(
         cwd.clone(),
         main_session_uuid.clone(),
     ));
-    let main_transcript_path = orchestrator::transcript_paths::main_transcript_path(
-        &cfg.lingxi_home,
-        &cwd.to_string_lossy(),
-        &main_session_uuid,
-    );
+    let main_transcript_path = cfg.session_transcript_path.clone().unwrap_or_else(|| {
+        orchestrator::transcript_paths::main_transcript_path(
+            &cfg.lingxi_home,
+            &cwd.to_string_lossy(),
+            &main_session_uuid,
+        )
+    });
     // Create the one ordinary transcript writer before durable session setup.
     // Production later decorates this same writer with the coordinator's
     // durable transaction; legacy/no-persistence hosts keep compatibility.
@@ -412,14 +417,18 @@ pub async fn build_with_credential_stack(
     // tools and turn-start snapshotter share this in-memory instance. Leaving
     // it empty on resume caused the next edit to restart at version 1 and lose
     // the previously tracked-file set.
-    if let Ok(content) = std::fs::read_to_string(&main_transcript_path) {
+    if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
+        // A fork has a different backup-directory owner. Do not attach source
+        // checkpoint names to that empty directory without a backup transfer.
+        if snapshot.source_session_id == main_session_uuid {
+            file_history.restore_from_records(session::file_history::parse_snapshot_records(
+                &snapshot.content,
+            ));
+        }
+    } else if let Ok(content) = std::fs::read_to_string(&main_transcript_path) {
         file_history.restore_from_records(session::file_history::parse_snapshot_records(&content));
     }
-    let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
-        &cfg.lingxi_home,
-        &cwd.to_string_lossy(),
-        &main_session_uuid,
-    );
+    let main_subagents_dir = main_transcript_path.with_extension("").join("subagents");
 
     // The credential/provider half of boot lives in `resolve_llm_stack` so the
     // headless one-shot commands share it byte-for-byte. Everything below this
@@ -500,32 +509,48 @@ pub async fn build_with_credential_stack(
     // telemetry lands on the same sink set — 1:1 with claude-code, where
     // `logEvent` is a single global pipeline.
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
-    // metadata.user_id (getAPIMetadata, claude.ts:519): the JSON-string identity
-    // `{...extra, device_id, account_uuid, session_id}`. `device_id` =
-    // getOrCreateUserID (persisted, stable per install); `session_id` = the main
-    // session id (claude-code's getSessionId()); `account_uuid` = "" — the OAuth
-    // profile carrying the account UUID is fetched asynchronously in the
-    // background and is not available at construction, so this is the faithful
-    // `getOauthAccountInfo()?.accountUuid ?? ''` fallback (the value is per-account
-    // and never byte-matches claude-code regardless).
-    let request_metadata = llm_runtime::RequestMetadata {
-        user_id: llm_runtime::ApiService::build_api_metadata_user_id(
-            &migrations::global_config::get_or_create_user_id(),
-            "",
-            &main_session_uuid,
-            cfg.parent_session_id.as_deref(),
-        ),
+    // Headless embeddings provide request state explicitly; no install-wide
+    // identity or process environment is read on that path.
+    let explicit_headless = cfg.composition == Some(super::DesktopSessionComposition::HeadlessCli);
+    let request_metadata = if let Some(identity) = &cfg.request_identity {
+        Some(llm_runtime::RequestMetadata {
+            user_id: llm_runtime::ApiService::build_api_metadata_user_id_with_extra(
+                &identity.device_id,
+                &identity.account_uuid,
+                &main_session_uuid,
+                cfg.parent_session_id.as_deref(),
+                identity.extra_metadata.clone(),
+            ),
+        })
+    } else if explicit_headless {
+        None
+    } else {
+        Some(llm_runtime::RequestMetadata {
+            user_id: llm_runtime::ApiService::build_api_metadata_user_id(
+                &migrations::global_config::get_or_create_user_id(),
+                "",
+                &main_session_uuid,
+                cfg.parent_session_id.as_deref(),
+            ),
+        })
     };
+    let user_agent_environment = cfg.user_agent_environment.clone().unwrap_or_else(|| {
+        if explicit_headless {
+            UserAgentEnv::default()
+        } else {
+            UserAgentEnv::from_process_env()
+        }
+    });
     // Build the provider-neutral drive service (the retry/rate-limit/betas loop),
     // then wrap it in the thin `ProviderApiAdapter` that impls the orchestrator +
     // agent seams. The `with_*` builders live on `ApiService`.
     let session_composition = cfg.session_composition();
     let interactive_session = session_composition.is_interactive_session();
-    let service_built = llm_runtime::ApiService::new_with_routing(
+    let mut service_built = llm_runtime::ApiService::new_with_routing(
         llm_runtime,
         llm_transport.clone(),
         subscriber_state,
-        UserAgentEnv::from_process_env(),
+        user_agent_environment,
         env!("CARGO_PKG_VERSION"),
         Some(analytics_bus.clone()),
         cfg.fallback_model.clone(),
@@ -552,7 +577,6 @@ pub async fn build_with_credential_stack(
     .with_subscription(subscription.clone())
     .with_interactive_session(interactive_session)
     .with_custom_cli_betas(cfg.custom_betas.clone())
-    .with_request_metadata(request_metadata)
     // Boot SESSION thinking config, resolved host-side from MAX_THINKING_TOKENS
     // + --max-thinking-tokens + alwaysThinkingEnabled (claude-code `qIe()`+`wn`).
     // Default `Adaptive` keeps every existing session byte-identical; a fixed
@@ -588,22 +612,59 @@ pub async fn build_with_credential_stack(
     // the global config). With the driver attached, a Bedrock 401/403
     // (expired STS) runs the refresh script and retries instead of
     // dead-ending — bounded at Ygf=2 inside the drive loops.
+    if let Some(metadata) = request_metadata {
+        service_built = service_built.with_request_metadata(metadata);
+    }
+    if let Some(version) = &cfg.anthropic_compatible_version {
+        service_built = service_built.with_anthropic_compatible_version(version.clone());
+    }
+    if let Some(policy) = &cfg.native_thinking_display {
+        service_built = service_built.with_native_thinking_display(policy.clone());
+    }
+    if let Some(metadata) = &cfg.anthropic_client_metadata {
+        let mut metadata = metadata.clone();
+        metadata.session_id = Some(main_session_uuid.clone());
+        service_built = service_built.with_anthropic_client_metadata(metadata);
+    }
+    if cfg.composition == Some(super::DesktopSessionComposition::HeadlessCli) {
+        let ua = cfg.user_agent_environment.as_ref();
+        let lookup = cfg.oauth_environment_lookup.as_ref();
+        let attribution_enabled = !lookup
+            .and_then(|lookup| lookup.get("CLAUDE_CODE_ATTRIBUTION_HEADER"))
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+            });
+        service_built = service_built.with_native_system_prefix(
+            lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix {
+                compatibility_version: cfg
+                    .anthropic_compatible_version
+                    .clone()
+                    .unwrap_or_else(|| crate::headless::CLAUDE_CODE_REFERENCE_VERSION.into()),
+                entrypoint: ua
+                    .and_then(|ua| ua.entrypoint.clone())
+                    .unwrap_or_else(|| "unknown".into()),
+                host_identity:
+                    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                        orchestrator::prompt::locked_templates::HEADER,
+                    ),
+                attribution_enabled,
+                assume_first_party_base_url: lookup
+                    .and_then(|lookup| lookup.get("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"))
+                    .is_some_and(|value| !value.is_empty()),
+            },
+        );
+    }
     let service_built = match aws_auth_refresher(&cfg, &cwd, analytics_bus.clone()) {
         Some(refresher) => service_built.with_aws_auth(refresher),
         None => service_built,
     };
-    let service_built = service_built
-        .retain_account_change_observer(subscription_refresh_generation);
-    // `--json-schema` structured output: FORCE the `StructuredOutput` tool so the
-    // model returns its final result through it (1:1 with claude-code). Untouched
-    // for every normal turn (`json_schema` is `None`).
-    let service_built = if cfg.json_schema.is_some() {
-        service_built.with_forced_tool_choice(llm_runtime::ToolChoice::Tool {
-            name: orchestrator::structured_output::STRUCTURED_OUTPUT_TOOL_NAME.to_string(),
-        })
-    } else {
-        service_built
-    };
+    let service_built =
+        service_built.retain_account_change_observer(subscription_refresh_generation);
+    // Native print schema requests advertise StructuredOutput without forcing
+    // tool_choice; its validation loop remains inside the normal query.
     // (M4 cc2.1.198) `--effort <level>` — the CLI-validated initial effort
     // rides the MAIN loop's requests as `output_config.effort` (binary session
     // state `thinkingConfig: SF(a.effort)`); `None` keeps bodies unchanged.
@@ -645,6 +706,7 @@ pub async fn build_with_credential_stack(
         None
     };
     let mut orch_cfg = OrchestratorConfig::default();
+    orch_cfg.bare = cfg.customization_gates.bare;
     apply_server_fallback_model_policy(
         &mut orch_cfg,
         &if managed_snapshot.read_failed || effective_settings.is_none() {
@@ -705,15 +767,8 @@ pub async fn build_with_credential_stack(
     if let Some(max_turns) = cfg.max_turns {
         orch_cfg.max_turns = max_turns;
     }
-    // Structured output forces `tool_choice` to `StructuredOutput`, which compels
-    // the model to call it on EVERY assistant turn — so cap the turn at a SINGLE
-    // model call: the model calls the tool once (capturing the result), then the
-    // cap ends the turn. The print path reads the captured slot regardless of the
-    // resulting MaxTurns stop and drives its own validate/retry loop. (Overrides
-    // any `--max-turns` here; structured output is inherently one-shot per turn.)
-    if cfg.json_schema.is_some() {
-        orch_cfg.max_turns = 1;
-    }
+    orch_cfg.max_structured_output_retries = cfg.max_structured_output_retries;
+    orch_cfg.structured_output_enabled = cfg.json_schema.is_some();
     orch_cfg.max_budget_nano_usd = cfg.max_budget_usd.map(|usd| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let nano = (usd.max(0.0) * 1_000_000_000.0) as u64;
@@ -940,6 +995,9 @@ pub async fn build_with_credential_stack(
         let initialization: Result<_, cost::CostPersistError> = async {
             coordinator.start().await?;
             let _initial_hydration = coordinator.hydrate(main_session_id).await?;
+            if let Some(opening) = cfg.session_resume_cost.as_ref() {
+                coordinator.import_session_opening_state(opening).await?;
+            }
             coordinator
                 .import_legacy_opening_balance(
                     legacy_opening_balance
@@ -1508,7 +1566,9 @@ pub async fn build_with_credential_stack(
     // prints nothing.
     for w in mcp::config_diagnostics::collect_all_mcp_config_warnings(&cwd, Some(&global_mcp_path))
     {
-        eprintln!("{}", w.to_stderr_line());
+        if let Some(diagnostics) = &cfg.diagnostics {
+            diagnostics.stderr_line(&w.to_stderr_line()).await;
+        }
     }
 
     // (5.3) Agent catalog — load from project + user agents/. Project wins on
@@ -1590,6 +1650,22 @@ pub async fn build_with_credential_stack(
         bool,
     ) = match cfg.cli_agent.clone() {
         Some(w) => (Some(w), None, false),
+        None if cfg.session_resume_snapshot.is_some() => {
+            let snapshot = cfg
+                .session_resume_snapshot
+                .as_ref()
+                .expect("checked resume snapshot");
+            let loaded = session::jsonl::route_lines(&snapshot.content);
+            let (persisted, definition) = session::jsonl::loader::agent_resume_state_from_loaded(
+                &loaded,
+                &snapshot.source_session_id,
+            );
+            (
+                persisted,
+                definition,
+                snapshot.source_session_id == main_session_uuid,
+            )
+        }
         None if cfg.session_id_override.is_some() => {
             let snapshot_fs = Arc::new(DesktopFileSystem::new(cwd.clone()))
                 as Arc<dyn lingxi_core::host::FileSystem>;
@@ -1663,15 +1739,19 @@ pub async fn build_with_credential_stack(
         // `Warning: agent frontmatter MCP ${Tt(len,"server")} blocked by
         // enterprise policy: ${names.join(", ")}` — `Tt` pluralizes WITHOUT a
         // count.
-        eprintln!(
-            "Warning: agent frontmatter MCP {} blocked by enterprise policy: {}",
-            if agent_mcp_blocked.len() == 1 {
-                "server"
-            } else {
-                "servers"
-            },
-            agent_mcp_blocked.join(", ")
-        );
+        if let Some(diagnostics) = &cfg.diagnostics {
+            diagnostics
+                .stderr_line(&format!(
+                    "Warning: agent frontmatter MCP {} blocked by enterprise policy: {}",
+                    if agent_mcp_blocked.len() == 1 {
+                        "server"
+                    } else {
+                        "servers"
+                    },
+                    agent_mcp_blocked.join(", ")
+                ))
+                .await;
+        }
     }
     // Apply the immutable project policy snapshot once more after the agent
     // merge. The earlier pass protects discovered/CLI candidates; this final
@@ -1688,6 +1768,14 @@ pub async fn build_with_credential_stack(
     // `WindowsMcpTransport`, whose remote IDE connections expose the same
     // shared JSON-RPC handle to the registry.
     let mcp_transport = new_desktop_mcp_transport();
+    let mcp_services = super::DesktopMcpServices {
+        transport: mcp_transport.clone() as Arc<dyn McpTransport>,
+        raw_connections: mcp_transport as Arc<dyn mcp::RawConnectionProvider>,
+    };
+    let mcp_services = match cfg.mcp_services_factory.as_ref() {
+        Some(factory) => factory(mcp_services),
+        None => mcp_services,
+    };
     // The registry is BUILT here but `connect_all` is deferred to (5.26),
     // after the real `hooks` executor exists: the elicitation hook dispatcher
     // (`OrchestratorHookDispatcher`) must be wired via `with_hook_dispatcher`
@@ -2413,21 +2501,18 @@ pub async fn build_with_credential_stack(
     };
     let mcp_additional_roots = mcp::new_shared_roots(mcp_roots_seed);
     let mcp_registry = Arc::new(
-        mcp::McpRegistry::with_raw_conn(
-            mcp_transport.clone() as Arc<dyn McpTransport>,
-            mcp_transport as Arc<dyn mcp::RawConnectionProvider>,
-        )
-        .with_projects_session_host(projects_session_host)
-        .with_hook_dispatcher(Some(elicitation_dispatcher))
-        .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
-            cfg.lingxi_home.join("mcp-discovery-cache"),
-        ))
-        .with_oauth(mcp_oauth_deps)
-        .with_headers_helper_cwd(cwd.clone())
-        // Advertise the session's additional working dirs (settings
-        // `additionalDirectories` + `--add-dir`) on every server's `roots/list`,
-        // matching claude-code r1d() = [cwd, ...additionalWorkingDirectories].
-        .with_additional_roots(mcp_additional_roots),
+        mcp::McpRegistry::with_raw_conn(mcp_services.transport, mcp_services.raw_connections)
+            .with_projects_session_host(projects_session_host)
+            .with_hook_dispatcher(Some(elicitation_dispatcher))
+            .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
+                cfg.lingxi_home.join("mcp-discovery-cache"),
+            ))
+            .with_oauth(mcp_oauth_deps)
+            .with_headers_helper_cwd(cwd.clone())
+            // Advertise the session's additional working dirs (settings
+            // `additionalDirectories` + `--add-dir`) on every server's `roots/list`,
+            // matching claude-code r1d() = [cwd, ...additionalWorkingDirectories].
+            .with_additional_roots(mcp_additional_roots),
     );
     hook_mcp_invoker.bind(mcp_registry.clone());
     // Subscribe before connecting: a server is allowed to invalidate a catalog
@@ -2435,7 +2520,15 @@ pub async fn build_with_credential_stack(
     // Tokio's broadcast receiver retains those early notifications until the
     // refresh driver below is installed.
     let mut mcp_catalog_changes = mcp_registry.subscribe_catalog_changes();
-    mcp_registry.connect_all(mcp_configs).await;
+    let (deferred_sdk_mcp_configs, startup_mcp_configs): (Vec<_>, Vec<_>) =
+        mcp_configs.into_iter().partition(|server| {
+            cfg.defer_session_start
+                && matches!(
+                    &server.spec,
+                    lingxi_core::host::McpTransportSpec::SdkControl { .. }
+                )
+        });
+    mcp_registry.connect_all(startup_mcp_configs).await;
     // Clone handles the runtime `/add-dir` live effect needs (the same registry
     // Arc is moved into the orchestrator builder below via `with_mcp_registry`).
     let runtime_mcp_registry = mcp_registry.clone();
@@ -3462,13 +3555,20 @@ pub async fn build_with_credential_stack(
     if cfg.session_id_override.is_some() {
         let restore_fs: Arc<dyn lingxi_core::host::FileSystem> =
             Arc::new(DesktopFileSystem::new(cwd.clone()));
-        if let Some(payload) = session::jsonl::loader::read_worktree_state(
-            &main_transcript_path,
-            restore_fs,
-            &main_session_uuid,
-        )
-        .await
-        {
+        let worktree_state = if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
+            session::jsonl::route_lines(&snapshot.content)
+                .worktree_states
+                .get(&snapshot.source_session_id)
+                .cloned()
+        } else {
+            session::jsonl::loader::read_worktree_state(
+                &main_transcript_path,
+                restore_fs,
+                &main_session_uuid,
+            )
+            .await
+        };
+        if let Some(payload) = worktree_state {
             if let Some(restored) = tool_api::WorktreeSession::from_persisted_json(&payload) {
                 if restored.worktree_path.is_dir() {
                     // Move the session into the worktree exactly as EnterWorktree's
@@ -3697,7 +3797,13 @@ pub async fn build_with_credential_stack(
     // (Task 4) `cfg.tmux_launch` additionally creates a detached tmux session
     // for that worktree — independently inert when `None` (see the function
     // doc); a tmux failure is logged, not a hard boot failure.
-    apply_worktree_launch(&cfg.worktree_launch, &cfg.tmux_launch, &tool_ctx).await?;
+    apply_worktree_launch(
+        &cfg.worktree_launch,
+        &cfg.tmux_launch,
+        &tool_ctx,
+        cfg.diagnostics.as_deref(),
+    )
+    .await?;
     let coordinator_wiring = (lingxi_core::host::env::agent_swarms_enabled()
         || cfg.session_started_as_coordinator)
         .then(|| CoordinatorWiring {
@@ -3993,15 +4099,15 @@ pub async fn build_with_credential_stack(
     for (conn_id, mcp_tools) in registered_mcp_tools {
         tools_inner.register_mcp_tools(conn_id, mcp_tools);
     }
-    // Structured output (`--json-schema`): register the forced `StructuredOutput`
-    // tool whose `input_schema` IS the user schema; its `call` captures the model's
-    // result into `structured_output_slot` for the print path to validate + retry.
+    // Structured output (`--json-schema`): register the dynamic capture tool
+    // with the exact supplied schema. The same explicit config activates the
+    // ordinary query driver's validation/retry policy; its slot stays local.
     // `None` (no `--json-schema`) leaves the registry + the slot untouched.
     let structured_output_slot: Option<orchestrator::structured_output::StructuredOutputSlot> =
         cfg.json_schema.as_ref().map(|schema| {
             let slot: orchestrator::structured_output::StructuredOutputSlot =
                 Arc::new(std::sync::Mutex::new(None));
-            tools_inner.register_builtin(Arc::new(
+            tools_inner.register_required_builtin(Arc::new(
                 orchestrator::structured_output::StructuredOutputTool::new(
                     schema.clone(),
                     slot.clone(),
@@ -4031,7 +4137,16 @@ pub async fn build_with_credential_stack(
             slot
         });
 
-    if cfg.restricted {
+    if cfg.customization_gates.bare && !coordinator_mode.is_enabled() {
+        // Native SIMPLE builds the platform shell, Read and Edit catalog
+        // before applying --tools selection; dynamic MCP remains separate.
+        tools_inner.set_builtin_catalog(if cfg!(windows) {
+            &["Bash", "PowerShell", "Read", "Edit"]
+        } else {
+            &["Bash", "Read", "Edit"]
+        });
+    }
+    if cfg.restricted || cfg.restricted_tools.is_some() {
         tools_inner.set_restricted_builtin_filter(cfg.restricted_tools.as_deref());
     }
 
@@ -4423,7 +4538,7 @@ pub async fn build_with_credential_stack(
         api_client,
         streaming_api,
         tools.clone(),
-        hooks,
+        hooks.clone(),
         perms,
         output,
         memory,
@@ -4684,6 +4799,27 @@ pub async fn build_with_credential_stack(
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
     let orch = orchestrator::ConversationOrchestrator::into_shared(orch_builder);
+    if cfg.anthropic_client_metadata.is_some() {
+        let owner = Arc::downgrade(&orch);
+        api_service.set_request_session_id_source(Arc::new(move || {
+            let owner = owner.clone();
+            Box::pin(async move {
+                let owner = owner.upgrade()?;
+                Some(owner.current_session_id().await.as_uuid().to_string())
+            })
+        }));
+    }
+
+    let safety_owner = Arc::downgrade(&orch);
+    hooks.set_model_safety_provider(Arc::new(move || {
+        let owner = safety_owner.clone();
+        Box::pin(async move {
+            match owner.upgrade() {
+                Some(owner) => owner.model_safety_observer().await,
+                None => None,
+            }
+        })
+    }));
     // Publish the configured model/profile before a recovered report can wake
     // the main loop or a restored child can read its live parent selection.
     if let Some(profile) = default_model_profile.as_deref() {
@@ -5205,6 +5341,7 @@ pub async fn build_with_credential_stack(
             .with_task_registry(task_registry.clone()
                 as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>),
         );
+        let mut plugin_load_order = Vec::new();
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
             // Materialise COMMANDS + HOOKS + MCP + LSP + AGENTS. The plugin's
@@ -5219,7 +5356,7 @@ pub async fn build_with_credential_stack(
             // removed rather than taking the whole plugin down. Pinned by
             // `plugin_runtime_refresh_strips_agent_escalation_from_live_catalog`.
             match pm.enable(&id, manifest, dir).await {
-                Ok(()) => {}
+                Ok(()) => plugin_load_order.push(id),
                 Err(e) => tracing::warn!(
                     plugin = %plugin_name,
                     error = %e,
@@ -5229,6 +5366,7 @@ pub async fn build_with_credential_stack(
         }
         plugin_runtime = Some(Arc::new(PluginRuntime {
             manager: pm,
+            load_order: RwLock::new(plugin_load_order),
             analytics_bus: analytics_bus.clone(),
             plugins_dir,
             home: cfg.lingxi_home.clone(),
@@ -5363,18 +5501,19 @@ pub async fn build_with_credential_stack(
                                         ))
                                     })?;
                                 drop(state);
-                                let selection = agent::model_resolution::resolve_user_model_selection(
-                                    spec,
-                                    None,
-                                    &context,
-                                    model_resolution_context_provider.as_ref(),
-                                )
-                                .map_err(|error| {
-                                    BuildError::Orchestrator(format!(
-                                        "cannot resolve model {spec:?} for agent {:?}: {error}",
-                                        a.agent_type
-                                    ))
-                                })?;
+                                let selection =
+                                    agent::model_resolution::resolve_user_model_selection(
+                                        spec,
+                                        None,
+                                        &context,
+                                        model_resolution_context_provider.as_ref(),
+                                    )
+                                    .map_err(|error| {
+                                        BuildError::Orchestrator(format!(
+                                            "cannot resolve model {spec:?} for agent {:?}: {error}",
+                                            a.agent_type
+                                        ))
+                                    })?;
                                 Some((selection.model, selection.model_profile))
                             }
                             agent::AgentModel::Inherit => None,
@@ -5785,15 +5924,21 @@ pub async fn build_with_credential_stack(
     // Startup reports and async hooks may have completed while agent, command,
     // and lifecycle wiring was still in progress. Publish their wake targets
     // only after the selected main agent and SessionStart hooks are ready.
-    orch.set_main_report_waker(Arc::new(
-        crate::main_report_waker::DirectMainReportWaker::new(&orch),
-    ));
-    if let Err(error) = orch.recover_main_reports().await {
-        tracing::warn!(%error, "could not recover admitted subagent reports");
-    }
-    async_hook_response_buffer.attach_rewake_target(&orch);
+    let deferred_startup = if cfg.defer_session_start {
+        Some(super::DeferredDesktopStartup {
+            async_hook_responses: async_hook_response_buffer,
+            sdk_mcp_configs: deferred_sdk_mcp_configs,
+            mcp_tool_context: mcp_tool_ctx,
+        })
+    } else {
+        super::activate_startup_producers(&orch, &async_hook_response_buffer).await;
+        None
+    };
 
     Ok(DesktopRuntime {
+        deferred_startup: tokio::sync::Mutex::new(deferred_startup),
+        fork_writer: cfg.session_persistence.then_some(main_agent_setting_writer),
+        pending_fork_history: tokio::sync::Mutex::new(None),
         catalog_registry,
         provider_region,
         orchestrator: orch,

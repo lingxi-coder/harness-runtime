@@ -128,7 +128,7 @@ impl Tool for EchoTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "content": "ORIGINAL_OUTPUT" }),
             model_content: None,
             new_messages: vec![],
@@ -203,7 +203,7 @@ async fn pre_tool_use_additional_context_is_a_separate_system_reminder_message()
     let tool_use_id = ToolUseId::new();
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![LlmContentBlock::ToolCall {
+            vec![LlmContentBlock::ToolCall { input_projection: None,
                 id: tool_use_id.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -213,7 +213,7 @@ async fn pre_tool_use_additional_context_is_a_separate_system_reminder_message()
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -271,7 +271,7 @@ async fn pre_tool_use_additional_context_is_a_separate_system_reminder_message()
     let found_separate = s.history.iter().any(|m| match m {
         ConversationMessage::User { content, .. } => content.iter().any(|b| {
             matches!(
-            b, ContentBlock::Text { text } if text == expected)
+            b, ContentBlock::Text { text, .. } if text == expected)
         }),
         _ => false,
     });

@@ -50,6 +50,7 @@ fn batched_response(text: &str) -> HistoryResponse {
         content: vec![LlmContentBlock::Text {
             text: text.into(),
             cache_control: None,
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,
@@ -91,17 +92,18 @@ fn batched_and_streaming_produce_same_assistant_text() {
         let streaming_mock = Arc::new(MockStreamingApiClient::with_turns(vec![stream_script]));
         let batched_stub = Arc::new(MockApiClient::new(Vec::new()));
         let output_s = Arc::new(MockOutputStream::new());
-        let orch_s = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            batched_stub,
-            streaming_mock,
-            Arc::new(ToolRegistry::new()),
-            orchestrator::test_support::noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            output_s.clone(),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        );
+        let orch_s =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                batched_stub,
+                streaming_mock,
+                Arc::new(ToolRegistry::new()),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output_s.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ));
         let outcome_s = orch_s.run_turn_streaming("ping").await.expect("stream");
 
         // Same outcome shape.
@@ -129,7 +131,7 @@ fn batched_and_streaming_produce_same_assistant_text() {
             for m in hist {
                 if let ConversationMessage::Assistant { content, .. } = m {
                     for blk in content {
-                        if let ContentBlock::Text { text } = blk {
+                        if let ContentBlock::Text { text, .. } = blk {
                             return Some(text.clone());
                         }
                     }
@@ -399,13 +401,12 @@ async fn model_input_texts(
 /// The model-facing order the shared collector must produce, as
 /// (label, distinctive substring) in the order they are expected to appear.
 ///
-/// Sourced from the collector's own sequence in
-/// `conversation/drivers/prepare.rs`, which this file locks; the substrings come
-/// from each renderer, not from a previous run's output. The durable
-/// task-notification leads because it is appended to the snapshot BEFORE the
-/// transient reminders, then the transient ones follow in collector order:
-/// output_style → plan_mode → skill_listing → task/todo → memory_update →
-/// total_tokens.
+/// Sourced from `conversation/drivers/prepare.rs`: after Normal context/date
+/// announcements, the durable task notification precedes the transient rows;
+/// those then follow collector order: skill listing → plan → task/todo →
+/// memory update → output style → total tokens. MCP instructions, when present,
+/// are inserted at the captured position after skill listing and before plan.
+/// The substrings come from each renderer, not a previous run's output.
 ///
 /// `total_tokens` is last because it is DEFAULT ON in this port
 /// (`prompt::total_tokens::PORT_DEFAULT_MODE`, oracle parity since 2026-08-20),
@@ -423,19 +424,56 @@ async fn model_input_texts(
 /// is not pinned by anything yet.
 const EXPECTED_REMINDER_ORDER: &[(&str, &str)] = &[
     ("task_notification (durable)", "<task-notification>"),
-    ("output_style", "Explanatory output style is active"),
-    ("plan_mode", "Plan mode is active."),
     (
         "skill_listing",
         "The following skills are available for use with the Skill tool:",
     ),
+    ("plan_mode", "Plan mode is active."),
     (
         "task_reminder",
         "The task tools haven't been used recently.",
     ),
     ("memory_update", "Background memory consolidation updated"),
+    ("output_style", "Explanatory output style is active"),
     ("total_tokens", "<total_tokens>"),
 ];
+
+/// Keep the Normal empty-context anchor and date announcement in the compared
+/// model input. These project to distinct rows: the empty session-context row
+/// has no rendered text, while the date row renders a system reminder.
+fn assert_normal_context_prefix(messages: &[String]) {
+    assert!(
+        messages.len() >= 4,
+        "missing Normal context prefix: {messages:#?}"
+    );
+    assert_eq!(messages[0], "seed", "fixture history starts with its seed");
+    assert_eq!(
+        messages[1], "ping",
+        "the current user prompt follows the seed"
+    );
+    assert!(
+        messages[2].is_empty(),
+        "retain the empty typed session-context anchor at its model-input position: {messages:#?}"
+    );
+    assert!(
+        messages[3].starts_with("<system-reminder>\nToday's date is ")
+            && messages[3].ends_with("\n</system-reminder>"),
+        "date announcement follows the empty context anchor: {messages:#?}"
+    );
+    assert_eq!(
+        messages.iter().filter(|text| text.is_empty()).count(),
+        1,
+        "the empty session-context row must appear once"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|text| text.contains("Today's date is "))
+            .count(),
+        1,
+        "the date announcement must appear once"
+    );
+}
 
 /// Pin the RELATIVE ORDER of every reminder this fixture switches on.
 ///
@@ -516,27 +554,33 @@ fn batched_and_streaming_share_complete_reminder_order() {
             message_stop(),
         ];
         let streaming_mock = Arc::new(MockStreamingApiClient::with_turns(vec![stream_script]));
-        let orch_s = ConversationOrchestrator::new_with_streaming(
-            config,
-            Arc::new(MockApiClient::new(Vec::new())),
-            streaming_mock.clone(),
-            gated_tool_registry(),
-            orchestrator::test_support::noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
-        .with_memory_prefetch(memory_prefetch(streaming_memdir.path()))
-        .with_skill_listing(Arc::new(StaticSkills))
-        .with_task_notifications(Arc::new(OnceTaskNotifications(std::sync::Mutex::new(
-            vec![one_dream_notification()],
-        ))));
+        let orch_s = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                config,
+                Arc::new(MockApiClient::new(Vec::new())),
+                streaming_mock.clone(),
+                gated_tool_registry(),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            )
+            .with_memory_prefetch(memory_prefetch(streaming_memdir.path()))
+            .with_skill_listing(Arc::new(StaticSkills))
+            .with_task_notifications(Arc::new(OnceTaskNotifications(std::sync::Mutex::new(
+                vec![one_dream_notification()],
+            )))),
+        );
         arm_gated_reminders(&orch_s).await;
         orch_s.run_turn_streaming("ping").await.expect("streaming");
         let streaming_calls = streaming_mock.captured_calls().await;
         let streaming_messages = model_input_texts(&orch_s, &streaming_calls[0].messages).await;
 
+        // Preserve and check the Normal context/date rows before reminders; the
+        // reminder needles alone intentionally do not filter the input vector.
+        assert_normal_context_prefix(&batched_messages);
+        assert_normal_context_prefix(&streaming_messages);
         // Order first: it is the only check that can see a reorder inside the
         // collector, and it gives the clearer message when one happens.
         assert_shared_reminder_order(&batched_messages);
@@ -603,18 +647,20 @@ fn streaming_turn_injects_new_diagnostics_reminder() {
         let streaming_mock = Arc::new(MockStreamingApiClient::with_turns(vec![stream_script]));
         let batched_stub = Arc::new(MockApiClient::new(Vec::new()));
         let block = "<new-diagnostics>The following new diagnostic issues were detected:\n\nx.rs:\n  \u{2718} [Line 1:1] boom</new-diagnostics>";
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            batched_stub,
-            streaming_mock.clone(),
-            Arc::new(ToolRegistry::new()),
-            orchestrator::test_support::noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
-        .with_new_diagnostics_source(Arc::new(MockDiag(Some(block.to_string()))));
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                batched_stub,
+                streaming_mock.clone(),
+                Arc::new(ToolRegistry::new()),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            )
+            .with_new_diagnostics_source(Arc::new(MockDiag(Some(block.to_string())))),
+        );
         orch.run_turn_streaming("ping").await.expect("stream");
         let calls = streaming_mock.captured_calls().await;
         let first = format!("{:?}", calls[0].messages);
@@ -676,7 +722,7 @@ fn streaming_connect_413_recovers_via_reactive_ptl() {
         let s = session.lock().await;
         let has_recovered = s.history.iter().any(|m| {
         matches!(m, ConversationMessage::Assistant { content, .. }
-            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "recovered")))
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "recovered")))
     });
         assert!(
             has_recovered,

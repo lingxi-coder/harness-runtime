@@ -12,7 +12,8 @@ use lingxi_core::types::{ContentBlock, MessageId};
 use std::sync::{Arc, Mutex as StdMutex};
 use tool_api::registry::ToolRegistry;
 
-static CONTEXT_COLLAPSE_ENV_LOCK: StdMutex<()> = StdMutex::new(());
+pub(super) static CONTEXT_COLLAPSE_ENV_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 #[derive(Default)]
 struct RecordingPreparer {
@@ -73,14 +74,14 @@ fn request_contains_marker(messages: &[ConversationMessage], marker: &str) -> bo
             content, is_meta, ..
         } if *is_meta => content
             .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text } if text == marker)),
+            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == marker)),
         _ => false,
     })
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn context_collapse_projects_initial_and_retry_snapshots_without_mutating_history() {
-    let _env_guard = CONTEXT_COLLAPSE_ENV_LOCK.lock().unwrap();
+    let _env_guard = CONTEXT_COLLAPSE_ENV_LOCK.lock().await;
     let saved = std::env::var(compaction::CONTEXT_COLLAPSE_ENV).ok();
     std::env::set_var(compaction::CONTEXT_COLLAPSE_ENV, "true");
 
@@ -148,7 +149,7 @@ async fn batched_turn_uses_shared_model_call_preparer() {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![llm_runtime::ContentBlock::Text {
             text: "done".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -163,6 +164,7 @@ async fn batched_turn_uses_shared_model_call_preparer() {
         std::env::temp_dir(),
     )
     .with_model_call_preparer(preparer.clone());
+    let orch = ConversationOrchestrator::into_shared(orch);
 
     let outcome = orch.run_turn("hello").await.expect("batched turn succeeds");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
@@ -190,8 +192,10 @@ async fn streaming_turn_uses_shared_model_call_preparer() {
         message_delta_stop("end_turn"),
         message_stop(),
     ]]));
+    let mut config = OrchestratorConfig::default();
+    config.query_source = "sdk".to_string();
     let orch = ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
+        config,
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
         Arc::new(ToolRegistry::new()),
@@ -202,6 +206,7 @@ async fn streaming_turn_uses_shared_model_call_preparer() {
         std::env::temp_dir(),
     )
     .with_model_call_preparer(preparer.clone());
+    let orch = ConversationOrchestrator::into_shared(orch);
 
     let outcome = orch
         .run_turn_streaming("hello")
@@ -214,6 +219,7 @@ async fn streaming_turn_uses_shared_model_call_preparer() {
 
     let calls = streaming.captured_calls().await;
     assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].query_source, "sdk");
     assert!(
         request_contains_marker(&calls[0].messages, "[prepared streaming]"),
         "streaming request should include the shared pre-call rewrite"
@@ -231,12 +237,28 @@ async fn thinking_strip_persistence_ignores_worker_only_rejections() {
     impl OrchestratorApiClient for SharedRecoveryApi {
         async fn messages_create(
             &self,
-            _model: &str,
-            _profile: Option<&str>,
-            _system: Option<&str>,
-            _msgs: Vec<ConversationMessage>,
-            _tools: Vec<serde_json::Value>,
+            request: crate::OrchestratorApiRequest,
         ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
+            let (request_model, request_profile, request_system, _msgs, _tools) = match request {
+                crate::OrchestratorApiRequest::Main(request) => (
+                    request.model,
+                    request.profile,
+                    request.system.map(|system| system.display_text()),
+                    request.messages,
+                    request.tools,
+                ),
+                crate::OrchestratorApiRequest::HookPrompt(request) => (
+                    request.model,
+                    request.profile,
+                    Some(request.system),
+                    request.messages,
+                    Vec::new(),
+                ),
+            };
+            let _model = request_model.as_str();
+            let _profile = request_profile.as_deref();
+            let _system = request_system.as_deref();
+
             unreachable!("persistence must not call the provider")
         }
         fn thinking_stripped_messages(&self) -> std::collections::HashMap<MessageId, usize> {
@@ -259,7 +281,7 @@ async fn thinking_strip_persistence_ignores_worker_only_rejections() {
         .lock()
         .await
         .history
-        .push(ConversationMessage::Assistant {
+        .push(ConversationMessage::Assistant { per_turn_effort: None,
             id: main,
             content: vec![ContentBlock::Thinking {
                 thinking: "main".into(),
@@ -271,4 +293,64 @@ async fn thinking_strip_persistence_ignores_worker_only_rejections() {
     let session = orch.session.lock().await;
     assert!(!session.thinking_signature_stripped);
     assert!(session.thinking_stripped_messages.is_empty());
+}
+
+#[tokio::test]
+async fn query_fallback_route_reaches_preparer_and_resets_after_scope() {
+    struct RoutePreparer(StdMutex<Vec<(String, Option<String>)>>);
+    #[async_trait]
+    impl ModelCallPreparer for RoutePreparer {
+        async fn prepare(
+            &self,
+            _: &ConversationOrchestrator,
+            _: ModelCallPath,
+            _: Option<&str>,
+            _: Option<&tokio_util::sync::CancellationToken>,
+            draft: PreparedModelCall,
+        ) -> Result<PreparedModelCall, OrchestratorError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((draft.model.clone(), draft.model_profile.clone()));
+            Ok(draft)
+        }
+    }
+    let preparer = Arc::new(RoutePreparer(StdMutex::new(vec![])));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig {
+            model: "primary".into(),
+            ..Default::default()
+        },
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_model_call_preparer(preparer.clone());
+    let fallback = crate::query_model::ModelRoute {
+        model: "fallback".into(),
+        profile: Some("other".into()),
+    };
+    let prepared = crate::query_model::ROUTE
+        .scope(
+            Some(fallback),
+            orch.prepare_model_call_snapshot(ModelCallPath::Streaming, None, None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared.model, "fallback");
+    orch.prepare_model_call_snapshot(ModelCallPath::Streaming, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        *preparer.0.lock().unwrap(),
+        [
+            ("fallback".into(), Some("other".into())),
+            ("primary".into(), None)
+        ]
+    );
+    assert_eq!(orch.session().lock().await.model, "primary");
 }

@@ -34,6 +34,7 @@ fn projected_response_model(metadata: &Value) -> Option<&str> {
 enum BlockKind {
     Text,
     ToolCall {
+        input_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         id: String,
         name: String,
         server: Option<Value>,
@@ -240,8 +241,8 @@ impl BlockAccumulator {
                 }),
                 _ => None,
             },
-            BlockKind::ToolCall { id, name, server } => match content {
-                Some(SdkBlock::ToolUse { input, .. }) => Some(if let Some(initial) = server {
+            BlockKind::ToolCall { id, name, server, input_projection } => match content {
+                Some(SdkBlock::ToolUse { input, input_json, .. }) => Some(if let Some(initial) = server {
                     ContentBlock::ServerToolUse {
                         id,
                         name,
@@ -252,10 +253,15 @@ impl BlockAccumulator {
                         },
                     }
                 } else {
+                    let projection = match input_json {
+                        Some(raw) => Some(lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).map_err(|error| LlmError::InvalidRequest { message: error.to_string() })?),
+                        None => input_projection,
+                    };
                     ContentBlock::ToolCall {
+                        input: projection.as_ref().map_or_else(|| input.clone(), |projection| projection.value.clone()),
+                        input_projection: projection,
                         id,
                         name,
-                        input: input.clone(),
                     }
                 }),
                 _ if server.is_some() => Some(ContentBlock::ServerToolUse {
@@ -304,12 +310,12 @@ fn type_mismatch(index: u32, expected: &str, got: &str) -> LlmError {
 fn block_kind_of(block: &ContentBlock) -> BlockKind {
     match block {
         ContentBlock::Text { .. } | ContentBlock::TextJsUtf16 { .. } => BlockKind::Text,
-        ContentBlock::ToolCall { id, name, .. } => BlockKind::ToolCall {
+        ContentBlock::ToolCall { id, name, input_projection, .. } => BlockKind::ToolCall { input_projection: input_projection.clone(),
             id: id.clone(),
             name: name.clone(),
             server: None,
         },
-        ContentBlock::ServerToolUse { id, name, input } => BlockKind::ToolCall {
+        ContentBlock::ServerToolUse { id, name, input } => BlockKind::ToolCall { input_projection: None,
             id: id.clone(),
             name: name.clone(),
             server: Some(input.clone()),
@@ -890,10 +896,10 @@ pub fn response_to_stream_events(resp: HistoryResponse) -> Vec<HistoryEvent> {
                     });
                 }
             }
-            ContentBlock::ToolCall { id, name, input } => {
+            ContentBlock::ToolCall { id, name, input , .. } => {
                 events.push(HistoryEvent::ContentBlockStart {
                     index,
-                    content_block: ContentBlock::ToolCall {
+                    content_block: ContentBlock::ToolCall { input_projection: None,
                         id: id.clone(),
                         name: name.clone(),
                         input: Value::Null,
@@ -1214,7 +1220,7 @@ mod tests {
             message_start("m1", "claude-mock"),
             HistoryEvent::ContentBlockStart {
                 index: 1,
-                content_block: ContentBlock::ToolCall {
+                content_block: ContentBlock::ToolCall { input_projection: None,
                     id: "tc-1".to_string(),
                     name: "Read".into(),
                     input: Value::Null,
@@ -1246,7 +1252,7 @@ mod tests {
         assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
         assert_eq!(resp.content.len(), 1);
         match &resp.content[0] {
-            ContentBlock::ToolCall { id, name, input } => {
+            ContentBlock::ToolCall { id, name, input , .. } => {
                 assert_eq!(id, "tc-1");
                 assert_eq!(name, "Read");
                 assert_eq!(input["file_path"], "foo.rs");
@@ -1264,7 +1270,7 @@ mod tests {
         accumulator
             .observe(HistoryEvent::ContentBlockStart {
                 index: 4,
-                content_block: ContentBlock::ToolCall {
+                content_block: ContentBlock::ToolCall { input_projection: None,
                     id: "tool-live".into(),
                     name: "Agent".into(),
                     input: Value::Null,
@@ -1292,7 +1298,7 @@ mod tests {
         assert_eq!(index, 4);
         assert!(matches!(
             block,
-            ContentBlock::ToolCall { id, name, input }
+            ContentBlock::ToolCall { id, name, input , .. }
                 if id == "tool-live" && name == "Agent" && input["prompt"] == "run child"
         ));
         assert_eq!(accumulator.partial_content().len(), 1);
@@ -1544,7 +1550,7 @@ mod tests {
             message_start("m1", "claude-mock"),
             HistoryEvent::ContentBlockStart {
                 index: 0,
-                content_block: ContentBlock::ToolCall {
+                content_block: ContentBlock::ToolCall { input_projection: None,
                     id: "tc-1".to_string(),
                     name: "Read".into(),
                     input: Value::Null,
@@ -1590,7 +1596,7 @@ mod tests {
                             input: Value::Null,
                         }
                     } else {
-                        ContentBlock::ToolCall {
+                        ContentBlock::ToolCall { input_projection: None,
                             id: "other".into(),
                             name: "Read".into(),
                             input: Value::Null,
@@ -1608,7 +1614,7 @@ mod tests {
                 evs.extend([
                     HistoryEvent::ContentBlockStart {
                         index: 1,
-                        content_block: ContentBlock::ToolCall {
+                        content_block: ContentBlock::ToolCall { input_projection: None,
                             id: "output".into(),
                             name: "StructuredOutput".into(),
                             input: Value::Null,
@@ -1660,7 +1666,7 @@ mod tests {
                     message_start("m1", "mock"),
                     HistoryEvent::ContentBlockStart {
                         index: 0,
-                        content_block: ContentBlock::ToolCall {
+                        content_block: ContentBlock::ToolCall { input_projection: None,
                             id: "output".into(),
                             name: "StructuredOutput".into(),
                             input: Value::Null,
@@ -1677,7 +1683,7 @@ mod tests {
                 if later_tool {
                     evs.push(HistoryEvent::ContentBlockStart {
                         index: 1,
-                        content_block: ContentBlock::ToolCall {
+                        content_block: ContentBlock::ToolCall { input_projection: None,
                             id: "later".into(),
                             name: "Write".into(),
                             input: Value::Null,
@@ -1913,7 +1919,7 @@ mod tests {
                     text: "reason".into(),
                     signature: Some("sig".into()),
                 },
-                ContentBlock::ToolCall {
+                ContentBlock::ToolCall { input_projection: None,
                     id: "tc-abc".to_string(),
                     name: "Read".into(),
                     input: serde_json::json!({"file_path": "x.rs", "limit": 10}),
@@ -1974,7 +1980,7 @@ mod tests {
         assert_round_trips(HistoryResponse {
             id: "m2".into(),
             model: "claude-mock".into(),
-            content: vec![ContentBlock::ToolCall {
+            content: vec![ContentBlock::ToolCall { input_projection: None,
                 id: "tc-xyz".to_string(),
                 name: "Now".into(),
                 input: serde_json::json!({}),

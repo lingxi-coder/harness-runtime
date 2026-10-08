@@ -14,8 +14,8 @@
 use async_trait::async_trait;
 use lingxi_core::host::sandbox::ProcessCommand;
 use lingxi_core::host::{
-    truncate_tail, FusionImplementHost, VerificationOutcome, VerificationRun, WorktreeManager,
-    FUSION_VERIFICATION_OUTPUT_BYTE_CAP,
+    FUSION_VERIFICATION_OUTPUT_BYTE_CAP, FusionImplementHost, VerificationOutcome, VerificationRun,
+    WorktreeManager, truncate_tail,
 };
 use mobile_linux_api::{ProcessError, ProcessStreamSink};
 use std::collections::HashMap;

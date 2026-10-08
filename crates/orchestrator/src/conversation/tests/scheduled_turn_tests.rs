@@ -25,7 +25,7 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
         ]
     };
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![events(), events()]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         crate::OrchestratorConfig::default(),
         api,
         streaming.clone(),
@@ -35,7 +35,7 @@ async fn scheduled_turn_uses_saved_model_but_preserves_human_defaults() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     let before = orch.session.lock().await.model.clone();
     let reasoning = orch.current_reasoning_selection();
     orch.run_scheduled_turn(
@@ -78,7 +78,7 @@ async fn missing_saved_model_fails_before_appending_prompt() {
     assert!(orch.snapshot_history().await.is_empty());
 }
 
-fn scheduled_session_fixture() -> ConversationOrchestrator {
+fn scheduled_session_fixture() -> Arc<ConversationOrchestrator> {
     let api = Arc::new(MockApiClient::new(Vec::new()));
     api.set_model_listings(vec![lingxi_core::host::ModelListing {
         request_model: "scheduled-model".into(),
@@ -93,7 +93,7 @@ fn scheduled_session_fixture() -> ConversationOrchestrator {
         message_delta_stop("end_turn"),
         message_stop()
     ]]));
-    ConversationOrchestrator::new_with_streaming(
+    ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         crate::OrchestratorConfig::default(),
         api,
         streaming,
@@ -103,7 +103,7 @@ fn scheduled_session_fixture() -> ConversationOrchestrator {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    )
+    ))
 }
 
 #[tokio::test]
@@ -128,7 +128,7 @@ async fn scheduled_target_gate_spans_binding_execution_and_result_capture() {
 
     let resume =
         <ConversationOrchestrator as lingxi_core::host::OrchestratorHandle>::resume_session(
-            &orch,
+            orch.as_ref(),
             resumed_session,
             Vec::new(),
             None,

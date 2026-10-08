@@ -1644,7 +1644,7 @@ impl Tool for WorkflowTool {
         if let Some(error) = launch_result.error {
             let model_content =
                 format!("Workflow script has a syntax error and was not launched:\n{error}");
-            return Ok(ToolCallResult {
+            return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({
                     "error": error,
                     "model_content": model_content,
@@ -1728,7 +1728,7 @@ impl Tool for WorkflowTool {
         if let Some(td) = launch_result.transcript_dir {
             obj.insert("transcriptDir".into(), Value::String(td));
         }
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content: None,
             new_messages: vec![],

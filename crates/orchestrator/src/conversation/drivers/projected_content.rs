@@ -10,6 +10,84 @@ pub(super) struct ProjectedUserContent {
     pub(super) text: Utf16JsonProjection,
 }
 
+pub(super) fn queued_human_content(
+    content: &Utf16JsonProjection,
+) -> Result<Vec<ContentBlock>, OrchestratorError> {
+    let parsed = ProjectedUserContent::parse(content)?;
+    let mut units: Vec<u16> = "The user sent a new message while you were working:\n"
+        .encode_utf16()
+        .collect();
+    units.extend(parsed.text.string_units("").expect("parsed exact text"));
+    units.extend("\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.".encode_utf16());
+    let wrapped = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .map_err(invalid_content)?;
+    let mut blocks = vec![text_block(wrapped, None)?];
+    blocks.extend(
+        parsed
+            .blocks
+            .into_iter()
+            .filter(|block| matches!(block, ContentBlock::Image { .. })),
+    );
+    Ok(blocks)
+}
+
+/// Native persisted attachment rendering. The API consumes the unwrapped
+/// system body; transcript rendering retains the system-reminder envelope.
+pub(super) fn queued_human_rendered(
+    content: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, OrchestratorError> {
+    let blocks = queued_human_content(content)?;
+    let utf16_code_units = match &blocks[0] {
+        ContentBlock::Text { text, .. } => text.encode_utf16().collect::<Vec<_>>(),
+        ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } => utf16_code_units.clone(),
+        _ => return Err(invalid_content("queued human text lost its exact carrier")),
+    };
+    let mut units: Vec<u16> = "<system-reminder>\n".encode_utf16().collect();
+    units.extend(utf16_code_units);
+    units.extend("\n</system-reminder>".encode_utf16());
+    let text = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .map_err(invalid_content)?;
+    let rendered_content = if content.value.is_string() {
+        text
+    } else {
+        let mut block =
+            Utf16JsonProjection::plain(serde_json::json!({"type":"text","text":text.value}));
+        block.set_pointer("/text", text).map_err(invalid_content)?;
+        let mut rendered_blocks = vec![block];
+        if let Some(values) = content.value.as_array() {
+            for (index, value) in values.iter().enumerate() {
+                if value.get("type").and_then(Value::as_str) == Some("image") {
+                    rendered_blocks.push(
+                        content
+                            .subprojection(&format!("/{index}"))
+                            .map_err(invalid_content)?,
+                    );
+                }
+            }
+        }
+        let mut content = Utf16JsonProjection::plain(Value::Array(
+            rendered_blocks
+                .iter()
+                .map(|block| block.value.clone())
+                .collect(),
+        ));
+        for (index, block) in rendered_blocks.into_iter().enumerate() {
+            content
+                .set_pointer(&format!("/{index}"), block)
+                .map_err(invalid_content)?;
+        }
+        content
+    };
+    let mut rendered =
+        Utf16JsonProjection::plain(serde_json::json!([{"content":rendered_content.value}]));
+    rendered
+        .set_pointer("/0/content", rendered_content)
+        .map_err(invalid_content)?;
+    Ok(rendered)
+}
+
 impl ProjectedUserContent {
     pub(super) fn parse(content: &Utf16JsonProjection) -> Result<Self, OrchestratorError> {
         content.validate().map_err(invalid_content)?;
@@ -183,6 +261,107 @@ mod tests {
             content.text.to_json_string().unwrap(),
             r#""before\ud800\nafter\udfff""#
         );
+    }
+
+    #[test]
+    fn queued_human_rendering_keeps_exact_text_and_media_per_delivery() {
+        let content = Utf16JsonProjection::parse(r#"[{"type":"text","text":"first\ud800"},{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}},{"type":"text","text":"last\udfff"}]"#).unwrap();
+        let wrapped = queued_human_content(&content).unwrap();
+        assert_eq!(wrapped.len(), 2);
+        assert!(matches!(&wrapped[1], ContentBlock::Image { .. }));
+        let ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } = &wrapped[0]
+        else {
+            panic!("lost exact queued text")
+        };
+        assert!(utf16_code_units
+            .windows(3)
+            .any(|units| units == [0xd800, 10, b'l' as u16]));
+        assert!(utf16_code_units.contains(&0xdfff));
+        let rendered = queued_human_rendered(&content).unwrap();
+        let exact = rendered
+            .subprojection("/0/content/0/text")
+            .unwrap()
+            .to_json_string()
+            .unwrap();
+        assert!(exact.contains(r"first\ud800\nlast\udfff"));
+        assert_eq!(
+            rendered.value.pointer("/0/content/1/type"),
+            Some(&serde_json::json!("image"))
+        );
+    }
+
+    #[test]
+    fn queued_human_wrapper_matches_both_pinned_native_requests() {
+        let receipt: Value = serde_json::from_str(include_str!(
+            "../../../../../scripts/tests/headless-fixtures/native-2.1.293-input-queue-probes.json"
+        ))
+        .unwrap();
+        let cases = receipt["cases"].as_object().unwrap();
+        let captures = cases
+            .iter()
+            .find(|(name, _)| name.contains("midtool"))
+            .unwrap()
+            .1
+            .as_array()
+            .unwrap();
+        assert_eq!(captures.len(), 2);
+        let wrapped = queued_human_content(&Utf16JsonProjection::plain(serde_json::json!(
+            "HEADLESS_MIDTOOL_B"
+        )))
+        .unwrap();
+        let text = match &wrapped[0] {
+            ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => text,
+            _ => panic!("exact queued text"),
+        };
+        for capture in captures {
+            let messages = capture["providerMessages"][1].as_array().unwrap();
+            let system = messages.last().unwrap();
+            assert_eq!(system["role"], "system");
+            assert_eq!(system["content"][0]["text"], *text);
+            assert_eq!(capture["observation"]["resultCount"], 1);
+        }
+    }
+
+    #[test]
+    fn per_delivery_projection_matches_both_native_multifold_requests() {
+        let receipt: Value = serde_json::from_str(include_str!(
+            "../../../../../scripts/tests/headless-fixtures/native-2.1.293-input-multifold-probes.json"
+        )).unwrap();
+        let messages = ["HEADLESS_MULTIFOLD_B", "HEADLESS_MULTIFOLD_C"]
+            .into_iter()
+            .map(|text| {
+                crate::ConversationOrchestrator::queued_human_attachment_projection(
+                    MessageId::new(),
+                    &Utf16JsonProjection::plain(serde_json::json!(text)),
+                )
+                .unwrap()
+            })
+            .collect();
+        let model = llm_runtime::convert::to_llm_messages(
+            llm_runtime::convert::normalize_messages_for_api(messages),
+        )
+        .unwrap();
+        assert_eq!(model.len(), 1);
+        assert_eq!(model[0].role, "system");
+        assert_eq!(model[0].content.len(), 1);
+        let text = match &model[0].content[0] {
+            llm_runtime::ContentBlock::Text { text, .. }
+            | llm_runtime::ContentBlock::TextJsUtf16 { text, .. } => text,
+            _ => panic!("native merged system text"),
+        };
+        let runs = receipt["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2);
+        for run in runs {
+            let native = run["providerMessages"][1]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap();
+            assert_eq!(native["role"], "system");
+            assert_eq!(native["content"][0]["text"], *text);
+        }
     }
 
     #[test]

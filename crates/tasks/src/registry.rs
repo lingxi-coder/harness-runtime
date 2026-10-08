@@ -169,6 +169,8 @@ pub struct TaskRegistry {
     /// (default 200), then bumps it on a cleared spawn. Interior-mutable so the
     /// shared `Arc<TaskRegistry>` the tool holds can count without a write lock.
     total_agent_spawns: AtomicU64,
+    agent_statistics: std::sync::Mutex<HashMap<lingxi_core::types::SessionId, Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>>>,
+    agent_spawn_tokens: std::sync::Mutex<HashMap<String, lingxi_core::host::agent_statistics::AgentSpawnToken>>,
     /// Session-wide WebSearch call counter — the `taskRegistry` `n` behind
     /// `getWebSearchCalls`/`incrementWebSearchCalls`/`resetWebSearchCalls` (parity
     /// 2.1.212). Session-global (shared across the main loop and its subagents,
@@ -554,6 +556,8 @@ impl TaskRegistry {
                 std::collections::VecDeque::new(),
             )),
             total_agent_spawns: AtomicU64::new(0),
+            agent_statistics: Default::default(),
+            agent_spawn_tokens: Default::default(),
             web_search_calls: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             lifecycle_gate: Arc::new(RwLock::new(())),
             accepting_tasks: AtomicBool::new(true),
@@ -669,6 +673,39 @@ impl TaskRegistry {
     /// Forget external routing only after the backend confirms termination.
     pub async fn unregister_external_teammate_task(&self, task_id: &str) {
         self.external_teammate_tasks.write().await.remove(task_id);
+    }
+
+    /// Retrieve the ephemeral statistics authority for one mounted session.
+    #[must_use]
+    pub fn agent_session_statistics(&self, session_id: lingxi_core::types::SessionId) -> Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics> {
+        self.agent_statistics.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id).or_default().clone()
+    }
+
+    pub async fn agent_statistics_for_parent(&self, agent_id: lingxi_core::types::AgentId) -> Option<Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>> {
+        let rows = self.tasks.read().await;
+        let task_id = rows.iter().find_map(|(id, state)| match state {
+            TaskState::LocalAgent(agent) if agent.agent_id == agent_id => Some(id),
+            _ => None,
+        })?;
+        self.agent_spawn_token(task_id).map(|token| token.statistics())
+    }
+
+    pub fn reset_agent_session_statistics(&self, session_id: lingxi_core::types::SessionId, clear_previous: Option<lingxi_core::types::SessionId>) {
+        let mut sessions = self.agent_statistics.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let statistics = clear_previous.and_then(|previous| sessions.get(&previous).cloned()).unwrap_or_default();
+        statistics.reset();
+        sessions.insert(session_id, statistics);
+    }
+
+    pub fn bind_agent_spawn_token(&self, task_id: &str, token: lingxi_core::host::agent_statistics::AgentSpawnToken) {
+        self.agent_spawn_tokens.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task_id.to_owned(), token);
+    }
+
+    fn agent_spawn_token(&self, task_id: &str) -> Option<lingxi_core::host::agent_statistics::AgentSpawnToken> {
+        self.agent_spawn_tokens.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(task_id).cloned()
     }
 
     /// Session running total of `Agent`-tool subagent spawns (claude 2.1.212
@@ -2674,6 +2711,11 @@ impl TaskRegistry {
                 ));
             }
 
+            if let TaskSpawnInput::LocalAgent { spawn_request: Some(request), .. } = &input {
+                if let Some(token) = request.agent_spawn_token.clone() {
+                    self.bind_agent_spawn_token(&id, token);
+                }
+            }
             tasks.insert(id.clone(), state);
             spawned.insert(id.clone(), task_type);
             if let Some(cleanup) = cleanup {
@@ -3488,6 +3530,14 @@ impl TaskRegistry {
                     }
                 }
                 TaskState::LocalAgent(a) => {
+                    if let Some(token) = self.agent_spawn_token(&task_id) {
+                        match status {
+                            TaskStatus::Completed => token.completed(),
+                            TaskStatus::Failed => token.failed(),
+                            TaskStatus::Killed => token.killed(lingxi_core::host::agent_statistics::AgentKillReason::from_task_reason(a.outcome.killed_by.as_deref().unwrap_or("user"))),
+                            _ => {}
+                        }
+                    }
                     a.is_parked = false;
                     a.base.status = status;
                     if let Some(finalizing) = agent_finalizing {
@@ -4423,6 +4473,9 @@ impl TaskRegistry {
             // stamping one would leave a completed task carrying a stop
             // initiator.
             if !agent.base.status.is_terminal() || agent.is_parked {
+                if let Some(token) = self.agent_spawn_token(&canonical) {
+                    token.killed(lingxi_core::host::agent_statistics::AgentKillReason::from_task_reason(killed_by));
+                }
                 agent.outcome.killed_by = Some(killed_by.to_string());
                 was_live_agent = true;
             }
@@ -5155,7 +5208,7 @@ impl TaskRegistry {
 
         let mut first_error = None;
         for task_id in task_ids {
-            if let Err(error) = self.kill(&task_id).await {
+            if let Err(error) = self.kill_with_reason(&task_id, "system").await {
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -5310,6 +5363,11 @@ impl TaskRegistry {
             .await
             .get(task_id_ref)
             .is_some_and(TaskState::is_terminated);
+        if was_live {
+            if let Some(token) = self.agent_spawn_token(task_id_ref) {
+                token.killed(lingxi_core::host::agent_statistics::AgentKillReason::User);
+            }
+        }
         if self
             .external_teammate_tasks
             .read()

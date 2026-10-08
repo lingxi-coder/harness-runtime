@@ -1,0 +1,446 @@
+{
+  "native_version": "2.1.286",
+  "native_sha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+  "source_byte_ranges": [
+    {
+      "signature": "async function l0(",
+      "start": 177773337,
+      "end": 177773475,
+      "sha256": "4dc79b1fd8f6034fa2f74f32393074550e2556e006dbcf3c3b809843b69c0949"
+    },
+    {
+      "signature": "async function QDn(",
+      "start": 184389863,
+      "end": 184390402,
+      "sha256": "9f2a0019822a3c0e1818456d7b92319dc015b2c43954f3b58e76618a441e38ca"
+    },
+    {
+      "signature": "async function Hot(",
+      "start": 184390402,
+      "end": 184391029,
+      "sha256": "e8e2a49a848c20e8f155ad6ad9c78a7bb2505d4128b6f76a44c0469627e8e34d"
+    },
+    {
+      "signature": "function $ot(",
+      "start": 184388419,
+      "end": 184388908,
+      "sha256": "63e4385fb18576a4958ac8b3a1465cdff2bdf610784c318a522fce4bf9fcec3b"
+    },
+    {
+      "signature": "var HDn=0.05,T7=4194304,jDn=40000;",
+      "start": 184387119,
+      "end": 184387153,
+      "sha256": "c0f33770bd93b4b3417f425ec2a2e491b63e296eaf32fe15e41b436085521afb"
+    }
+  ],
+  "coverage": {
+    "actual_native_functions": [
+      "l0",
+      "QDn",
+      "Hot"
+    ],
+    "controlled_seams": [
+      "Node fs.stat/readFile utf8 and Buffer UTF-8 decoder replace native Bun builtins",
+      "QDn backend supplies a padded Uint8Array view with real raw bytes and totalBytes",
+      "Hot downstream $ot markdown parser returns captured decoded text; logging and health are recorded callbacks"
+    ],
+    "size_bytes": "Rust local LoadedFile metadata uses raw bytes read; native $ot info has no size_bytes field"
+  },
+  "byte_limit": 4194304,
+  "byte_cases": [
+    {
+      "name": "empty",
+      "bytes": [],
+      "raw_size_bytes": 0,
+      "decoded_utf8_bytes": 0,
+      "l0_body": "",
+      "backend_body": "",
+      "hot_body": "",
+      "hot_backend_body": ""
+    },
+    {
+      "name": "ascii",
+      "bytes": [
+        35,
+        32,
+        114,
+        117,
+        108,
+        101,
+        115,
+        10,
+        104,
+        101,
+        108,
+        108,
+        111,
+        10
+      ],
+      "raw_size_bytes": 14,
+      "decoded_utf8_bytes": 14,
+      "l0_body": "# rules\nhello\n",
+      "backend_body": "# rules\nhello\n",
+      "hot_body": "# rules\nhello\n",
+      "hot_backend_body": "# rules\nhello\n"
+    },
+    {
+      "name": "valid-unicode",
+      "bytes": [
+        228,
+        184,
+        173,
+        230,
+        150,
+        135,
+        240,
+        159,
+        152,
+        128,
+        10
+      ],
+      "raw_size_bytes": 11,
+      "decoded_utf8_bytes": 11,
+      "l0_body": "中文😀\n",
+      "backend_body": "中文😀\n",
+      "hot_body": "中文😀\n",
+      "hot_backend_body": "中文😀\n"
+    },
+    {
+      "name": "bom-and-nul",
+      "bytes": [
+        239,
+        187,
+        191,
+        97,
+        0,
+        98
+      ],
+      "raw_size_bytes": 6,
+      "decoded_utf8_bytes": 6,
+      "l0_body": "﻿a\u0000b",
+      "backend_body": "﻿a\u0000b",
+      "hot_body": "﻿a\u0000b",
+      "hot_backend_body": "﻿a\u0000b"
+    },
+    {
+      "name": "isolated-continuations",
+      "bytes": [
+        128,
+        191
+      ],
+      "raw_size_bytes": 2,
+      "decoded_utf8_bytes": 6,
+      "l0_body": "��",
+      "backend_body": "��",
+      "hot_body": "��",
+      "hot_backend_body": "��"
+    },
+    {
+      "name": "invalid-leading-bytes",
+      "bytes": [
+        192,
+        193,
+        245,
+        255
+      ],
+      "raw_size_bytes": 4,
+      "decoded_utf8_bytes": 12,
+      "l0_body": "����",
+      "backend_body": "����",
+      "hot_body": "����",
+      "hot_backend_body": "����"
+    },
+    {
+      "name": "truncated-two-byte",
+      "bytes": [
+        194
+      ],
+      "raw_size_bytes": 1,
+      "decoded_utf8_bytes": 3,
+      "l0_body": "�",
+      "backend_body": "�",
+      "hot_body": "�",
+      "hot_backend_body": "�"
+    },
+    {
+      "name": "truncated-three-byte",
+      "bytes": [
+        226,
+        130
+      ],
+      "raw_size_bytes": 2,
+      "decoded_utf8_bytes": 3,
+      "l0_body": "�",
+      "backend_body": "�",
+      "hot_body": "�",
+      "hot_backend_body": "�"
+    },
+    {
+      "name": "truncated-four-byte",
+      "bytes": [
+        240,
+        159,
+        146
+      ],
+      "raw_size_bytes": 3,
+      "decoded_utf8_bytes": 3,
+      "l0_body": "�",
+      "backend_body": "�",
+      "hot_body": "�",
+      "hot_backend_body": "�"
+    },
+    {
+      "name": "overlong-two-byte",
+      "bytes": [
+        192,
+        175
+      ],
+      "raw_size_bytes": 2,
+      "decoded_utf8_bytes": 6,
+      "l0_body": "��",
+      "backend_body": "��",
+      "hot_body": "��",
+      "hot_backend_body": "��"
+    },
+    {
+      "name": "overlong-three-byte",
+      "bytes": [
+        224,
+        128,
+        175
+      ],
+      "raw_size_bytes": 3,
+      "decoded_utf8_bytes": 9,
+      "l0_body": "���",
+      "backend_body": "���",
+      "hot_body": "���",
+      "hot_backend_body": "���"
+    },
+    {
+      "name": "overlong-four-byte",
+      "bytes": [
+        240,
+        128,
+        128,
+        175
+      ],
+      "raw_size_bytes": 4,
+      "decoded_utf8_bytes": 12,
+      "l0_body": "����",
+      "backend_body": "����",
+      "hot_body": "����",
+      "hot_backend_body": "����"
+    },
+    {
+      "name": "encoded-high-surrogate",
+      "bytes": [
+        237,
+        160,
+        128
+      ],
+      "raw_size_bytes": 3,
+      "decoded_utf8_bytes": 9,
+      "l0_body": "���",
+      "backend_body": "���",
+      "hot_body": "���",
+      "hot_backend_body": "���"
+    },
+    {
+      "name": "encoded-low-surrogate",
+      "bytes": [
+        237,
+        191,
+        191
+      ],
+      "raw_size_bytes": 3,
+      "decoded_utf8_bytes": 9,
+      "l0_body": "���",
+      "backend_body": "���",
+      "hot_body": "���",
+      "hot_backend_body": "���"
+    },
+    {
+      "name": "out-of-range-scalar",
+      "bytes": [
+        244,
+        144,
+        128,
+        128
+      ],
+      "raw_size_bytes": 4,
+      "decoded_utf8_bytes": 12,
+      "l0_body": "����",
+      "backend_body": "����",
+      "hot_body": "����",
+      "hot_backend_body": "����"
+    },
+    {
+      "name": "wrong-continuation",
+      "bytes": [
+        226,
+        40,
+        161
+      ],
+      "raw_size_bytes": 3,
+      "decoded_utf8_bytes": 7,
+      "l0_body": "�(�",
+      "backend_body": "�(�",
+      "hot_body": "�(�",
+      "hot_backend_body": "�(�"
+    },
+    {
+      "name": "truncated-prefix-before-ascii",
+      "bytes": [
+        240,
+        159,
+        65
+      ],
+      "raw_size_bytes": 3,
+      "decoded_utf8_bytes": 4,
+      "l0_body": "�A",
+      "backend_body": "�A",
+      "hot_body": "�A",
+      "hot_backend_body": "�A"
+    },
+    {
+      "name": "valid-scalar-boundary-and-replacement",
+      "bytes": [
+        244,
+        143,
+        191,
+        191,
+        239,
+        191,
+        189
+      ],
+      "raw_size_bytes": 7,
+      "decoded_utf8_bytes": 7,
+      "l0_body": "􏿿�",
+      "backend_body": "􏿿�",
+      "hot_body": "􏿿�",
+      "hot_backend_body": "􏿿�"
+    },
+    {
+      "name": "invalid-parent-with-import",
+      "bytes": [
+        112,
+        97,
+        114,
+        101,
+        110,
+        116,
+        32,
+        255,
+        10,
+        64,
+        46,
+        47,
+        99,
+        104,
+        105,
+        108,
+        100,
+        46,
+        109,
+        100,
+        10
+      ],
+      "raw_size_bytes": 21,
+      "decoded_utf8_bytes": 23,
+      "l0_body": "parent �\n@./child.md\n",
+      "backend_body": "parent �\n@./child.md\n",
+      "hot_body": "parent �\n@./child.md\n",
+      "hot_backend_body": "parent �\n@./child.md\n"
+    },
+    {
+      "name": "invalid-child-with-import",
+      "bytes": [
+        99,
+        104,
+        105,
+        108,
+        100,
+        32,
+        237,
+        160,
+        128,
+        10,
+        64,
+        46,
+        47,
+        103,
+        114,
+        97,
+        110,
+        100,
+        99,
+        104,
+        105,
+        108,
+        100,
+        46,
+        109,
+        100,
+        10
+      ],
+      "raw_size_bytes": 27,
+      "decoded_utf8_bytes": 33,
+      "l0_body": "child ���\n@./grandchild.md\n",
+      "backend_body": "child ���\n@./grandchild.md\n",
+      "hot_body": "child ���\n@./grandchild.md\n",
+      "hot_backend_body": "child ���\n@./grandchild.md\n"
+    }
+  ],
+  "stat_cases": [
+    {
+      "name": "exact-limit",
+      "skipped": false,
+      "read_calls": 1,
+      "decoded_length": 4194304,
+      "callback_is_directory": null
+    },
+    {
+      "name": "over-limit",
+      "skipped": true,
+      "read_calls": 0,
+      "decoded_length": null,
+      "callback_is_directory": false
+    },
+    {
+      "name": "directory",
+      "skipped": true,
+      "read_calls": 0,
+      "decoded_length": null,
+      "callback_is_directory": true
+    }
+  ],
+  "backend_cases": [
+    {
+      "name": "absent",
+      "expected": {
+        "kind": "absent"
+      }
+    },
+    {
+      "name": "over-limit",
+      "expected": {
+        "kind": "skipped",
+        "isDirectory": false
+      }
+    },
+    {
+      "name": "directory",
+      "expected": {
+        "kind": "skipped",
+        "isDirectory": true
+      }
+    },
+    {
+      "name": "read-error",
+      "expected": {
+        "kind": "error",
+        "code": "EACCES"
+      }
+    }
+  ]
+}

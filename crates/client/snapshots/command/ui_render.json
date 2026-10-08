@@ -1,0 +1,5 @@
+{
+  "type": "ui_render",
+  "request_id": "render-1",
+  "request_json": "{\"subtype\":\"ui_render\"}"
+}

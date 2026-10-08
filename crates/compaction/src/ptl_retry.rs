@@ -144,9 +144,9 @@ mod tests {
 
     /// A fresh-id assistant message carrying a tool-use block (starts a group).
     fn assistant(tool: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: ToolUseId::new(),
                 name: tool.into(),
                 input: json!({}),
@@ -157,9 +157,9 @@ mod tests {
     }
 
     fn user_result() -> ConversationMessage {
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "ok".into(),
                 is_error: Some(false),

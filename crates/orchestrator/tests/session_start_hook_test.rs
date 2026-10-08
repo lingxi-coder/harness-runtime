@@ -34,6 +34,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tool_api::registry::ToolRegistry;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+};
 
 // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
 struct UnusedHttp;
@@ -65,6 +68,89 @@ impl RuntimeSpawner for UnusedRuntime {
         _h: &lingxi_core::host::BackgroundTaskHandle,
     ) -> Result<(), RuntimeError> {
         Ok(())
+    }
+}
+
+struct TestModSettingsReader;
+
+#[async_trait]
+impl hooks::mods::ModSettingsReader for TestModSettingsReader {
+    async fn read(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, hooks::mods::ModError> {
+        assert_eq!(input, serde_json::json!({"source":"policy"}));
+        Ok(serde_json::json!({"custom":"managed"}))
+    }
+}
+
+struct ListedTool {
+    schema: serde_json::Value,
+}
+
+#[async_trait]
+impl Tool for ListedTool {
+    fn name(&self) -> &str {
+        "Inspector"
+    }
+
+    fn input_schema(&self) -> &serde_json::Value {
+        &self.schema
+    }
+
+    fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+        true
+    }
+
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn check_permissions(
+        &self,
+        _input: &serde_json::Value,
+        _ctx: &tool_api::context::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+        "Inspect the current repository.".into()
+    }
+
+    async fn prompt(&self, _opts: &PromptOptions) -> String {
+        "Inspect the current repository.".into()
+    }
+
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _ctx: tool_api::context::ToolUseContext,
+        _tx: tool_api::progress::ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            data: serde_json::json!({}),
+            model_content: None,
+            new_messages: Vec::new(),
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: None,
+        })
     }
 }
 
@@ -144,6 +230,112 @@ fn orch_with(hooks: Arc<HookExecutorImpl>) -> ConversationOrchestrator {
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
     )
+}
+
+#[tokio::test]
+async fn mod_session_start_runs_at_the_host_startup_seam() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("start.js");
+    std::fs::write(
+        &module,
+        r#"
+        export function register(on) {
+          on('session.start', async ($, e, next) => {
+            if (typeof e.cwd !== 'string' || e.surface !== null || e.isInteractive !== false) {
+              throw new Error('unexpected session.start shape');
+            }
+            $.ui.log('mod started', { to: 'transcript' });
+            return next(e);
+          });
+        }
+        "#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("start-mod", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let mut registry = HookRegistry::new();
+    registry.set_mod_host(host);
+    let registry = Arc::new(RwLock::new(registry));
+    let exec = Arc::new(HookExecutorImpl::new(
+        registry.clone(),
+        Arc::new(UnusedHttp),
+        Arc::new(UnusedRuntime),
+    ));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        exec,
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_hook_registry(registry);
+    orch.fire_session_start("startup").await;
+    assert!(output.snapshot().await.iter().any(|event| matches!(
+        event,
+        lingxi_core::host::OutputEvent::ModLog { plugin, text }
+        if plugin == "start-mod" && text == "mod started"
+    )));
+}
+
+#[tokio::test]
+async fn mod_settings_and_tool_list_reach_the_host_during_startup() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("settings.js");
+    std::fs::write(
+        &module,
+        r#"
+        export function register(on) {
+          on('session.start', async ($, e, next) => {
+            const settings = await $.settings.read({ source: 'policy' });
+            const tools = await $.tool.list();
+            $.ui.log(`${settings.custom}:${tools[0]?.name}:${tools[0]?.description}:${tools[0]?.mcp}`, { to: 'transcript' });
+            return next(e);
+          });
+        }
+        "#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("settings-mod", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let mut registry = HookRegistry::new();
+    registry.set_mod_host(host);
+    let registry = Arc::new(RwLock::new(registry));
+    let exec = Arc::new(HookExecutorImpl::new(
+        registry.clone(),
+        Arc::new(UnusedHttp),
+        Arc::new(UnusedRuntime),
+    ));
+    let output = Arc::new(MockOutputStream::new());
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(ListedTool {
+        schema: serde_json::json!({"type":"object"}),
+    }));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(tools),
+        exec,
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_hook_registry(registry)
+    .with_mod_settings_reader(Arc::new(TestModSettingsReader));
+    orch.fire_session_start("startup").await;
+    assert!(output.snapshot().await.iter().any(|event| matches!(
+        event,
+        lingxi_core::host::OutputEvent::ModLog { plugin, text }
+        if plugin == "settings-mod" && text == "managed:Inspector:Inspect the current repository.:false"
+    )));
 }
 
 #[tokio::test]

@@ -40,11 +40,11 @@ fn build_orch(
 ) -> (
     Arc<MockStreamingApiClient>,
     Arc<MockOutputStream>,
-    ConversationOrchestrator,
+    Arc<ConversationOrchestrator>,
 ) {
     let api = Arc::new(MockStreamingApiClient::with_turns(turns));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
         api.clone(),
@@ -54,7 +54,7 @@ fn build_orch(
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
     (api, output, orch)
 }
 
@@ -67,7 +67,7 @@ fn count_nudges(msgs: &[ConversationMessage]) -> usize {
     msgs.iter()
         .filter(|m| {
             matches!(m, ConversationMessage::User { content, is_meta: true, .. }
-                if matches!(content.first(), Some(ContentBlock::Text { text }) if text == NUDGE))
+                if matches!(content.first(), Some(ContentBlock::Text { text, .. }) if text == NUDGE))
         })
         .count()
 }

@@ -170,13 +170,13 @@ mod tests {
 
     #[async_trait]
     impl OutputStream for SpyOutput {
-        async fn emit_text(&self, _text: &str) {}
+        async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
         async fn emit_tool_call(
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _input: &serde_json::Value,
-        ) {
+         _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
         }
         async fn emit_tool_result(
             &self,
@@ -184,7 +184,7 @@ mod tests {
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
-        ) {
+         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
         }
         async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
         async fn emit_coordinator_worker(

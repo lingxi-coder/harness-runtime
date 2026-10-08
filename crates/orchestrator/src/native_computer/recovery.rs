@@ -498,7 +498,7 @@ async fn restore_marker(
     // This view is derived from execution facts and scoped by response identity.
     restore_message(
         orch,
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: recovery_message_id(session_id, kind, calls, origins)?,
             content,
             is_meta: true,

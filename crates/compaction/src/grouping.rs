@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn oracle_261_estimates_each_wire_block_with_utf16_rounding() {
-        let message = ConversationMessage::Assistant {
+        let message = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -174,7 +174,7 @@ mod tests {
                 ContentBlock::Text {
                     text: "😀".into(), citations: None
                 },
-                ContentBlock::ToolUse {
+                ContentBlock::ToolUse { input_projection: None,
                     id: ToolUseId::new(),
                     name: "Read".into(),
                     input: json!({}),
@@ -194,9 +194,9 @@ mod tests {
 
     #[test]
     fn oracle_261_estimates_nested_wire_results_instead_of_display_text() {
-        let message = ConversationMessage::User {
+        let message = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "display".repeat(1000),
                 is_error: Some(false),
@@ -215,9 +215,9 @@ mod tests {
     }
 
     fn assistant_with_id(id: MessageId, tool: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id,
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: ToolUseId::new(),
                 name: tool.into(),
                 input: json!({}),
@@ -228,9 +228,9 @@ mod tests {
     }
 
     fn user_result(tool_use_id: ToolUseId) -> ConversationMessage {
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id,
                 content: "ok".into(),
                 is_error: Some(false),

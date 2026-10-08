@@ -1,0 +1,2065 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "main pd object template",
+      "start": 187856903,
+      "end": 187857575,
+      "sha256": "5c925dc3f0c6b430651f84b543d36ab815fa6d1820db214250a65b4a65d96fef"
+    },
+    {
+      "label": "side En object template",
+      "start": 187413929,
+      "end": 187414213,
+      "sha256": "0c4096da9b9663929f93b363111c973a45940adf91c28cb4c88083fa38027134"
+    }
+  ],
+  "scope": "Unmodified main pd and side En templates; feature values supplied as computed codec fields. Includes final main stream spread, key collisions and computed tails. Config admission/extra config handled by the separate 204-case oracle; not entire native CLI.",
+  "cases": [
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": []
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": []
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"extension\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"extension\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": []
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"override\"},\"max_tokens\":7,\"stream\":false,\"speed\":\"slow\",\"thread\":\"extra\",\"diagnostics\":\"extra\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"override\"},\"max_tokens\":7,\"stream\":false,\"speed\":\"slow\",\"thread\":\"extra\",\"diagnostics\":\"extra\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": []
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"before\":\"one\",\"after\":\"two\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"before\":\"one\",\"after\":\"two\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "stream": true
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "stream": true,
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "stream": true
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"extension\":true,\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "stream": true,
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"extension\":true,\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "stream": true
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"override\"},\"max_tokens\":7,\"stream\":true,\"speed\":\"slow\",\"thread\":\"extra\",\"diagnostics\":\"extra\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "stream": true,
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"override\"},\"max_tokens\":7,\"stream\":true,\"speed\":\"slow\",\"thread\":\"extra\",\"diagnostics\":\"extra\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "stream": true
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"before\":\"one\",\"after\":\"two\",\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "stream": true,
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"before\":\"one\",\"after\":\"two\",\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "context_management": {
+            "fixture": true
+          },
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "speed": "fast",
+          "thread": {
+            "id": "thread"
+          },
+          "diagnostics": {
+            "previous_message_id": "previous"
+          }
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "thread": {
+            "id": "thread"
+          },
+          "speed": "fast",
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "context_management": {
+            "fixture": true
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "context_management": {
+            "fixture": true
+          },
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "speed": "fast",
+          "thread": {
+            "id": "thread"
+          },
+          "diagnostics": {
+            "previous_message_id": "previous"
+          }
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"extension\":true,\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "thread": {
+            "id": "thread"
+          },
+          "speed": "fast",
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "context_management": {
+            "fixture": true
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"extension\":true,\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "context_management": {
+            "fixture": true
+          },
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "speed": "fast",
+          "thread": {
+            "id": "thread"
+          },
+          "diagnostics": {
+            "previous_message_id": "previous"
+          }
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"override\"},\"max_tokens\":7,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"stream\":false,\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "thread": {
+            "id": "thread"
+          },
+          "speed": "fast",
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "context_management": {
+            "fixture": true
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"override\"},\"max_tokens\":7,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"stream\":false,\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "context_management": {
+            "fixture": true
+          },
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "speed": "fast",
+          "thread": {
+            "id": "thread"
+          },
+          "diagnostics": {
+            "previous_message_id": "previous"
+          }
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"before\":\"one\",\"after\":\"two\",\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "thread": {
+            "id": "thread"
+          },
+          "speed": "fast",
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "context_management": {
+            "fixture": true
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"before\":\"one\",\"after\":\"two\",\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "context_management": {
+            "fixture": true
+          },
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "speed": "fast",
+          "thread": {
+            "id": "thread"
+          },
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "stream": true
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "stream": true,
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "thread": {
+            "id": "thread"
+          },
+          "speed": "fast",
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "context_management": {
+            "fixture": true
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "context_management": {
+            "fixture": true
+          },
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "speed": "fast",
+          "thread": {
+            "id": "thread"
+          },
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "stream": true
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"extension\":true,\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "stream": true,
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "thread": {
+            "id": "thread"
+          },
+          "speed": "fast",
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "context_management": {
+            "fixture": true
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"extension\":true,\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "context_management": {
+            "fixture": true
+          },
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "speed": "fast",
+          "thread": {
+            "id": "thread"
+          },
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "stream": true
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"override\"},\"max_tokens\":7,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"stream\":true,\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "stream": true,
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "thread": {
+            "id": "thread"
+          },
+          "speed": "fast",
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "context_management": {
+            "fixture": true
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"override\"},\"max_tokens\":7,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"stream\":true,\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "context_management": {
+            "fixture": true
+          },
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "speed": "fast",
+          "thread": {
+            "id": "thread"
+          },
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "stream": true
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"before\":\"one\",\"after\":\"two\",\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "main",
+        "base": {
+          "stream": true,
+          "diagnostics": {
+            "previous_message_id": "previous"
+          },
+          "thread": {
+            "id": "thread"
+          },
+          "speed": "fast",
+          "safeguards": [
+            {
+              "type": "fixture",
+              "classifier_context": {
+                "fixture": true
+              }
+            }
+          ],
+          "context_management": {
+            "fixture": true
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"system\":[],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16,\"thinking\":{\"type\":\"adaptive\"},\"temperature\":0.5,\"context_management\":{\"fixture\":true},\"safeguards\":[{\"type\":\"fixture\",\"classifier_context\":{\"fixture\":true}}],\"before\":\"one\",\"after\":\"two\",\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"speed\":\"fast\",\"thread\":{\"id\":\"thread\"},\"diagnostics\":{\"previous_message_id\":\"previous\"},\"stream\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": []
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"metadata\":{\"user_id\":\"fixture\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"metadata\":{\"user_id\":\"fixture\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": []
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"metadata\":{\"user_id\":\"fixture\"},\"extension\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"metadata\":{\"user_id\":\"fixture\"},\"extension\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": []
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"max_tokens\":7,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"metadata\":{\"user_id\":\"override\"},\"stream\":false,\"speed\":\"slow\",\"thread\":\"extra\",\"diagnostics\":\"extra\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"max_tokens\":7,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"metadata\":{\"user_id\":\"override\"},\"stream\":false,\"speed\":\"slow\",\"thread\":\"extra\",\"diagnostics\":\"extra\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": []
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"metadata\":{\"user_id\":\"fixture\"},\"before\":\"one\",\"after\":\"two\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"metadata\":{\"user_id\":\"fixture\"},\"before\":\"one\",\"after\":\"two\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "stop_sequences": [
+            "stop"
+          ]
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}},\"effort\":\"high\"},\"temperature\":0.5,\"stop_sequences\":[\"stop\"],\"thinking\":{\"type\":\"adaptive\"},\"metadata\":{\"user_id\":\"fixture\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "stop_sequences": [
+            "stop"
+          ],
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {}
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}},\"effort\":\"high\"},\"temperature\":0.5,\"stop_sequences\":[\"stop\"],\"thinking\":{\"type\":\"adaptive\"},\"metadata\":{\"user_id\":\"fixture\"}}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "stop_sequences": [
+            "stop"
+          ]
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}},\"effort\":\"high\"},\"temperature\":0.5,\"stop_sequences\":[\"stop\"],\"thinking\":{\"type\":\"adaptive\"},\"metadata\":{\"user_id\":\"fixture\"},\"extension\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "stop_sequences": [
+            "stop"
+          ],
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "extension": true
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}},\"effort\":\"high\"},\"temperature\":0.5,\"stop_sequences\":[\"stop\"],\"thinking\":{\"type\":\"adaptive\"},\"metadata\":{\"user_id\":\"fixture\"},\"extension\":true}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "stop_sequences": [
+            "stop"
+          ]
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"max_tokens\":7,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}},\"effort\":\"high\"},\"temperature\":0.5,\"stop_sequences\":[\"stop\"],\"thinking\":{\"type\":\"adaptive\"},\"metadata\":{\"user_id\":\"override\"},\"stream\":false,\"speed\":\"slow\",\"thread\":\"extra\",\"diagnostics\":\"extra\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "stop_sequences": [
+            "stop"
+          ],
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "model": "override",
+          "max_tokens": 7,
+          "metadata": {
+            "user_id": "override"
+          },
+          "stream": false,
+          "speed": "slow",
+          "thread": "extra",
+          "diagnostics": "extra"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"override\",\"max_tokens\":7,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}},\"effort\":\"high\"},\"temperature\":0.5,\"stop_sequences\":[\"stop\"],\"thinking\":{\"type\":\"adaptive\"},\"metadata\":{\"user_id\":\"override\"},\"stream\":false,\"speed\":\"slow\",\"thread\":\"extra\",\"diagnostics\":\"extra\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "max_tokens": 16,
+          "model": "claude-sonnet-4-6",
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "system": [],
+          "tools": [],
+          "tool_choice": {
+            "type": "any"
+          },
+          "temperature": 0.5,
+          "thinking": {
+            "type": "adaptive"
+          },
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "stop_sequences": [
+            "stop"
+          ]
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}},\"effort\":\"high\"},\"temperature\":0.5,\"stop_sequences\":[\"stop\"],\"thinking\":{\"type\":\"adaptive\"},\"metadata\":{\"user_id\":\"fixture\"},\"before\":\"one\",\"after\":\"two\"}"
+      }
+    },
+    {
+      "input": {
+        "kind": "side",
+        "base": {
+          "stop_sequences": [
+            "stop"
+          ],
+          "output_config": {
+            "effort": "high",
+            "format": {
+              "type": "json_schema",
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "thinking": {
+            "type": "adaptive"
+          },
+          "temperature": 0.5,
+          "tool_choice": {
+            "type": "any"
+          },
+          "tools": [],
+          "system": [],
+          "messages": [
+            {
+              "role": "user",
+              "content": "fixture"
+            }
+          ],
+          "metadata": {
+            "user_id": "fixture"
+          },
+          "model": "claude-sonnet-4-6",
+          "max_tokens": 16
+        },
+        "extra": {
+          "0": 0,
+          "2": 2,
+          "before": "one",
+          "after": "two"
+        }
+      },
+      "expected": {
+        "body_json": "{\"0\":0,\"2\":2,\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16,\"system\":[],\"messages\":[{\"role\":\"user\",\"content\":\"fixture\"}],\"tools\":[],\"tool_choice\":{\"type\":\"any\"},\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}},\"effort\":\"high\"},\"temperature\":0.5,\"stop_sequences\":[\"stop\"],\"thinking\":{\"type\":\"adaptive\"},\"metadata\":{\"user_id\":\"fixture\"},\"before\":\"one\",\"after\":\"two\"}"
+      }
+    }
+  ]
+}

@@ -571,6 +571,7 @@ async fn websocket_session_second_compatible_request_uses_previous_response_delt
             lingxi_llm_client::protocol::ContentBlock::Text {
                 text: "answer".into(),
                 thought_signature: None,
+                citations: None,
             },
         ]),
     );

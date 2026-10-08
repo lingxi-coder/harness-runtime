@@ -302,7 +302,7 @@ impl Tool for ListAgentsTool {
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let listing = self.format_listing(&ctx).await;
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "listing": listing }),
             model_content: Some(listing),
             new_messages: vec![],
@@ -484,6 +484,7 @@ mod tests {
                 task_type: "local_agent".into(),
                 status: "running".into(),
                 description: "agent".into(),
+                agent_facts: None,
                 ..Default::default()
             },
         );

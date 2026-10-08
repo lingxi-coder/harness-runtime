@@ -9,10 +9,14 @@ use thiserror::Error;
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::messages::Message;
+use json_projection::{Utf16JsonProjection, Utf16JsonProjectionError};
 
 /// Errors produced by codecs.
 #[derive(Debug, Error)]
 pub enum CodecError {
+    #[error("JSON-RPC projection: {0}")]
+    /// Exact JSON carrier is invalid or cannot be encoded.
+    Projection(#[from] Utf16JsonProjectionError),
     /// Frame exceeded the configured max size.
     #[error("frame too large: {0} bytes (max {1})")]
     FrameTooLarge(usize, usize),
@@ -25,6 +29,21 @@ pub enum CodecError {
     /// Underlying I/O error from the framed transport.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+fn decode_message(bytes: &[u8]) -> Result<Message, CodecError> {
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(value) => Ok(serde_json::from_value(value)?),
+        Err(original) => {
+            let projection = std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|text| Utf16JsonProjection::parse(text).ok());
+            match projection {
+                Some(projection) => Ok(Message::from_projection(projection)?),
+                None => Err(CodecError::Json(original)),
+            }
+        }
+    }
 }
 
 /// Default maximum header size — matches Claude Code's 64 KiB LSP framing cap.
@@ -79,7 +98,7 @@ impl Encoder<Message> for LspCodec {
     type Error = CodecError;
 
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let body = serde_json::to_vec(&item)?;
+        let body = item.projected()?.to_json_string()?.into_bytes();
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
         dst.reserve(header.len() + body.len());
         dst.put_slice(header.as_bytes());
@@ -101,24 +120,14 @@ impl Decoder for LspCodec {
                 }
                 let body = src.split_to(body_len);
                 self.pending_body_len = None;
-                let v: Value = match serde_json::from_slice(&body) {
+                let message = match decode_message(&body) {
                     Ok(value) => value,
                     Err(error) => {
                         tracing::warn!(%error, "LSP: dropped unparseable message body");
                         continue;
                     }
                 };
-                if !v.is_object() {
-                    tracing::warn!("LSP: dropped message body that is not an object");
-                    continue;
-                }
-                match serde_json::from_value(v) {
-                    Ok(message) => return Ok(Some(message)),
-                    Err(error) => {
-                        tracing::warn!(%error, "LSP: dropped unrecognized JSON-RPC message body");
-                        continue;
-                    }
-                }
+                return Ok(Some(message));
             }
 
             // Locate `\r\n\r\n` separator.
@@ -255,7 +264,7 @@ impl Encoder<Message> for LineCodec {
     type Error = CodecError;
 
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let body = serde_json::to_vec(&item)?;
+        let body = item.projected()?.to_json_string()?.into_bytes();
         dst.reserve(body.len() + 1);
         dst.put_slice(&body);
         dst.put_u8(b'\n');
@@ -295,9 +304,7 @@ impl Decoder for LineCodec {
                 return Err(CodecError::FrameTooLarge(line.len(), self.max_frame_size));
             }
 
-            let v: Value = serde_json::from_slice(&line)?;
-            let msg: Message = serde_json::from_value(v)?;
-            return Ok(Some(msg));
+            return Ok(Some(decode_message(&line)?));
         }
     }
 }

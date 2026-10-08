@@ -1,0 +1,43 @@
+{
+  "version": "2.1.293",
+  "platform": "darwin-arm64",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "method": "Bounded read-only native embedded JavaScript byte ranges; observed runtime version comes from raw request headers, not a literal in this source.",
+  "excerpts": [
+    {
+      "id": "external_build_user_agent",
+      "offset": 186511405,
+      "length": 915,
+      "sha256": "a990dc721722e9b17497ce55e7bf9198a8080b7f4c5812ac24fc1de228b104c8",
+      "source": "eturn lm.getStore()?.workload}function TDn(e,n){return lm.run({workload:e},n)}function VH(){let e=process.env.CLAUDE_AGENT_SDK_VERSION?`, agent-sdk/${process.env.CLAUDE_AGENT_SDK_VERSION}`:\"\",n=a.CLAUDE_AGENT_SDK_CLIENT_APP?`, client-app/${a.CLAUDE_AGENT_SDK_CLIENT_APP}`:\"\",r=Zhr(),s=r?`, workload/${r}`:\"\";return`claude-cli/${{ISSUES_EXPLAINER:\"report the issue at https://github.com/anthropics/claude-code/issues\",PACKAGE_URL:\"@anthropic-ai/claude-code\",README_URL:\"https://code.claude.com/docs/en/overview\",VERSION:\"2.1.293\",FEEDBACK_CHANNEL:\"https://github.com/anthropics/claude-code/issues\",BUILD_TIME:\"2026-10-07T06:36:42Z\",GIT_SHA:\"3abc54a9d60b4d12c627afad22d6e5f58a6199d2\",HOOKS_WORKER_URL:\"/$bunfs/root/src/plugins/functionHooks/hooks-worker/hooks-worker.js\",DD_SOURCEMAP_GROUP:\"darwin\"}.VERSION} (external, ${a.CLAUDE_CODE_ENTRYPOINT??\"cli\"}${e}${n}${s})`}function w6(){let e=[];if(a.CLAUDE_CODE_ENTRYPOI"
+    },
+    {
+      "id": "entrypoint_defaulting",
+      "offset": 184519888,
+      "length": 637,
+      "sha256": "9f961b6868a34a89938664cdfcb9ee8ec1dd7d6ffdfdba04717c701f87ea7cba",
+      "source": "Te)}function D(e){if(a.CLAUDE_CODE_ENTRYPOINT){if(a.CLAUDE_CODE_ENTRYPOINT===\"local_agent\")a.set(\"CLAUDE_CODE_ENTRYPOINT\",\"local-agent\");if(a.CLAUDE_CODE_ENTRYPOINT===\"cli\"&&e)a.set(\"CLAUDE_CODE_ENTRYPOINT\",\"sdk-cli\");return}let t=process.argv.slice(2),o=t.indexOf(\"mcp\");if(o!==-1&&t[o+1]===\"serve\"){a.set(\"CLAUDE_CODE_ENTRYPOINT\",\"mcp\");return}if(Le(a.CLAUDE_CODE_ACTION)){a.set(\"CLAUDE_CODE_ENTRYPOINT\",\"claude-code-github-action\");return}a.set(\"CLAUDE_CODE_ENTRYPOINT\",e?\"sdk-cli\":\"cli\")}function bSo(e){let t=e.indexOf(\"--\");return t===-1?e:e.slice(0,t)}function O1n(e){let t=bSo(e);if(t.includes(\"-r\")||t.includes(\"--resume\")||t.in"
+    },
+    {
+      "id": "stainless_runtime_mapping",
+      "offset": 190216833,
+      "length": 2767,
+      "sha256": "1909381710e530a9d4db51559039ecbea599f7dba9a41134735ba971343b1fc4",
+      "source": "0.128.0\";var Sds=()=>typeof window<\"u\"&&typeof window.document<\"u\"&&typeof navigator<\"u\";function Q(){if(typeof Deno<\"u\"&&Deno.build!=null)return\"deno\";if(typeof EdgeRuntime<\"u\")return\"edge\";if(Object.prototype.toString.call(typeof globalThis.process<\"u\"?globalThis.process:0)===\"[object process]\")return\"node\";return\"unknown\"}var ee=()=>{let e=Q();if(e===\"deno\")return{\"X-Stainless-Lang\":\"js\",\"X-Stainless-Package-Version\":Yk,\"X-Stainless-OS\":x(Deno.build.os),\"X-Stainless-Arch\":D(Deno.build.arch),\"X-Stainless-Runtime\":\"deno\",\"X-Stainless-Runtime-Version\":typeof Deno.version===\"string\"?Deno.version:Deno.version?.deno??\"unknown\"};if(typeof EdgeRuntime<\"u\")return{\"X-Stainless-Lang\":\"js\",\"X-Stainless-Package-Version\":Yk,\"X-Stainless-OS\":\"Unknown\",\"X-Stainless-Arch\":`other:${EdgeRuntime}`,\"X-Stainless-Runtime\":\"edge\",\"X-Stainless-Runtime-Version\":globalThis.process?.version??\"unknown\"};if(e===\"node\")return{\"X-Stainless-Lang\":\"js\",\"X-Stainless-Package-Version\":Yk,\"X-Stainless-OS\":x(globalThis.process.platform??\"unknown\"),\"X-Stainless-Arch\":D(globalThis.process.arch??\"unknown\"),\"X-Stainless-Runtime\":\"node\",\"X-Stainless-Runtime-Version\":globalThis.process.version??\"unknown\"};let n=te();if(n)return{\"X-Stainless-Lang\":\"js\",\"X-Stainless-Package-Version\":Yk,\"X-Stainless-OS\":\"Unknown\",\"X-Stainless-Arch\":\"unknown\",\"X-Stainless-Runtime\":`browser:${n.browser}`,\"X-Stainless-Runtime-Version\":n.version};return{\"X-Stainless-Lang\":\"js\",\"X-Stainless-Package-Version\":Yk,\"X-Stainless-OS\":\"Unknown\",\"X-Stainless-Arch\":\"unknown\",\"X-Stainless-Runtime\":\"unknown\",\"X-Stainless-Runtime-Version\":\"unknown\"}};function te(){if(typeof navigator>\"u\"||!navigator)return null;let e=[{key:\"edge\",pattern:/Edge(?:\\W+(\\d+)\\.(\\d+)(?:\\.(\\d+))?)?/},{key:\"ie\",pattern:/MSIE(?:\\W+(\\d+)\\.(\\d+)(?:\\.(\\d+))?)?/},{key:\"ie\",pattern:/Trident(?:.*rv\\:(\\d+)\\.(\\d+)(?:\\.(\\d+))?)?/},{key:\"chrome\",pattern:/Chrome(?:\\W+(\\d+)\\.(\\d+)(?:\\.(\\d+))?)?/},{key:\"firefox\",pattern:/Firefox(?:\\W+(\\d+)\\.(\\d+)(?:\\.(\\d+))?)?/},{key:\"safari\",pattern:/(?:Version\\W+(\\d+)\\.(\\d+)(?:\\.(\\d+))?)?(?:\\W+Mobile\\S*)?\\W+Safari/}];for(let{key:n,pattern:s}of e){let r=s.exec(navigator.userAgent);if(r){let o=r[1]||0,u=r[2]||0,f=r[3]||0;return{browser:n,version:`${o}.${u}.${f}`}}}return null}var D=(e)=>{if(e===\"x32\")return\"x32\";if(e===\"x86_64\"||e===\"x64\")return\"x64\";if(e===\"arm\")return\"arm\";if(e===\"aarch64\"||e===\"arm64\")return\"arm64\";if(e)return`other:${e}`;return\"unknown\"},x=(e)=>{if(e=e.toLowerCase(),e.includes(\"ios\"))return\"iOS\";if(e===\"android\")return\"Android\";if(e===\"darwin\")return\"MacOS\";if(e===\"win32\")return\"Windows\";if(e===\"freebsd\")return\"FreeBSD\";if(e===\"openbsd\")return\"OpenBSD\";if(e===\"linux\")return\"Linux\";if(e)return`Other:${e}`;return\"Unknown\"},b,oHn=()=>b??(b=ee());var cy=(e)=>{if(typeof globalThis.proc"
+    },
+    {
+      "id": "bare_sets_simple",
+      "offset": 183773370,
+      "length": 280,
+      "sha256": "a89d8cd7e68d90af3a0e973d2877822a67009144a4ea5d4799a689546ef181f5",
+      "source": "gth===1&&(t[0]===\"--update\"||t[0]===\"--upgrade\"))process.argv=[process.argv[0],process.argv[1],\"update\"];let X=t.indexOf(\"--\");if((X===-1?t:t.slice(0,X)).includes(\"--bare\"))process.env.CLAUDE_CODE_SIMPLE=\"1\";let{NON_REPL_SUBCOMMANDS:ct,isMcpServeInvocation:lt,isPluginEvalInvocati"
+    },
+    {
+      "id": "simple_catalog_excludes_agent",
+      "offset": 200331950,
+      "length": 530,
+      "sha256": "f0139f8eabe42007646653beeea74c6685b766ce42c299dfa6fd622a1439d91b",
+      "source": ">s.includes(g));return p.length===0?e:[...e,...p]}var LM=(e,r)=>{if(a.CLAUDE_CODE_SIMPLE&&!r?.skipSimpleModeFilter){let b=Jr();if(b!==null&&HN()&&!r?.skipReplFilter){let O=IA()||e.restricted===!0&&Bo(e,b)!==null?[ub,lb,Aw]:[b,lb,Aw];if(me!==null&&b1())O.push(me);if(Xe.isCoordinatorMode())O.push(xDt,We,vt(),...zm()?[Rt]:[]);return t5(O,e)}let w=It(),E=[...hl()?[hi]:[],...w?[w]:[],ub,lb];if(Xe.isCoordinatorMode())E.push(xDt,We,vt(),...zm()?[Rt]:[]);return t5(E,e)}let n=new Set([U0.name,B0.name,EW.name,ia]),s=kk().filter((b)=>!"
+    }
+  ]
+}

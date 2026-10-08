@@ -276,7 +276,8 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
         // no dedicated DTO kind, so it maps to Internal — the "Reached maximum budget
         // ($X)" Display is preserved in the event's message. (client::adapter is not the
         // headless `--max-budget` path; this just keeps the match exhaustive.)
-        | OrchestratorError::MaxBudgetReached { .. } => ErrorKindDto::Internal,
+        | OrchestratorError::MaxBudgetReached { .. }
+        | OrchestratorError::MaxStructuredOutputRetries { .. } => ErrorKindDto::Internal,
     }
 }
 
@@ -651,7 +652,7 @@ mod tests {
     #[test]
     fn tool_use_block_lowers_input_to_json_string() {
         let id = ToolUseId::new();
-        let block = ContentBlock::ToolUse {
+        let block = ContentBlock::ToolUse { input_projection: None,
             id: id.clone(),
             name: "Read".into(),
             input: serde_json::json!({"file_path": "/tmp/x"}),

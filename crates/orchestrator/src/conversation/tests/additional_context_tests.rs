@@ -1228,7 +1228,7 @@ async fn mod_turn_step_batched_dispatches_an_earlier_tool_before_the_final_respo
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.0.lock().unwrap().push(input);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: serde_json::json!({"content":"probe done"}),
                 model_content: None,
                 new_messages: Vec::new(),
@@ -2100,7 +2100,7 @@ async fn mod_turn_complete_sums_response_usage_and_keeps_last_model() {
         ..Default::default()
     };
     orch.fire_mod_turn_start("question", "turn-usage").await;
-    let first = ConversationMessage::Assistant {
+    let first = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "first".into(),
@@ -2115,7 +2115,7 @@ async fn mod_turn_complete_sums_response_usage_and_keeps_last_model() {
         Some("tool_use"),
         None,
     );
-    let last = ConversationMessage::Assistant {
+    let last = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "last".into(),

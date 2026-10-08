@@ -814,7 +814,7 @@ impl TurnStepDecoder {
                 } else {
                     out.push(HistoryEvent::ContentBlockStart {
                         index,
-                        content_block: ContentBlock::ToolCall {
+                        content_block: ContentBlock::ToolCall { input_projection: None,
                             id: id.to_owned(),
                             name: name.to_owned(),
                             input: json!({}),
@@ -1032,7 +1032,7 @@ mod tests {
         let mut encoder = TurnStepEncoder::default();
         let reference = completed_reference(
             &mut encoder,
-            response_with(vec![ContentBlock::ToolCall {
+            response_with(vec![ContentBlock::ToolCall { input_projection: None,
                 id: "toolu-local".into(),
                 name: "Read".into(),
                 input: json!({"path":"a.txt"}),
@@ -1073,7 +1073,7 @@ mod tests {
             &mut encoder,
             response_with(vec![
                 server_tool_use("server-old", "web_search", json!({})),
-                ContentBlock::ToolCall {
+                ContentBlock::ToolCall { input_projection: None,
                     id: "toolu-old".into(),
                     name: "ReadOld".into(),
                     input: json!({}),
@@ -1094,7 +1094,7 @@ mod tests {
                     "web_fetch",
                     json!({"url":"https://example.test"}),
                 ),
-                ContentBlock::ToolCall {
+                ContentBlock::ToolCall { input_projection: None,
                     id: "toolu-new".into(),
                     name: "ReadNew".into(),
                     input: json!({}),
@@ -1118,13 +1118,13 @@ mod tests {
             &mut encoder,
             response_with(vec![
                 server_tool_use("server-discarded", "web_search", json!({})),
-                ContentBlock::ToolCall {
+                ContentBlock::ToolCall { input_projection: None,
                     id: "toolu-discarded".into(),
                     name: "ReadDiscarded".into(),
                     input: json!({}),
                 },
                 server_tool_use("server-retained", "web_fetch", json!({})),
-                ContentBlock::ToolCall {
+                ContentBlock::ToolCall { input_projection: None,
                     id: "toolu-retained".into(),
                     name: "ReadRetained".into(),
                     input: json!({}),
@@ -1228,7 +1228,7 @@ mod tests {
             encoder
                 .push(HistoryEvent::ContentBlockStart {
                     index: 2,
-                    content_block: ContentBlock::ToolCall {
+                    content_block: ContentBlock::ToolCall { input_projection: None,
                         id: "toolu_1".into(),
                         name: "Read".into(),
                         input: json!({})
@@ -1336,7 +1336,7 @@ mod tests {
                 cache_control: None,
                 citations: None,
             },
-            ContentBlock::ToolCall {
+            ContentBlock::ToolCall { input_projection: None,
                 id: "toolu_1".into(),
                 name: "Read".into(),
                 input: json!({"path":"a"}),
@@ -1586,7 +1586,7 @@ mod tests {
             .clone();
         wire.push(HistoryEvent::ContentBlockStart {
             index: 0,
-            content_block: ContentBlock::ToolCall {
+            content_block: ContentBlock::ToolCall { input_projection: None,
                 id: "toolu_1".into(),
                 name: "Read".into(),
                 input: json!({}),

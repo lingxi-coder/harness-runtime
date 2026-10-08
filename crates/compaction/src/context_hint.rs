@@ -554,9 +554,9 @@ mod tests {
         let mut out = Vec::new();
         for i in 0..n {
             let id = ToolUseId::from(format!("t{i}"));
-            out.push(ConversationMessage::Assistant {
+            out.push(ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolUse {
+                content: vec![ContentBlock::ToolUse { input_projection: None,
                     id: id.clone(),
                     name: "Read".into(),
                     input: serde_json::json!({}),
@@ -564,12 +564,12 @@ mod tests {
                 }],
                 stop_reason: None,
             });
-            out.push(ConversationMessage::User {
+            out.push(ConversationMessage::User { api_message_override: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolResult {
+                content: vec![ContentBlock::ToolResult { content_projection: None,
                     tool_use_id: id,
                     content: "x".repeat(result_len),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 }],

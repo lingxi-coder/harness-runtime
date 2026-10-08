@@ -1,0 +1,49 @@
+{
+  "version": "2.1.293",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "scope": "Source only. SESSION_ACCESS_TOKEN is ingress and is not selected as a model OAuth credential. Explicit empty assignment is preserved and truthiness-based lookup falls back.",
+  "excerpts": [
+    {
+      "id": "session_ingress_truthy_fallback",
+      "offset": 186264100,
+      "length": 900,
+      "sha256": "12f1a9a522364368012f71dc0d9109b0cd8a20a703e207e5d3a0878ae9074f48",
+      "source": "tCached:VFe,setCached:qFe,skipInReviewOrigin:!0})}async function Dys(e){if(process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN)return;await F({envVar:\"CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR\",wellKnownPath:lre,readPath:process.env.CLAUDE_SESSION_INGRESS_TOKEN_FILE??lre,label:\"token\",fileLabel:\"session ingress token\",getCached:VFe,setCached:qFe,credentials:e,skipInReviewOrigin:!0})}function Hc(){let e=process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN;if(e)return e;return x()}function qNn(){return Hc()!==null}function TF(){let e=Hc();if(!e)return{};if(e.startsWith(\"sk-ant-sid\")){let n={Cookie:`sessionKey=${e}`},r=process.env.CLAUDE_CODE_ORGANIZATION_UUID;if(r)n[\"X-Organization-Uuid\"]=r;return n}return f_e(e)}function f_e(e){return e?{Authorization:`Bearer ${e}`}:{}}function KNn(e){process.env.CLAUDE_CODE_SESSION_ACCESS_TOKEN=e}\nexport{kK,XAe,zNn,lre,Oys,JAe,_xt,Jit,Hys,VNn,Ffo,b9,eM,ySr,$fo,Qit,cre"
+    },
+    {
+      "id": "oauth_truthy_then_fd_store",
+      "offset": 187072046,
+      "length": 950,
+      "sha256": "5ba29281ae7d67489bbf775779f2b1fd3a5e3cdb16ef1a268ffe3575439a2fad",
+      "source": "function m$(){if(a.CLAUDE_CODE_OAUTH_TOKEN)return{accessToken:a.CLAUDE_CODE_OAUTH_TOKEN,refreshToken:null,expiresAt:null,scopes:Dk(),subscriptionType:a.CLAUDE_CODE_SUBSCRIPTION_TYPE||null,rateLimitTier:a.CLAUDE_CODE_RATE_LIMIT_TIER||null};let e=eM(),n=(r)=>({accessToken:r,refreshToken:null,expiresAt:null,scopes:DEo()??Dk(g$),subscriptionType:a.CLAUDE_CODE_SUBSCRIPTION_TYPE||null,rateLimitTier:a.CLAUDE_CODE_RATE_LIMIT_TIER||null});if(e&&(!vz()||Ld()))return n(e);if(on())return null;try{let g=zn().read({fromStoreCopy:!0})?.claudeAiOauth;if(g?.accessToken)return g}catch(r){c(r)}if(e)return n(e);return null}class bA{value=void 0;promise=null;lastCredentialsMtimeMs=0;lastCredentialsVersion=void 0;lastKeychainAccessToken=null;lastUnusableTokenRecheckAt=0;lastOwnSavedAccessToken=null;credentialsChangedOnDisk=Oe();pending401Handlers=new Map;pendingRefreshChecks={bare:null,store:null,backend:null};pendingOptedInRefreshChecks={bare:null,store:nul"
+    },
+    {
+      "id": "oauth_cached_read_and_invalidate",
+      "offset": 187073269,
+      "length": 1800,
+      "sha256": "441215c3c21e94f846d223e63bd6a0bb035aa9bb629f24c0f5ae55b9bc90f9b5",
+      "source": "function mn(){if(S6())return null;let e=Hye.of(F().host);if(e.value!==void 0)return e.value;let n=m$();return e.value=n,n}function e9(){Hye.of(F().host).clear()}function Jk(){let e=ip();if(typeof e===\"string\")return e;let n=zn().read()?.claudeAiOauth?.accessToken;return vA(e,n)}async function Km(e){let n=ip();if(typeof n===\"string\")return n;let r=(await zn().readAsync(e))?.claudeAiOauth?.accessToken;return vA(n,r)}function URs(){let e=ip();return e===\"env\"||e===\"fd\"}function _Yt(e){return{ineligibleReason:e,isGateway:Pe()===\"gateway\",hasEnvAuthToken:Boolean(Ab()),hasApiKeyHelper:Boolean(Yf()),injectedOAuthToken:()=>URs()}}function SYt(e){if(e===\"env\")return!1;if(e===\"fd\")return vz()&&!Ld();return!0}function ip(){let e=mn();if(!e?.accessToken)return\"none\";if(a.CLAUDE_CODE_OAUTH_TOKEN)return\"env\";let n=eM();if(n&&(!vz()||Ld()))return\"fd\";return{bearer:e.accessToken,fdToken:n}}function vA({bearer:e,fdToken:n},r){if(r&&r===e)return\"store\";if(n&&e===n)return\"fd\";return\"none\"}function SA(){if(e9(),p0(),B())CTe()}function sp(){y6(),XCe(),Ok()}function EA(){e9(),p0(),sp()}function ox(){if(EA(),B())CTe()}function bYt(){if(e9(),xi().clear(),wst(),Une(),vst(),TTt(),y6(),Rye(),B())CTe()}function YMs(){Hye.of(F().host).resetChangeCheck()}async function yDn(e,n){if(!Cst())return;let r=Hye.of(F().host),s;try{let b=await e.probeCredentials();s=b.state===\"present\"?b.version:void 0}catch(b){t(`Credentials version prime failed: ${l(b)}`,{level:\"error\"})}if(await n?.catch(()=>null),await r.promise?.catch(()=>null),r.promise=null,s!==void 0)r.lastCredentialsVersion=s;let g=_$(e);if(r.promise=g,await g===null){if(s!==void 0)r.lastCredentialsVersion=void 0;if(r.promise===g)r.promise=null}r.value=void 0}async function _$(e){try{let n=(await zn().readAsync(e))?.claudeAiOauth;return n?.accessTok"
+    },
+    {
+      "id": "async_oauth_resolution",
+      "offset": 187081027,
+      "length": 700,
+      "sha256": "bd36128b13e234f314c5bed1f5e3dd72c2a649545c6979ad6139dfaa82b1f832",
+      "source": "function Ya(e){if(S6())return Promise.resolve(null);let n=Hye.of(F().host);if(n.promise)return n.promise;let r=b$(e);return n.promise=r,r.catch(()=>{if(n.promise===r)n.promise=null}),r}async function b$(e){if(a.CLAUDE_CODE_OAUTH_TOKEN)return mn();let n=B()&&e!==void 0?await ySr(e):eM();if(n&&(!vz()||Ld()))return mn();if(on())return null;try{let g=(await zn().readAsync(e))?.claudeAiOauth;if(g?.accessToken)return g}catch(r){c(r)}if(n)return mn();return null}async function lAe(e){return SA(),(await Ya(e))?.accessToken}function Cst(){if(S6()||a.CLAUDE_CODE_OAUTH_TOKEN||a.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR||on())return!1;return!(Ez()&&!vz())}async function Nco(e){if(!Cst())return;try{await z"
+    },
+    {
+      "id": "auth_source_priority",
+      "offset": 187043650,
+      "length": 1100,
+      "sha256": "edc2e0da2d0be38f5b9c809f4b9ad4494186efafecd3c8fc5be32ff3fc7405fc",
+      "source": "eturn hw()?void 0:a.ANTHROPIC_AUTH_TOKEN}function Ul(){if(S6()){if(Yf())return{source:\"apiKeyHelper\",hasToken:!0};return{source:\"none\",hasToken:!1}}if(Ab()&&!oqe())return{source:\"ANTHROPIC_AUTH_TOKEN\",hasToken:!0};if(a.CLAUDE_CODE_OAUTH_TOKEN)return{source:\"CLAUDE_CODE_OAUTH_TOKEN\",hasToken:!0};if(eM()){if(b9(\"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR\"))return{source:\"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR\",hasToken:!0};return{source:\"CCR_OAUTH_TOKEN_FILE\",hasToken:!0}}if(Yf()&&!vr())return{source:\"apiKeyHelper\",hasToken:!0};if(ld())return{source:\"profile\",hasToken:!0};let r=mn();if(t2(r?.scopes)&&r?.accessToken)return{source:\"claude.ai\",hasToken:!0};return{source:\"none\",hasToken:!1}}function Ohr(e){return e===\"claude.ai\"||e===\"CLAUDE_CODE_OAUTH_TOKEN\"||e===\"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR\"||e===\"CCR_OAUTH_TOKEN_FILE\"}function CTt(e,n){let r=n!==\"none\"&&!_t();return{tokenSource:(e===\"profile\"?!dK():r&&Ohr(e))?\"none\":e,apiKey:r}}function $ne(){let{key:e}=lv();return e}function Jw(){try{return $ne()}catch{return null}}function uDn(){return Rf().source}function Rf(e={}){try{retur"
+    },
+    {
+      "id": "runtime_env_updates_exact_empty_assignment",
+      "offset": 208252026,
+      "length": 1750,
+      "sha256": "0b22becf8a6aec0df96c3997b992a0ecbbb660d961d087a5fbbfa9a97360ac0d",
+      "source": "update_environment_variables\"){if(!this.acceptsInboundEnvUpdates()){let h=s.variables,g=typeof h===\"object\"&&h!==null?Object.keys(h):[],k=g.filter((v)=>Ae.has(v)),q=g.length-k.length,b=q>0?k.concat(`${q} other`):k;t(`[structuredIO] refused update_environment_variables: this worker does not take environment updates from its inbound stream (keys: ${b.join(\", \")||\"none\"})`,{level:\"warn\"}),this.retireDroppedFrame(\"uuid\"in s?s.uuid:void 0);return}let n=s.variables;if(typeof n!==\"object\"||n===null||Array.isArray(n)||Object.values(n).some((h)=>typeof h!==\"string\")){if(t(\"[structuredIO] dropped update_environment_variables: variables must be an object of string values\"),typeof s.request_id===\"string\"&&s.request_id)this.writeActivityLine(_({type:\"control_response\",response:{subtype:\"error\",request_id:s.request_id,error:\"update_environment_variables: variables must be an object of string values\"}})+`\n`);return}let r=[],m=[];for(let[h,g]of Object.entries(s.variables)){if(!Ae.has(h)){m.push(h);continue}process.env[h]=g,r.push(h)}if(m.length>0)t(`[structuredIO] refused update_environment_variables for non-allowlisted keys: ${m.join(\", \")}`);if(r.includes(\"CLAUDE_CODE_OAUTH_TOKEN\"))ox();else XCe();if(t(`[structuredIO] applied update_environment_variables: ${r.join(\", \")}`),typeof s.request_id===\"string\"&&s.request_id)this.writeActivityLine(_({type:\"control_response\",response:{subtype:\"success\",request_id:s.request_id}})+`\n`);return}if(s.type===\"control_response\"){let n=\"uuid\"in s&&typeof s.uuid===\"string\"?s.uuid:void 0,r=s.response;if(typeof r!==\"object\"||r===null||Array.isArray(r)){if(n)this.onCommandLifecycle?.(n,\"completed\");t(\"[structuredIO] dropped control_response with malformed response payload\");return}let m=this.blankedPrompt"
+    }
+  ]
+}

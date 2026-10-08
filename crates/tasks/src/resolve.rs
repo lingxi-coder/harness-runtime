@@ -164,6 +164,7 @@ mod tests {
             teammate_agent_id: Some(id.into()),
             teammate_name: Some(name.into()),
             status: status.into(),
+            agent_facts: None,
             ..Default::default()
         }
     }
@@ -205,6 +206,7 @@ mod tests {
         rows.push(TaskRecord {
             task_id: "agent123".into(),
             task_type: "local_agent".into(),
+            agent_facts: None,
             ..Default::default()
         });
         assert!(
@@ -218,6 +220,7 @@ mod tests {
             task_type: "local_agent".into(),
             status: "completed".into(),
             is_parked: true,
+            agent_facts: None,
             ..Default::default()
         }];
         assert!(

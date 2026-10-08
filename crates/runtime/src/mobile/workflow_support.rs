@@ -7360,7 +7360,7 @@ mod workspace_lease_forwarding_tests {
         ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError>
         {
             *self.seen.lock().unwrap() = Some(workspace_lease_token);
-            Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+            Ok(lingxi_core::host::tool_invoker::ToolInvocationResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 is_error: true,
                 data: serde_json::json!({"error": "contract validation failed"}),
                 model_content: Some("contract validation failed".into()),

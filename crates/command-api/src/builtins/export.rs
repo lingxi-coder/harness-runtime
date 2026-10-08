@@ -276,7 +276,7 @@ mod tests {
     }
 
     fn assistant(text: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(), citations: None,
@@ -294,13 +294,13 @@ mod tests {
 
     #[test]
     fn renders_tool_blocks() {
-        let msgs = vec![ConversationMessage::Assistant {
+        let msgs = vec![ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
                     text: "running".to_string(), citations: None,
                 },
-                ContentBlock::ToolUse {
+                ContentBlock::ToolUse { input_projection: None,
                     id: lingxi_core::types::ToolUseId::new(),
                     name: "Read".to_string(),
                     input: serde_json::json!({"file_path": "/x"}),
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn skips_internal_media_analysis_blocks() {
-        let msgs = vec![ConversationMessage::User {
+        let msgs = vec![ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {

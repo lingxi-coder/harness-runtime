@@ -244,7 +244,7 @@ async fn an_allowed_tool_is_not_recorded_as_a_denial() {
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!("fine"),
                 model_content: None,
                 new_messages: vec![],

@@ -28,6 +28,7 @@ fn stream_events_support_block_lifecycle_and_terminal_delta() {
         content_block: ContentBlock::Text {
             text: String::new(),
             cache_control: None,
+            citations: None,
         },
     };
     let delta = HistoryEvent::ContentBlockDelta {
@@ -65,6 +66,7 @@ fn stream_event_json_has_expected_shape_and_round_trips() {
         content_block: ContentBlock::Text {
             text: String::new(),
             cache_control: None,
+            citations: None,
         },
     };
     let delta = HistoryEvent::ContentBlockDelta {

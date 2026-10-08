@@ -429,6 +429,17 @@ impl RunAuthority {
 
 #[async_trait]
 impl llm_runtime::ModelAttemptHooks for DesktopFusionAttempts {
+    fn request_session_id(
+        &self,
+        context: &ModelAttemptContext,
+    ) -> Option<lingxi_core::types::SessionId> {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&context.registration_id())
+            .and_then(Weak::upgrade)
+            .map(|authority| authority.output.session_id())
+    }
     async fn begin(
         &self,
         context: &ModelAttemptContext,
@@ -637,6 +648,11 @@ impl Drop for HostLease {
     }
 }
 impl llm_runtime::ModelAttemptLease for HostLease {
+    fn model_safety_observer(
+        &self,
+    ) -> Option<lingxi_core::host::model_safety::ModelSafetyObserver> {
+        Some(self.authority.tracker.model_safety_observer())
+    }
     fn mark_no_provider_response(&mut self) {
         self.no_provider_response = true;
     }

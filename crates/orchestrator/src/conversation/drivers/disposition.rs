@@ -34,7 +34,7 @@ impl ConversationOrchestrator {
             .is_some_and(|slot| slot.swap(false, std::sync::atomic::Ordering::SeqCst));
         if requested {
             self.output
-                .emit_text(crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE)
+                .emit_text(crate::prompt::end_conversation::END_CONVERSATION_ENDED_MESSAGE, None)
                 .await;
         }
         requested
@@ -68,6 +68,19 @@ impl ConversationOrchestrator {
         allow_budget_continuation: bool,
         tool_requested_end: bool,
     ) -> TurnEndVerdict {
+        if !tool_requested_end && stop_reason == "end_turn" {
+            {
+                let session = self.session.lock().await;
+                state.structured_output_retry.observe(&session.history);
+            }
+            if state.structured_output_retry.take_missing_tool_reminder() {
+                self.inject_meta_user_message(
+                    crate::structured_output::STRUCTURED_OUTPUT_ENFORCE_REMINDER,
+                )
+                .await;
+                return TurnEndVerdict::Continue;
+            }
+        }
         // hooks B4: fire Stop hooks BEFORE the token-budget check
         // (order: recovery → stop-hooks → token-budget).
         if tool_requested_end {
@@ -92,7 +105,7 @@ impl ConversationOrchestrator {
                 // `handle_stop_at_end` already emitted the end-turn here, so no
                 // caller re-emits on this branch.
                 StopHookFlow::Terminate(outcome) => {
-                    return TurnEndVerdict::StopHookTerminated(outcome)
+                    return TurnEndVerdict::StopHookTerminated(outcome);
                 }
                 StopHookFlow::TerminateMaxTurns => return TurnEndVerdict::MaxTurns,
                 StopHookFlow::LoopAgain => {
@@ -130,7 +143,7 @@ impl ConversationOrchestrator {
             return TurnEndVerdict::Continue;
         }
         let cost = self.snapshot_cost_real().await;
-        self.output.emit_end_turn(stop_reason, &cost).await;
+        self.emit_turn_terminal(stop_reason, &cost).await;
         TurnEndVerdict::EndTurn(final_message_id)
     }
 }

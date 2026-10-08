@@ -9,8 +9,8 @@
 use crate::tracker::CostTracker;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock};
 
 mod attempt_lifecycle;
@@ -285,6 +285,10 @@ impl BudgetEnforcer {
     #[must_use]
     pub fn cost_tracker_arc(&self) -> Arc<CostTracker> {
         self.cost_tracker.clone()
+    }
+
+    pub fn model_safety_observer(&self) -> lingxi_core::host::model_safety::ModelSafetyObserver {
+        self.cost_tracker.model_safety_observer()
     }
 
     /// Configured session-wide ceiling, if budget enforcement is enabled.
@@ -806,7 +810,7 @@ impl BudgetEnforcer {
             Err(error) => {
                 return BudgetCheckResult::Unavailable {
                     reason: error.to_string(),
-                }
+                };
             }
         };
         let realized = state.total_nano_usd;
@@ -1009,7 +1013,7 @@ const fn i64_from_u64_saturating(v: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::{nano_usd_to_dollars_format, CostError, PricingCatalog, ProviderId};
+    use crate::pricing::{CostError, PricingCatalog, ProviderId, nano_usd_to_dollars_format};
     use crate::usage::{TokenUsage, Usage};
     use crate::{
         CostDurabilityGate, CostHydration, CostPersistError, CostPersistPermit, CostPersistRequest,
@@ -1104,12 +1108,14 @@ mod tests {
         );
         let hold = enforcer.reserve_nano_usd(400).await.unwrap();
         let session = enforcer.session_state_for(tracker.session_id().await).await;
-        assert!(std::thread::spawn(move || {
-            let _book = session.reservations.lock().unwrap();
-            panic!("test-only accounting critical-section panic");
-        })
-        .join()
-        .is_err());
+        assert!(
+            std::thread::spawn(move || {
+                let _book = session.reservations.lock().unwrap();
+                panic!("test-only accounting critical-section panic");
+            })
+            .join()
+            .is_err()
+        );
         assert_eq!(enforcer.active_reservation_nano_usd().await, 400);
         assert!(tracker.durability_gate().frozen_reason().is_some());
         assert!(enforcer.reserve_nano_usd(1).await.is_err());

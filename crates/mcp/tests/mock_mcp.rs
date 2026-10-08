@@ -304,10 +304,11 @@ async fn initialize_emits_literal_claude_code_clientinfo() {
         frame.contains(r#""protocolVersion":"2025-11-25""#),
         "literal protocolVersion must appear, got: {frame}",
     );
-    // Capabilities are EXACTLY {"roots":{"listChanged":true},"elicitation":{}}
-    // (parity 2.1.207 J7n(): roots advertises listChanged:true).
+    // Current ordinary transport capabilities advertise both form and URL.
     assert!(
-        frame.contains(r#""capabilities":{"roots":{"listChanged":true},"elicitation":{}}"#),
+        frame.contains(
+            r#""capabilities":{"roots":{"listChanged":true},"elicitation":{"form":{},"url":{}}}"#
+        ),
         "literal capability shape must appear, got: {frame}",
     );
 }
@@ -505,8 +506,10 @@ async fn modern_list_tools_emits_the_aggregate_shape_even_for_one_page() {
                 }),
                 "tools/list" => json!({
                     "resultType": "complete",
+                    "ttlMs": 0,
+                    "cacheScope": "private",
                     "tools": [
-                        { "name": "read_file", "description": "Read", "inputSchema": {} }
+                        { "name": "read_file", "description": "Read", "inputSchema": { "type": "object" } }
                     ]
                 }),
                 _ => return None,

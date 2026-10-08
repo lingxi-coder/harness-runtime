@@ -34,9 +34,9 @@ fn server_fallback_reset_tombstones_all_query_tool_result_rows_and_keeps_other_j
     let second_result_id = MessageId::new();
     let other_id = MessageId::new();
     let assistant_id = MessageId::new();
-    let result = lingxi_core::types::ConversationMessage::User {
+    let result = lingxi_core::types::ConversationMessage::User { api_message_override: None,
         id: result_id,
-        content: vec![lingxi_core::types::ContentBlock::ToolResult {
+        content: vec![lingxi_core::types::ContentBlock::ToolResult { content_projection: None,
             tool_use_id: tool_id.clone(),
             content: "old result".into(),
             is_error: Some(false),
@@ -47,9 +47,9 @@ fn server_fallback_reset_tombstones_all_query_tool_result_rows_and_keeps_other_j
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
     };
-    let second_result = lingxi_core::types::ConversationMessage::User {
+    let second_result = lingxi_core::types::ConversationMessage::User { api_message_override: None,
         id: second_result_id,
-        content: vec![lingxi_core::types::ContentBlock::ToolResult {
+        content: vec![lingxi_core::types::ContentBlock::ToolResult { content_projection: None,
             tool_use_id: second_tool_id.clone(),
             content: "other old result".into(),
             is_error: Some(false),
@@ -449,14 +449,14 @@ impl OutputStream for RecordingFallbackOutput {
             .push(FallbackOutputEvent::AssistantBlockIdentity(*row_id));
     }
 
-    async fn emit_text(&self, text: &str) {
+    async fn emit_text(&self, text: &str, _utf16_code_units: Option<&[u16]>) {
         self.events
             .lock()
             .await
             .push(FallbackOutputEvent::Text(text.to_string()));
     }
 
-    async fn emit_tool_call(&self, _id: &ToolUseId, _tool: &str, _input: &serde_json::Value) {}
+    async fn emit_tool_call(&self, _id: &ToolUseId, _tool: &str, _input: &serde_json::Value, _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {}
 
     async fn emit_tool_result(
         &self,
@@ -464,7 +464,7 @@ impl OutputStream for RecordingFallbackOutput {
         _tool: &str,
         _model_text: &str,
         _result: &serde_json::Value,
-    ) {
+     _projection: Option<&lingxi_core::host::ToolResultProjection>) {
     }
 
     async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
@@ -1984,7 +1984,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
             },
         ],
         assistant_rows: vec![
-            CompletedAssistantRow {
+            CompletedAssistantRow { per_turn_effort: None,
                 stream_order: 0,
                 row_id: kept_text_row_id,
                 provider_message_id: "response-1".into(),
@@ -2004,7 +2004,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 session_append_dispatched: false,
                 supersedes_row_ids: Vec::new(),
             },
-            CompletedAssistantRow {
+            CompletedAssistantRow { per_turn_effort: None,
                 stream_order: 1,
                 row_id: kept_tool_row_id,
                 provider_message_id: "response-1".into(),
@@ -2017,7 +2017,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 request_id: None,
                 timestamp: "2026-10-03T00:00:00.000Z".into(),
                 persisted_link: None,
-                content: vec![ContentBlock::ToolUse {
+                content: vec![ContentBlock::ToolUse { input_projection: None,
                     id: kept_tool.clone(),
                     name: "Read".into(),
                     input: serde_json::json!({}),
@@ -2026,7 +2026,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 session_append_dispatched: false,
                 supersedes_row_ids: Vec::new(),
             },
-            CompletedAssistantRow {
+            CompletedAssistantRow { per_turn_effort: None,
                 stream_order: 2,
                 row_id: discarded_thinking_row_id,
                 provider_message_id: "response-1".into(),
@@ -2046,7 +2046,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 session_append_dispatched: false,
                 supersedes_row_ids: Vec::new(),
             },
-            CompletedAssistantRow {
+            CompletedAssistantRow { per_turn_effort: None,
                 stream_order: 3,
                 row_id: discarded_tool_row_id,
                 provider_message_id: "response-1".into(),
@@ -2059,7 +2059,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 request_id: None,
                 timestamp: "2026-10-03T00:00:00.000Z".into(),
                 persisted_link: None,
-                content: vec![ContentBlock::ToolUse {
+                content: vec![ContentBlock::ToolUse { input_projection: None,
                     id: discarded_tool.clone(),
                     name: "Read".into(),
                     input: serde_json::json!({}),

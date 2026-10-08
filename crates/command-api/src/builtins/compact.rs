@@ -406,10 +406,10 @@ mod tests {
                         ),
                     ));
                 } else {
-                    s.history.push(ConversationMessage::Assistant {
+                    s.history.push(ConversationMessage::Assistant { per_turn_effort: None,
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
-                            text: format!("reply-{i}"),
+                            text: format!("reply-{i}"), citations: None,
                         }],
                         stop_reason: Some("end_turn".into()),
                     });

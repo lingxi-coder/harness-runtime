@@ -6,32 +6,182 @@
 //! only after successful validation. Invalid output remains a tool-call error
 //! so the model can correct it within the turn.
 //!
-//! Both desktop and CLI composition roots register this tool. The CLI's print
-//! path reads the accepted result from the shared slot and owns its outer
-//! retry budget when no structured result was produced.
+//! Desktop and headless composition roots register this tool. The existing
+//! query driver owns its retry budget and the accepted result is read from the
+//! shared slot after that query finishes.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use tool_api::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolProgressSender,
     ToolStaticContext, ToolUseContext,
 };
 
+/// Query-owned retry bookkeeping. Existing history before the first model
+/// cycle is a baseline, so resumed/injected old failures do not spend this
+/// query's budget. One failed assistant iteration counts once even if it
+/// contains several parallel StructuredOutput calls.
+pub(crate) struct StructuredOutputRetryState {
+    enabled: bool,
+    initialized: bool,
+    known_calls: HashSet<ToolUseId>,
+    current_calls: HashMap<ToolUseId, MessageId>,
+    failed_iterations: HashSet<MessageId>,
+    failed_calls: HashSet<ToolUseId>,
+    failed_attempts: u32,
+    last_error: Option<String>,
+    succeeded: bool,
+    completion_admitted: bool,
+    missing_tool_reminded: bool,
+    cursor: usize,
+    last_message: Option<MessageId>,
+}
+
+impl StructuredOutputRetryState {
+    pub(crate) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            initialized: false,
+            known_calls: HashSet::new(),
+            current_calls: HashMap::new(),
+            failed_iterations: HashSet::new(),
+            failed_calls: HashSet::new(),
+            failed_attempts: 0,
+            last_error: None,
+            succeeded: false,
+            completion_admitted: false,
+            missing_tool_reminded: false,
+            cursor: 0,
+            last_message: None,
+        }
+    }
+
+    pub(crate) fn observe(&mut self, history: &[ConversationMessage]) {
+        if !self.enabled {
+            return;
+        }
+        if !self.initialized {
+            for message in history {
+                for block in message.tool_calls() {
+                    if let ContentBlock::ToolUse { id, name, .. } = block {
+                        if name == STRUCTURED_OUTPUT_TOOL_NAME {
+                            self.known_calls.insert(id.clone());
+                        }
+                    }
+                }
+            }
+            self.initialized = true;
+            self.remember_tail(history);
+            return;
+        }
+        // Compaction/replay may replace rows. Retained identities make the
+        // fallback scan idempotent, while ordinary appends scan only new rows.
+        let offset = if self.cursor <= history.len()
+            && (self.cursor == 0
+                || history.get(self.cursor - 1).map(ConversationMessage::id) == self.last_message)
+        {
+            self.cursor
+        } else {
+            0
+        };
+        let appended = &history[offset..];
+        for message in appended {
+            for block in message.tool_calls() {
+                if let ContentBlock::ToolUse { id, name, .. } = block {
+                    if name == STRUCTURED_OUTPUT_TOOL_NAME && self.known_calls.insert(id.clone()) {
+                        self.current_calls.insert(id.clone(), message.id());
+                    }
+                }
+            }
+        }
+        for message in appended {
+            let ConversationMessage::User { content, .. } = message else {
+                continue;
+            };
+            for block in content {
+                let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                    ..
+                } = block
+                else {
+                    continue;
+                };
+                let Some(iteration) = self.current_calls.get(tool_use_id) else {
+                    continue;
+                };
+                if *is_error != Some(true) {
+                    self.succeeded = true;
+                    continue;
+                }
+                if !self.failed_calls.insert(tool_use_id.clone()) {
+                    continue;
+                }
+                if self.failed_iterations.insert(*iteration) {
+                    self.failed_attempts = self.failed_attempts.saturating_add(1);
+                }
+                self.last_error = Some(content.clone());
+            }
+        }
+        self.remember_tail(history);
+    }
+
+    fn remember_tail(&mut self, history: &[ConversationMessage]) {
+        self.cursor = history.len();
+        self.last_message = history.last().map(ConversationMessage::id);
+    }
+
+    /// Admit the successful tool's terminal query cycle exactly once. This
+    /// cycle completes from the accepted tool result without another API call.
+    pub(crate) fn admit_completion(&mut self) -> bool {
+        if !self.succeeded || self.completion_admitted {
+            return false;
+        }
+        self.completion_admitted = true;
+        true
+    }
+
+    pub(crate) fn take_missing_tool_reminder(&mut self) -> bool {
+        if !self.enabled || self.succeeded || self.missing_tool_reminded {
+            return false;
+        }
+        self.missing_tool_reminded = true;
+        true
+    }
+
+    pub(crate) fn exhausted(&self, max_retries: i64) -> Option<crate::OrchestratorError> {
+        (self.enabled && self.failed_attempts > 0 && i64::from(self.failed_attempts) >= max_retries)
+            .then(|| crate::OrchestratorError::MaxStructuredOutputRetries {
+                max_retries,
+                last_error: self.last_error.clone(),
+            })
+    }
+}
+
 /// Canonical name of the synthetic structured-output tool.
 pub const STRUCTURED_OUTPUT_TOOL_NAME: &str = "StructuredOutput";
 
+/// Native 2.1.293's single engine reminder when an ordinary response omitted
+/// StructuredOutput. It is a meta message inside the same query.
+pub(crate) const STRUCTURED_OUTPUT_ENFORCE_REMINDER: &str = "[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now.";
+
 /// Shared slot the [`StructuredOutputTool`] writes the model's structured result
 /// into after validation. The print path reads it after the turn to emit.
-pub type StructuredOutputSlot = Arc<Mutex<Option<Value>>>;
+pub type StructuredOutputSlot =
+    Arc<Mutex<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>>;
 
 /// The forced `StructuredOutput` tool. Its `input_schema` IS the user's schema;
 /// `call` validates the model's arguments, captures accepted output into the
 /// shared slot, and returns the canonical acknowledgement.
 pub struct StructuredOutputTool {
     /// The user-supplied JSON schema, returned verbatim as `input_schema`.
-    schema: Value,
+    schema: Utf16JsonProjection,
     /// Where `call` deposits the model's structured arguments.
     captured: StructuredOutputSlot,
 }
@@ -39,7 +189,7 @@ pub struct StructuredOutputTool {
 impl StructuredOutputTool {
     /// Build the tool for `schema`, capturing the model's call into `slot`.
     #[must_use]
-    pub fn new(schema: Value, slot: StructuredOutputSlot) -> Self {
+    pub fn new(schema: Utf16JsonProjection, slot: StructuredOutputSlot) -> Self {
         Self {
             schema,
             captured: slot,
@@ -58,7 +208,10 @@ impl Tool for StructuredOutputTool {
     }
 
     fn input_schema(&self) -> &Value {
-        &self.schema
+        &self.schema.value
+    }
+    fn input_schema_projection(&self) -> Option<Utf16JsonProjection> {
+        Some(self.schema.clone())
     }
 
     fn input_validation_schema(&self) -> &Value {
@@ -118,16 +271,22 @@ impl Tool for StructuredOutputTool {
     async fn call(
         &self,
         input: Value,
-        _ctx: ToolUseContext,
+        ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        validate_output(&self.schema, &input).map_err(ToolError::InvalidInput)?;
+        let projected = ctx
+            .projected_input(&input)
+            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+        validate_output_projected(&self.schema, &projected).map_err(ToolError::InvalidInput)?;
         // Capture only values accepted by the dynamic call-stage validator.
         // Lock is held only for the store (no await across it).
         if let Ok(mut slot) = self.captured.lock() {
-            *slot = Some(input);
+            *slot = Some(projected);
         }
         Ok(ToolCallResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             data: Value::String("Structured output provided successfully".to_string()),
             model_content: None,
             new_messages: Vec::new(),
@@ -301,7 +460,39 @@ impl ValidationSchemas<'_> {
     }
 }
 
-fn validate_output(schema: &Value, input: &Value) -> Result<(), String> {
+/// Validate an output with the same Draft 7 evaluator and native diagnostics
+/// used by `StructuredOutputTool::call`. Invalid schemas are errors.
+/// Validate rich structured input without conflating independent surrogate identities.
+pub fn validate_output_projected(
+    schema: &Utf16JsonProjection,
+    input: &Utf16JsonProjection,
+) -> Result<(), String> {
+    if schema.strings.is_empty()
+        && schema.keys.is_empty()
+        && input.strings.is_empty()
+        && input.keys.is_empty()
+    {
+        return validate_output(&schema.value, &input.value);
+    }
+    let mut pending = vec![&schema.value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Object(object) => {
+                if object.contains_key("pattern") || object.contains_key("patternProperties") {
+                    return Err("Exact UTF-16 schema regex validation is unavailable".into());
+                }
+                pending.extend(object.values());
+            }
+            Value::Array(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    let consumer = lingxi_core::types::utf16_json::Utf16JsonConsumer::new(&[schema, input])
+        .map_err(|error| error.to_string())?;
+    validate_output(&consumer.values()[0], &consumer.values()[1])
+}
+
+pub fn validate_output(schema: &Value, input: &Value) -> Result<(), String> {
     const URL: &str = "mem://structured-output/root";
     let mut normalized = ValidationSchemas {
         root: schema,
@@ -592,7 +783,9 @@ mod tests {
     #[test]
     fn dynamic_schema_only_runs_at_call_stage() {
         let tool = StructuredOutputTool::new(
-            json!({"type":"object", "required":["answer"]}),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                json!({"type":"object", "required":["answer"]}),
+            ),
             Arc::new(Mutex::new(None)),
         );
         assert!(crate::schema_validation::validate_tool_schema(&tool, &json!({})).is_ok());
@@ -601,9 +794,13 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_structured_output_does_not_replace_the_captured_value() {
-        let slot = Arc::new(Mutex::new(Some(json!({"answer":42}))));
+        let slot = Arc::new(Mutex::new(Some(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({"answer":42})),
+        )));
         let tool = StructuredOutputTool::new(
-            json!({"type":"object", "required":["answer"]}),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                json!({"type":"object", "required":["answer"]}),
+            ),
             slot.clone(),
         );
         let (tx, _) = tool_api::progress::progress_channel();
@@ -619,7 +816,13 @@ mod tests {
             error.model_facing_message(),
             "Output does not match required schema: root: must have required property 'answer'"
         );
-        assert_eq!(*slot.lock().unwrap(), Some(json!({"answer":42})));
+        assert_eq!(
+            slot.lock()
+                .unwrap()
+                .as_ref()
+                .map(|projection| &projection.value),
+            Some(&json!({"answer":42}))
+        );
     }
 
     #[test]
@@ -628,8 +831,10 @@ mod tests {
         let schema = json!({"type":"object", "definitions":{"number":{"type":"integer","minimum":5}},
             "allOf":[{"required":["x"]},{"properties":{"a":{"$ref":"#/definitions/number"}}}],
             "additionalProperties":false});
-        assert_eq!(validate_output(&schema, &json!({"a":2,"b":4})).unwrap_err(),
-            "Output does not match required schema: root: must have required property 'x', /a: must be >= 5, root: must NOT have additional properties ('a' is not allowed), root: must NOT have additional properties ('b' is not allowed)");
+        assert_eq!(
+            validate_output(&schema, &json!({"a":2,"b":4})).unwrap_err(),
+            "Output does not match required schema: root: must have required property 'x', /a: must be >= 5, root: must NOT have additional properties ('a' is not allowed), root: must NOT have additional properties ('b' is not allowed)"
+        );
         assert!(validate_output(
             &json!({"properties":{"x":{"type":"integer"},"y":{"$ref":"#/properties/x"}}}),
             &json!({"x":1,"y":2})
@@ -649,12 +854,26 @@ mod tests {
     fn ze_enriches_lengths_enums_constants_and_all_errors_in_ajv_order() {
         let schema = json!({"type":"object", "maxProperties":1, "minProperties":5,
             "required":["x"], "properties":{"a":{"type":"integer"}}, "additionalProperties":false});
-        assert_eq!(validate_output(&schema, &json!({"a":"bad","b":2})).unwrap_err(),
-            "Output does not match required schema: root: must NOT have more than 1 properties (got 2), root: must NOT have fewer than 5 properties (got 2), root: must have required property 'x', root: must NOT have additional properties ('b' is not allowed), /a: must be integer");
-        assert_eq!(validate_output(&json!({"properties":{"text":{"minLength":3}, "tags":{"maxItems":1}}}), &json!({"text":"😀","tags":[1,2]})).unwrap_err(),
-            "Output does not match required schema: /text: must NOT have fewer than 3 characters (got 1), /tags: must NOT have more than 1 items (got 2)");
-        assert_eq!(validate_output(&json!({"properties":{"value":{"const":1,"enum":[2,3]}}}), &json!({"value":0})).unwrap_err(),
-            "Output does not match required schema: /value: must be equal to constant: 1, /value: must be equal to one of the allowed values: [2,3]");
+        assert_eq!(
+            validate_output(&schema, &json!({"a":"bad","b":2})).unwrap_err(),
+            "Output does not match required schema: root: must NOT have more than 1 properties (got 2), root: must NOT have fewer than 5 properties (got 2), root: must have required property 'x', root: must NOT have additional properties ('b' is not allowed), /a: must be integer"
+        );
+        assert_eq!(
+            validate_output(
+                &json!({"properties":{"text":{"minLength":3}, "tags":{"maxItems":1}}}),
+                &json!({"text":"😀","tags":[1,2]})
+            )
+            .unwrap_err(),
+            "Output does not match required schema: /text: must NOT have fewer than 3 characters (got 1), /tags: must NOT have more than 1 items (got 2)"
+        );
+        assert_eq!(
+            validate_output(
+                &json!({"properties":{"value":{"const":1,"enum":[2,3]}}}),
+                &json!({"value":0})
+            )
+            .unwrap_err(),
+            "Output does not match required schema: /value: must be equal to constant: 1, /value: must be equal to one of the allowed values: [2,3]"
+        );
         assert!(validate_output(
             &json!({"properties":{"date":{"type":"string","format":"date-time"}}}),
             &json!({"date":"not a date"})
@@ -674,15 +893,26 @@ mod tests {
         );
         assert_eq!(validate_output(&json!({"type":"object", "dependencies":{"a":["b","c"]}, "propertyNames":{"pattern":"^[a-z]+$"}}), &json!({"a":1,"BAD":2})).unwrap_err(),
             "Output does not match required schema: root: must match pattern \"^[a-z]+$\", root: property name must be valid, root: must have properties b, c when property a is present, root: must have properties b, c when property a is present");
-        assert_eq!(validate_output(&json!({"if":{"required":["a"]}, "then":{"required":["b"]}}), &json!({"a":1})).unwrap_err(),
-            "Output does not match required schema: root: must have required property 'b', root: must match \"then\" schema");
-        assert_eq!(validate_output(&json!({"anyOf":[{"required":["x"]}]}), &json!({})).unwrap_err(),
-            "Output does not match required schema: root: must have required property 'x', root: must match a schema in anyOf");
+        assert_eq!(
+            validate_output(
+                &json!({"if":{"required":["a"]}, "then":{"required":["b"]}}),
+                &json!({"a":1})
+            )
+            .unwrap_err(),
+            "Output does not match required schema: root: must have required property 'b', root: must match \"then\" schema"
+        );
+        assert_eq!(
+            validate_output(&json!({"anyOf":[{"required":["x"]}]}), &json!({})).unwrap_err(),
+            "Output does not match required schema: root: must have required property 'x', root: must match a schema in anyOf"
+        );
     }
 
     #[tokio::test]
     async fn tool_prompt_matches_2_1_263_oracle() {
-        let tool = StructuredOutputTool::new(json!({"type":"object"}), Arc::new(Mutex::new(None)));
+        let tool = StructuredOutputTool::new(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({"type":"object"})),
+            Arc::new(Mutex::new(None)),
+        );
         assert_eq!(
             tool.description(
                 &json!({}),
@@ -693,15 +923,20 @@ mod tests {
             .await,
             "Return structured output in the requested format"
         );
-        assert_eq!(tool.prompt(&PromptOptions::default()).await,
-            "Use this tool to return your final response in the requested structured format. You MUST call this tool exactly once at the end of your response to provide the structured output.");
+        assert_eq!(
+            tool.prompt(&PromptOptions::default()).await,
+            "Use this tool to return your final response in the requested structured format. You MUST call this tool exactly once at the end of your response to provide the structured output."
+        );
     }
 
     #[test]
     fn tool_exposes_the_user_schema_as_input_schema() {
         let schema = json!({ "type": "object", "required": ["x"] });
         let slot: StructuredOutputSlot = Arc::new(Mutex::new(None));
-        let tool = StructuredOutputTool::new(schema.clone(), slot);
+        let tool = StructuredOutputTool::new(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(schema.clone()),
+            slot,
+        );
         assert_eq!(tool.name(), "StructuredOutput");
         assert_eq!(tool.input_schema(), &schema);
     }
@@ -709,7 +944,10 @@ mod tests {
     #[tokio::test]
     async fn call_captures_the_models_arguments_into_the_slot() {
         let slot: StructuredOutputSlot = Arc::new(Mutex::new(None));
-        let tool = StructuredOutputTool::new(json!({"type": "object"}), slot.clone());
+        let tool = StructuredOutputTool::new(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({"type": "object"})),
+            slot.clone(),
+        );
         let (tx, _rx) = tool_api::progress::progress_channel();
         let result = tool
             .call(
@@ -728,9 +966,189 @@ mod tests {
             "StructuredOutput mirrors the oracle's endsTurn:true result"
         );
         assert_eq!(
-            slot.lock().unwrap().as_ref(),
+            slot.lock()
+                .unwrap()
+                .as_ref()
+                .map(|projection| &projection.value),
             Some(&json!({"answer": 42})),
             "the model's arguments must be captured for validation"
+        );
+    }
+
+    #[test]
+    fn rich_schema_required_properties_and_enum_values_use_exact_shared_identity() {
+        let schema = Utf16JsonProjection::parse(r#"{"type":"object","properties":{"\ud800":{"type":"string","enum":["\ud801"],"minLength":1,"maxLength":1}},"required":["\ud800"],"additionalProperties":false}"#).unwrap();
+        assert!(validate_output_projected(
+            &schema,
+            &Utf16JsonProjection::parse(r#"{"\ud800":"\ud801"}"#).unwrap()
+        )
+        .is_ok());
+        for raw in [
+            r#"{"\ud801":"\ud801"}"#,
+            r#"{"\ud800":"\ud800"}"#,
+            r#"{"\ud800":"\ud801","\ud802":true}"#,
+        ] {
+            assert!(
+                validate_output_projected(&schema, &Utf16JsonProjection::parse(raw).unwrap())
+                    .is_err(),
+                "{raw}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn captures_exact_utf16_input_and_rejects_stale_projection() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let slot: StructuredOutputSlot = Arc::new(Mutex::new(None));
+        let tool = StructuredOutputTool::new(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({"type":"object"})),
+            slot.clone(),
+        );
+        let projected =
+            Utf16JsonProjection::parse(r#"{"\ud800":"\udfff","answer":"\udc00"}"#).unwrap();
+        let mut ctx = ToolUseContext::model_seed("test".into(), None);
+        ctx.input_projection = Some(projected.clone());
+        let (tx, _rx) = tool_api::progress::progress_channel();
+        tool.call(projected.value.clone(), ctx.clone(), tx)
+            .await
+            .unwrap();
+        assert_eq!(slot.lock().unwrap().as_ref(), Some(&projected));
+        let (tx, _rx) = tool_api::progress::progress_channel();
+        assert!(tool
+            .call(json!({"answer":"changed"}), ctx, tx)
+            .await
+            .is_err());
+        assert_eq!(slot.lock().unwrap().as_ref(), Some(&projected));
+    }
+}
+
+#[cfg(test)]
+mod query_retry_tests {
+    use super::*;
+
+    fn failed_iteration(error: &str) -> Vec<ConversationMessage> {
+        let tool_id = ToolUseId::new();
+        let assistant = ConversationMessage::Assistant { per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolUse {
+                id: tool_id.clone(),
+                name: STRUCTURED_OUTPUT_TOOL_NAME.into(),
+                input: serde_json::json!({"answer":42}),
+                provider_id: None,
+                input_projection: None,
+            }],
+            stop_reason: Some("tool_use".into()),
+        };
+        let mut result = ConversationMessage::user(MessageId::new(), String::new());
+        let ConversationMessage::User { content, .. } = &mut result else {
+            unreachable!()
+        };
+        *content = vec![ContentBlock::ToolResult {
+            content_projection: None,
+            tool_use_id: tool_id,
+            content: error.into(),
+            is_error: Some(true),
+            provider_id: None,
+            content_blocks: None,
+        }];
+        vec![assistant, result]
+    }
+
+    #[test]
+    fn failed_structured_iterations_share_one_query_and_keep_the_native_last_error() {
+        let mut history = failed_iteration("prior query error");
+        history.push(ConversationMessage::user(
+            MessageId::new(),
+            "original prompt".into(),
+        ));
+        let mut state = StructuredOutputRetryState::new(true);
+        state.observe(&history);
+        assert!(
+            state.exhausted(2).is_none(),
+            "prior transcript must not spend this query budget"
+        );
+        history.extend(failed_iteration("first schema error"));
+        state.observe(&history);
+        assert!(state.exhausted(2).is_none());
+        let last = "Output does not match required schema: /answer: must be string";
+        history.extend(failed_iteration(last));
+        state.observe(&history);
+        assert_eq!(
+            state.exhausted(2).unwrap().to_string(),
+            format!(
+                "Failed to provide valid structured output after 2 attempts — last StructuredOutput error: {last}"
+            )
+        );
+        state.observe(&history);
+        assert_eq!(
+            state.failed_attempts, 2,
+            "re-reading history cannot double count attempts"
+        );
+        let mut next_query = StructuredOutputRetryState::new(true);
+        next_query.observe(&history);
+        assert!(next_query.exhausted(2).is_none());
+    }
+
+    #[test]
+    fn compaction_or_replay_retains_attempt_identity_and_latest_error() {
+        let mut state = StructuredOutputRetryState::new(true);
+        state.observe(&[]);
+        let old = failed_iteration("first");
+        let latest = failed_iteration("latest");
+        let mut history = old.clone();
+        history.extend(latest);
+        state.observe(&history);
+        assert_eq!(state.failed_attempts, 2);
+        state.observe(&old);
+        assert_eq!(state.failed_attempts, 2);
+        assert_eq!(state.last_error.as_deref(), Some("latest"));
+        history = failed_iteration("after compact");
+        state.observe(&history);
+        assert_eq!(state.failed_attempts, 3);
+        assert_eq!(state.last_error.as_deref(), Some("after compact"));
+    }
+
+    #[test]
+    fn retry_policy_is_inert_without_the_structured_output_tool() {
+        let mut state = StructuredOutputRetryState::new(false);
+        state.observe(&failed_iteration("unrelated transcript"));
+        assert!(state.exhausted(0).is_none());
+    }
+
+    #[test]
+    fn successful_tool_result_admits_one_terminal_cycle_for_the_current_query() {
+        let mut successful = failed_iteration("Structured output captured successfully");
+        let ConversationMessage::User { content, .. } = &mut successful[1] else {
+            unreachable!()
+        };
+        let ContentBlock::ToolResult { is_error, .. } = &mut content[0] else {
+            unreachable!()
+        };
+        *is_error = Some(false);
+        let mut state = StructuredOutputRetryState::new(true);
+        state.observe(&successful);
+        assert!(
+            !state.admit_completion(),
+            "resumed successful output is a baseline"
+        );
+        successful.extend(failed_iteration("invalid output"));
+        let mut accepted = failed_iteration("Structured output captured successfully");
+        let ConversationMessage::User { content, .. } = &mut accepted[1] else {
+            unreachable!()
+        };
+        let ContentBlock::ToolResult { is_error, .. } = &mut content[0] else {
+            unreachable!()
+        };
+        *is_error = None;
+        successful.extend(accepted);
+        state.observe(&successful);
+        assert!(state.admit_completion());
+        assert!(!state.admit_completion());
+        assert_eq!(state.failed_attempts, 1);
+        state.observe(&successful);
+        assert!(
+            !state.admit_completion(),
+            "replay cannot readmit a terminal cycle"
         );
     }
 }

@@ -48,7 +48,10 @@
 //! `cwd = workspace`, so this sentence is currently ASPIRATIONAL until BASH.4
 //! lands the per-session cwd carry-over.
 
-use crate::bash::{bash_default_timeout_ms, bash_max_timeout_ms};
+use crate::bash::{
+    bash_background_max_timeout_ms, bash_default_timeout_ms, bash_max_timeout_ms,
+    BASH_BACKGROUND_DEFAULT_TIMEOUT_MS,
+};
 use sandbox::runtime_config::SandboxRuntimeConfig;
 
 // ===== Wire tool-name literals (string literals, NOT cross-crate imports) ====
@@ -167,7 +170,7 @@ fn cheap_commands_bullet_enabled() -> bool {
 /// and that its default made the env the only observable gate. Both were wrong:
 /// `Ge()` reads it at the TOP level, and a settings `false` is observable
 /// whenever the env var is absent — which is the normal case.)
-fn should_include_git_instructions() -> bool {
+pub(crate) fn should_include_git_instructions() -> bool {
     include_git_instructions_from(
         env_tristate("LINGXI_DISABLE_GIT_INSTRUCTIONS"),
         lingxi_core::host::session_flags::include_git_instructions(),
@@ -647,7 +650,7 @@ fn sandbox_section(cfg: &SandboxRuntimeConfig) -> String {
 /// The `ant` undercover/skills branches are dropped. Returns an empty string
 /// when [`should_include_git_instructions`] is false (matching the TS
 /// `undercoverSection` early return, which is empty on the external path).
-fn commit_and_pr_instructions() -> String {
+fn commit_and_pr_instructions(precommit_suggestion: &str) -> String {
     if !should_include_git_instructions() {
         return String::new();
     }
@@ -734,7 +737,7 @@ git commit -m \"$(cat <<'EOF'
    )\"
 </example>
 
-# Creating pull requests
+{PRECOMMIT_SUGGESTION}# Creating pull requests
 Use the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a Github URL use the gh command to get the information needed.
 
 IMPORTANT: When the user asks you to create a pull request, follow these steps carefully:
@@ -772,6 +775,14 @@ Important:
         .replace("{COMMIT_STEP_SUFFIX}", &commit_step_suffix)
         .replace("{COMMIT_HEREDOC_SUFFIX}", &commit_heredoc_suffix)
         .replace("{PR_BODY_SUFFIX}", &pr_body_suffix)
+        .replace(
+            "{PRECOMMIT_SUGGESTION}",
+            &if precommit_suggestion.is_empty() {
+                String::new()
+            } else {
+                format!("{precommit_suggestion}\n\n")
+            },
+        )
 }
 
 // ===== Public entry point ===================================================
@@ -782,6 +793,14 @@ Important:
 /// `BuiltinToolContext::sandbox_runtime`.
 #[must_use]
 pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
+    simple_prompt_with_precommit(sandbox, "")
+}
+
+/// Build the verbose Bash description with the session's precommit guidance.
+pub(crate) fn simple_prompt_with_precommit(
+    sandbox: &SandboxRuntimeConfig,
+    precommit_suggestion: &str,
+) -> String {
     let max_timeout_ms = bash_max_timeout_ms();
     let default_timeout_ms = bash_default_timeout_ms();
 
@@ -835,9 +854,12 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
         Bullet::Item("Always quote file paths that contain spaces with double quotes in your command (e.g., cd \"path with spaces/file.txt\")".into()),
         Bullet::Item("Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it. In particular, never prepend `cd <current-directory>` to a `git` command \u{2014} `git` already operates on the current working tree, and the compound triggers a permission prompt.".into()),
         Bullet::Item(format!(
-            "You may specify an optional timeout in milliseconds (up to {max_timeout_ms}ms / {} minutes). By default, your command will timeout after {default_timeout_ms}ms ({} minutes).",
+            "You may specify an optional timeout in milliseconds (up to {max_timeout_ms}ms / {} minutes). By default, your command will timeout after {default_timeout_ms}ms ({} minutes). With `run_in_background` the timeout is instead how long the command may run in the background (default {BASH_BACKGROUND_DEFAULT_TIMEOUT_MS}ms / {} minutes, max {}ms / {} hours); at that limit it is stopped and you are notified.",
             max_timeout_ms / 60_000,
-            default_timeout_ms / 60_000
+            default_timeout_ms / 60_000,
+            BASH_BACKGROUND_DEFAULT_TIMEOUT_MS / 60_000,
+            bash_background_max_timeout_ms(),
+            bash_background_max_timeout_ms() / 3_600_000
         )),
     ];
     if let Some(note) = background_note {
@@ -865,7 +887,7 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
     lines.extend(prepend_bullets(&instruction_items));
     lines.push(sandbox_section(sandbox));
 
-    let git = commit_and_pr_instructions();
+    let git = commit_and_pr_instructions(precommit_suggestion);
     if !git.is_empty() {
         lines.push(String::new());
         lines.push(git);
@@ -908,13 +930,10 @@ pub fn simple_prompt(sandbox: &SandboxRuntimeConfig) -> String {
 ///   appended to the `- Commit or push only when the user asks…` bullet as
 ///   `${a?`\n${a}`:""}`. The attribution VALUE is NOT indented — it sits at
 ///   column 0 on its own line under each bullet.
-fn concise_git_section() -> String {
+fn concise_git_section(precommit_suggestion: &str) -> String {
     if !should_include_git_instructions() {
         return String::new();
     }
-    // `c`/`a`/`l` (pre-ship gate, `bash_lean` extras) are all empty in the
-    // shipped build, so the section is the three fixed bullets plus the
-    // attribution block.
     let mut section = "# Git\n\
      - Interactive flags (`-i`, e.g. `git rebase -i`, `git add -i`) are not supported in this environment.\n\
      - Use the `gh` CLI for GitHub operations (PRs, issues, API).\n\
@@ -934,6 +953,10 @@ fn concise_git_section() -> String {
     if !attribution_lines.is_empty() {
         section.push('\n');
         section.push_str(&attribution_lines.join("\n"));
+    }
+    if !precommit_suggestion.is_empty() {
+        section.push_str("\n- ");
+        section.push_str(precommit_suggestion);
     }
     section
 }
@@ -995,6 +1018,14 @@ fn concise_git_section() -> String {
 /// Em-dash is U+2014 (the binary stores it as the JS escape `—`).
 #[must_use]
 pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, _model: Option<&str>) -> String {
+    simple_prompt_concise_with_precommit(sandbox, "")
+}
+
+/// Build the concise Bash description with the session's precommit guidance.
+pub(crate) fn simple_prompt_concise_with_precommit(
+    sandbox: &SandboxRuntimeConfig,
+    precommit_suggestion: &str,
+) -> String {
     // CONCISE avoid-list — claude-code 2.1.238 `hcT` picks it with the SAME
     // `VH()` (embedded-search-tools) predicate the VERBOSE builder `Yhm` uses:
     //   VH() ? "`cat`, …" : "`find`, `grep`, `cat`, …"
@@ -1030,7 +1061,7 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, _model: Option<&str
     // `s` — the detached-run bullet, present iff the background note exists.
     // `sq()` (Monitor / amber sentinel) is default-false ⇒ no Monitor clause.
     if background_usage_note().is_some() {
-        lines.push("- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. No `&` needed.".into());
+        lines.push(format!("- `run_in_background` runs the command detached: it keeps running across turns and re-invokes you when it exits. With it, `timeout` is how long the command may run in the background (default {BASH_BACKGROUND_DEFAULT_TIMEOUT_MS}, max {}); at that limit it is stopped and you are re-invoked. No `&` needed.", bash_background_max_timeout_ms()));
     }
 
     // `r=yXa()` — sandbox section (same as VERBOSE), appended when non-empty.
@@ -1040,7 +1071,7 @@ pub fn simple_prompt_concise(sandbox: &SandboxRuntimeConfig, _model: Option<&str
     }
 
     // `n=$Up(e)` — CONCISE git section, preceded by a blank line when non-empty.
-    let git = concise_git_section();
+    let git = concise_git_section(precommit_suggestion);
     if !git.is_empty() {
         lines.push(String::new());
         lines.push(git);

@@ -74,6 +74,41 @@ pub const MAX_GLOB_MATCHES: usize = 100;
 /// Model-facing string when no files matched (`GlobTool.ts:178-183`, byte-exact).
 const NO_FILES_FOUND: &str = "No files found";
 
+/// Claude Code 2.1.287 `Glob.mapToolResultToToolResultBlockParam` and its
+/// truncation notice. Mod replacements must use this pure projection without
+/// re-running the filesystem search.
+fn map_glob_result_text(data: &Value) -> Option<String> {
+    let filenames = data
+        .get("filenames")?
+        .as_array()?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()?;
+    if filenames.is_empty() {
+        return Some(NO_FILES_FOUND.to_string());
+    }
+    let mut text = filenames.join("\n");
+    if data.get("truncated").and_then(Value::as_bool) == Some(true) {
+        let count = filenames.len();
+        let notice = match data.get("totalMatches").and_then(Value::as_u64) {
+            None => "(Results are truncated. Consider using a more specific path or pattern.)"
+                .to_string(),
+            Some(total) if data.get("countIsComplete").and_then(Value::as_bool) == Some(true) => {
+                format!(
+                    "(Showing {count} of {total} matching files; {} more are not listed. Narrow the pattern or path to see the rest.)",
+                    total as i128 - count as i128
+                )
+            }
+            Some(total) => format!(
+                "(Showing the first {count} files; there are more than {total} matches. Narrow the pattern or path to see the rest.)"
+            ),
+        };
+        text.push('\n');
+        text.push_str(&notice);
+    }
+    Some(text)
+}
+
 /// `lhe.maxResultSizeChars` = `1e5` (binary 2.1.238 @289926092). Glob's own cap,
 /// deliberately NOT the shared `MAX_TOOL_OUTPUT_LENGTH`.
 const GLOB_MAX_RESULT_SIZE_CHARS: usize = 100_000;
@@ -200,6 +235,21 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    json!({
+        "type":"object",
+        "required":["durationMs","numFiles","filenames","truncated"],
+        "properties":{
+            "durationMs":{"type":"number"},
+            "numFiles":{"type":"number"},
+            "filenames":{"type":"array","items":{"type":"string"}},
+            "truncated":{"type":"boolean"},
+            "totalMatches":{"type":"number"},
+            "countIsComplete":{"type":"boolean"}
+        }
+    })
+});
+
 #[async_trait]
 impl Tool for GlobTool {
     fn name(&self) -> &str {
@@ -213,6 +263,12 @@ impl Tool for GlobTool {
     }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
+    }
+    fn output_schema(&self) -> Option<&Value> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    fn map_result_text(&self, result: &Value) -> Option<String> {
+        map_glob_result_text(result)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -527,7 +583,7 @@ impl Tool for GlobTool {
         // model text is the tool's STRING, not a JSON dump of `data`.
         let duration_ms = started.elapsed().as_millis() as u64;
         let num_files = matches.len();
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "filenames": matches,
                 "durationMs": duration_ms,
@@ -621,6 +677,42 @@ mod tests {
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
 
+    #[test]
+    fn mod_replacement_uses_globs_result_mapper() {
+        assert!(tool_api::output_schema::validate(
+            &OUTPUT_SCHEMA,
+            &json!({"durationMs":1,"numFiles":0,"filenames":[],"truncated":false})
+        )
+        .is_ok());
+        assert!(tool_api::output_schema::validate(
+            &OUTPUT_SCHEMA,
+            &json!({"durationMs":1,"numFiles":0,"filenames":"wrong","truncated":false})
+        )
+        .is_err());
+        assert_eq!(
+            map_glob_result_text(&json!({"filenames":[]})).as_deref(),
+            Some("No files found")
+        );
+        let mut result = json!({
+            "filenames":["a.rs","b.rs"], "truncated":true,
+            "totalMatches":5, "countIsComplete":true
+        });
+        assert_eq!(
+            map_glob_result_text(&result).as_deref(),
+            Some("a.rs\nb.rs\n(Showing 2 of 5 matching files; 3 more are not listed. Narrow the pattern or path to see the rest.)")
+        );
+        result["countIsComplete"] = json!(false);
+        assert_eq!(
+            map_glob_result_text(&result).as_deref(),
+            Some("a.rs\nb.rs\n(Showing the first 2 files; there are more than 5 matches. Narrow the pattern or path to see the rest.)")
+        );
+        result.as_object_mut().unwrap().remove("totalMatches");
+        assert_eq!(
+            map_glob_result_text(&result).as_deref(),
+            Some("a.rs\nb.rs\n(Results are truncated. Consider using a more specific path or pattern.)")
+        );
+    }
+
     /// S2 (PathAtlas): a guest base directory translates onto its host twin,
     /// so the search runs where the files actually live — an untranslated
     /// guest base would fail containment as a nonexistent path.
@@ -713,6 +805,7 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert_eq!(long, glob_description(true));
@@ -722,6 +815,7 @@ mod tests {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert_eq!(short, GLOB_PROMPT_SHORT);
@@ -1530,6 +1624,7 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert_eq!(p, d);

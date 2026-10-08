@@ -1269,6 +1269,7 @@ impl InProcessTeammateHandler {
             // cells (filled at the composition root, same as `PoolSubagentSpawner`).
             // Unfilled ⇒ the runner skips them (byte-identical legacy).
             hook_executor: self.hook_executor.get().cloned(),
+            agent_spawn_token: None,
             stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
             subagent_stop_firer: self
                 .hook_executor

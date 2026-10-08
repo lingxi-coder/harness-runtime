@@ -225,6 +225,14 @@ fn project_message_utf16(
     };
     if let Some(blocks) = blocks {
         for (index, block) in blocks.iter().enumerate() {
+            if let ContentBlock::ToolUse { input_projection: Some(input), .. } = block {
+                projection.set_pointer(&format!("{message_pointer}/content/{index}/input"), input.clone()).expect("typed tool input owns its valid display tree");
+            }
+            if let ContentBlock::ToolResult { content_projection: Some(output), content_blocks, .. } = block {
+                block.projected_tool_result().expect("typed result projection is valid");
+                let field = if content_blocks.is_some() { "content_blocks" } else { "content" };
+                projection.set_pointer(&format!("{message_pointer}/content/{index}/{field}"), output.clone()).expect("typed result source field exists");
+            }
             let ContentBlock::TextJsUtf16 {
                 utf16_code_units, ..
             } = block
@@ -358,7 +366,7 @@ fn append_content_block(block: &ContentBlock) -> Value {
             name,
             input,
             provider_id,
-        } => serde_json::json!({
+         .. } => serde_json::json!({
             "type":"tool_use",
             "id":provider_id.as_deref().unwrap_or_else(|| id.as_str()),
             "name":name,
@@ -370,7 +378,7 @@ fn append_content_block(block: &ContentBlock) -> Value {
             is_error,
             provider_tool_use_id,
             content_blocks,
-        } => {
+         .. } => {
             let mut value = serde_json::json!({
                 "type":"tool_result",
                 "tool_use_id":provider_tool_use_id.as_deref().unwrap_or_else(|| tool_use_id.as_str()),
@@ -434,33 +442,6 @@ fn append_message_projection(message: &ConversationMessage) -> Value {
     result
 }
 
-fn append_content_utf16_sidecars(
-    message: &ConversationMessage,
-    pointer_prefix: &str,
-) -> Vec<hooks::mods::ModUtf16StringSidecar> {
-    let content = match message {
-        ConversationMessage::User { content, .. }
-        | ConversationMessage::Assistant { content, .. } => content,
-        ConversationMessage::System { .. } => return Vec::new(),
-    };
-    content
-        .iter()
-        .enumerate()
-        .filter_map(|(index, block)| {
-            let ContentBlock::TextJsUtf16 {
-                utf16_code_units, ..
-            } = block
-            else {
-                return None;
-            };
-            String::from_utf16(utf16_code_units).err()?;
-            Some(hooks::mods::ModUtf16StringSidecar {
-                pointer: format!("{pointer_prefix}/content/{index}/text"),
-                code_units: utf16_code_units.clone(),
-            })
-        })
-        .collect()
-}
 
 fn append_text_parts(
     value: &Value,
@@ -556,16 +537,22 @@ fn append_new_text_block(
     })
 }
 
+fn append_exact_message(message: &ConversationMessage) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String> {
+    message.project_native_content(append_message_projection(message), "/content").map_err(|error| error.to_string())
+}
+
 fn append_projection_matches(
     expected: &ConversationMessage,
-    actual: &Value,
+    actual: &serde_json::Value,
     actual_strings: &[hooks::mods::ModUtf16StringSidecar],
+    actual_keys: &[hooks::mods::ModUtf16KeySidecar],
 ) -> bool {
-    let mut actual_strings = actual_strings.to_vec();
-    let mut expected_strings = append_content_utf16_sidecars(expected, "/message");
-    actual_strings.sort_by(|left, right| left.pointer.cmp(&right.pointer));
-    expected_strings.sort_by(|left, right| left.pointer.cmp(&right.pointer));
-    actual == &append_message_projection(expected) && actual_strings == expected_strings
+    let actual = hooks::mods::ModUtf16ValueProjection {
+        value: serde_json::json!({"message":actual}), strings: actual_strings.to_vec(), keys: actual_keys.to_vec(),
+    }.into_core_projection().and_then(|projection| projection.subprojection("/message").map_err(|error| hooks::mods::ModError::Protocol(error.to_string())))
+        .and_then(|projection| projection.to_json_string().map_err(|error| hooks::mods::ModError::Protocol(error.to_string())));
+    let expected = append_exact_message(expected).and_then(|projection| projection.to_json_string().map_err(|error| error.to_string()));
+    matches!((actual, expected), (Ok(actual), Ok(expected)) if actual == expected)
 }
 
 fn append_identity_key(
@@ -591,19 +578,31 @@ fn append_identity_key(
     Some(key)
 }
 
-fn rewrite_tool_result_blocks(original: Option<&Vec<Value>>, incoming: &[Value]) -> Vec<Value> {
+fn rewrite_tool_result_blocks(original: Option<&Vec<Value>>, incoming: &[Value],
+    original_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    incoming_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> Vec<Value> {
     let original = original.map_or(&[][..], Vec::as_slice);
     let mut used = vec![false; original.len()];
     incoming
         .iter()
-        .filter_map(|block| {
+        .enumerate()
+        .filter_map(|(incoming_index, block)| {
             if let Some((index, old)) = original
                 .iter()
                 .enumerate()
-                .find(|(index, old)| !used[*index] && *old == block)
+                .find(|(index, old)| {
+                    if used[*index] { return false; }
+                    if let (Some(original), Some(incoming)) = (original_projection, incoming_projection) {
+                        let old = original.subprojection(&format!("/{index}")).and_then(|p| p.to_json_string());
+                        let new = incoming.subprojection(&format!("/{incoming_index}")).and_then(|p| p.to_json_string());
+                        return matches!((old, new), (Ok(old), Ok(new)) if old == new);
+                    }
+                    *old == block
+                })
             {
                 used[index] = true;
-                return Some(old.clone());
+                return Some(if incoming_projection.is_some() { block.clone() } else { old.clone() });
             }
             if block.get("type").and_then(Value::as_str) == Some("text")
                 && block
@@ -618,14 +617,17 @@ fn rewrite_tool_result_blocks(original: Option<&Vec<Value>>, incoming: &[Value])
         .collect()
 }
 
-fn rewrite_tool_result(original: &ContentBlock, incoming: &Value) -> ContentBlock {
+fn rewrite_tool_result(original: &ContentBlock, incoming: &Value,
+    source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> ContentBlock {
     let ContentBlock::ToolResult {
         tool_use_id,
         content,
         is_error: _,
         provider_tool_use_id,
         content_blocks,
-    } = original
+        content_projection,
+     .. } = original
     else {
         return original.clone();
     };
@@ -653,7 +655,7 @@ fn rewrite_tool_result(original: &ContentBlock, incoming: &Value) -> ContentBloc
                 if content_blocks.as_ref().is_some_and(|old| old == blocks) {
                     next_content_blocks = Some(blocks.clone());
                 } else {
-                    let blocks = rewrite_tool_result_blocks(content_blocks.as_ref(), blocks);
+                    let blocks = rewrite_tool_result_blocks(content_blocks.as_ref(), blocks, content_projection.as_ref(), source);
                     next_content = blocks
                         .iter()
                         .filter_map(|block| block.get("text").and_then(Value::as_str))
@@ -665,7 +667,7 @@ fn rewrite_tool_result(original: &ContentBlock, incoming: &Value) -> ContentBloc
             _ => {}
         }
     }
-    ContentBlock::ToolResult {
+    ContentBlock::ToolResult { content_projection: incoming.get("content").is_none().then(|| content_projection.clone()).flatten(),
         tool_use_id: tool_use_id.clone(),
         content: next_content,
         // Native makes an omitted flag logically false. Preserve its wire
@@ -680,6 +682,7 @@ fn rewrite_append_blocks(
     original: &[ContentBlock],
     incoming: &[Value],
     strings: &[hooks::mods::ModUtf16StringSidecar],
+    source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> Vec<ContentBlock> {
     let mut source_counts = HashMap::new();
     let source_keys = original
@@ -729,7 +732,7 @@ fn rewrite_append_blocks(
     let mut raised_sources = vec![false; original.len()];
     let mut active_anchor = None::<String>;
     let mut overlays = HashMap::<Option<String>, Vec<ContentBlock>>::new();
-    let mut tool_result_overlays = HashMap::<String, Value>::new();
+    let mut tool_result_overlays = HashMap::<String, (usize, Value)>::new();
 
     for (incoming_index, block) in incoming.iter().enumerate() {
         let text_pointer = format!("/message/content/{incoming_index}/text");
@@ -784,7 +787,7 @@ fn rewrite_append_blocks(
         };
         active_anchor = Some(identity_key.clone());
         if kind == "tool_result" {
-            tool_result_overlays.insert(identity_key, block.clone());
+            tool_result_overlays.insert(identity_key, (incoming_index, block.clone()));
         }
     }
 
@@ -810,8 +813,16 @@ fn rewrite_append_blocks(
         }
         if let Some(identity_key) = &source_keys[index] {
             let block = match (&original[index], tool_result_overlays.get(identity_key)) {
-                (ContentBlock::ToolResult { .. }, Some(incoming)) => {
-                    rewrite_tool_result(&original[index], incoming)
+                (ContentBlock::ToolResult { .. }, Some((incoming_index, incoming))) => {
+                    let content_source = source.and_then(|source| source.subprojection(&format!("/message/content/{incoming_index}/content")).ok());
+                    let mut result = rewrite_tool_result(&original[index], incoming, content_source.as_ref());
+                    if incoming.get("is_error").is_none_or(Value::is_boolean) {
+                        if let Some(exact) = content_source.filter(|exact| exact.value.is_string() || exact.value.is_array())
+                        {
+                            result.rebase_tool_result_projection(exact).expect("validated result content rewrite");
+                        }
+                    }
+                    result
                 }
                 _ => original[index].clone(),
             };
@@ -828,6 +839,7 @@ fn rewrite_append_message(
     original: &ConversationMessage,
     incoming: &Value,
     strings: &[hooks::mods::ModUtf16StringSidecar],
+    source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> Result<ConversationMessage, String> {
     let Some(content) = incoming.get("content").and_then(Value::as_array) else {
         return Err("session.append message.content must be an array".into());
@@ -839,9 +851,9 @@ fn rewrite_append_message(
             is_meta,
             is_compact_summary,
             is_visible_in_transcript_only,
-        } => ConversationMessage::User {
+         .. } => ConversationMessage::User { api_message_override: None,
             id: *id,
-            content: rewrite_append_blocks(old_content, content, strings),
+            content: rewrite_append_blocks(old_content, content, strings, source),
             is_meta: *is_meta,
             is_compact_summary: *is_compact_summary,
             is_visible_in_transcript_only: *is_visible_in_transcript_only,
@@ -850,9 +862,9 @@ fn rewrite_append_message(
             id,
             content: old_content,
             stop_reason,
-        } => ConversationMessage::Assistant {
+         .. } => ConversationMessage::Assistant { per_turn_effort: None,
             id: *id,
-            content: rewrite_append_blocks(old_content, content, strings),
+            content: rewrite_append_blocks(old_content, content, strings, source),
             stop_reason: stop_reason.clone(),
         },
         ConversationMessage::System {
@@ -862,7 +874,7 @@ fn rewrite_append_message(
             model_fallback,
             refusal_fallback,
             ..
-        } => ConversationMessage::System {
+        } => ConversationMessage::System { api_system: None,
             id: *id,
             content: content
                 .iter()
@@ -1074,7 +1086,6 @@ async fn mod_append_message_row(
 ) -> ConversationMessage {
     let uuid = original.id().as_uuid().to_string();
     let (door, origin) = append_door_origin(original, prior_history, model);
-    let input_utf16_strings = append_content_utf16_sidecars(original, "/message");
     let input = serde_json::json!({
         "message":append_message_projection(original),
         "door":door,
@@ -1082,17 +1093,13 @@ async fn mod_append_message_row(
         "uuid":uuid,
         "agentId":agent_id.as_uuid().to_string(),
     });
-    let mut input_projection = Utf16JsonProjection::plain(input.clone());
-    input_projection
-        .strings
-        .extend(
-            input_utf16_strings
-                .into_iter()
-                .map(|sidecar| Utf16JsonString {
-                    pointer: sidecar.pointer,
-                    code_units: sidecar.code_units,
-                }),
-        );
+    let input_projection = match original.project_native_content(input.clone(), "/message/content")
+        .map_err(|error| ModError::Protocol(error.to_string()))
+        .and_then(hooks::mods::ModUtf16ValueProjection::from_core_projection)
+    {
+        Ok(projection) => projection,
+        Err(error) => { tracing::warn!(%uuid, %error, "invalid child session.append source projection"); return original.clone(); }
+    };
     let core_input = input.clone();
     let core_uuid = uuid.clone();
     let core_original = original.clone();
@@ -1101,26 +1108,16 @@ async fn mod_append_message_row(
     let result = dispatch_append_event(
         host,
         cwd,
-        hooks::mods::ModUtf16ValueProjection {
-            value: input_projection.value,
-            strings: input_projection
-                .strings
-                .into_iter()
-                .map(|sidecar| hooks::mods::ModUtf16StringSidecar {
-                    pointer: sidecar.pointer,
-                    code_units: sidecar.code_units,
-                })
-                .collect(),
-            keys: Vec::new(),
-        },
+        input_projection,
         move |forwarded_projection| {
             let core_input = core_input.clone();
             let core_uuid = core_uuid.clone();
             let core_original = core_original.clone();
             let applied = applied_by_core.clone();
-            let forwarded = forwarded_projection.value;
-            let input_utf16_strings = forwarded_projection.strings;
             async move {
+                let input_utf16_strings = forwarded_projection.strings.clone();
+                let source = forwarded_projection.into_core_projection()?;
+                let forwarded = &source.value;
                 for key in ["door", "origin", "uuid", "agentId"] {
                     if forwarded
                         .get(key)
@@ -1146,19 +1143,16 @@ async fn mod_append_message_row(
                     }
                 }
                 let rewritten =
-                    rewrite_append_message(&core_original, incoming, &input_utf16_strings)
+                    rewrite_append_message(&core_original, incoming, &input_utf16_strings, Some(&source))
                         .map_err(ModError::Hook)?;
-                let projected = append_message_projection(&rewritten);
-                let result_utf16_strings = append_content_utf16_sidecars(&rewritten, "/message");
+                let projected = append_exact_message(&rewritten).map_err(ModError::Hook)?;
                 *applied
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some((rewritten, projected.clone()));
-                Ok(hooks::mods::ModUtf16ValueProjection {
-                    value: serde_json::json!({"message":projected,"uuid":core_uuid}),
-                    strings: result_utf16_strings,
-                    keys: Vec::new(),
-                })
+                    Some((rewritten, projected.value.clone()));
+                let mut result = Utf16JsonProjection::plain(serde_json::json!({"message":projected.value,"uuid":core_uuid}));
+                result.set_pointer("/message", projected).map_err(|error| ModError::Protocol(error.to_string()))?;
+                hooks::mods::ModUtf16ValueProjection::from_core_projection(result)
             }
         },
     )
@@ -1167,6 +1161,7 @@ async fn mod_append_message_row(
         Ok(outcome) => {
             let result = outcome.result;
             let result_utf16_strings = outcome.result_utf16_strings;
+            let result_utf16_keys = outcome.result_utf16_keys;
             let accepted = applied
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1178,6 +1173,7 @@ async fn mod_append_message_row(
                             &rewritten,
                             &result["message"],
                             &result_utf16_strings,
+                            &result_utf16_keys,
                         ) =>
                 {
                     rewritten
@@ -1318,7 +1314,7 @@ async fn mod_append_source_attachment(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some((rewritten, projected.clone()));
-            let mut result_strings = projected
+            let result_strings = projected
                 .strings
                 .into_iter()
                 .map(|sidecar| hooks::mods::ModUtf16StringSidecar {
@@ -1515,6 +1511,7 @@ impl AgentTranscriptWriter {
                 id: MessageId::new(),
                 content: "Model selection changed".into(),
                 subtype: Some("agent_model_selection".into()),
+                api_system: None,
                 compact_metadata: None,
                 model_fallback: None,
                 refusal_fallback: None,
@@ -1898,7 +1895,7 @@ impl AgentTranscriptWriter {
         &self,
         messages: std::collections::HashMap<lingxi_core::types::MessageId, usize>,
     ) -> Result<(), lingxi_core::host::FsError> {
-        self.record(&ConversationMessage::System {
+        self.record(&ConversationMessage::System { api_system: None,
             id: lingxi_core::types::MessageId::new(),
             content: serde_json::to_string(&messages).expect("thinking ranges serialize"),
             subtype: Some("thinking_stripped".into()),
@@ -1938,15 +1935,17 @@ impl AgentTranscriptWriter {
         let entry = self.attachment_entry(message.id(), Some(message), attachment);
         let overrides = peer_attachment_overrides(&entry)?;
         for line in existing.lines().filter(|line| !line.is_empty()) {
-            let decoded = lingxi_core::types::exact_json::parse_exact_json(line)
+            let decoded = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
                 .map_err(|_| attachment_io("transcript contains an uncommitted or invalid row"))?;
+            let string_overrides = decoded.string_overrides();
             let row = decoded.value;
             if row["uuid"] == entry["uuid"] || row["message"]["id"] == entry["uuid"] {
                 if row["type"] != "attachment"
                     || row["agent_id"] != entry["agent_id"]
                     || row["message"] != entry["message"]
                     || row["attachment"] != entry["attachment"]
-                    || decoded.utf16_overrides != overrides
+                    || string_overrides != overrides
+                    || !decoded.keys.is_empty()
                 {
                     return Err(attachment_io("peer transcript identity collision"));
                 }
@@ -2016,7 +2015,7 @@ impl AgentTranscriptWriter {
         let entry = TranscriptEntry {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),
-            message: ConversationMessage::System {
+            message: ConversationMessage::System { api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: detail.to_string(),
                 subtype: Some(format!("agent_{status}")),
@@ -2335,13 +2334,13 @@ mod tests {
 
     #[test]
     fn append_overlay_replays_after_every_duplicate_source_tool_identity() {
-        let first = ContentBlock::ToolUse {
+        let first = ContentBlock::ToolUse { input_projection: None,
             id: lingxi_core::types::ToolUseId::from("source-a"),
             name: "Read".into(),
             input: serde_json::json!({"file_path":"a"}),
             provider_id: Some("toolu_duplicate".into()),
         };
-        let second = ContentBlock::ToolUse {
+        let second = ContentBlock::ToolUse { input_projection: None,
             id: lingxi_core::types::ToolUseId::from("source-b"),
             name: "Read".into(),
             input: serde_json::json!({"file_path":"b"}),
@@ -2363,7 +2362,7 @@ mod tests {
                 serde_json::json!({"type":"text","text":"accepted suffix"}),
             ],
             &[],
-        );
+         None);
         assert_eq!(
             rewritten,
             vec![first, accepted_text.clone(), second, accepted_text]
@@ -2380,7 +2379,7 @@ mod tests {
         assert!(projected_text.get("citations").is_some());
         assert_eq!(projected_text["citations"], Value::Null);
 
-        let omitted = ContentBlock::ToolResult {
+        let omitted = ContentBlock::ToolResult { content_projection: None,
             tool_use_id: lingxi_core::types::ToolUseId::from("toolu_1"),
             content: "ok".into(),
             is_error: None,
@@ -2389,7 +2388,7 @@ mod tests {
         };
         assert!(append_content_block(&omitted).get("is_error").is_none());
 
-        let explicit_false = ContentBlock::ToolResult {
+        let explicit_false = ContentBlock::ToolResult { content_projection: None,
             tool_use_id: lingxi_core::types::ToolUseId::from("toolu_1"),
             content: "ok".into(),
             is_error: Some(false),
@@ -2409,7 +2408,7 @@ mod tests {
                 "citations":null,
             })],
             &[],
-        );
+         None);
         assert!(matches!(
             accepted_text.as_slice(),
             [ContentBlock::Text {
@@ -2421,7 +2420,7 @@ mod tests {
         assert!(projected_accepted_text.get("citations").is_some());
         assert_eq!(projected_accepted_text["citations"], Value::Null);
 
-        let old_error = ContentBlock::ToolResult {
+        let old_error = ContentBlock::ToolResult { content_projection: None,
             tool_use_id: lingxi_core::types::ToolUseId::from("toolu_1"),
             content: "failed".into(),
             is_error: Some(true),
@@ -2434,7 +2433,7 @@ mod tests {
                 "type":"tool_result",
                 "content":"accepted",
             }),
-        );
+         None);
         assert!(matches!(
             omitted_error,
             ContentBlock::ToolResult { is_error: None, .. }
@@ -2458,14 +2457,14 @@ mod tests {
                 std::slice::from_ref(&source),
                 std::slice::from_ref(&projected),
                 &[],
-            ),
+             None),
             vec![source.clone()]
         );
 
         let mut changed = projected;
         changed["text"] = Value::String("replacement answer".into());
         assert_eq!(
-            rewrite_append_blocks(&[source], &[changed], &[]),
+            rewrite_append_blocks(&[source], &[changed], &[], None),
             vec![ContentBlock::Text {
                 text: "replacement answer".into(),
                 citations: Some(None),
@@ -2655,7 +2654,7 @@ mod tests {
         );
         let mut message_units = "reminder ".encode_utf16().collect::<Vec<_>>();
         message_units.push(0xd800);
-        let message = ConversationMessage::User {
+        let message = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::TextJsUtf16 {
@@ -2762,7 +2761,7 @@ mod tests {
         );
         scope_message_row_indexes(None, async {
             let removed_id = MessageId::new();
-            let removed = ConversationMessage::Assistant {
+            let removed = ConversationMessage::Assistant { per_turn_effort: None,
                 id: removed_id,
                 content: vec![ContentBlock::Text {
                     text: "discarded server row".into(),
@@ -3105,7 +3104,7 @@ mod tests {
                 dir.path().to_path_buf(),
             )),
         );
-        let assistant = |id, text: &str| ConversationMessage::Assistant {
+        let assistant = |id, text: &str| ConversationMessage::Assistant { per_turn_effort: None,
             id,
             content: vec![
                 lingxi_core::types::ContentBlock::Thinking {
@@ -3157,5 +3156,69 @@ mod tests {
         );
         assert_eq!(content.len(), 2);
         assert_eq!(history[1], fresh);
+    }
+}
+
+#[cfg(test)]
+mod rich_append_projection_tests {
+    use super::*;
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    fn worker_frame(message: &ConversationMessage) -> hooks::mods::ModUtf16ValueProjection {
+        let message = append_exact_message(message).unwrap();
+        let mut frame = Utf16JsonProjection::plain(serde_json::json!({"message":message.value}));
+        frame.set_pointer("/message", message).unwrap();
+        hooks::mods::ModUtf16ValueProjection::from_core_projection(frame).unwrap()
+    }
+
+    #[test]
+    fn source_tool_input_survives_worker_key_namespace_and_detects_key_unit_change() {
+        let input = Utf16JsonProjection::parse(r#"{"\ud800":"\udfff"}"#).unwrap();
+        let original = ConversationMessage::Assistant { per_turn_effort: None,
+            id: MessageId::new(), stop_reason: Some("tool_use".into()),
+            content: vec![ContentBlock::ToolUse {
+                id: ToolUseId::from("toolu_exact"), name: "Echo".into(),
+                input: input.value.clone(), input_projection: Some(input.clone()), provider_id: None,
+            }],
+        };
+        let forwarded = worker_frame(&original);
+        let source = forwarded.clone().into_core_projection().unwrap();
+        let rewritten = rewrite_append_message(&original, &source.value["message"], &forwarded.strings, Some(&source)).unwrap();
+        assert!(append_projection_matches(&rewritten, &forwarded.value["message"], &forwarded.strings, &forwarded.keys));
+        assert_eq!(append_exact_message(&rewritten).unwrap().subprojection("/content/0/input").unwrap().to_json_string().unwrap(), input.to_json_string().unwrap());
+        let mut tampered = forwarded;
+        tampered.keys[0].code_units = vec![0xd801];
+        assert!(!append_projection_matches(&rewritten, &tampered.value["message"], &tampered.strings, &tampered.keys));
+    }
+
+    #[test]
+    fn accepted_result_retains_exact_source_keys_when_append_repositions_blocks() {
+        let data = Utf16JsonProjection::parse(r#"[{"type":"text","text":"\udc00","\udfff":"\ud800"}]"#).unwrap();
+        let original = ConversationMessage::User { api_message_override: None,
+            id: MessageId::new(), is_meta: false, is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::from("toolu_exact"), content: "\u{fffd}".into(),
+                is_error: Some(false), provider_tool_use_id: None,
+                content_blocks: Some(data.value.as_array().unwrap().clone()), content_projection: Some(data.clone()),
+            }],
+        };
+        let mut omitted = append_message_projection(&original);
+        omitted["content"][0].as_object_mut().unwrap().remove("content");
+        let retained = rewrite_append_message(&original, &omitted, &[], None).unwrap();
+        assert_eq!(append_exact_message(&retained).unwrap().subprojection("/content/0/content").unwrap().to_json_string().unwrap(), data.to_json_string().unwrap());
+        let mut incoming = append_message_projection(&original);
+        incoming["content"].as_array_mut().unwrap().insert(0, serde_json::json!({"type":"text","text":"added"}));
+        let mut frame = Utf16JsonProjection::plain(serde_json::json!({"message":incoming}));
+        frame.set_pointer("/message/content/1/content", data.clone()).unwrap();
+        let forwarded = hooks::mods::ModUtf16ValueProjection::from_core_projection(frame).unwrap();
+        let source = forwarded.clone().into_core_projection().unwrap();
+        let rewritten = rewrite_append_message(&original, &source.value["message"], &forwarded.strings, Some(&source)).unwrap();
+        let result = append_exact_message(&rewritten).unwrap().subprojection("/content/0/content").unwrap();
+        assert_eq!(result.to_json_string().unwrap(), data.to_json_string().unwrap());
+        assert_eq!(append_message_projection(&rewritten)["content"][1]["text"], "added");
+        let accepted = worker_frame(&rewritten);
+        assert!(append_projection_matches(&rewritten, &accepted.value["message"], &accepted.strings, &accepted.keys));
     }
 }

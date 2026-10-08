@@ -179,7 +179,9 @@ fn register_with_options(
     // NO `isEnabled`, so `es()`'s default `isEnabled:()=>!0` applies and the
     // schema is advertised in every session — registered unconditionally here.
     reg.register_builtin(Arc::new(ReportFindingsTool::new(ctx.clone())));
-    reg.register_builtin(Arc::new(SyntheticOutputTool::new(ctx)));
+    // StructuredOutput is a dynamically configured schema capture tool owned
+    // by the query's composition root. The replay echo implementation remains
+    // available for explicit replay users, never in a default model catalog.
     // NOTE: `ArtifactTool` lives in this crate but is registered by the DESKTOP
     // composition root (`harness_runtime::desktop::register_desktop_tools`), not here — it
     // is a first-party/claude.ai feature gated on `tengu_cobalt_plinth` +
@@ -198,8 +200,8 @@ mod ask_timeout_wiring_tests {
     use mobile_linux_api::ProcessOutput;
     use serde_json::json;
     use std::sync::Arc;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use tool_api::ToolError;
+    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
     fn dummy_out() -> ProcessOutput {
         ProcessOutput {
@@ -221,6 +223,13 @@ mod ask_timeout_wiring_tests {
                 ]
             }]
         })
+    }
+
+    #[test]
+    fn ordinary_ui_catalog_does_not_advertise_unconfigured_structured_output() {
+        let mut registry = tool_api::ToolRegistry::new();
+        register_all_without_ask_user_question(&mut registry, shell_test_ctx(dummy_out()));
+        assert!(registry.find_registered("StructuredOutput").is_none());
     }
 
     /// Register the UI tools with the given `askUserQuestionTimeout` carrier and

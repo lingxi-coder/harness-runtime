@@ -41,7 +41,7 @@ impl Transport for Capture {
 }
 
 fn user(text: &str) -> ConversationMessage {
-    ConversationMessage::User {
+    ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: text.into(),

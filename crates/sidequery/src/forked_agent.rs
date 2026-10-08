@@ -479,7 +479,7 @@ mod tests {
             canned_usage: Usage::default(),
         });
         let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "test".into());
-        let placeholder = ConversationMessage::System {
+        let placeholder = ConversationMessage::System { api_system: None,
             id: MessageId::new(),
             content: String::new(),
             subtype: Some("model_reminder_attachment".into()),
@@ -487,7 +487,7 @@ mod tests {
             model_fallback: None,
             refusal_fallback: None,
         };
-        let boundary = ConversationMessage::System {
+        let boundary = ConversationMessage::System { api_system: None,
             id: MessageId::new(),
             content: String::new(),
             subtype: Some("compact_boundary".into()),
@@ -574,6 +574,10 @@ mod tests {
                 "cache_control": {"type": "ephemeral"}
             }),
         ];
+        let parent_tools = parent_tools
+            .into_iter()
+            .map(lingxi_core::types::utf16_json::Utf16JsonProjection::plain)
+            .collect::<Vec<_>>();
         req.cache_safe_params.tools = parent_tools.clone();
         req.cache_safe_params.effort = Some(serde_json::json!("high"));
 
@@ -751,11 +755,14 @@ mod tests {
         // `/btw` is a tool-denied, one-turn fork, but it still needs the
         // parent schemas in the API request to preserve the shared cache key.
         req.query_source = QuerySource::Custom("side_question".into());
-        req.cache_safe_params.tools = vec![serde_json::json!({
-            "name": "Read",
-            "description": "Read a file.",
-            "input_schema": {"type": "object"}
-        })];
+        req.cache_safe_params.tools =
+            vec![lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                serde_json::json!({
+                    "name": "Read",
+                    "description": "Read a file.",
+                    "input_schema": {"type": "object"}
+                }),
+            )];
         req.cache_safe_params.effort = Some(serde_json::json!("high"));
         let parent_tools = req.cache_safe_params.tools.clone();
         let result = runner.run(req).await.expect("run succeeds");

@@ -15,7 +15,7 @@ use client::protocol::controls::{
     ReasoningSelectionDto,
 };
 use client::protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
-use client::protocol::listings::SessionAgentSummaryDto;
+use client::protocol::listings::{SessionAgentMessageRowDto, SessionAgentSummaryDto};
 use client::protocol::local_apps::{
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
     AppCheckpointKindDto, AppDependencyChangeConfirmationRequestDto, AppDependencyChangeDto,
@@ -85,11 +85,17 @@ fn session_agent_events_round_trip() {
         }],
         images: Vec::new(),
     };
+    let row = SessionAgentMessageRowDto {
+        message_index: 0,
+        message_uuid: "00000000-0000-0000-0000-000000000003".into(),
+        message,
+        api_error_json: None,
+    };
     for event in [
         ClientEvent::SessionAgentTranscript {
             session_id: "session".into(),
             agent_id: summary.agent_id.clone(),
-            messages: vec![message.clone()],
+            messages: vec![row.clone()],
             next_message_index: 1,
             revision: 1,
         },
@@ -100,8 +106,7 @@ fn session_agent_events_round_trip() {
         ClientEvent::SessionAgentMessage {
             session_id: "session".into(),
             agent_id: summary.agent_id.clone(),
-            message_index: 0,
-            message: message.clone(),
+            row,
         },
     ] {
         let json = serde_json::to_value(&event).expect("serialize session-agent event");

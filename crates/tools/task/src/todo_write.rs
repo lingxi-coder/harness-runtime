@@ -491,7 +491,7 @@ impl Tool for TodoWriteTool {
             "Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable",
         );
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "oldTodos": old_todos,
                 "newTodos": todos,
@@ -1114,11 +1114,13 @@ mod tests {
             include_examples: false,
             model: None,
             model_profile: None,
+            ..Default::default()
         };
         let with_model = |m: &str| PromptOptions {
             include_examples: false,
             model: Some(m.to_string()),
             model_profile: None,
+            ..Default::default()
         };
 
         // Default (var unset): no model threaded ⇒ `Dh(undefined)` is false ⇒

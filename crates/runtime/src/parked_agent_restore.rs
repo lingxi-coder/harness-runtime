@@ -229,6 +229,15 @@ fn restore_message_with_utf16(
         ConversationMessage::System { .. } => return Some(message),
     };
     for (index, block) in content.iter_mut().enumerate() {
+        if let ContentBlock::ToolUse { input, input_projection, .. } = block {
+            let projection = row.subprojection(&format!("/message/content/{index}/input")).ok()?;
+            *input = projection.value.clone();
+            *input_projection = Some(projection);
+        }
+        if let ContentBlock::ToolResult { content_projection, content_blocks, .. } = block {
+            let field = if content_blocks.is_some() { "content_blocks" } else { "content" };
+            *content_projection = Some(row.subprojection(&format!("/message/content/{index}/{field}")).ok()?);
+        }
         let pointer = format!("/message/content/{index}/text");
         let Some(code_units) = row.string_units(&pointer) else {
             continue;
@@ -283,10 +292,10 @@ async fn read_restored_transcript(
     let mut resolved_selection = None;
     let mut explicit_model_selection = false;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let decoded = lingxi_core::types::exact_json::parse_exact_json(line)
+        let decoded = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
             .map_err(|error| format!("agent transcript is incomplete: {error}"))?;
-        let exact_strings = decoded.utf16_overrides.clone();
-        let value = decoded.value;
+        let exact_strings = decoded.string_overrides();
+        let value = decoded.value.clone();
         let attachment = value.get("attachment");
         if attachment.is_some_and(|attachment| {
             attachment.get("type").and_then(serde_json::Value::as_str) == Some("subagent_handback")
@@ -315,7 +324,8 @@ async fn read_restored_transcript(
                     == Some(&serde_json::to_value(envelope.receipt.message_id).unwrap())
                 && value.get("agent_id") == Some(&serde_json::to_value(agent_id).unwrap())
                 && message == expected
-                && decoded.utf16_overrides == envelope.transcript_utf16_overrides();
+                && decoded.string_overrides() == envelope.transcript_utf16_overrides()
+                && decoded.keys.is_empty();
             if !valid {
                 return Err("peer report transcript row lost its recipient, scope, identity, or Peer authority".into());
             }
@@ -323,23 +333,23 @@ async fn read_restored_transcript(
             announcement_history.push(attachment.clone());
             continue;
         }
-        let row_projection = lingxi_core::types::utf16_json::Utf16JsonProjection {
-            value: value.clone(),
-            strings: exact_strings
-                .iter()
-                .map(
-                    |(pointer, code_units)| lingxi_core::types::utf16_json::Utf16JsonString {
-                        pointer: pointer.clone(),
-                        code_units: code_units.clone(),
-                    },
-                )
-                .collect(),
-            keys: Vec::new(),
-        };
+        let row_projection = decoded;
         row_projection.validate().map_err(|error| {
             format!("agent transcript exact UTF-16 fields are invalid: {error}")
         })?;
         for pointer in exact_strings.keys() {
+            let is_tool_input = pointer.strip_prefix("/message/content/")
+                .and_then(|rest| rest.split_once("/input"))
+                .is_some_and(|(index, rest)| index.parse::<usize>().is_ok_and(|index| {
+                    value["message"]["content"][index]["type"] == "tool_use" && (rest.is_empty() || rest.starts_with('/'))
+                }));
+            let is_tool_result = pointer.strip_prefix("/message/content/")
+                .and_then(|rest| rest.split_once('/'))
+                .is_some_and(|(index, field)| index.parse::<usize>().is_ok_and(|index| {
+                    value["message"]["content"][index]["type"] == "tool_result"
+                        && (field == "content" || field.starts_with("content/")
+                            || field == "content_blocks" || field.starts_with("content_blocks/"))
+                }));
             let is_message_text = pointer
                 .strip_prefix("/message/content/")
                 .and_then(|rest| rest.strip_suffix("/text"))
@@ -347,7 +357,7 @@ async fn read_restored_transcript(
             let is_source_content = pointer
                 .strip_prefix("/source_attachment/content/")
                 .is_some_and(|index| index.parse::<usize>().is_ok());
-            if !is_message_text && !is_source_content {
+            if !is_message_text && !is_source_content && !is_tool_input && !is_tool_result {
                 return Err(format!(
                     "agent transcript exact UTF-16 field is outside a typed message or source attachment: {pointer}"
                 ));
@@ -405,7 +415,7 @@ async fn read_restored_transcript(
             // before any provider request is assembled.
             if let Ok(attachment) = row_projection.subprojection("/source_attachment") {
                 let content = exact_source_attachment_marker(message.id(), &attachment)?;
-                history.push(lingxi_core::types::ConversationMessage::System {
+                history.push(lingxi_core::types::ConversationMessage::System { api_system: None,
                     id: lingxi_core::types::MessageId::new(),
                     content,
                     subtype: Some("mod_attachment_source".into()),
@@ -621,6 +631,7 @@ mod tests {
 
     fn request() -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: Default::default(),
             agent_spawn_provenance: Default::default(),
             teammate_color: None,

@@ -74,33 +74,44 @@ struct Api {
 }
 #[async_trait]
 impl crate::api::SubagentApiClient for Api {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _: &str,
-        _: Option<&str>,
-        _: Vec<lingxi_core::types::ConversationMessage>,
-        _: Vec<Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        self.entered.notify_one();
-        if let Some(both) = &self.both {
-            both.wait().await;
+        _request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = async {
+            self.entered.notify_one();
+            if let Some(both) = &self.both {
+                both.wait().await;
+            }
+            if self.park {
+                std::future::pending::<()>().await;
+            }
+            Ok(llm_runtime::HistoryResponse {
+                id: "admitted".into(),
+                model: "mock".into(),
+                content: vec![llm_runtime::ContentBlock::Text {
+                    text: "done".into(),
+                    cache_control: None,
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                stop_details: None,
+                usage: llm_runtime::ExecutionUsage::default(),
+                cost: None,
+                provider_metadata: Value::Null,
+            })
         }
-        if self.park {
-            std::future::pending::<()>().await;
-        }
-        Ok(llm_runtime::HistoryResponse {
-            id: "admitted".into(),
-            model: "mock".into(),
-            content: vec![llm_runtime::ContentBlock::Text {
-                text: "done".into(),
-                cache_control: None,
-            }],
-            stop_reason: Some("end_turn".into()),
-            stop_details: None,
-            usage: llm_runtime::ExecutionUsage::default(),
-            cost: None,
-            provider_metadata: Value::Null,
-        })
+        .await;
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::StreamExt::boxed(futures::stream::iter(
+            events.into_iter().map(Ok),
+        )))
     }
 }
 
@@ -148,17 +159,19 @@ async fn panel_admission_wrong_pool_and_unpolled_future_return_original_permit()
     let source = PoolSubagentSpawner::new(pool(1));
     let other = PoolSubagentSpawner::new(pool(1));
     let permit = reserve(&source, 1).await.into_permits().pop().unwrap();
-    assert!(other
-        .spawn_workflow_with_observer_admitted(
-            request(),
-            inherit(),
-            None,
-            None,
-            Default::default(),
-            permit
-        )
-        .await
-        .is_err());
+    assert!(
+        other
+            .spawn_workflow_with_observer_admitted(
+                request(),
+                inherit(),
+                None,
+                None,
+                Default::default(),
+                permit
+            )
+            .await
+            .is_err()
+    );
     drop(reserve(&other, 1).await);
     let permit = reserve(&source, 1).await.into_permits().pop().unwrap();
     let unpolled = source.spawn_workflow_with_observer_admitted(
@@ -183,19 +196,21 @@ async fn panel_admission_context_rejection_and_running_cancellation_return_capac
         park: true,
     }));
     let unavailable = PoolSubagentSpawner::new(pool.clone())
-        .with_default_model_selection_provider(Arc::new(|| None));
+        .with_default_model_selection_provider(Arc::new(|| Ok(None)));
     let permit = reserve(&unavailable, 1).await.into_permits().pop().unwrap();
-    assert!(unavailable
-        .spawn_workflow_with_observer_admitted(
-            request(),
-            inherit(),
-            None,
-            None,
-            Default::default(),
-            permit
-        )
-        .await
-        .is_err());
+    assert!(
+        unavailable
+            .spawn_workflow_with_observer_admitted(
+                request(),
+                inherit(),
+                None,
+                None,
+                Default::default(),
+                permit
+            )
+            .await
+            .is_err()
+    );
     let permit = reserve(&spawner, 1).await.into_permits().pop().unwrap();
     let mut running = Box::pin(spawner.spawn_workflow_with_observer_admitted(
         request(),

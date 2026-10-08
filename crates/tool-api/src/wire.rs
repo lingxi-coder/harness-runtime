@@ -135,15 +135,36 @@ pub fn locale_cmp(a: &str, b: &str) -> Ordering {
 ///
 /// `description` is awaited from [`Tool::prompt`] (the long-form tool prompt,
 /// the same text claude-code places in the API tool definition's `description`).
-pub async fn tool_to_wire(tool: &dyn Tool, opts: &PromptOptions) -> Value {
+pub async fn tool_to_wire(
+    tool: &dyn Tool,
+    opts: &PromptOptions,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     let input_schema = tool
         .input_schema_snapshot()
         .unwrap_or_else(|| tool.input_schema().clone());
-    json!({
+    let mut projection = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({
         "name": tool.name(),
         "description": tool.prompt(opts).await,
         "input_schema": input_schema,
-    })
+    }));
+    if let Some(schema) = tool.input_schema_projection() {
+        // The producer's current schema is the authority. The declaration
+        // consumer validates the final rich projection before model egress.
+        projection.value["input_schema"] = schema.value;
+        projection
+            .strings
+            .extend(schema.strings.into_iter().map(|mut string| {
+                string.pointer = format!("/input_schema{}", string.pointer);
+                string
+            }));
+        projection
+            .keys
+            .extend(schema.keys.into_iter().map(|mut key| {
+                key.pointer = format!("/input_schema{}", key.pointer);
+                key
+            }));
+    }
+    projection
 }
 
 /// Serialize a tool set to the wire `tools` array, **preserving the incoming
@@ -156,8 +177,11 @@ pub async fn tool_to_wire(tool: &dyn Tool, opts: &PromptOptions) -> Value {
 /// here would re-interleave MCP tools into the builtin prefix and break the
 /// server-side prompt-cache breakpoint contract claude-code preserves
 /// (`tools.ts:345-367`), so this function does NOT re-sort.
-pub async fn tools_to_wire(tools: &[Arc<dyn Tool>], opts: &PromptOptions) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::with_capacity(tools.len());
+pub async fn tools_to_wire(
+    tools: &[Arc<dyn Tool>],
+    opts: &PromptOptions,
+) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    let mut out = Vec::with_capacity(tools.len());
     for tool in tools {
         out.push(tool_to_wire(tool.as_ref(), opts).await);
     }
@@ -168,10 +192,14 @@ pub async fn tools_to_wire(tools: &[Arc<dyn Tool>], opts: &PromptOptions) -> Vec
 /// `defer` is set — claude-code's deferred-tool wire form
 /// (`{name, description, input_schema, defer_loading: true}`). When `defer` is
 /// `false` the output is the byte-identical base triple.
-pub async fn tool_to_wire_deferred(tool: &dyn Tool, opts: &PromptOptions, defer: bool) -> Value {
+pub async fn tool_to_wire_deferred(
+    tool: &dyn Tool,
+    opts: &PromptOptions,
+    defer: bool,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     let mut v = tool_to_wire(tool, opts).await;
     if defer {
-        if let Some(obj) = v.as_object_mut() {
+        if let Some(obj) = v.value.as_object_mut() {
             obj.insert("defer_loading".to_string(), Value::Bool(true));
         }
     }
@@ -182,7 +210,11 @@ pub async fn tool_to_wire_deferred(tool: &dyn Tool, opts: &PromptOptions, defer:
 /// Undiscovered deferred tools are omitted; tools discovered through
 /// `tool_reference` are included with `defer_loading: true`; non-candidates are
 /// unchanged. Matching is by name and preserves the original partition order.
-pub fn apply_defer_loading(wire: &mut Vec<Value>, tools: &[Arc<dyn Tool>], defer: &DeferralState) {
+pub fn apply_defer_loading(
+    wire: &mut Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    tools: &[Arc<dyn Tool>],
+    defer: &DeferralState,
+) {
     // This compatibility entry point predates context-aware auto mode. With no
     // model window available, preserve its historical eager-auto behavior;
     // production turn assembly calls the context-aware variant below.
@@ -192,7 +224,7 @@ pub fn apply_defer_loading(wire: &mut Vec<Value>, tools: &[Arc<dyn Tool>], defer
 /// Context-aware variant used by callers without an exact token count. In
 /// automatic mode it applies Claude's 2.5-character fallback heuristic.
 pub fn apply_defer_loading_with_context(
-    wire: &mut Vec<Value>,
+    wire: &mut Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     tools: &[Arc<dyn Tool>],
     defer: &DeferralState,
     context_window: u64,
@@ -204,7 +236,7 @@ pub fn apply_defer_loading_with_context(
 /// token count. Claude first uses its provider token-count endpoint and falls
 /// back to the 2.5-character heuristic only when that endpoint is unavailable.
 pub fn apply_defer_loading_with_context_and_tokens(
-    wire: &mut Vec<Value>,
+    wire: &mut Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     tools: &[Arc<dyn Tool>],
     defer: &DeferralState,
     context_window: u64,
@@ -283,7 +315,7 @@ pub fn apply_defer_loading_with_context_and_tokens(
         if !candidates.contains(name) || !defer.is_loaded(name) {
             continue;
         }
-        if let Some(obj) = w.as_object_mut() {
+        if let Some(obj) = w.value.as_object_mut() {
             obj.insert("defer_loading".to_string(), Value::Bool(true));
         }
     }
@@ -354,7 +386,9 @@ mod tests {
             _ctx: ToolUseContext,
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({"ok": true}),
                 model_content: None,
                 new_messages: vec![],
@@ -370,6 +404,7 @@ mod tests {
             include_examples: true,
             model: None,
             model_profile: None,
+            ..Default::default()
         }
     }
 
@@ -386,7 +421,7 @@ mod tests {
         assert_eq!(wire["input_schema"]["type"], "object");
         // Exactly the base triple — no stray keys.
         let obj = wire.as_object().unwrap();
-        assert_eq!(obj.len(), 3, "only name/description/input_schema: {wire}");
+        assert_eq!(obj.len(), 3, "only name/description/input_schema: {wire:?}");
     }
 
     #[tokio::test]
@@ -554,7 +589,9 @@ mod tests {
             _ctx: ToolUseContext,
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({"ok": true}),
                 model_content: None,
                 new_messages: vec![],

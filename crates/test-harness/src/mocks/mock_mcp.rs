@@ -140,6 +140,9 @@ impl MockMcpTransport {
     /// The full name follows the engine's convention `mcp__<server>__<tool>`.
     pub fn add_tool(&self, name: &str) {
         self.tools.lock().unwrap().push(McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: "mock".into(),
             tool_name: name.into(),
             description: format!("{name} test tool"),
@@ -328,6 +331,8 @@ impl McpTransport for MockMcpTransport {
         _input: Value,
     ) -> Result<McpToolResultDto, McpError> {
         Ok(McpToolResultDto {
+            result_projection: None,
+
             content: serde_json::json!("ok"),
             is_error: false,
             ..Default::default()

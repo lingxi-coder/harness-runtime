@@ -1673,7 +1673,7 @@ impl McpRegistry {
         &self,
         server: &str,
         full_name: &str,
-        input: serde_json::Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         tool_use_id: Option<&str>,
         on_progress: Option<crate::client::McpProgressCallback>,
     ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
@@ -1728,12 +1728,12 @@ impl McpRegistry {
             })?;
             return self
                 .transport
-                .call_tool(&McpRawConnection { connection_id }, tool_name, input)
+                .call_tool(&McpRawConnection { connection_id }, tool_name, input.value)
                 .await
                 .map_err(|error| crate::client::McpClientError::Rpc(error.to_string()));
         };
         let first = client
-            .call_tool_with_progress(full_name, input.clone(), tool_use_id, on_progress.clone())
+            .call_tool_with_progress_projected(full_name, input.clone(), tool_use_id, on_progress.clone())
             .await;
         let Err(error) = first else {
             return first;
@@ -1806,7 +1806,7 @@ impl McpRegistry {
             ))
         })?;
         let second = refreshed
-            .call_tool_with_progress(full_name, input, tool_use_id, on_progress)
+            .call_tool_with_progress_projected(full_name, input, tool_use_id, on_progress)
             .await;
         if let Err(error) = &second {
             if error.is_auth_response() {

@@ -257,6 +257,46 @@ impl ModelRuntime {
     }
 
     /// Resolve native effort inputs without encoding, credentials or transport.
+    pub(crate) fn native_per_turn_effort_policy(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<
+        Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicEffortPolicy>,
+        LlmError,
+    > {
+        let route = self
+            .registry
+            .resolve_in(&request.input.model, request.profile.as_deref())?;
+        if route.provider_id != ProviderId::AnthropicFirstParty
+            || !lingxi_llm_client::providers::anthropic::supports_per_message_effort(
+                &route.request_model,
+            )
+        {
+            return Ok(None);
+        }
+        let entry = self
+            .routes
+            .get(&route.profile_name)
+            .ok_or(LlmError::ModelUnavailable)?;
+        Ok(crate::model::effort::prepare(
+            request,
+            entry.protocol,
+            &route.provider_id,
+            &entry.profile,
+            &route.request_model,
+        ))
+    }
+
+    pub(crate) fn native_api_system_route(&self, model: &str, profile: Option<&str>) -> bool {
+        self.registry.resolve_in(model, profile).is_ok_and(|route| {
+            route.provider_id == ProviderId::AnthropicFirstParty
+                && self
+                    .routes
+                    .get(&route.profile_name)
+                    .is_some_and(|entry| entry.protocol == ProtocolFamily::AnthropicMessages)
+        })
+    }
+
     pub(crate) fn effort_command_snapshot(
         &self,
         request: &LlmRequest,
@@ -549,12 +589,20 @@ impl ModelRuntime {
             .get(&resolved_route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
         let host_failure = Arc::new(Mutex::new(None));
-        let authenticator = Arc::new(crate::execution::HostAuthenticator::for_request(
-            self.clone(),
-            resolved_route.profile_name.clone(),
-            None,
-            host_failure.clone(),
-        ));
+        let authenticator = Arc::new(
+            crate::execution::HostAuthenticator::for_request(
+                self.clone(),
+                resolved_route.profile_name.clone(),
+                None,
+                host_failure.clone(),
+            )
+            .with_request_credentials(
+                (resolved_route.provider_id == ProviderId::AnthropicFirstParty
+                    && entry.protocol == ProtocolFamily::AnthropicMessages)
+                    .then_some(request.execution.request_credentials.as_ref())
+                    .flatten(),
+            ),
+        );
         let prompt_cache_scope = credential_scope(entry, &resolved_route.profile_name);
         // Fast mode is a first-party Anthropic request property, not a generic
         // Anthropic-wire feature. Resolve the route before encoding and strip
@@ -765,7 +813,14 @@ impl ModelRuntime {
                         lingxi_llm_client::protocol::CachePosition::System { .. }
                     )
                 });
-            if let Some(system) = context.system.as_ref() {
+            let prefixed_system = context.native_system_prefix.as_ref().map(|(prefix, attribution)| {
+                if request.execution.anthropic_request_kind == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main {
+                    lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_system_prefix(context.system.as_ref(), prefix, attribution, &entry.profile)
+                } else {
+                    lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_attribution(context.system.as_ref(), prefix, attribution, &entry.profile)
+                }
+            });
+            if let Some(system) = prefixed_system.as_ref().or(context.system.as_ref()) {
                 let projection = project_system_prompt(
                     system,
                     Some(&entry.profile),
@@ -875,6 +930,7 @@ impl ModelRuntime {
         }
 
         Ok(PreparedLlmCall {
+            request_session_id: request.execution.request_session_id.clone(),
             computer_binding,
             computer_submission: request.execution.computer_submission.clone(),
             server_fallback_lane: None,
@@ -911,6 +967,8 @@ impl ModelRuntime {
             stream_fallback: request.execution.stream_fallback,
             extra_body,
             effort_policy,
+            anthropic_context_management: request.execution.anthropic_context_management.clone(),
+            native_thinking_display: request.execution.native_thinking_display.clone(),
             fast_mode_allowed,
             route: Route {
                 resolved_route,
@@ -1388,6 +1446,7 @@ impl ModelRuntime {
         now: std::time::SystemTime,
     ) -> Result<ProviderRequest, LlmError> {
         let mut wire = lingxi_llm_client::HttpRequest {
+            http1_header_layout: None,
             method: request.method.clone(),
             url: request.url.clone(),
             headers: request
@@ -1501,6 +1560,7 @@ fn validate_provider_profile(provider: &crate::ProviderProfile) -> Result<(), Ll
 }
 
 pub struct PreparedLlmCall {
+    pub(crate) request_session_id: Option<String>,
     pub(crate) computer_binding: Option<lingxi_core::host::NativeContinuationBinding>,
     pub(crate) computer_submission: Option<Arc<crate::computer::ComputerReceiptSubmission>>,
     pub(crate) server_fallback_lane:
@@ -1523,6 +1583,10 @@ pub struct PreparedLlmCall {
     pub(crate) fast_account_binding: Option<crate::model::fast_admission::Binding>,
     /// Native Fast admission captured before SDK validation and credential work.
     pub(crate) fast_mode_allowed: bool,
+    pub(crate) anthropic_context_management:
+        Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicContextManagement>,
+    pub(crate) native_thinking_display:
+        Option<lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy>,
     pub(crate) effort_policy:
         Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicEffortPolicy>,
     pub(crate) anthropic_request_kind:

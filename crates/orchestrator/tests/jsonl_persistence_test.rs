@@ -29,14 +29,14 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     let r1 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "first reply".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );
     let r2 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "second reply".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );
@@ -66,31 +66,64 @@ async fn two_turns_persist_user_assistant_messages_with_parent_uuid_chain() {
     let reader = JsonlReader::new(session_path, fs);
     let msgs = reader.read_all().await.expect("read_all");
 
-    // 2 user + 2 assistant + ONE static system-prompt snapshot, recorded once
-    // for the session on the first turn. claude-code 2.1.270 records it unless
-    // `CLAUDE_CODE_SIMPLE` is set (`lje(e)` in `src_169588164.js`, with
-    // `function U2(){return a.CLAUDE_CODE_SIMPLE}`), so with the env unset this
-    // is the aligned shape — the old `4` predated the feature.
+    // The first Normal/Announced query records the empty session-context anchor
+    // and date before its token reminder, then persists the write-once static
+    // prompt snapshot. The second query correctly deduplicates the unchanged
+    // context/date and snapshot, while recording its own token reminder.
     assert_eq!(
         msgs.iter()
             .map(|m| m.message_type.as_str())
             .collect::<Vec<_>>(),
-        vec!["user", "attachment", "assistant", "user", "assistant"],
+        vec![
+            "user",
+            "attachment",
+            "attachment",
+            "attachment",
+            "attachment",
+            "assistant",
+            "user",
+            "attachment",
+            "assistant"
+        ],
         "unexpected JSONL entry sequence"
     );
+    let attachment_types = msgs
+        .iter()
+        .filter(|message| message.message_type == "attachment")
+        .map(|message| {
+            message
+                .extra
+                .get("attachment")
+                .and_then(|attachment| attachment.get("type"))
+                .and_then(|kind| kind.as_str())
+                .expect("attachment row has a typed attachment")
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        msgs[1]
-            .extra
-            .get("attachment")
-            .and_then(|a| a.get("type"))
-            .and_then(|t| t.as_str()),
-        Some("prompt_snapshot"),
-        "the only non-message line must be the prompt snapshot"
+        attachment_types,
+        vec![
+            "session_context",
+            "date",
+            "total_tokens_reminder",
+            "prompt_snapshot",
+            "total_tokens_reminder"
+        ],
+        "Normal context/date rows precede turn reminders, and unchanged announcements dedupe"
+    );
+    assert_eq!(
+        msgs[1].extra["attachment"]["context"],
+        serde_json::json!({}),
+        "empty instruction sources still persist the typed session-context anchor"
+    );
+    assert!(msgs[2].extra["attachment"]["date"].is_string());
+    assert_eq!(
+        msgs[4].extra["attachment"]["contextRendering"], "announced",
+        "the one-time prompt snapshot records the selected context rendering"
     );
     assert_eq!(
         msgs.len(),
-        5,
-        "expected 5 JSONL entries (2 user + 2 assistant + 1 snapshot), got {} — entries: {:?}",
+        9,
+        "expected 9 JSONL entries (2 user + 2 assistant + 5 typed attachments), got {} — entries: {:?}",
         msgs.len(),
         msgs.iter().map(|m| &m.message_type).collect::<Vec<_>>(),
     );
@@ -137,7 +170,7 @@ async fn orchestrator_without_writer_creates_no_file() {
     let response = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "hello".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );
@@ -187,7 +220,7 @@ async fn batched_run_turn_persists_the_real_model_and_usage_not_synthetic() {
     let r1 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "hi there".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );
@@ -248,7 +281,7 @@ async fn assistant_line_records_session_effort_level_2_1_212() {
     let r1 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "reply".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );
@@ -314,7 +347,7 @@ async fn assistant_line_omits_effort_when_session_has_none_2_1_212() {
     let r1 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "reply".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );

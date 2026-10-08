@@ -178,6 +178,7 @@ impl SkillLoader for CommandRegistrySkillLoader {
         let reg = self.registry.read().await;
         Ok(reg
             .resolve(name)
+            .filter(|cmd| reg.session_skill_allowed(cmd))
             .map(|cmd| to_descriptor(cmd, self.session_id.as_deref())))
     }
 
@@ -193,7 +194,11 @@ impl SkillLoader for CommandRegistrySkillLoader {
     /// touch disk for a path that is already an error.
     async fn list_names(&self) -> Vec<String> {
         let reg = self.registry.read().await;
-        reg.list_all().iter().map(|cmd| cmd.name.clone()).collect()
+        reg.list_all()
+            .iter()
+            .filter(|cmd| reg.session_skill_allowed(cmd))
+            .map(|cmd| cmd.name.clone())
+            .collect()
     }
 }
 
@@ -241,6 +246,22 @@ mod tests {
         assert_eq!(desc.allowed_tools, vec!["Bash".to_string()]);
         assert_eq!(desc.argument_names, vec!["name".to_string()]);
         assert!(!desc.disable_model_invocation);
+    }
+
+    #[tokio::test]
+    async fn session_skill_grants_filter_load_and_names_without_hiding_manual_commands() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(markdown_cmd("verify", "body"));
+        registry.register_command(markdown_cmd("simplify", "body"));
+        registry.set_session_skill_allowlist(Some(vec!["verify".to_string()]));
+        let registry = Arc::new(RwLock::new(registry));
+        let loader = CommandRegistrySkillLoader::new(registry.clone());
+        assert!(loader.load("verify").await.unwrap().is_some());
+        assert!(loader.load("simplify").await.unwrap().is_none());
+        assert_eq!(loader.list_names().await, vec!["verify"]);
+        assert!(registry.read().await.resolve("simplify").is_some());
+        registry.write().await.set_session_skill_allowlist(None);
+        assert!(loader.load("simplify").await.unwrap().is_some());
     }
 
     /// A skill's declared `effort` must reach the descriptor.

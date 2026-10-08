@@ -523,7 +523,7 @@ mod upgrade_tests {
 
     #[test]
     fn native_programmatic_caller_metadata_survives_transcript_replay() {
-        let native = wire::ContentBlock::ToolUse {
+        let native = wire::ContentBlock::ToolUse { input_json: None,
             id: wire::ToolUseId::new("tool-1"),
             name: "lookup".into(),
             input: json!({"key":"value"}),
@@ -532,7 +532,7 @@ mod upgrade_tests {
             toolset_name: None,
             thought_signature: None,
         };
-        let message = Message {
+        let message = Message { api_output_config: None,
             role: "assistant".into(),
             content: projected_history(native.clone()),
         };
@@ -609,7 +609,7 @@ mod upgrade_tests {
             ContentBlock::ProviderContent { .. }
         ));
         let restored = message_content(
-            &Message {
+            &Message { api_output_config: None,
                 role: "assistant".into(),
                 content: projected,
             },
@@ -712,7 +712,7 @@ mod upgrade_tests {
 
     #[test]
     fn toolset_identity_is_echoed_on_the_matching_host_tool_result() {
-        let native = wire::ContentBlock::ToolUse {
+        let native = wire::ContentBlock::ToolUse { input_json: None,
             id: wire::ToolUseId::new("call-1"),
             name: "click".into(),
             input: json!({}),
@@ -722,13 +722,13 @@ mod upgrade_tests {
             thought_signature: None,
         };
         let mut req = HistoryFixture::new("claude-sonnet-4-6");
-        req.messages.push(Message {
+        req.messages.push(Message { api_output_config: None,
             role: "assistant".into(),
             content: projected_history(native.clone()),
         });
-        req.messages.push(Message {
+        req.messages.push(Message { api_output_config: None,
             role: "user".into(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { output_projection: None,
                 tool_call_id: "call-1".into(),
                 output: json!("clicked"),
                 is_error: Some(false),
@@ -747,7 +747,7 @@ mod upgrade_tests {
 
     #[test]
     fn history_cache_breakpoints_follow_filtered_message_and_block_positions() {
-        let native = wire::ContentBlock::ToolUse {
+        let native = wire::ContentBlock::ToolUse { input_json: None,
             id: wire::ToolUseId::new("call-1"),
             name: "lookup".into(),
             input: json!({}),
@@ -757,7 +757,7 @@ mod upgrade_tests {
             thought_signature: None,
         };
         let mut req = HistoryFixture::new("claude-sonnet-4-6");
-        req.messages.push(Message {
+        req.messages.push(Message { api_output_config: None,
             role: "assistant".into(),
             content: vec![],
         });
@@ -772,7 +772,7 @@ mod upgrade_tests {
             cache_control: Some(CacheControl::Ephemeral),
             citations: None,
         });
-        req.messages.push(Message {
+        req.messages.push(Message { api_output_config: None,
             role: "assistant".into(),
             content: history,
         });
@@ -831,7 +831,7 @@ mod upgrade_tests {
             );
         }
         let replay = message_content(
-            &Message {
+            &Message { api_output_config: None,
                 role: "assistant".into(),
                 content: vec![observation],
             },

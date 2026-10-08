@@ -206,17 +206,17 @@ async fn side_question_combines_saved_system_with_current_completed_messages() {
     let generation = slot.get_last().await.unwrap().generation;
     let history = vec![
         prefix[0].clone(),
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: "New completed answer".into(),
+                text: "New completed answer".into(), citations: None,
             }],
             stop_reason: Some("end_turn".into()),
         },
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: "Partial answer".into(),
+                text: "Partial answer".into(), citations: None,
             }],
             stop_reason: None,
         },

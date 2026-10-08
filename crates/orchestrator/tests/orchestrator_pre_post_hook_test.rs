@@ -117,7 +117,7 @@ impl BuiltinHookHandler for AppendNoteOnReadHandler {
                     stderr: String::new(),
                     exit_code: None,
                     response: Some(HookResponse {
-                        system_message: Some("[hook: file accessed]".to_string()),
+                        system_message: Some("[hook: file accessed]".into()),
                         ..Default::default()
                     }),
                 };
@@ -197,7 +197,7 @@ impl tool_api::tool_trait::Tool for BashStubTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: tool_api::progress::ToolProgressSender,
     ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
-        Ok(tool_api::tool_trait::ToolCallResult {
+        Ok(tool_api::tool_trait::ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "content": "ok" }),
             model_content: None,
             new_messages: vec![],
@@ -249,7 +249,7 @@ async fn pre_hook_blocks_bash_tool() {
     let responses = vec![
         // Turn 1: model emits tool_use Bash
         mock_message_response(
-            vec![LlmContentBlock::ToolCall {
+            vec![LlmContentBlock::ToolCall { input_projection: None,
                 id: tool_use_id.to_string(),
                 name: "Bash".into(),
                 input: json!({"command": "rm -rf /"}),
@@ -260,7 +260,7 @@ async fn pre_hook_blocks_bash_tool() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "stopped".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),

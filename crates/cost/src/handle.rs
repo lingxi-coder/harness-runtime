@@ -16,6 +16,12 @@ use std::sync::Arc;
 
 #[async_trait]
 impl BudgetEnforcerHandle for BudgetEnforcer {
+    fn model_safety_observer(
+        &self,
+    ) -> Option<lingxi_core::host::model_safety::ModelSafetyObserver> {
+        Some(BudgetEnforcer::model_safety_observer(self))
+    }
+
     async fn check_and_charge(&self, nano_usd: u64) -> Result<(), BudgetError> {
         match self.check_pre_api_call(nano_usd).await {
             BudgetCheckResult::Ok

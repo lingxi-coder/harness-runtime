@@ -333,6 +333,31 @@ pub(crate) fn remove_row_identity_at(
     )
 }
 
+/// Establish Host ownership before its first UUID-free queue record. Existing
+/// Native transcripts still require the explicit import/bootstrap boundary.
+pub(crate) fn initialize_empty_host_log_at(
+    store: &IdentityLogStore,
+    transcript_path: &Path,
+    root: &Path,
+    identity: &RootIdentity,
+) -> Result<(), FsError> {
+    let sidecar = log_path(transcript_path)?;
+    match open_read_file_pinned(root, &sidecar, Some(identity)) {
+        Ok(_) => return Ok(()),
+        Err(FsError::NotFound(_)) => {}
+        Err(error) => return Err(error),
+    }
+    require_initialized_at(transcript_path, root, identity)?;
+    append_entry_at(
+        store,
+        transcript_path,
+        root,
+        identity,
+        &sidecar,
+        &IdentityLogEntry::Bootstrap { next_message_index: 0 },
+    )
+}
+
 pub(crate) fn require_initialized_at(
     transcript_path: &Path,
     root: &Path,
@@ -408,10 +433,10 @@ pub(crate) fn bootstrap_at(
     if let Some(file) = transcript {
         for line in BufReader::new(file).lines() {
             let line = line.map_err(|error| FsError::Io(error.to_string()))?;
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            let Ok(exact) = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&line) else {
                 continue;
             };
-            if let Some(uuid) = value.get("uuid").and_then(serde_json::Value::as_str) {
+            if let Some(uuid) = exact.value.get("uuid").and_then(serde_json::Value::as_str) {
                 if !uuid.is_empty() && seen_uuids.insert(uuid.to_owned()) {
                     entries.push(IdentityLogEntry::Append {
                         uuid: uuid.to_string(),
@@ -489,7 +514,7 @@ pub(crate) fn read_snapshot_at(
     let mut present = std::collections::HashSet::new();
     for line in BufReader::new(transcript).lines() {
         let line = line.map_err(|error| FsError::Io(error.to_string()))?;
-        if let Ok(exact) = crate::jsonl::exact_json::parse_exact_json(&line) {
+        if let Ok(exact) = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&line) {
             if let Some(uuid) = exact.value.get("uuid").and_then(serde_json::Value::as_str) {
                 present.insert(uuid.to_string());
             }
@@ -551,4 +576,67 @@ mod tests {
         assert_eq!(cache.snapshot.by_uuid["next-row"], 1);
         assert_eq!(cache.snapshot.next_message_index, 3);
     }
+    #[test]
+    fn queue_first_host_log_keeps_row_zero_and_rejects_unimported_native_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let identity = lingxi_core::host::rooted_fs::root_identity(root).unwrap();
+        let store = super::IdentityLogStore::default();
+        let path = root.join("host.jsonl");
+        super::initialize_empty_host_log_at(&store, &path, root, &identity).unwrap();
+        std::fs::write(&path, "{\"type\":\"queue-operation\",\"operation\":\"enqueue\"}\n").unwrap();
+        assert_eq!(super::append_row_identity_at(&store, &path, root, &identity, "first-row").unwrap(), 0);
+        super::initialize_empty_host_log_at(&store, &path, root, &identity).unwrap();
+        assert_eq!(super::append_row_identity_at(&store, &path, root, &identity, "next-row").unwrap(), 1);
+
+        let native = root.join("native.jsonl");
+        std::fs::write(&native, "{\"uuid\":\"native-row\"}\n").unwrap();
+        assert!(super::initialize_empty_host_log_at(&store, &native, root, &identity).is_err());
+        assert!(!root.join(super::log_path(&native).unwrap()).exists());
+    }
+
+    #[test]
+    fn bootstrap_and_cold_snapshot_retain_rows_with_lone_surrogate_keys_and_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("native.jsonl");
+        let source = concat!(
+            "{\"uuid\":\"row-text\",\"message\":{\"content\":\"\\ud800\"}}\n",
+            "{\"uuid\":\"row-key\",\"message\":{\"input\":{\"\\ud801\":\"\\udfff\"}}}\n",
+            "invalid json\n",
+            "{\"uuid\":\"row-last\",\"message\":{\"content\":\"ordinary\"}}\n"
+        );
+        std::fs::write(&path, source).unwrap();
+        let identity = lingxi_core::host::rooted_fs::root_identity(root).unwrap();
+        let store = super::IdentityLogStore::default();
+        let bootstrapped = super::bootstrap_at(&store, &path, root, &identity).unwrap();
+        assert_eq!(bootstrapped.by_uuid["row-text"], 0);
+        assert_eq!(bootstrapped.by_uuid["row-key"], 1);
+        assert_eq!(bootstrapped.by_uuid["row-last"], 2);
+        assert_eq!(bootstrapped.next_message_index, 3);
+        let cold = super::read_snapshot_at(&path, root, &identity).unwrap();
+        assert_eq!(cold, bootstrapped);
+        let reopened = super::bootstrap_at(&super::IdentityLogStore::default(), &path, root, &identity).unwrap();
+        assert_eq!(reopened, bootstrapped);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    }
+
+    #[test]
+    fn cold_exact_key_intersection_removes_deleted_rows_without_reallocating_indices() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("native.jsonl");
+        let retained = "{\"uuid\":\"retained\",\"input\":{\"\\ud800\":1}}\n";
+        let removed = "{\"uuid\":\"removed\",\"content\":\"\\udfff\"}\n";
+        std::fs::write(&path, format!("{retained}{removed}")).unwrap();
+        let identity = lingxi_core::host::rooted_fs::root_identity(root).unwrap();
+        let initial = super::bootstrap_at(&super::IdentityLogStore::default(), &path, root, &identity).unwrap();
+        assert_eq!(initial.next_message_index, 2);
+        std::fs::write(&path, retained).unwrap();
+        let cold = super::read_snapshot_at(&path, root, &identity).unwrap();
+        assert_eq!(cold.by_uuid.len(), 1);
+        assert_eq!(cold.by_uuid["retained"], 0);
+        assert_eq!(cold.next_message_index, 2);
+    }
+
 }

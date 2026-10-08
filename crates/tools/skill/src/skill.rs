@@ -437,6 +437,7 @@ impl SkillTool {
             ctx.origin_session_id
         };
         let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
@@ -621,7 +622,7 @@ impl SkillTool {
                     return Ok(None);
                 }
             };
-            return Ok(Some(ToolCallResult {
+            return Ok(Some(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: crate::fork::fork_result(command_name, &agent_id.to_string(), false, &result),
                 model_content: Some(crate::fork::fork_tool_result_text(
                     command_name,
@@ -653,7 +654,7 @@ impl SkillTool {
         };
 
         let result_line = crate::fork::running_in_background_line(command_name);
-        Ok(Some(ToolCallResult {
+        Ok(Some(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: crate::fork::fork_result(
                 command_name,
                 &launch.agent_id.to_string(),
@@ -1371,7 +1372,7 @@ present this turn, the skill is loaded — follow it directly rather than callin
                 })
             });
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content: None,
             new_messages,

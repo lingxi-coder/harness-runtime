@@ -69,8 +69,21 @@ impl ModSurfaceRoster {
         client_id: impl Into<String>,
         surface: ModRenderSurface,
     ) -> Result<bool, ModSurfaceRosterError> {
-        let client_id = client_id.into();
-        if !valid_client_id(&client_id) {
+        self.attach_owned(client_id.into(), surface, false)
+    }
+
+    /// Admit the engine-owned renderer used when ui_render omits client_id.
+    pub fn attach_default(&self, surface: ModRenderSurface) -> Result<bool, ModSurfaceRosterError> {
+        self.attach_owned(format!("{}:default", surface.as_str()), surface, true)
+    }
+
+    fn attach_owned(
+        &self,
+        client_id: String,
+        surface: ModRenderSurface,
+        engine_default: bool,
+    ) -> Result<bool, ModSurfaceRosterError> {
+        if !valid_client_id(&client_id) && !engine_default {
             return Err(ModSurfaceRosterError::InvalidClientId);
         }
         if surface == ModRenderSurface::Terminal {
@@ -149,6 +162,19 @@ pub fn valid_client_id(client_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_default_client_does_not_expand_external_id_contract() {
+        let roster = ModSurfaceRoster::default();
+        assert!(roster
+            .attach("mobile:default", ModRenderSurface::Mobile)
+            .is_err());
+        assert!(roster.attach_default(ModRenderSurface::Mobile).unwrap());
+        assert!(!roster.attach_default(ModRenderSurface::Mobile).unwrap());
+        assert_eq!(roster.attachments()[0].client_id, "mobile:default");
+        assert_eq!(roster.surfaces(), vec![ModRenderSurface::Mobile]);
+        assert!(roster.attach_default(ModRenderSurface::Terminal).is_err());
+    }
 
     #[test]
     fn duplicate_attach_is_idempotent_and_keeps_first_surface() {

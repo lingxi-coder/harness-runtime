@@ -1,0 +1,60 @@
+{
+  "version": "2.1.293",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "method": "Bounded read-only source ranges from the pinned native binary, plus the existing controlled-loopback raw provider capture. No new native network invocation.",
+  "excerpts": [
+    {
+      "id": "attribution_header_builder",
+      "offset": 187850356,
+      "length": 1695,
+      "sha256": "887b2e8aafff560e2dc5c556e09cb7113ef6b56cd409aa9344dd21212e476039",
+      "source": "wio(e,n,i,r,s,c,d){let m=Pe();if(!(d?.ignoreEnvOptOut===!0&&m===\"firstParty\"&&Of()&&!a.ANTHROPIC_UNIX_SOCKET)&&ps(process.env.CLAUDE_CODE_ATTRIBUTION_HEADER))return\"\";let g=`${{ISSUES_EXPLAINER:\"report the issue at https://github.com/anthropics/claude-code/issues\",PACKAGE_URL:\"@anthropic-ai/claude-code\",README_URL:\"https://code.claude.com/docs/en/overview\",VERSION:\"2.1.293\",FEEDBACK_CHANNEL:\"https://github.com/anthropics/claude-code/issues\",BUILD_TIME:\"2026-10-07T06:36:42Z\",GIT_SHA:\"3abc54a9d60b4d12c627afad22d6e5f58a6199d2\",HOOKS_WORKER_URL:\"/$bunfs/root/src/plugins/functionHooks/hooks-worker/hooks-worker.js\",DD_SOURCEMAP_GROUP:\"darwin\"}.VERSION}.${e}`,y=process.env.CLAUDE_CODE_ENTRYPOINT??\"unknown\",b=m===\"firstParty\"&&pi()||m===\"vertex\"?\" cch=00000;\":\"\",S=Zhr(),He=S?` cc_workload=${S};`:\"\",Be=cv(n)&&!n.isMainSession?\" cc_is_subagent=true;\":\"\",Ke=i!==void 0&&/^req_[A-Za-z0-9_-]{1,36}$/.test(i)&&m===\"firstParty\"&&pi()?` cc_prev_req=${i};`:\"\",Ve=r!==void 0&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(r)&&m===\"firstParty\"&&pi()?` cc_prompt_id=${r};`:\"\",ze=typeof s===\"string\"&&/^[a-z][a-z_]{0,31}$/.test(s)&&m===\"firstParty\"&&pi()?` cc_turn_origin=${s};`:\"\",oe=c?.promptIndex,se=c?.turnIndex,$e=ce(oe,0)&&ce(se,1)&&m===\"firstParty\"&&pi()?` cc_prompt_index=${oe}; cc_turn_index=${se};`:\"\",le=`x-anthropic-billing-header: cc_version=${g}; cc_entrypoint=${y};${b}${He}${Be}${Ke}${Ve}${ze}${$e}`;return t(`attribution header ${le}`),le}function U0n(e){return e.anthropicAuthEnabled&&Boolean(e.oauthScopes?.includes(xA))}function Xcs(e){if(e.isSubscriber)return{apiKey:null,authToken:e.oauthAccessToken??null};return{apiKey:e.apiKey,authToken:null}}function ce"
+    },
+    {
+      "id": "first_user_and_utf16_fingerprint",
+      "offset": 191289593,
+      "length": 857,
+      "sha256": "d35023b31a53ef5c17285c01eea3fc62837f0fbc8097f17cf469dac752177f2d",
+      "source": "doe=\"59cf53e54c78\";function foe(e){let n=e.find((s)=>s.type===\"user\"&&!s.isMeta);if(!n)return\"\";let r=n.message.content;if(typeof r===\"string\")return r;if(Array.isArray(r)){let s=r.find((h)=>h.type===\"text\");if(s&&s.type===\"text\")return s.text}return\"\"}function cE(e,n){let s=[4,7,20].map((b)=>e[b]||\"0\").join(\"\"),h=`${doe}${s}${n}`;return coe(\"sha256\").update(h).digest(\"hex\").slice(0,3)}function AJo(e){let n=foe(e);return cE(n,{ISSUES_EXPLAINER:\"report the issue at https://github.com/anthropics/claude-code/issues\",PACKAGE_URL:\"@anthropic-ai/claude-code\",README_URL:\"https://code.claude.com/docs/en/overview\",VERSION:\"2.1.293\",FEEDBACK_CHANNEL:\"https://github.com/anthropics/claude-code/issues\",BUILD_TIME:\"2026-10-07T06:36:42Z\",GIT_SHA:\"3abc54a9d60b4d12c627afad22d6e5f58a6199d2\",HOOKS_WORKER_URL:\"/$bunfs/root/src/plugins/functionHooks/hooks-worker/hoo"
+    },
+    {
+      "id": "identity_selection_and_prefix_composition",
+      "offset": 191290782,
+      "length": 713,
+      "sha256": "e7b8791b12e67964e3f4d113ca16ccd6e1b80ce648dd47b1bde54da485595972",
+      "source": ", Anthropic's official CLI for Claude.\",oN=\"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.\",sN=\"You are a Claude agent, built on Anthropic's Claude Agent SDK.\",goe=[fE,oN,sN],Mg=new Set(goe);function akn(e){return Mg.has(e)}function _or(e){if(Pe()===\"vertex\")return fE;if(e?.recorded!==void 0)return e.recorded;if(e?.isNonInteractive){if(e.hasAppendSystemPrompt)return oN;return sN}return fE}function GYo(e,n,r){let s=wio(r.fingerprint,r.agentContext,r.previousRequestId,r.promptId,r.turnOrigin,r.turnPosition),h=yi([s,n,...e].filter(Boolean));return yoe(h),h}function iN(e,n){let r=wio(n.fingerprint,n.agentContext,void 0,void 0,void 0,void 0,n.forceAttributionHea"
+    },
+    {
+      "id": "first_party_base_gate",
+      "offset": 184417515,
+      "length": 550,
+      "sha256": "d9064fb7bdf9566504c858e75a026a8fccec29523ac2c847d6784a8118f20907",
+      "source": "ty\"&&pi()}function pi(){if(a._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL)return!0;return Of()}function Of(){let e=process.env.ANTHROPIC_BASE_URL;if(!e)return!0;return $g(e)}function oJt(){let e=a.ANTHROPIC_BASE_URL;if(Pe()!==\"firstParty\"||!e||a.ANTHROPIC_UNIX_SOCKET!==void 0||$g(e))return;try{return new URL(e).host||void 0}catch{return}}function $g(e){try{let t=new URL(e).host;return[\"api.anthropic.com\"].includes(t)}catch{return!1}}var B=\"[a-z]{2,4}(?:-[a-z]{2,5})?-[a-z]+-\\\\d+\",h=\"[a-z]+(?:-[a-z]+\\\\d+)?\",F=\"(?:amazonaws\\\\.(?:com(?:\\\\.cn)?|eu)|api\\"
+    },
+    {
+      "id": "attribution_opt_out",
+      "offset": 183921481,
+      "length": 185,
+      "sha256": "7c8f7c4f0d32ca389728c2e66d661e467ff2cc1242c2c9f026a13e37f6b13dfe",
+      "source": "function ps(e){if(e===void 0)return!1;if(typeof e===\"boolean\")return!e;let n=String(e).toLowerCase().trim();return[\"0\",\"false\",\"no\",\"off\"].includes(n)}function QT(e){if(!e||e.startsWith"
+    }
+  ],
+  "observedLoopback": {
+    "capture": "/tmp/headless-baseline-293-harness-first-print-text/print-text/native-a/provider/000.request-body.bin",
+    "firstUserText": "Return HEADLESS_LOCAL_RESPONSE.",
+    "fingerprint": "7c5",
+    "billingHeader": "x-anthropic-billing-header: cc_version=2.1.293.7c5; cc_entrypoint=sdk-cli;",
+    "checksumPresent": false
+  },
+  "acceptedBrandDifference": {
+    "native": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+    "harness": "You are LingXi, an agentic command-line coding assistant.",
+    "reason": "User requires real LingXi identity; provider comparison must report this difference without masking it."
+  },
+  "acceptance": {
+    "freshHarnessCapture": false,
+    "officialFinalWireChecksumVerified": false,
+    "officialChecksumSource": "wio declares literal cch=00000 only under the official pi gate (or vertex). No JavaScript checksum rewriting function was found; no final-wire checksum algorithm is invented.",
+    "sourceOnlyOptionalOfficialMetadata": "SDK builder supports native validation/order for prior request ID, prompt ID, turn origin and turn positions. Runtime owners for these optional values are currently absent at this boundary, so they remain None; controlled loopback excludes them by pi gate."
+  }
+}

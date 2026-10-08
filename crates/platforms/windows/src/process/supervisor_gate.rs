@@ -49,6 +49,7 @@ extern "system" {
     fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> Handle;
     fn SetInformationJobObject(job: Handle, class: u32, info: *const c_void, len: u32) -> i32;
     fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+    fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
     fn GetCurrentProcess() -> Handle;
     fn GetHandleInformation(handle: Handle, flags: *mut u32) -> i32;
     fn IsProcessInJob(process: Handle, job: Handle, result: *mut i32) -> i32;
@@ -67,6 +68,75 @@ static JOB: OnceLock<OwnedHandle> = OnceLock::new();
 static INITIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn error(context: &str) -> ProcessError {
     ProcessError::Io(format!("{context}: {}", std::io::Error::last_os_error()))
+}
+
+/// A payload-only job stays authoritative after the shell leader exits.
+/// It is nested inside the supervisor job when supervision is enabled; killing
+/// it leaves the supervisor alive to finish output and write its receipt.
+pub(super) struct CommandJob(OwnedHandle);
+
+impl CommandJob {
+    pub(super) fn assign_suspended(child: &tokio::process::Child) -> Result<Self, ProcessError> {
+        let process = child
+            .raw_handle()
+            .ok_or_else(|| ProcessError::Io("shell has no held process handle".into()))?;
+        // SAFETY: creation transfers an unnamed, non-inheritable job handle.
+        let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if raw.is_null() {
+            return Err(error("create payload job"));
+        }
+        let job = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut limits = ExtendedLimits::default();
+        // KILL_ON_JOB_CLOSE, no breakaway.
+        limits.basic.flags = 0x2000;
+        // SAFETY: job and the configuration buffer remain valid for this call.
+        if unsafe {
+            SetInformationJobObject(
+                job.as_raw_handle(),
+                9,
+                (&limits as *const ExtendedLimits).cast(),
+                std::mem::size_of::<ExtendedLimits>() as u32,
+            )
+        } == 0
+        {
+            return Err(error("set payload job kill-on-close"));
+        }
+        // The initial thread is still suspended: no child code can fork before
+        // assignment. Windows 8+ nested-job restrictions fail closed.
+        if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0 {
+            return Err(error("assign suspended shell to payload job"));
+        }
+        Ok(Self(job))
+    }
+
+    pub(super) fn terminate(&self) -> Result<(), ProcessError> {
+        // SAFETY: the owned job handle names exactly this payload tree even
+        // after the original shell PID has exited or has been recycled.
+        if unsafe { TerminateJobObject(self.0.as_raw_handle(), 143) } == 0 {
+            return Err(error("terminate payload job"));
+        }
+        Ok(())
+    }
+
+    /// A normally completed foreground shell may have deliberately detached
+    /// descendants. Release our cancellation ownership without killing them.
+    pub(super) fn disarm_on_close(&self) -> Result<(), ProcessError> {
+        let limits = ExtendedLimits::default();
+        // SAFETY: this payload-only job has no limits other than kill-on-close;
+        // replacing that flag with zero leaves any live members running.
+        if unsafe {
+            SetInformationJobObject(
+                self.0.as_raw_handle(),
+                9,
+                (&limits as *const ExtendedLimits).cast(),
+                std::mem::size_of::<ExtendedLimits>() as u32,
+            )
+        } == 0
+        {
+            return Err(error("disarm completed foreground payload job"));
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn initialize() -> Result<(), ProcessError> {
@@ -112,26 +182,22 @@ pub(super) fn initialize() -> Result<(), ProcessError> {
     Ok(())
 }
 
-pub(super) fn enabled() -> bool {
-    JOB.get().is_some()
-}
-
 /// Hold the sole suspended initial thread before publishing the child's PID.
 /// The live Child process handle prevents PID recycling during enumeration.
 /// Unexpected extra threads are rejected; never guess which thread to resume.
 pub(super) fn suspended_thread(child: &tokio::process::Child) -> Result<OwnedHandle, ProcessError> {
-    let job = JOB
-        .get()
-        .ok_or_else(|| ProcessError::Io("supervised startup has no owning job".into()))?;
     let process = child
         .raw_handle()
         .ok_or_else(|| ProcessError::Io("supervised child has no process handle".into()))?;
     let pid = child
         .id()
         .ok_or_else(|| ProcessError::Io("supervised child has no PID".into()))?;
-    let mut member = 0;
-    if unsafe { IsProcessInJob(process, job.as_raw_handle(), &mut member) } == 0 || member == 0 {
-        return Err(error("child did not inherit supervisor job"));
+    if let Some(job) = JOB.get() {
+        let mut member = 0;
+        if unsafe { IsProcessInJob(process, job.as_raw_handle(), &mut member) } == 0 || member == 0
+        {
+            return Err(error("child did not inherit supervisor job"));
+        }
     }
     let raw = unsafe { CreateToolhelp32Snapshot(4, 0) };
     if raw == -1isize as Handle {
@@ -192,6 +258,117 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     const HELPER: &str = "process::supervisor_gate::tests::windows_job_gate_helper";
+    const DETACHED_HELPER: &str =
+        "process::supervisor_gate::tests::windows_foreground_detached_helper";
+
+    #[test]
+    fn windows_foreground_detached_helper() {
+        let Some(directory) = std::env::var_os("LINGXI_DETACHED_JOB_TEST_DIR") else {
+            return;
+        };
+        let directory = PathBuf::from(directory);
+        if std::env::var_os("LINGXI_DETACHED_JOB_CHILD").is_some() {
+            std::fs::write(directory.join("started"), "ready").unwrap();
+            let until = std::time::Instant::now() + Duration::from_secs(30);
+            while std::time::Instant::now() < until {
+                if directory.join("release").exists() {
+                    std::fs::write(directory.join("finished"), "survived").unwrap();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([DETACHED_HELPER, "--exact", "--nocapture"])
+            .env("LINGXI_DETACHED_JOB_CHILD", "1")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        if std::env::var_os("LINGXI_DETACHED_JOB_HOLD_PIPE").is_none() {
+            command.stdout(Stdio::null());
+        }
+        let _detached = command.spawn().unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while !directory.join("started").exists() {
+            assert!(
+                std::time::Instant::now() < until,
+                "descendant did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[tokio::test]
+    async fn normal_foreground_completion_preserves_detached_descendants() {
+        use lingxi_core::host::sandbox::SandboxedTag;
+        use lingxi_core::host::{ForegroundOutcome, SandboxedCommand};
+        for hold_pipe in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut env = std::collections::HashMap::from([(
+                "LINGXI_DETACHED_JOB_TEST_DIR".into(),
+                directory.path().to_string_lossy().into_owned(),
+            )]);
+            if hold_pipe {
+                env.insert("LINGXI_DETACHED_JOB_HOLD_PIPE".into(), "1".into());
+            }
+            let command = SandboxedCommand::__new_sandboxed(
+                lingxi_core::host::sandbox::ProcessCommand {
+                    command: std::env::current_exe()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    args: vec![
+                        DETACHED_HELPER.into(),
+                        "--exact".into(),
+                        "--nocapture".into(),
+                    ],
+                    cwd: Some(directory.path().to_path_buf()),
+                    env,
+                    timeout: Some(Duration::from_secs(5)),
+                    stdin: None,
+                },
+                SandboxedTag::BypassAuditedWithReason {
+                    reason: "foreground job lifecycle regression".into(),
+                },
+            );
+            let result = tokio::time::timeout(
+                Duration::from_secs(15),
+                super::super::background::run(&command, None, false),
+            )
+            .await;
+            // Always release the bounded descendant before asserting, including
+            // a failure in the foreground path under test.
+            std::fs::write(directory.path().join("release"), "release").unwrap();
+            let result = result.unwrap().unwrap();
+            assert!(
+                matches!(result.outcome, ForegroundOutcome::Completed(output) if output.exit_code == 0 && !output.timed_out)
+            );
+            await_file(&directory.path().join("finished")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn armed_payload_job_drop_still_terminates_its_child() {
+        let mut command = tokio::process::Command::new("cmd.exe");
+        command
+            .args(["/D", "/S", "/C", "more"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x4)
+            .kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let job = CommandJob::assign_suspended(&child).unwrap();
+        release(suspended_thread(&child).unwrap()).unwrap();
+        drop(job);
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!status.success());
+    }
+
     #[tokio::test]
     async fn windows_job_gate_helper() {
         let Some(directory) = std::env::var_os("LINGXI_GATE_TEST_DIR") else {

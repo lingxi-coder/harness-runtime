@@ -154,7 +154,7 @@ impl ProviderApiAdapter {
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         skip_global_cache_for_system_prompt: bool,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         max_tokens: Option<u32>,
     ) -> Result<llm_runtime::LlmRequest, LlmError> {
         let route = crate::query_model::current();
@@ -225,7 +225,7 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
         if blocks.is_empty() {
             return Ok(None);
         }
-        let message = ConversationMessage::User {
+        let message = ConversationMessage::User { api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: blocks,
             is_meta: false,
@@ -397,7 +397,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<u64, LlmError> {
         self.service
             .count_tokens(model, profile, system, msgs, tools)
@@ -410,7 +410,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<Option<u64>, LlmError> {
         self.service
             .count_tokens_exact(model, profile, system, msgs, tools)
@@ -553,7 +553,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
         self.service
@@ -970,7 +970,7 @@ impl StreamingApiClient for ProviderApiAdapter {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         query_source: &str,
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
@@ -995,7 +995,7 @@ impl StreamingApiClient for ProviderApiAdapter {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         effort: Option<&str>,
         query_source: &str,
         skip_global_cache_for_system_prompt: bool,
@@ -1471,7 +1471,7 @@ mod tests {
         let pruned_id = lingxi_core::types::MessageId::new();
         let messages = vec![
             ConversationMessage::user_meta(pruned_id, "stale guarded pre-boundary row".into()),
-            ConversationMessage::System {
+            ConversationMessage::System { api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: "Conversation compacted".into(),
                 subtype: Some("compact_boundary".into()),
@@ -2118,7 +2118,7 @@ mod tests {
             dir.path().to_path_buf(),
         )
         .with_jsonl_writer(writer);
-        let old = ConversationMessage::Assistant {
+        let old = ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Thinking {
@@ -2246,7 +2246,7 @@ mod tests {
             seen: Mutex::new(Vec::new()),
         });
         let adapter = make_adapter(transport.clone());
-        let old = ConversationMessage::Assistant {
+        let old = ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Thinking {
@@ -2294,7 +2294,7 @@ mod tests {
         rb.unwrap();
         assert_eq!(a.messages().get(&old.id()), Some(&0));
         assert!(b.messages().is_empty());
-        let fresh = ConversationMessage::Assistant {
+        let fresh = ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Thinking {

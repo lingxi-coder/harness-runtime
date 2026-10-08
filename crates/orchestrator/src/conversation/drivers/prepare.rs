@@ -28,7 +28,7 @@ pub(crate) struct PreparedTurnStep {
     pub(crate) guarded_async_hook_reminders:
         Vec<(MessageId, Arc<dyn hooks::attachment::HookPublicationGuard>)>,
     pub(crate) context_announcements: PreparedContextAnnouncements,
-    pub(crate) wire_tools: Vec<serde_json::Value>,
+    pub(crate) wire_tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     pub(crate) skip_global_cache_for_system_prompt: bool,
     pub(crate) deferred_reminder: Option<ConversationMessage>,
     pub(crate) date_change_reminder: Option<ConversationMessage>,
@@ -352,6 +352,23 @@ impl ConversationOrchestrator {
         // Reminder fan-out has a large state machine; allocate it here so
         // preparing a turn does not embed or copy that state through its callers.
         Box::pin(async move {
+            // Native 2.1.293 SIMPLE returns only the queued task attachments
+            // before entering the ordinary reminder producer fan-out.
+            if self.config.bare {
+                let task_notifications = self
+                    .task_notification_reminder_messages_in_turn(in_human_turn)
+                    .await;
+                for notification in &task_notifications {
+                    self.session.lock().await.history.push(notification.clone());
+                    self.persist_message_to_jsonl(notification).await;
+                }
+                return TurnReminders {
+                    transient: Vec::new(),
+                    task_notifications,
+                    model_reminders: Vec::new(),
+                    guarded_async_hook_reminders: Vec::new(),
+                };
+            }
             let mut transient = Vec::new();
             let mut model_reminders = Vec::new();
             let mut guarded_async_hook_reminders = Vec::new();

@@ -9,6 +9,7 @@ use llm_runtime::{validate_capabilities, Capabilities, LlmRequest};
 fn tool_declarations_require_tools_capability() {
     let mut request = LlmRequest::new("text-only").with_user_text("hi");
     request.input.tools = vec![ToolSpec {
+        input_schema_json: None,
         name: "Read".to_string(),
         description: "d".to_string(),
         input_schema: serde_json::json!({"type":"object"}),
@@ -41,6 +42,7 @@ fn with_image_attaches_to_last_user_message_or_starts_one() {
         content: vec![ContentBlock::Text {
             text: "ok".to_string(),
             thought_signature: None,
+            citations: None,
         }],
     });
 

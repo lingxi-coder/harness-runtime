@@ -298,7 +298,7 @@ impl Tool for ReportFindingsTool {
         }
         data.insert("findings".into(), Value::Array(findings));
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: Value::Object(data),
             model_content: Some(render_tool_result(count)),
             new_messages: vec![],

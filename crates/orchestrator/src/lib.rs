@@ -113,7 +113,7 @@ pub use config::{
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
     OrchestratorApiClient, OrchestratorApiRequest, SessionMemoryHandle, StreamingApiClient,
-    TurnOutcome,
+    TurnOutcome, TurnExecutionMetrics,
 };
 pub use conversation::{QueuedPromptInput, ScheduledLoopFire};
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;

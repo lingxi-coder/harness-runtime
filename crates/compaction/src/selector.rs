@@ -168,16 +168,51 @@ mod tests {
         ConversationMessage::user(MessageId::new(), text.to_string())
     }
     fn assistant(text: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
-                text: text.to_string(),
+                text: text.to_string(), citations: None,
             }],
             stop_reason: None,
         }
     }
     fn old_summary() -> ConversationMessage {
         ConversationMessage::compact_summary(MessageId::new(), "an older summary".into())
+    }
+
+    #[test]
+    fn up_to_retains_an_ordinary_system_message_with_compact_body() {
+        let ordinary = ConversationMessage::System { api_system: None,
+            id: MessageId::new(),
+            content: crate::boundary::BOUNDARY_CONTENT.into(),
+            subtype: None,
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        };
+        let mut typed = crate::boundary::create_compact_boundary(
+            crate::boundary::CompactTrigger::Manual,
+            0,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .0;
+        if let ConversationMessage::System { content, .. } = &mut typed {
+            *content = "typed boundary with arbitrary body".into();
+        }
+        let tail = assistant("tail");
+        let messages = vec![
+            user("summarize this"),
+            ordinary.clone(),
+            typed,
+            old_summary(),
+            tail.clone(),
+        ];
+        let split = split_at(&messages, 1, SummarizeDirection::UpTo).unwrap();
+        assert_eq!(split.to_keep, vec![ordinary, tail]);
+        assert_eq!(texts(&split.to_summarize), ["summarize this"]);
     }
 
     fn texts(messages: &[ConversationMessage]) -> Vec<String> {
@@ -188,7 +223,7 @@ mod tests {
                 | ConversationMessage::Assistant { content, .. } => content
                     .iter()
                     .map(|block| match block {
-                        lingxi_core::types::ContentBlock::Text { text } => text.clone(),
+                        lingxi_core::types::ContentBlock::Text { text, .. } => text.clone(),
                         _ => String::new(),
                     })
                     .collect::<String>(),

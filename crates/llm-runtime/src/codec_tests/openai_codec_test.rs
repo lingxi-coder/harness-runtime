@@ -103,7 +103,7 @@ fn decode_content_string_still_works() {
 fn encode_image_bytes_produces_data_uri_part() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = HistoryFixture::new("gpt-4o");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::Image {
             media_type: "image/png".to_string(),
@@ -124,7 +124,7 @@ fn encode_image_bytes_produces_data_uri_part() {
 fn encode_image_url_produces_url_part() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = HistoryFixture::new("gpt-4o");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
             url: "https://example.com/img.png".to_string(),
@@ -142,12 +142,13 @@ fn encode_image_url_produces_url_part() {
 fn encode_mixed_text_and_image_becomes_array_form() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = HistoryFixture::new("gpt-4o");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![
             ContentBlock::Text {
                 text: "look at this".to_string(),
                 cache_control: None,
+                citations: None,
             },
             ContentBlock::Image {
                 media_type: "image/jpeg".to_string(),
@@ -183,7 +184,7 @@ fn encode_document_produces_file_part() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = HistoryFixture::new("gpt-4o");
     let pdf_bytes = vec![0x25u8, 0x50, 0x44, 0x46]; // %PDF
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::Document {
             media_type: "application/pdf".to_string(),
@@ -211,12 +212,13 @@ fn encode_document_produces_file_part() {
 fn encode_mixed_text_and_document_becomes_array_form() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = HistoryFixture::new("gpt-4o");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![
             ContentBlock::Text {
                 text: "see the attached".to_string(),
                 cache_control: None,
+                citations: None,
             },
             ContentBlock::Document {
                 media_type: "application/pdf".to_string(),
@@ -322,12 +324,12 @@ fn encode_sampling_controls() {
 fn encode_tool_result_as_tool_message_not_tool_call() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = HistoryFixture::new("gpt-4o");
-    request.messages.push(llm_runtime::Message {
+    request.messages.push(llm_runtime::Message { api_output_config: None,
         role: "assistant".to_string(),
-        content: vec![ContentBlock::ToolResult {
+        content: vec![ContentBlock::ToolResult { output_projection: None,
             tool_call_id: "call_1".to_string(),
             output: serde_json::json!("done"),
-            is_error: false,
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
@@ -350,20 +352,20 @@ fn encode_tool_result_as_tool_message_not_tool_call() {
 fn encode_multiple_tool_results_preserves_each_as_tool_message() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let mut request = HistoryFixture::new("gpt-4o");
-    request.messages.push(llm_runtime::Message {
+    request.messages.push(llm_runtime::Message { api_output_config: None,
         role: "assistant".to_string(),
         content: vec![
-            ContentBlock::ToolResult {
+            ContentBlock::ToolResult { output_projection: None,
                 tool_call_id: "call_1".to_string(),
                 output: serde_json::json!("first"),
-                is_error: false,
+                is_error: Some(false),
                 cache_control: None,
                 cache_reference: None,
             },
-            ContentBlock::ToolResult {
+            ContentBlock::ToolResult { output_projection: None,
                 tool_call_id: "call_2".to_string(),
                 output: serde_json::json!("second"),
-                is_error: false,
+                is_error: Some(false),
                 cache_control: None,
                 cache_reference: None,
             },

@@ -1,0 +1,5 @@
+{
+  "type": "ui_client_operation",
+  "request_id": "operation-1",
+  "operation_json": "{\"subtype\":\"mount\"}"
+}

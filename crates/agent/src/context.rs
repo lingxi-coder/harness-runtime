@@ -213,7 +213,7 @@ pub struct SubagentContext {
     /// built-ins from [`crate::builtins`], overridden by the file catalog), so
     /// the policy is per-agent: a read-only agent narrows this advertised set
     /// AND `allowed_tools` together, while `general-purpose` keeps the full set.
-    pub tool_schemas: Vec<serde_json::Value>,
+    pub tool_schemas: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Structured-output schema (JSON Schema string) forwarded from
     /// [`lingxi_core::host::subagent_spawn::SubagentSpawnRequest::schema`]. When `Some`, the
     /// runner injects a forced `StructuredOutput` tool and returns the model's
@@ -242,6 +242,7 @@ pub struct SubagentContext {
     /// the child's history byte-identical to legacy.
     pub hook_executor: Option<Arc<hooks::HookExecutorImpl>>,
     /// Whether this producer has a consumer for session/plugin terminal hooks.
+    pub agent_spawn_token: Option<lingxi_core::host::agent_statistics::AgentSpawnToken>,
     pub stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope,
     /// Session epoch captured at admission. Snapshot publication cannot bind a
     /// retained child to a later restored run or session generation.

@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "version": "2.1.293",
+  "platform": "darwin-arm64",
+  "pinnedAt": "2026-10-08T00:03:21.598Z",
+  "release": {
+    "url": "https://github.com/anthropics/claude-code/releases/tag/v2.1.293",
+    "api": "https://api.github.com/repos/anthropics/claude-code/releases/latest",
+    "tag": "v2.1.293",
+    "prerelease": false,
+    "draft": false,
+    "publishedAt": "2026-10-07T18:10:20Z"
+  },
+  "nativeLatest": {
+    "url": "https://downloads.claude.ai/claude-code-releases/latest",
+    "value": "2.1.293"
+  },
+  "manifest": {
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.293/manifest.json",
+    "sha256": "ce867df78920b885ffcd8ddeb5b12f867bbb34f8a7dd85d42740d48b4c6ef351",
+    "commit": "3abc54a9d60b4d12c627afad22d6e5f58a6199d2",
+    "buildDate": "2026-10-07T06:56:40Z"
+  },
+  "binary": {
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.293/darwin-arm64/claude",
+    "sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+    "size": 236330608,
+    "verifiedVersionOutput": "2.1.293 (Claude Code)\n",
+    "localPathHint": "/tmp/harness-claude-code-2.1.293-darwin-arm64"
+  },
+  "evidence": {
+    "binaryChecksumMatched": true,
+    "releaseAndNativeLatestAgreed": true,
+    "officialInstallerUrl": "https://claude.ai/install.sh",
+    "officialInstallerDownloadBase": "https://downloads.claude.ai/claude-code-releases"
+  },
+  "acceptance": {
+    "fullNativeHarnessParity": false,
+    "reason": "First real private CLI print-text comparison failed completion and exact artifact comparison. Historical native cohort stability and all remaining cases are reported separately."
+  },
+  "nativeMatrix": {
+    "receipt": "scripts/tests/headless-fixtures/native-2.1.293-observations.json",
+    "fixtureCount": 28,
+    "processCount": 60,
+    "captureComplete": true,
+    "normalizedStableCaseCount": 18,
+    "normalizedUnstableCaseCount": 10,
+    "harnessInvoked": false,
+    "parityEstablished": false,
+    "stitchedBoundedBatches": true
+  },
+  "sourceMetricsReceipt": "scripts/tests/headless-fixtures/native-2.1.293-source-metrics.json",
+  "schemaResearchReceipt": "scripts/tests/headless-fixtures/native-2.1.293-schema-probes.json",
+  "lifecycleResearchReceipt": "scripts/tests/headless-fixtures/native-2.1.293-lifecycle-probes.json",
+  "sourceHeaderReceipt": "scripts/tests/headless-fixtures/native-2.1.293-source-headers.json",
+  "textSigintResearchReceipt": "scripts/tests/headless-fixtures/native-2.1.293-text-sigint-probes.json",
+  "mcpUiMetadataResearchReceipt": "scripts/tests/headless-fixtures/native-2.1.293-mcp-ui-metadata.json",
+  "sourceCapabilityReceipt": "scripts/tests/headless-fixtures/native-2.1.293-source-capabilities.json",
+  "clientMarkerResearchReceipt": "scripts/tests/headless-fixtures/native-2.1.293-client-marker-probes.json",
+  "firstNativeHarnessCapture": {
+    "receipt": "scripts/tests/headless-fixtures/native-harness-first-print-text.json",
+    "fixture": "print-text",
+    "nativeNativeNormalizedStable": true,
+    "harnessInvoked": true,
+    "harnessCaptureComplete": false,
+    "harnessTimedOut": true,
+    "harnessProviderCalls": 6,
+    "harnessBinarySha256": "0c115f0376081057c3003fea6d337b5b02c4a93196de9a0eb096644b6c660b4a",
+    "parityEstablished": false,
+    "privateBuild": "validation/run-002",
+    "scope": "Bounded v2 private CLI proof only; not current product UI changes."
+  },
+  "inputQueueSourceReceipt": "scripts/tests/headless-fixtures/native-2.1.293-source-input-queue.json",
+  "inputQueueResearchReceipt": "scripts/tests/headless-fixtures/native-2.1.293-input-queue-probes.json",
+  "parserResearchReceipt": "scripts/tests/headless-fixtures/native-2.1.293-parser-probes.json",
+  "sourceRequestPolicyReceipt": "scripts/tests/headless-fixtures/native-2.1.293-source-request-policy.json",
+  "sourceReminderReceipt": "scripts/tests/headless-fixtures/native-2.1.293-source-reminders.json",
+  "multiHumanMidtoolResearchReceipt": "scripts/tests/headless-fixtures/native-2.1.293-input-multifold-probes.json",
+  "sourceAuthUpdateReceipt": "scripts/tests/headless-fixtures/native-2.1.293-source-auth-updates.json",
+  "queuedCommandPersistenceReceipt": "scripts/tests/headless-fixtures/native-2.1.293-queued-command-jsonl.json"
+}

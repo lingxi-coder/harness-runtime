@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use lingxi_core::host::{McpPermissionCeiling, McpTransportSpec};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use mcp::registry::McpRegistry;
 use mcp::McpClientError;
 use once_cell::sync::Lazy;
@@ -119,6 +120,26 @@ fn normalize_empty_schema_arguments(schema: Option<&Value>, input: Value) -> Val
     }
 }
 
+fn normalize_empty_schema_arguments_projected(
+    schema: Option<&Value>,
+    input: Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    if matches!(schema, Some(Value::Object(object)) if object.is_empty()) {
+        if let Some(units) = input.string_units("") {
+            let raw = char::decode_utf16(units)
+                .map(|unit| match unit {
+                    Ok(character) => character.to_string(),
+                    Err(error) => format!("\\u{:04x}", error.unpaired_surrogate()),
+                })
+                .collect::<String>();
+            if let Ok(parsed) = Utf16JsonProjection::parse(&raw) {
+                return parsed;
+            }
+        }
+    }
+    input
+}
+
 /// Assemble the optional `mcp_meta` passthrough for a surfaced tool result.
 ///
 /// Mirrors claude-code (`services/mcp/client.ts:1897-1909`): the surfaced
@@ -138,6 +159,34 @@ fn build_mcp_meta(meta: Option<Value>, structured_content: Option<Value>) -> Opt
         obj.insert("structuredContent".to_string(), sc);
     }
     Some(Value::Object(obj))
+}
+
+fn build_mcp_meta_projected(
+    source: Option<&Utf16JsonProjection>,
+    meta: Option<Value>,
+    structured: Option<Value>,
+) -> Result<Option<Utf16JsonProjection>, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    let Some(value) = build_mcp_meta(meta, structured) else {
+        return Ok(None);
+    };
+    let mut projection = Utf16JsonProjection::plain(value);
+    if let Some(source) = source {
+        source.validate()?;
+        for key in ["_meta", "structuredContent"] {
+            if projection.value.get(key).is_some() {
+                let child = source.subprojection(&format!("/{key}"))?;
+                if projection.value.get(key) != Some(&child.value) {
+                    return Err(
+                        lingxi_core::types::utf16_json::Utf16JsonProjectionError::InvalidProjection(
+                            "MCP result metadata projection does not match its display metadata",
+                        ),
+                    );
+                }
+                projection.set_field(key, child)?;
+            }
+        }
+    }
+    Ok(Some(projection))
 }
 
 const MAX_OUTPUT_SCHEMA_ERRORS: usize = 8;
@@ -788,6 +837,7 @@ pub struct MCPTool {
     /// The server's own `inputSchema` for a per-tool wire entry; `None`
     /// falls back to the generic `{full_name, arguments}` schema.
     bound_schema: Option<Value>,
+    bound_schema_projection: Option<Utf16JsonProjection>,
     /// The server's (truncated) description for a per-tool wire entry; `None`
     /// falls back to the generic dispatcher blurb.
     bound_desc: Option<String>,
@@ -843,6 +893,10 @@ pub struct ReadMcpResourceTool {
 }
 
 impl MCPTool {
+    pub fn with_input_schema_projection(mut self, projection: Option<Utf16JsonProjection>) -> Self {
+        self.bound_schema_projection = projection;
+        self
+    }
     /// Construct the generic MCP dispatcher over the supplied context.
     ///
     /// Its wire `name()` is [`MCP_TOOL_NAME`] and the model addresses an MCP
@@ -853,6 +907,7 @@ impl MCPTool {
             ctx,
             full_name: None,
             bound_schema: None,
+            bound_schema_projection: None,
             bound_desc: None,
             bound_output_schema: None,
             search_hint: None,
@@ -890,6 +945,7 @@ impl MCPTool {
             ctx,
             full_name: Some(full_name),
             bound_schema: Some(input_schema),
+            bound_schema_projection: None,
             // Truncate to the TS limit (client.ts:1786-1794). The DTO is
             // already truncated on receipt (client.rs:54-55), so this is a
             // defensive no-op for in-band descriptions but keeps the per-tool
@@ -1222,65 +1278,87 @@ async fn process_mcp_call_result(
                 now_millis,
                 rand_tag: &rand_tag,
             };
-            let (model_content, large_result_type) = match &dto.structured_content {
+            let source_content = dto
+                .result_projection
+                .as_ref()
+                .and_then(|projection| projection.subprojection("/content").ok())
+                .unwrap_or_else(|| Utf16JsonProjection::plain(dto.content.clone()));
+            let (mut model_projection, large_result_type) = match &dto.structured_content {
                 Some(sc) => {
-                    let sc_json = serde_json::to_string(sc).unwrap_or_default();
-                    // jqd (binary @198966347): when the result ALSO carries
-                    // non-`text` content blocks (images, audio, resources),
-                    // those survive ALONGSIDE the structured JSON as a
-                    // contentArray `[...transformed-non-text, {text:<json>}]`.
-                    // Original `text` blocks are dropped (the JSON represents
-                    // them). Only a structured-only result collapses to the
-                    // bare JSON string. Previously the non-text blocks (e.g.
-                    // images) were silently dropped.
-                    let non_text: Vec<Value> = dto
-                        .content
+                    let structured = dto
+                        .result_projection
+                        .as_ref()
+                        .and_then(|projection| projection.subprojection("/structuredContent").ok())
+                        .unwrap_or_else(|| Utf16JsonProjection::plain(sc.clone()));
+                    let sc_json = structured
+                        .to_json_string()
+                        .map_err(|error| ToolError::Internal(error.to_string()))?;
+                    let non_text = source_content
+                        .value
                         .as_array()
-                        .map(|items| {
-                            items
+                        .map(|blocks| {
+                            blocks
                                 .iter()
-                                .filter(|b| {
-                                    b.get("type")
+                                .enumerate()
+                                .filter(|(_, block)| {
+                                    block
+                                        .get("type")
                                         .and_then(Value::as_str)
-                                        .is_some_and(|t| t != "text")
+                                        .is_some_and(|kind| kind != "text")
                                 })
-                                .cloned()
-                                .collect()
+                                .map(|(index, _)| {
+                                    source_content.subprojection(&format!("/{index}"))
+                                })
+                                .collect::<Result<Vec<_>, _>>()
                         })
+                        .transpose()
+                        .map_err(|error| ToolError::Internal(error.to_string()))?
                         .unwrap_or_default();
                     if non_text.is_empty() {
                         (
-                            Value::String(sc_json),
+                            Utf16JsonProjection::plain(Value::String(sc_json)),
                             crate::large_output::McpLargeResultType::StructuredContent,
                         )
                     } else {
-                        let transformed = crate::transform_result::transform_result_content(
-                            &Value::Array(non_text),
-                            &server,
-                            persist_ctx,
-                        );
-                        let mut arr = transformed.as_array().cloned().unwrap_or_default();
-                        arr.push(json!({ "type": "text", "text": sc_json }));
+                        let non_text = Utf16JsonProjection::array(non_text)
+                            .map_err(|error| ToolError::Internal(error.to_string()))?;
+                        let transformed =
+                            crate::transform_result::transform_result_content_projected(
+                                &non_text,
+                                &server,
+                                persist_ctx,
+                            )
+                            .map_err(|error| ToolError::Internal(error.to_string()))?;
+                        let mut blocks = (0..transformed.value.as_array().map_or(0, Vec::len))
+                            .map(|index| transformed.subprojection(&format!("/{index}")))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|error| ToolError::Internal(error.to_string()))?;
+                        blocks.push(Utf16JsonProjection::plain(
+                            json!({"type":"text","text":sc_json}),
+                        ));
                         (
-                            Value::Array(arr),
+                            Utf16JsonProjection::array(blocks)
+                                .map_err(|error| ToolError::Internal(error.to_string()))?,
                             crate::large_output::McpLargeResultType::ContentArray,
                         )
                     }
                 }
                 None => {
-                    let transformed = crate::transform_result::transform_result_content(
-                        &dto.content,
+                    let transformed = crate::transform_result::transform_result_content_projected(
+                        &source_content,
                         &server,
                         persist_ctx,
-                    );
-                    let result_type = if transformed.is_array() {
+                    )
+                    .map_err(|error| ToolError::Internal(error.to_string()))?;
+                    let kind = if transformed.value.is_array() {
                         crate::large_output::McpLargeResultType::ContentArray
                     } else {
                         crate::large_output::McpLargeResultType::ToolResult
                     };
-                    (transformed, result_type)
+                    (transformed, kind)
                 }
             };
+            let model_content = model_projection.value.clone();
             // MCP large-output guard (claude-code `processMCPResult`): over-
             // threshold non-image content is persisted to disk and replaced
             // with read-it-from-file instructions; images / a falsy
@@ -1355,6 +1433,9 @@ async fn process_mcp_call_result(
             // array. `dto.is_error` rides the analytics path only (the dispatch
             // sets the block's `is_error` separately — it never read this key).
             let data = processed.content;
+            model_projection
+                .rebase_display_value(data.clone())
+                .map_err(|error| ToolError::Internal(error.to_string()))?;
             // Model-facing render: claude-code passes the MCP content directly
             // as the `tool_result` content (`MCPTool.ts:70-76`). The dispatch's
             // `tool_result_to_model_text` would JSON-dump an ARRAY/string `data`
@@ -1364,7 +1445,41 @@ async fn process_mcp_call_result(
             // `content_blocks` instead, leaving `model_content` as `None`).
             let model_content =
                 mcp_all_text_content_to_string(&data).or_else(|| data.as_str().map(str::to_string));
+            let model_content_projection = model_content
+                .as_ref()
+                .map(|text| {
+                    let units = if let Some(blocks) = model_projection.value.as_array() {
+                        let mut units = Vec::new();
+                        for index in 0..blocks.len() {
+                            if index > 0 {
+                                units.push(u16::from(b'\n'));
+                            }
+                            units.extend(
+                                model_projection
+                                    .string_units(&format!("/{index}/text"))
+                                    .unwrap_or_default(),
+                            );
+                        }
+                        units
+                    } else {
+                        model_projection
+                            .string_units("")
+                            .unwrap_or_else(|| text.encode_utf16().collect())
+                    };
+                    Utf16JsonProjection::root_string(text.clone(), units)
+                })
+                .transpose()
+                .map_err(|error| ToolError::Internal(error.to_string()))?;
+            let mcp_meta_projection = build_mcp_meta_projected(
+                dto.result_projection.as_ref(),
+                dto.meta.clone(),
+                dto.structured_content.clone(),
+            )
+            .map_err(|error| ToolError::Internal(error.to_string()))?;
             Ok(ToolCallResult {
+                mcp_meta_projection,
+                model_content_projection,
+                data_projection: Some(model_projection),
                 data,
                 model_content,
                 new_messages: vec![],
@@ -1410,6 +1525,9 @@ async fn process_mcp_call_result(
 
 #[async_trait]
 impl Tool for MCPTool {
+    fn input_schema_projection(&self) -> Option<Utf16JsonProjection> {
+        self.bound_schema_projection.clone()
+    }
     fn name(&self) -> &str {
         // Per-tool wire entry → the `mcp__<server>__<tool>` FQN; generic
         // dispatcher → the constant `MCP` (client.ts:1768 `name = fqn`).
@@ -1437,10 +1555,7 @@ impl Tool for MCPTool {
     fn is_mcp(&self) -> bool {
         true
     }
-    async fn tool_check_permission_ceiling(
-        &self,
-        input: &Value,
-    ) -> Option<McpPermissionCeiling> {
+    async fn tool_check_permission_ceiling(&self, input: &Value) -> Option<McpPermissionCeiling> {
         let organization_ceiling = if self.full_name.is_none() {
             self.generic_organization_max_permission(
                 input.get("full_name").and_then(Value::as_str)?,
@@ -1581,9 +1696,7 @@ impl Tool for MCPTool {
                 requires_user_interaction,
                 true,
             );
-            if self
-                .generic_organization_max_permission(full_name)
-                .await
+            if self.generic_organization_max_permission(full_name).await
                 == Some(McpToolMaxPermission::Ask)
             {
                 return native_organization_ask_result(result);
@@ -1636,6 +1749,9 @@ impl Tool for MCPTool {
         progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         let started = Instant::now();
+        let original_input = ctx
+            .projected_input(&input)
+            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
         // Per-tool wire entry (Batch 3): the FQN is the bound `name()` and the
         // RAW `input` object is the tool arguments — there is NO
         // `{full_name, arguments}` envelope to unwrap (the model addressed this
@@ -1646,7 +1762,10 @@ impl Tool for MCPTool {
         let (full_name, arguments) = match &self.full_name {
             Some(fqn) => (
                 fqn.clone(),
-                normalize_empty_schema_arguments(self.bound_schema.as_ref(), input),
+                normalize_empty_schema_arguments_projected(
+                    self.bound_schema.as_ref(),
+                    original_input,
+                ),
             ),
             None => {
                 let fqn = input
@@ -1656,7 +1775,9 @@ impl Tool for MCPTool {
                         ToolError::InvalidInput("MCPTool: missing or non-string full_name".into())
                     })?
                     .to_string();
-                let args = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                let args = original_input
+                    .subprojection("/arguments")
+                    .unwrap_or_else(|_| Utf16JsonProjection::plain(json!({})));
                 (fqn, args)
             }
         };
@@ -1677,7 +1798,8 @@ impl Tool for MCPTool {
             .unwrap_or_else(|| server.clone());
         // Despite the oracle field's historical `Bytes` suffix, `W` is
         // `JSON.stringify(input).length`: JavaScript UTF-16 code units.
-        let tool_input_size_bytes = serde_json::to_string(&arguments)
+        let tool_input_size_bytes = arguments
+            .to_json_string()
             .map(|json| js_string_len(&json))
             .unwrap_or(0);
 
@@ -1720,7 +1842,7 @@ impl Tool for MCPTool {
             None
         };
         if let Some(preflight) = inspect_missing_required_input(
-            &arguments,
+            &arguments.value,
             self.bound_schema.as_ref().or(generic_input_schema.as_ref()),
         ) {
             let tool_use_id = ctx.tool_use_id.as_ref().map(|id| id.to_string());
@@ -2108,6 +2230,9 @@ impl Tool for MCPTool {
             elapsed_secs,
         );
         Ok(ToolCallResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             data: json!([{ "type": "text", "text": message }]),
             model_content: Some(message),
             new_messages: vec![],
@@ -2276,6 +2401,9 @@ impl Tool for McpAuthTool {
         .await;
 
         Ok(ToolCallResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             data: json!({
                 "server_name": server_name,
                 "transport_kind": kind,
@@ -2568,6 +2696,9 @@ impl Tool for ListMcpResourcesTool {
             )
             .await;
             return Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({ "server_name": target_server, "resources": resources }),
                 model_content: None,
                 new_messages: vec![],
@@ -2657,6 +2788,9 @@ impl Tool for ListMcpResourcesTool {
         )
         .await;
         Ok(ToolCallResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             // `resources` is now a flat array of `{uri, name, mimeType?, server}`
             // objects (matches `ListMcpResourcesTool.ts:26-34` output rows). The
             // optional `server_name` echo is retained for the single-server path.
@@ -3123,6 +3257,9 @@ impl Tool for ReadMcpResourceTool {
                 )
                 .await;
                 Ok(ToolCallResult {
+                    mcp_meta_projection: None,
+                    model_content_projection: None,
+                    data_projection: None,
                     // Output shape mirrors `ReadMcpResourceTool.ts` `outputSchema`
                     // `{ contents: [{uri, mimeType?, text?, blobSavedTo?}] }`,
                     // wrapped with the existing `{server_name, uri}` envelope the
@@ -3317,7 +3454,8 @@ pub async fn build_registered_mcp_tools(
                         dto.search_hint.clone(),
                         config.always_load || dto.always_load.unwrap_or(false),
                         dto.requires_user_interaction,
-                    );
+                    )
+                    .with_input_schema_projection(dto.input_schema_projection.clone());
                     let tool = if let Some(ceiling) =
                         configured_permission_ceiling(config, &dto.tool_name)
                     {
@@ -4029,12 +4167,17 @@ mod tests {
     #[test]
     fn organization_ceiling_projection_excludes_local_permission_policy() {
         let mut config = super::resource_tool_gating_tests::config("srv");
-        config.tools.push(lingxi_core::host::McpConfiguredToolPolicyDto {
-            name: "write".into(),
-            permission_policy: Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk),
-            org_max_permission: None,
-        });
-        assert_eq!(configured_organization_max_permission(&config, "write"), None);
+        config
+            .tools
+            .push(lingxi_core::host::McpConfiguredToolPolicyDto {
+                name: "write".into(),
+                permission_policy: Some(lingxi_core::host::McpToolPermissionPolicy::AlwaysAsk),
+                org_max_permission: None,
+            });
+        assert_eq!(
+            configured_organization_max_permission(&config, "write"),
+            None
+        );
 
         config.tools[0].org_max_permission = Some(McpPermissionCeiling::Ask);
         assert_eq!(
@@ -4083,9 +4226,7 @@ mod tests {
         )
         .with_organization_max_permission(McpPermissionCeiling::Ask);
         assert_eq!(
-            org_capped
-                .tool_check_permission_ceiling(&json!({}))
-                .await,
+            org_capped.tool_check_permission_ceiling(&json!({})).await,
             Some(McpPermissionCeiling::Ask)
         );
         let result = native_organization_ask_result(permission::clamp_mcp_permission_result(
@@ -4103,7 +4244,10 @@ mod tests {
             panic!("organization Ask must use the Native Other decision reason");
         };
         assert_eq!(reason, "Your organization requires approval for this tool");
-        assert_eq!(prompt.message, "Your organization requires approval for this tool");
+        assert_eq!(
+            prompt.message,
+            "Your organization requires approval for this tool"
+        );
     }
 
     #[tokio::test]
@@ -4482,6 +4626,8 @@ pub(crate) mod cached_resource_test_support {
             _input: Value,
         ) -> Result<McpToolResultDto, McpError> {
             Ok(McpToolResultDto {
+                result_projection: None,
+
                 content: json!("ok"),
                 is_error: false,
                 ..Default::default()
@@ -5947,6 +6093,9 @@ mod resource_tool_gating_tests {
 
     fn dto(server_name: &str, tool_name: &str) -> McpToolDto {
         McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: server_name.into(),
             tool_name: tool_name.into(),
             description: format!("{tool_name} tool"),

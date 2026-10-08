@@ -242,14 +242,22 @@ fn parse_file_status_reads_top_level_file_resource() {
     assert_eq!(file.state, "PROCESSING");
 }
 
-// ── BONUS (T5 review): legacy ProviderRequest JSON without body_bytes ─────────
+// Current ProviderRequest declares its encoding; raw bytes remain optional.
 
 #[test]
-fn provider_request_legacy_json_without_body_bytes_deserializes_to_none() {
+fn provider_request_current_json_declares_encoding_and_optional_raw_body() {
     let request: ProviderRequest = serde_json::from_str(
-        r#"{"method":"POST","url":"https://example.com","body_json":{"a":1}}"#,
+        r#"{"method":"POST","url":"https://example.com","body_json":{"a":1},"json_encoding":"Serde"}"#,
     )
-    .expect("legacy JSON must deserialize");
+    .expect("current JSON must deserialize");
+    assert_eq!(
+        request.json_encoding,
+        lingxi_llm_client::exact_json::JsonEncoding::Serde
+    );
+    assert!(serde_json::from_str::<ProviderRequest>(
+        r#"{"method":"POST","url":"https://example.com","body_json":{"a":1}}"#
+    )
+    .is_err());
     assert_eq!(request.body_bytes, None);
 }
 
@@ -571,7 +579,7 @@ fn uploaded_file_uri_round_trips_into_gemini_file_data_encoding() {
 
     let codec = GeminiCodec::new(GEMINI_BASE);
     let mut request = HistoryFixture::new("gemini-2.0-flash");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
             url: file.uri.clone(),

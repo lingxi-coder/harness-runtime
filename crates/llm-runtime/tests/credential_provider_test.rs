@@ -1,7 +1,7 @@
 //! Tests for `OAuthCredentialProvider` — `llm_runtime::CredentialProvider` impl.
 //!
 //! Behavioral contracts:
-//!   1. Fresh token returned as `Credential::BearerToken` (no refresh).
+//!   1. Fresh token and scopes returned as `Credential::AnthropicOAuth` (no refresh).
 //!   2. Expired token triggers single-flight refresh; refreshed token returned.
 //!   3. Refresh failure maps to `LlmError::Authentication` (no secret material leaked).
 
@@ -79,6 +79,7 @@ fn fresh_driver() -> Arc<RefreshDriver> {
         Some(Secret::new("ref-fresh".to_string())),
         // Expires well in the future relative to CLOCK_NOW_SECS.
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS + 3_600),
+        lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0).scopes,
         // Transport must never be invoked here: a returned credential other than "tok-fresh" would fail the assertion below.
         Arc::new(FreshTokenTransport) as Arc<dyn Transport>,
         Arc::new(FixedClock(
@@ -99,6 +100,7 @@ fn expired_driver_ok() -> Arc<RefreshDriver> {
         Some(Secret::new("ref-expired".to_string())),
         // Expired: `expires_at` is before the clock's `now`.
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS - 1),
+        lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0).scopes,
         Arc::new(FreshTokenTransport) as Arc<dyn Transport>,
         Arc::new(FixedClock(
             SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS),
@@ -117,6 +119,7 @@ fn expired_driver_fail() -> Arc<RefreshDriver> {
         Secret::new("tok-expired".to_string()),
         Some(Secret::new("ref-expired".to_string())),
         SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS - 1),
+        lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0).scopes,
         Arc::new(FailingTransport) as Arc<dyn Transport>,
         Arc::new(FixedClock(
             SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS),
@@ -143,7 +146,45 @@ async fn load_returns_current_token_when_fresh() {
         .await
         .expect("credential");
 
-    assert_eq!(credential, Credential::BearerToken("tok-fresh".to_string()));
+    assert_eq!(
+        credential,
+        Credential::AnthropicOAuth {
+            access_token: "tok-fresh".into(),
+            scopes: ClaudeAiOAuthConfig::default_with_port(0).scopes
+        }
+    );
+}
+
+#[tokio::test]
+async fn granted_scopes_do_not_inherit_the_requested_default_scopes() {
+    let state = AuthState::new(
+        ClaudeAiOAuthConfig::default_with_port(0),
+        Secret::new("restricted".into()),
+        Some(Secret::new("refresh".into())),
+        SystemTime::UNIX_EPOCH + Duration::from_secs(5000),
+        vec!["user:inference".into()],
+        Arc::new(FreshTokenTransport),
+        Arc::new(FixedClock(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(CLOCK_NOW_SECS),
+        )),
+        None,
+        None,
+    );
+    let provider = OAuthCredentialProvider::new(Arc::new(RefreshDriver::new(state)));
+    let credential = provider
+        .load(&CredentialScope::new(
+            ProviderId::AnthropicFirstParty,
+            "anthropic",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        credential,
+        Credential::AnthropicOAuth {
+            access_token: "restricted".into(),
+            scopes: vec!["user:inference".into()]
+        }
+    );
 }
 
 #[tokio::test]
@@ -160,7 +201,10 @@ async fn load_refreshes_expired_token_single_flight() {
 
     assert_eq!(
         credential,
-        Credential::BearerToken("tok-refreshed".to_string())
+        Credential::AnthropicOAuth {
+            access_token: "tok-refreshed".into(),
+            scopes: vec!["read:user".into()]
+        }
     );
 }
 

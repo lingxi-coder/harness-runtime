@@ -1,0 +1,1930 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "native tool kinds",
+      "start": 187816125,
+      "end": 187816184,
+      "sha256": "4ea152eb86ab2f6b33042bc1d6a6246fcb8137e273423a127ac943d5489f938c"
+    },
+    {
+      "label": "native initial state",
+      "start": 187896148,
+      "end": 187896168,
+      "sha256": "a01f4fb26a866ff5b9a3acc696103440ebc51a902fa12aba710a17a288a70a59"
+    },
+    {
+      "label": "native close generator",
+      "start": 187896168,
+      "end": 187896372,
+      "sha256": "5dd61c9ac464a781ebcb642afcb7ad2bfd47c0d1a9c27ac9df834cb3e18ccd1a"
+    },
+    {
+      "label": "native forwarded-event state update",
+      "start": 187911739,
+      "end": 187911980,
+      "sha256": "dbf9426ec0eb70e34e732c9db47292e58be50ed4f119c7c30315bd83d4676e5a"
+    },
+    {
+      "label": "native final-delta terminal state update",
+      "start": 187907184,
+      "end": 187907281,
+      "sha256": "0ad7d61a0ebb4a38398a27fff71484ecff17b6f33a1f0773c017cb75853e5e95"
+    },
+    {
+      "label": "native clean-EOF completion predicates",
+      "start": 187912517,
+      "end": 187913239,
+      "sha256": "291fce55451be7f533779f7cf7b4c4fffe65d11e69b3d76be66a207df4d85cb7"
+    },
+    {
+      "label": "native error close-after-complete branch",
+      "start": 187919705,
+      "end": 187920110,
+      "sha256": "5850d35e5f7be28371414a17f7466d7f03845a4d92c7390f2abd6f325320c288"
+    },
+    {
+      "label": "native message-start completion state",
+      "start": 187900490,
+      "end": 187900509,
+      "sha256": "6c9de1cf908a75cf456aed3a9eadd8d2a5258bb332197202f8b9f398d3207ed4"
+    },
+    {
+      "label": "native block-start terminal reset",
+      "start": 187901255,
+      "end": 187901260,
+      "sha256": "9406cb09490c829507f8a905b6205680ad3f622dea55da41ea65756f9d39b4c9"
+    },
+    {
+      "label": "native open-block state",
+      "start": 187902374,
+      "end": 187902385,
+      "sha256": "39cd379417ad365e0f7e6738845751c06d11add836de98015b2a9013876b230f"
+    },
+    {
+      "label": "native block-delta terminal reset and guards",
+      "start": 187902528,
+      "end": 187902793,
+      "sha256": "7991ca39964a60c343f43278ef4e680abc65c30ae951e08c298059b8df5850a4"
+    },
+    {
+      "label": "native block-stop terminal reset and guards",
+      "start": 187904495,
+      "end": 187904886,
+      "sha256": "9b8e704c76143ec347f2231a6613e61eac3f4b27602cf123f069a33a5ca79f0d"
+    },
+    {
+      "label": "native closed-block state",
+      "start": 187904749,
+      "end": 187904756,
+      "sha256": "9b69a6ba9fdc5379d9ee22c7e6548d4342659ee27e787cb24a14fa07c81460b8"
+    },
+    {
+      "label": "native completed-block state",
+      "start": 187905701,
+      "end": 187905748,
+      "sha256": "51b829f8553c6fd4af92f07909792f776ed146a5a918131177a36077d82822d0"
+    },
+    {
+      "label": "native message-stop completion state",
+      "start": 187911507,
+      "end": 187911512,
+      "sha256": "2a674cc95b48ea92af893b808f5c383e3cc97777753b4646b408ed28a9b02b5a"
+    },
+    {
+      "label": "native error stop-reason presence flag",
+      "start": 187919443,
+      "end": 187919460,
+      "sha256": "da65a8d4c3d6d6a75aaddc1757d7557f6c6eeab9bc6ce0b0b0f7fa532bba90ba"
+    },
+    {
+      "label": "native DUt stream-failure classification",
+      "start": 187800880,
+      "end": 187801253,
+      "sha256": "5bbdbeb8a6abcd1905b113b6c216f70f56a853009063bf33cab1ba43539f06fd"
+    },
+    {
+      "label": "native HLo stream-failure cause classification",
+      "start": 187801253,
+      "end": 187801606,
+      "sha256": "9fd36a4d21319e74e7bb266dd55c63933510ec9e604a4ef405fd886f274168ea"
+    }
+  ],
+  "scope": "Exact native Um generator, forwarded-event state update, initial state and DNo tool-kind set. Input forwarded events and close timing are controlled. This proves the helper state and JSON bytes, not native CLI, abort/retraction or every caller branch acceptance.",
+  "completionScope": "Exact extracted native terminal updates, reset/guard statements and clean-EOF/error-close-after-complete predicates executed in a VM. Content-block payload validation/conversion, bookkeeping objects, logging, clocks and an eligible connection-error context are controlled. Native wa open/closed assignments execute separately from the forwarded Ih state. complete is the intersection of cleanAccepted and errorAccepted; errorAccepted means only that the selected close-after-complete necessary-condition branch matched. This VM does not execute DUt/HLo or onStreamFailed error eligibility, abort/retraction or native CLI acceptance.",
+  "errorEligibilityScope": "Exact native DUt and HLo classifiers executed separately with controlled input fields, RU overload checks and xt/Jd/Dd error-class prototypes. bypassesStreamFailurePolicy means DUt returned undefined: complete connectionLost/truncated/stalled, or complete overloaded/serverError with output progress (both anyBlockFinished and anyOutputShown). Classification is separate from completionCases and does not execute M_.onStreamFailed, native transports, abort/retraction or native CLI acceptance.",
+  "cases": [
+    {
+      "name": "no-forwarded-message",
+      "events": [],
+      "expected": {
+        "first": [],
+        "repeated": [],
+        "eventJson": []
+      }
+    },
+    {
+      "name": "message-start-only",
+      "events": [
+        {
+          "type": "message_start"
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "open-text",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 3,
+          "content_block": {
+            "type": "text"
+          }
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "content_block_stop",
+              "index": 3
+            }
+          },
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"content_block_stop\",\"index\":3}",
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "open-thinking",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 2,
+          "content_block": {
+            "type": "thinking"
+          }
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "content_block_stop",
+              "index": 2
+            }
+          },
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"content_block_stop\",\"index\":2}",
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "open-redacted-thinking",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 4,
+          "content_block": {
+            "type": "redacted_thinking"
+          }
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "content_block_stop",
+              "index": 4
+            }
+          },
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"content_block_stop\",\"index\":4}",
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "open-tool-use",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 1,
+          "content_block": {
+            "type": "tool_use"
+          }
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "open-server-tool-use",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 2,
+          "content_block": {
+            "type": "server_tool_use"
+          }
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "open-mcp-tool-use",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 3,
+          "content_block": {
+            "type": "mcp_tool_use"
+          }
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "completed-text-block",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 1,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 1
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "completed-thinking-then-open-text",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "thinking"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "content_block_start",
+          "index": 1,
+          "content_block": {
+            "type": "text"
+          }
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "content_block_stop",
+              "index": 1
+            }
+          },
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"content_block_stop\",\"index\":1}",
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "stop-reason-before-lost-stop",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "already-forwarded-message-stop",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_stop"
+        }
+      ],
+      "expected": {
+        "first": [],
+        "repeated": [],
+        "eventJson": []
+      }
+    },
+    {
+      "name": "block-without-message-start",
+      "events": [
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        }
+      ],
+      "expected": {
+        "first": [],
+        "repeated": [],
+        "eventJson": []
+      }
+    },
+    {
+      "name": "new-message-after-real-stop",
+      "events": [
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_stop"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "content_block_start",
+          "index": 7,
+          "content_block": {
+            "type": "text"
+          }
+        }
+      ],
+      "expected": {
+        "first": [
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "content_block_stop",
+              "index": 7
+            }
+          },
+          {
+            "type": "stream_event",
+            "event": {
+              "type": "message_stop"
+            }
+          }
+        ],
+        "repeated": [],
+        "eventJson": [
+          "{\"type\":\"content_block_stop\",\"index\":7}",
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    }
+  ],
+  "completionCases": [
+    {
+      "name": "missing-message-start",
+      "events": [],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": false,
+        "terminalDelta": false,
+        "stopReason": null,
+        "openBlock": null,
+        "completedBlocks": 0,
+        "cleanFailure": "non_streaming_fallback",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "message-start-without-final-block-or-stop-reason",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": null,
+        "openBlock": null,
+        "completedBlocks": 0,
+        "cleanFailure": "non_streaming_fallback",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "zero-output-final-string-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        }
+      ],
+      "expected": {
+        "complete": true,
+        "cleanAccepted": true,
+        "errorAccepted": true,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "end_turn",
+        "openBlock": null,
+        "completedBlocks": 0,
+        "cleanFailure": null,
+        "errorEventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "missing-message-start-with-final-delta",
+      "events": [
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": true,
+        "messageStarted": false,
+        "terminalDelta": true,
+        "stopReason": "end_turn",
+        "openBlock": null,
+        "completedBlocks": 0,
+        "cleanFailure": "non_streaming_fallback",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "closed-block-without-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": null,
+        "openBlock": null,
+        "completedBlocks": 1,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "closed-block-with-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        }
+      ],
+      "expected": {
+        "complete": true,
+        "cleanAccepted": true,
+        "errorAccepted": true,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "end_turn",
+        "openBlock": null,
+        "completedBlocks": 1,
+        "cleanFailure": null,
+        "errorEventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "open-text-with-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "end_turn",
+        "openBlock": 0,
+        "completedBlocks": 0,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "open-tool-block-before-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "tool_use"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "tool_use"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "tool_use",
+        "openBlock": 0,
+        "completedBlocks": 0,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "final-delta-before-tool-block-start",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "tool_use"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "tool_use"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": "tool_use",
+        "openBlock": 0,
+        "completedBlocks": 0,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "open-tool-input-with-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "tool_use"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "input_json_delta",
+            "partial_json": "{\"path\":"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "tool_use"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "tool_use",
+        "openBlock": 0,
+        "completedBlocks": 0,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "open-server-input-with-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "server_tool_use"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "input_json_delta",
+            "partial_json": "{\"path\":"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "tool_use"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "tool_use",
+        "openBlock": 0,
+        "completedBlocks": 0,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "open-mcp-block-with-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "mcp_tool_use"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "tool_use"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "tool_use",
+        "openBlock": 0,
+        "completedBlocks": 0,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "later-block-start-resets-terminal",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 1,
+          "content_block": {
+            "type": "text"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": "end_turn",
+        "openBlock": 1,
+        "completedBlocks": 1,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "later-block-start-and-stop-reset-terminal",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 1,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 1
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": "end_turn",
+        "openBlock": null,
+        "completedBlocks": 2,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "later-block-delta-resets-terminal",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": "end_turn",
+        "openBlock": 0,
+        "completedBlocks": 0,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "later-block-stop-resets-terminal",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": "end_turn",
+        "openBlock": null,
+        "completedBlocks": 1,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "usage-only-delta-keeps-terminal",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {},
+          "usage": {
+            "output_tokens": 2
+          }
+        }
+      ],
+      "expected": {
+        "complete": true,
+        "cleanAccepted": true,
+        "errorAccepted": true,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "end_turn",
+        "openBlock": null,
+        "completedBlocks": 1,
+        "cleanFailure": null,
+        "errorEventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "usage-only-delta-does-not-set-terminal",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_delta",
+          "delta": {},
+          "usage": {
+            "output_tokens": 2
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": null,
+        "openBlock": null,
+        "completedBlocks": 1,
+        "cleanFailure": "dropped_connection",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "null-stop-reason-does-not-set-terminal",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": null
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": null,
+        "openBlock": null,
+        "completedBlocks": 0,
+        "cleanFailure": "non_streaming_fallback",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "number-stop-reason-does-not-set-terminal",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": 7
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": null,
+        "openBlock": null,
+        "completedBlocks": 0,
+        "cleanFailure": "non_streaming_fallback",
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "zero-output-empty-string-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": ""
+          }
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": false,
+        "errorAccepted": true,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "",
+        "openBlock": null,
+        "completedBlocks": 0,
+        "cleanFailure": "non_streaming_fallback",
+        "errorEventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "closed-block-empty-string-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": ""
+          }
+        }
+      ],
+      "expected": {
+        "complete": true,
+        "cleanAccepted": true,
+        "errorAccepted": true,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "",
+        "openBlock": null,
+        "completedBlocks": 1,
+        "cleanFailure": null,
+        "errorEventJson": [
+          "{\"type\":\"message_stop\"}"
+        ]
+      }
+    },
+    {
+      "name": "already-forwarded-message-stop-after-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_delta",
+          "delta": {
+            "stop_reason": "end_turn"
+          }
+        },
+        {
+          "type": "message_stop"
+        }
+      ],
+      "expected": {
+        "complete": true,
+        "cleanAccepted": true,
+        "errorAccepted": true,
+        "messageStarted": true,
+        "terminalDelta": true,
+        "stopReason": "end_turn",
+        "openBlock": null,
+        "completedBlocks": 1,
+        "cleanFailure": null,
+        "errorEventJson": []
+      }
+    },
+    {
+      "name": "already-forwarded-message-stop-without-final-delta",
+      "events": [
+        {
+          "type": "message_start",
+          "message": {
+            "id": "fixture-message"
+          }
+        },
+        {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": {
+            "type": "text"
+          }
+        },
+        {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {
+            "type": "text_delta",
+            "text": "partial"
+          }
+        },
+        {
+          "type": "content_block_stop",
+          "index": 0
+        },
+        {
+          "type": "message_stop"
+        }
+      ],
+      "expected": {
+        "complete": false,
+        "cleanAccepted": true,
+        "errorAccepted": false,
+        "messageStarted": true,
+        "terminalDelta": false,
+        "stopReason": null,
+        "openBlock": null,
+        "completedBlocks": 1,
+        "cleanFailure": null,
+        "errorEventJson": []
+      }
+    }
+  ],
+  "errorEligibilityCases": [
+    {
+      "name": "complete-connection-lost-with-zero-output",
+      "input": {
+        "errorClass": "unknown",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": true,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": true,
+        "cause": "connectionLost",
+        "failure": null
+      }
+    },
+    {
+      "name": "complete-truncated-with-zero-output",
+      "input": {
+        "errorClass": "unknown",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": true,
+        "truncated": true,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": true,
+        "cause": "truncated",
+        "failure": null
+      }
+    },
+    {
+      "name": "complete-stalled-with-zero-output",
+      "input": {
+        "errorClass": "unknown",
+        "denied": false,
+        "isServerError": false,
+        "stalled": true,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": true,
+        "cause": "stalled",
+        "failure": null
+      }
+    },
+    {
+      "name": "complete-overloaded-with-output",
+      "input": {
+        "errorClass": "overloaded",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": true,
+        "anyOutputShown": true,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": true,
+        "cause": "overloaded",
+        "failure": null
+      }
+    },
+    {
+      "name": "complete-server-error-with-output",
+      "input": {
+        "errorClass": "unknown",
+        "denied": false,
+        "isServerError": true,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": true,
+        "anyOutputShown": true,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": true,
+        "cause": "serverError",
+        "failure": null
+      }
+    },
+    {
+      "name": "complete-overloaded-without-output",
+      "input": {
+        "errorClass": "overloaded",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "overloaded",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "overloaded",
+          "progress": "started",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "complete-overloaded-with-thinking-only",
+      "input": {
+        "errorClass": "overloaded",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": true,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "overloaded",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "overloaded",
+          "progress": "thinkingOnly",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "complete-overloaded-with-partial-output",
+      "input": {
+        "errorClass": "overloaded",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": true,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "overloaded",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "overloaded",
+          "progress": "partialOutput",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "complete-server-error-without-output",
+      "input": {
+        "errorClass": "unknown",
+        "denied": false,
+        "isServerError": true,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "serverError",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "serverError",
+          "progress": "started",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "complete-server-error-with-partial-output",
+      "input": {
+        "errorClass": "unknown",
+        "denied": false,
+        "isServerError": true,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": true,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "serverError",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "serverError",
+          "progress": "partialOutput",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "complete-malformed-error",
+      "input": {
+        "errorClass": "unknown",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": true,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "malformed",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "malformed",
+          "progress": "started",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "complete-bad-request-error",
+      "input": {
+        "errorClass": "xt",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "badRequest",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "badRequest",
+          "progress": "started",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "complete-dd-error-class",
+      "input": {
+        "errorClass": "Dd",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "unknown",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "unknown",
+          "progress": "started",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "complete-unknown-error",
+      "input": {
+        "errorClass": "unknown",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": false,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "unknown",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "unknown",
+          "progress": "started",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "incomplete-connection-lost",
+      "input": {
+        "errorClass": "unknown",
+        "denied": false,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": true,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": false
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "connectionLost",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "connectionLost",
+          "progress": "started",
+          "stopReasonReceived": true
+        }
+      }
+    },
+    {
+      "name": "denied-error-overrides-connection-lost",
+      "input": {
+        "errorClass": "unknown",
+        "denied": true,
+        "isServerError": false,
+        "stalled": false,
+        "isConnectionError": true,
+        "truncated": false,
+        "malformed": false,
+        "anyEvent": true,
+        "anyBlockFinished": false,
+        "anyOutputShown": false,
+        "stopReasonReceived": true,
+        "complete": true
+      },
+      "expected": {
+        "bypassesStreamFailurePolicy": false,
+        "cause": "denied",
+        "failure": {
+          "kind": "streamFailed",
+          "cause": "denied",
+          "progress": "started",
+          "stopReasonReceived": true
+        }
+      }
+    }
+  ]
+}

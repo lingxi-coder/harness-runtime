@@ -17,6 +17,59 @@ use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::oneshot;
 
 #[tokio::test]
+async fn agent_statistics_follow_task_terminal_owner_and_stop_reason_once() {
+    let (_dir, registry) = make_registry();
+    let session = lingxi_core::types::SessionId::new();
+    let statistics = registry.agent_session_statistics(session);
+    for (id, reason) in [("astatpar", "parent"), ("astatsys", "system"), ("astatusr", "user")] {
+        registry.insert_state_for_test(agent_state(id, TaskStatus::Running)).await;
+        let token = statistics.prepare_spawn("worker".into(), Some(true), true, 1);
+        token.started();
+        registry.bind_agent_spawn_token(id, token);
+        registry.kill_with_reason(id, reason).await.unwrap();
+        registry.kill_with_reason(id, reason).await.unwrap();
+        registry.set_status(id, TaskStatus::Completed).await.unwrap();
+    }
+    registry.insert_state_for_test(agent_state("astatdone", TaskStatus::Running)).await;
+    let token = statistics.prepare_spawn("Explore".into(), None, false, 2);
+    token.started();
+    registry.bind_agent_spawn_token("astatdone", token);
+    registry.set_status("astatdone", TaskStatus::Completed).await.unwrap();
+    registry.kill_with_reason("astatdone", "parent").await.unwrap();
+    // An internal local-agent row has no Agent-tool capability.
+    registry.insert_state_for_test(agent_state("ainternal", TaskStatus::Running)).await;
+    registry.set_status("ainternal", TaskStatus::Failed).await.unwrap();
+    let snapshot = statistics.snapshot();
+    assert_eq!(snapshot.spawned, 4);
+    assert_eq!(snapshot.completed, 1);
+    assert_eq!(snapshot.failed, 0);
+    assert_eq!(snapshot.killed, lingxi_core::host::agent_statistics::AgentKilledStatistics { parent: 1, user: 1, system: 1 });
+}
+
+#[tokio::test]
+async fn agent_statistics_clear_follows_old_workers_but_resume_replaces_authority() {
+    let (_dir, registry) = make_registry();
+    let original_id = lingxi_core::types::SessionId::new();
+    let cleared_id = lingxi_core::types::SessionId::new();
+    let original = registry.agent_session_statistics(original_id);
+    registry.insert_state_for_test(agent_state("astatlate", TaskStatus::Running)).await;
+    let token = original.prepare_spawn("worker".into(), None, true, 1);
+    token.started();
+    registry.bind_agent_spawn_token("astatlate", token);
+    registry.reset_agent_session_statistics(cleared_id, Some(original_id));
+    let cleared = registry.agent_session_statistics(cleared_id);
+    assert!(Arc::ptr_eq(&original, &cleared));
+    registry.set_status("astatlate", TaskStatus::Completed).await.unwrap();
+    assert_eq!(cleared.snapshot().spawned, 0);
+    assert_eq!(cleared.snapshot().completed, 1);
+    registry.reset_agent_session_statistics(cleared_id, None);
+    let resumed = registry.agent_session_statistics(cleared_id);
+    assert!(!Arc::ptr_eq(&cleared, &resumed));
+    assert_eq!(resumed.snapshot(), Default::default());
+    assert_eq!(cleared.snapshot().completed, 1);
+}
+
+#[tokio::test]
 async fn parked_agent_is_completed_retained_resumable_and_stoppable() {
     use crate::handlers::TaskStatusSink;
     use lingxi_core::host::task_registry::TaskRegistryHandle;
@@ -8239,7 +8292,7 @@ impl agent::api::SubagentApiClient for ForegroundOwnerFixture {
         let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             let content = if call == 0 {
-                vec![llm_runtime::ContentBlock::ToolCall {
+                vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                     id: lingxi_core::types::ToolUseId::new().to_string(),
                     name: "SpawnOwnedTask".into(),
                     input: serde_json::json!({}),
@@ -10506,7 +10559,7 @@ async fn terminal_agent_wait_uses_native_transcript_and_claims_completion() {
     let mut state = agent_row(task_id);
     state.agent_id = agent_id;
     let settled_messages = vec![
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "transcript answer".into(), citations: None,
@@ -10514,7 +10567,7 @@ async fn terminal_agent_wait_uses_native_transcript_and_claims_completion() {
             stop_reason: Some("end_turn".into()),
         },
         // Native kfo skips an empty assistant candidate and scans backward.
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: String::new(), citations: None,
@@ -10607,7 +10660,7 @@ async fn terminal_agent_wait_preserves_whitespace_and_prefers_task_error() {
     state.base.status = TaskStatus::Failed;
     state.error = Some("terminal failure".into());
     state.outcome.result = Some("different task result".into());
-    state.messages = vec![ConversationMessage::Assistant {
+    state.messages = vec![ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "  \n".into(), citations: None,

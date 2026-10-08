@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 fn mf(path: &str, body: &str, tier: LingxiMdTier) -> MemoryFile {
     MemoryFile {
+        parent: None,
+        source_content: None,
         path: PathBuf::from(path),
         body: body.into(),
         is_local_override: tier == LingxiMdTier::Local,
@@ -84,13 +86,12 @@ policy"
 }
 
 #[test]
-fn conditional_rule_with_paths_is_excluded_from_eager_block() {
-    // GAP 2 part-1: a rule WITH `paths:` globs is filtered out of the eager
-    // block; one WITHOUT is included. (memory_block::format itself emits what
-    // it's given; the filtering happens in RealMemoryHierarchyProvider::load,
-    // exercised below by constructing files as the provider would after its
-    // `globs.is_some()` drop.)
+fn acquired_named_instruction_with_paths_is_rendered_eagerly() {
+    // Current native xJ/L0n tests acquired content truthiness; the distinct
+    // conditional rule-directory filter runs during acquisition.
     let included = MemoryFile {
+        parent: None,
+        source_content: None,
         path: PathBuf::from("/proj/.lingxi/rules/always.md"),
         body: "always".into(),
         is_local_override: false,
@@ -99,10 +100,10 @@ fn conditional_rule_with_paths_is_excluded_from_eager_block() {
         raw_content: "always".into(),
         content_differs_from_disk: false,
     };
-    // The provider would have dropped this one (globs.is_some()); assert that a
-    // hand-rolled eager set excludes it and keeps only the unconditional rule.
-    let conditional = MemoryFile {
-        path: PathBuf::from("/proj/.lingxi/rules/scoped.md"),
+    let named = MemoryFile {
+        parent: None,
+        source_content: None,
+        path: PathBuf::from("/proj/LINGXI.md"),
         body: "scoped".into(),
         is_local_override: false,
         tier: LingxiMdTier::Project,
@@ -110,18 +111,8 @@ fn conditional_rule_with_paths_is_excluded_from_eager_block() {
         raw_content: "scoped".into(),
         content_differs_from_disk: false,
     };
-    let eager: Vec<MemoryFile> = [included.clone(), conditional]
-        .into_iter()
-        .filter(|f| f.globs.is_none())
-        .collect();
-    assert_eq!(eager.len(), 1);
-    assert_eq!(eager[0].path, included.path);
-    let out = memory_block::format(&eager);
-    assert!(out.contains("always"));
-    assert!(
-        !out.contains("scoped"),
-        "conditional rule must not be injected"
-    );
+    let out = memory_block::format(&[included, named]);
+    assert_eq!(out, format!("{PREAMBLE}\n\nContents of /proj/.lingxi/rules/always.md (project instructions, checked into the codebase):\n\nalways\n\nContents of /proj/LINGXI.md (project instructions, checked into the codebase):\n\nscoped"));
 }
 
 #[tokio::test]
@@ -140,10 +131,8 @@ async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
     std::fs::create_dir_all(&rules).unwrap();
     std::fs::write(proj.join("LINGXI.md"), "REPO").unwrap();
     std::fs::write(proj.join("LINGXI.local.md"), "LOCAL").unwrap();
-    // §F: an unconditional rule (no `paths:`) is eagerly injected; a conditional
-    // rule (with `paths:`) is now RETAINED by the provider (globs intact) so the
-    // orchestrator can lazily activate it — it is only EXCLUDED from the eager
-    // `format()` block, asserted below.
+    // Native eager acquisition retains unconditional rules and excludes
+    // conditional rule-directory projections; lazy activation walks afresh.
     std::fs::write(rules.join("a-always.md"), "ALWAYS").unwrap();
     std::fs::write(
         rules.join("b-scoped.md"),
@@ -169,22 +158,15 @@ async fn real_provider_loads_in_spec_splice_order_via_temp_repo() {
     let files = p.load(&proj).await;
     std::env::remove_var(memory::lingxi_md::hierarchy::MANAGED_DIR_ENV);
     let bodies: Vec<String> = files.iter().map(|f| f.body.clone()).collect();
-    // §F: `load()` now RETAINS the conditional rule (with globs). Splice order:
-    // HOME → REPO → unconditional rule → conditional rule → LOCAL. (Within the
-    // `.lingxi/rules/` dir the walk emits `a-always.md` before `b-scoped.md`.)
-    assert_eq!(bodies, vec!["HOME", "REPO", "ALWAYS", "SCOPED", "LOCAL"]);
+    // Eager splice order: HOME → REPO → unconditional rule → LOCAL.
+    assert_eq!(bodies, vec!["HOME", "REPO", "ALWAYS", "LOCAL"]);
     // The included unconditional rule carries no globs; tiers are tagged.
     let always = files.iter().find(|f| f.body == "ALWAYS").unwrap();
     assert!(always.globs.is_none());
     assert_eq!(always.tier, LingxiMdTier::Project);
-    // The conditional rule carries its `paths:` globs (trailing `/**` stripped).
-    let scoped = files.iter().find(|f| f.body == "SCOPED").unwrap();
-    assert_eq!(scoped.globs, Some(vec!["src".to_string()]));
-    assert_eq!(scoped.tier, LingxiMdTier::Project);
+    // Native eager rule-directory acquisition excludes the conditional rule.
+    assert!(!files.iter().any(|file| file.path.ends_with("b-scoped.md")));
 
-    // §F eager filter: the eager `format()` block EXCLUDES the conditional rule
-    // (mirrors claude-code `conditionalRule:false`), while keeping everything
-    // unconditional. Byte-locked shape stays intact (other tests cover that).
     let eager = memory_block::format(&files);
     assert!(eager.contains("ALWAYS"));
     assert!(
@@ -226,9 +208,9 @@ fn rendered_into_context_matches_format_output() {
             f.path.display()
         );
     }
-    // Sanity: the fixture actually exercises both outcomes.
+    // Acquired nonempty content is truthy, including whitespace and globs.
     assert!(memory_block::is_rendered_into_context(&files[0]));
-    assert!(!memory_block::is_rendered_into_context(&files[1]));
+    assert!(memory_block::is_rendered_into_context(&files[1]));
     assert!(memory_block::is_rendered_into_context(&files[2]));
-    assert!(!memory_block::is_rendered_into_context(&files[3]));
+    assert!(memory_block::is_rendered_into_context(&files[3]));
 }

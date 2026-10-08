@@ -10,7 +10,7 @@ use lingxi_core::host::permission_gate::{
     PermissionDecision, PermissionGate, PermissionResolution,
 };
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker};
-use lingxi_core::types::{ContentBlock, HookId, ToolUseId};
+use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, MessageId, ToolUseId};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -312,6 +312,14 @@ struct SeamTool {
     workflow_read_ask: bool,
     requires_ui: bool,
     seen: Arc<Mutex<Vec<Value>>>,
+    seen_context: Option<Arc<Mutex<Vec<CapturedToolContext>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedToolContext {
+    messages: Vec<ConversationMessage>,
+    assistant_message: Option<ConversationMessage>,
+    same_turn_tool_uses: Vec<ContentBlock>,
 }
 
 #[async_trait]
@@ -412,10 +420,17 @@ impl Tool for SeamTool {
     async fn call(
         &self,
         input: Value,
-        _: ToolUseContext,
+        context: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         self.seen.lock().unwrap().push(input);
+        if let Some(seen_context) = &self.seen_context {
+            seen_context.lock().unwrap().push(CapturedToolContext {
+                messages: context.messages.clone(),
+                assistant_message: context.assistant_message.clone(),
+                same_turn_tool_uses: context.same_turn_tool_uses.clone(),
+            });
+        }
         Ok(ToolCallResult::from_data(json!({ "content": "ran" })))
     }
 }
@@ -455,6 +470,145 @@ async fn dispatch(tool: SeamTool, rule_source: Option<&str>) -> (String, Vec<Val
     (text, inputs)
 }
 
+#[tokio::test]
+async fn physical_request_history_and_raw_row_facts_reach_the_tool_context() {
+    // This is the successful physical request snapshot after PTL has rewritten
+    // the outbound history. The session history deliberately contains a
+    // different marker; dispatch must use the captured request facts instead
+    // of rereading that mutable session state.
+    let ptl_request_history = vec![ConversationMessage::user(
+        MessageId::new(),
+        "history after prompt-too-long rewrite".into(),
+    )];
+    let turn_step_input_history = vec![ConversationMessage::user(
+        MessageId::new(),
+        "original turn.step input before PTL rewrite".into(),
+    )];
+    let (captured_request_history, history_source) = super::select_visible_response_request_history(
+        "physical-response-id",
+        std::iter::once(("physical-response-id", ptl_request_history.as_slice())),
+        true,
+        &turn_step_input_history,
+        Some(super::mod_batched_step::RequestHistorySource::PhysicalRequest),
+        &turn_step_input_history,
+    );
+    assert_eq!(
+        history_source,
+        super::mod_batched_step::RequestHistorySource::PhysicalRequest
+    );
+    let (synthetic_history, synthetic_source) = super::select_visible_response_request_history(
+        "synthetic-mod-response-id",
+        std::iter::empty::<(&str, &[ConversationMessage])>(),
+        true,
+        &turn_step_input_history,
+        Some(super::mod_batched_step::RequestHistorySource::TurnStepInputForSyntheticResponse),
+        &turn_step_input_history,
+    );
+    assert_eq!(synthetic_history, turn_step_input_history);
+    assert_eq!(
+        synthetic_source,
+        super::mod_batched_step::RequestHistorySource::TurnStepInputForSyntheticResponse
+    );
+    let first_tool_id = ToolUseId::new();
+    let second_tool_id = ToolUseId::new();
+    let prior_tool_id = ToolUseId::new();
+    let first_input = json!({ "timeout": 7 });
+    let second_input = json!({ "timeout": 8 });
+    let first_tool = ContentBlock::ToolUse { input_projection: None,
+        id: first_tool_id.clone(),
+        name: "Seam".into(),
+        input: first_input.clone(),
+        provider_id: Some("provider-first".into()),
+    };
+    let second_tool = ContentBlock::ToolUse { input_projection: None,
+        id: second_tool_id.clone(),
+        name: "Seam".into(),
+        input: second_input.clone(),
+        provider_id: Some("provider-second".into()),
+    };
+    let prior_tool = ContentBlock::ToolUse { input_projection: None,
+        id: prior_tool_id,
+        name: "Read".into(),
+        input: json!({ "file_path": "prior.txt" }),
+        provider_id: Some("provider-prior".into()),
+    };
+    let assistant_id = MessageId::new();
+    let raw_assistant_row = ConversationMessage::Assistant { per_turn_effort: None,
+        id: assistant_id,
+        content: vec![first_tool.clone(), second_tool],
+        stop_reason: Some("tool_use".into()),
+    };
+    let seen_context = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register_builtin(Arc::new(SeamTool {
+        coerce: false,
+        ask: false,
+        mcp: false,
+        workflow_read_ask: false,
+        requires_ui: false,
+        seen: Arc::new(Mutex::new(Vec::new())),
+        seen_context: Some(seen_context.clone()),
+    }) as Arc<dyn Tool>);
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(registry),
+        noop_hook_executor(),
+        Arc::new(PromptSpyGate { rule_source: None }),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        PathBuf::from("/tmp"),
+    );
+    let uses = vec![
+        (
+            first_tool_id,
+            "Seam".into(),
+            first_input,
+            Some("provider-first".into()),
+        ),
+        (
+            second_tool_id,
+            "Seam".into(),
+            second_input,
+            Some("provider-second".into()),
+        ),
+    ];
+    super::tool_dispatch::dispatch_tool_uses_tracked_deferred_with_facts(
+        &orch,
+        &uses,
+        None,
+        Some(assistant_id),
+        Some(super::tool_dispatch::ToolUseDispatchFacts {
+            query_history: captured_request_history.clone(),
+            assistant_message: raw_assistant_row.clone(),
+            same_turn_tool_uses: vec![prior_tool.clone()],
+        }),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("tool dispatch should succeed");
+
+    assert_eq!(
+        seen_context.lock().unwrap().as_slice(),
+        &[
+            CapturedToolContext {
+                messages: captured_request_history.clone(),
+                assistant_message: Some(raw_assistant_row.clone()),
+                same_turn_tool_uses: vec![prior_tool.clone()],
+            },
+            CapturedToolContext {
+                messages: captured_request_history,
+                assistant_message: Some(raw_assistant_row),
+                same_turn_tool_uses: vec![prior_tool, first_tool],
+            },
+        ],
+        "W1 must receive the exact physical-request history separately from the raw current assistant row and prior siblings"
+    );
+}
+
 /// BASH-18 CALL SITE: `coerce_input` runs BEFORE the JSON-schema gate, and
 /// the rewritten input is what `call` receives.
 #[tokio::test]
@@ -467,6 +621,7 @@ async fn coerce_input_is_applied_before_schema_validation() {
             workflow_read_ask: false,
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
+            seen_context: None,
         },
         None,
     )
@@ -493,6 +648,7 @@ async fn without_the_hook_the_alias_key_fails_the_schema() {
             workflow_read_ask: false,
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
+            seen_context: None,
         },
         None,
     )
@@ -516,6 +672,7 @@ async fn tool_check_permissions_ask_escalates_a_non_rule_allow() {
             workflow_read_ask: false,
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
+            seen_context: None,
         },
         None,
     )
@@ -541,6 +698,7 @@ async fn workflow_read_ask_permission_request_allow_rescues_with_rewrite() {
         workflow_read_ask: true,
         requires_ui: false,
         seen: Arc::new(Mutex::new(Vec::new())),
+        seen_context: None,
     };
     let seen = tool.seen.clone();
     let mut registry = ToolRegistry::new();
@@ -593,6 +751,7 @@ async fn tool_check_permissions_allow_leaves_the_resolution_alone() {
             workflow_read_ask: false,
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
+            seen_context: None,
         },
         None,
     )
@@ -614,6 +773,7 @@ async fn a_rule_allow_suppresses_the_tool_ask() {
             workflow_read_ask: false,
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
+            seen_context: None,
         },
         Some("userSettings"),
     )
@@ -635,6 +795,7 @@ async fn mcp_tool_ask_overrides_explicit_allow_rule() {
             workflow_read_ask: false,
             requires_ui: false,
             seen: Arc::new(Mutex::new(Vec::new())),
+            seen_context: None,
         },
         Some("userSettings"),
     )
@@ -679,7 +840,7 @@ async fn workflow_script_path_read_deny_overrides_outer_allow_rule() {
     else {
         panic!("expected a tool_result from Workflow permission denial");
     };
-    assert!(*is_error);
+    assert!(is_error.unwrap_or(false));
     assert!(content.contains("prompted-and-declined"), "got: {content}");
 }
 
@@ -695,9 +856,13 @@ async fn workflow_script_path_read_deny_overrides_subagent_allow() {
     let invoker =
         RegistryToolInvoker::new(Arc::new(registry)).with_gate(Arc::new(NoOpPermissionGate));
     let ctx = SubagentInvocationContext {
+        input_projection: None,
+        cancellation_token: tokio_util::sync::CancellationToken::new(),
         permission_pause_observer: None,
         parent_agent_id: None,
         origin_session_id: None,
+        instruction_context: None,
+        fork_context: None,
         tool_execution_policy: lingxi_core::host::tool_invoker::ToolExecutionPolicy::Ordinary,
         agent_name: Some("researcher".into()),
         team_name: Some("alpha".into()),
@@ -707,10 +872,15 @@ async fn workflow_script_path_read_deny_overrides_subagent_allow() {
         cwd: None,
         tool_use_id: Some("toolu_workflow_subagent".into()),
         assistant_message_id: None,
+        assistant_message: None,
+        same_turn_tool_uses: Vec::new(),
         depth: 0,
         observer: None,
         parent_model: None,
         parent_model_profile: None,
+        agent_spawn_provenance: Default::default(),
+        tool_context_state: None,
+        current_history: Vec::new(),
         mode_override: None,
         request_source: None,
         frozen_command_denies: Vec::new(),

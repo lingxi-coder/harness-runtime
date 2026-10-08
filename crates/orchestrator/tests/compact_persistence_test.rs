@@ -1,10 +1,11 @@
-//! Claude Code 2.1.261 post-compact JSONL persistence and cold-resume parity.
+//! Claude Code 2.1.286 post-compact JSONL persistence and cold-resume parity.
 //!
 //! Both full automatic compaction and tail-preserving manual compaction persist
 //! a chain-reset boundary and a typed summary. Only the manual path records
 //! preservedMessages for the loader to splice back into the resumed history.
-//! These tests drive the actual compaction and writer, then compare loaded
-//! history with the live session and verify the next persisted parent UUID.
+//! Announced session-context/date and total-token rows advance the parent chain.
+//! These tests drive the actual compaction and writer, then compare every
+//! loaded history entry with the live session and verify the complete chain.
 
 use llm_runtime::ContentBlock as LlmContentBlock;
 
@@ -75,6 +76,90 @@ fn inner_text(line: &JsonlMessage) -> String {
     }
 }
 
+/// Actual native Or/Br fixture for empty eager files, followed by HZo's stock
+/// reanchored total-token attachment. Only the machine's local date is replaced;
+/// types, field presence and rendered bytes follow executed native helpers.
+fn assert_empty_context_and_budget_announcements<'a>(
+    rows: &'a [JsonlMessage],
+    hot_history: &[ConversationMessage],
+    parent_uuid: &str,
+) -> &'a JsonlMessage {
+    let oracle: Value = serde_json::from_str(include_str!(
+        "../../core/tests/fixtures/instruction_announcements_2_1_286.json"
+    ))
+    .expect("executed native context fixture");
+    let case = oracle["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == "successful-empty-initial")
+        .expect("native empty-file announcement case");
+    let mut expected = case["expected"].as_array().unwrap().clone();
+    assert_eq!(expected.len(), 2);
+    // 2.1.286 HZo reanchors a regular user prompt before computing remaining
+    // tokens. Actual wvt/HZo/ol execution with the stock settings yields this
+    // exact payload and body, even when a previous context rolled over.
+    expected.push(serde_json::json!({
+        "attachment": {
+            "type": "total_tokens_reminder",
+            "text": "<total_tokens>15000000 tokens left</total_tokens>"
+        },
+        "rendered": [
+            "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+        ]
+    }));
+    assert_eq!(
+        rows.len(),
+        expected.len(),
+        "exact native announcement count"
+    );
+    let today = orchestrator::prompt::env_meta::current_date_string();
+    let mut parent = parent_uuid.to_owned();
+    for (row, native) in rows.iter().zip(&expected) {
+        let mut payload = native["attachment"].clone();
+        let native_date = payload
+            .get("date")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if native_date.is_some() {
+            payload["date"] = Value::String(today.clone());
+        }
+        assert_eq!(row.message_type, "attachment");
+        assert_eq!(
+            row.message,
+            Value::Null,
+            "native attachment has no inner message"
+        );
+        assert_eq!(row.extra.get("attachment"), Some(&payload));
+        assert!(!row.is_sidechain);
+        assert_eq!(row.logical_parent_uuid, None);
+        assert_eq!(row.parent_uuid.as_deref(), Some(parent.as_str()));
+        let projection = hot_history
+            .iter()
+            .find(|message| message.id().as_uuid().to_string() == row.uuid)
+            .expect("every raw announcement retains its hot projection identity");
+        let rendered = native["rendered"].as_array().unwrap();
+        if rendered.is_empty() {
+            assert!(matches!(projection, ConversationMessage::System {
+                content, subtype: Some(subtype), ..
+            } if content.is_empty() && subtype == "model_reminder_attachment"));
+        } else {
+            assert_eq!(rendered.len(), 1);
+            assert!(projection.is_meta());
+            let bytes = rendered[0].as_str().unwrap();
+            let expected_body = native_date
+                .as_deref()
+                .map_or_else(|| bytes.to_owned(), |date| bytes.replace(date, &today));
+            assert_eq!(
+                projection.text_content().as_bytes(),
+                expected_body.as_bytes()
+            );
+        }
+        parent = row.uuid.clone();
+    }
+    rows.last().unwrap()
+}
+
 #[test]
 fn cold_resume_reconstructs_full_auto_compact_state() {
     assert_cold_resume_reconstructs_post_compact_state(false);
@@ -121,7 +206,7 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: (*t).to_string(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         )
@@ -199,7 +284,7 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         "hot history carries the typed compact-summary flag"
     );
 
-    // ---- On-disk shape (Claude Code 2.1.261) ---------------------------------- //
+    // ---- On-disk shape (Claude Code 2.1.286) ---------------------------------- //
     let reader = JsonlReader::new(session_path.clone(), fs.clone());
     let lines: Vec<JsonlMessage> = reader.read_all().await.expect("read_all");
 
@@ -278,9 +363,41 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         Some(&Value::Bool(true))
     );
 
-    // Full auto replaces all pre-compact history. Manual compact preserves
-    // the final API-round group, which here is the last assistant reply.
-    let next_line = &lines[boundary_idx + 2];
+    // Native Br emits fresh session_context/date when the compacted model
+    // history has no announcement baseline. Native insertMessageChain updates
+    // its leaf for attachments too (`$ge` excludes only progress).
+    // The stock total-token producer follows these rows and also advances the
+    // chain, so the assistant must parent off that final attachment.
+    // Full auto replaces all pre-compact history. Manual compact preserves the
+    // final API-round group, which here is the last assistant reply.
+    let expected_post_types = if manual {
+        vec![
+            "system",
+            "user",
+            "user",
+            "attachment",
+            "attachment",
+            "attachment",
+            "assistant",
+        ]
+    } else {
+        vec![
+            "system",
+            "user",
+            "attachment",
+            "attachment",
+            "attachment",
+            "assistant",
+        ]
+    };
+    assert_eq!(
+        lines[boundary_idx..]
+            .iter()
+            .map(|line| line.message_type.as_str())
+            .collect::<Vec<_>>(),
+        expected_post_types,
+        "exact physical post-compact sequence; no duplicate or skipped announcements"
+    );
     if manual {
         let pm = cm
             .get("preservedMessages")
@@ -298,32 +415,59 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
             Some(&serde_json::json!([tail.uuid])),
             "manual compaction preserves exactly the last API-round group"
         );
-        assert_eq!(next_line.message_type, "user");
-        assert_eq!(inner_text(next_line), "continue after compact");
+        let continuation = &lines[boundary_idx + 2];
+        assert_eq!(continuation.message_type, "user");
+        assert_eq!(inner_text(continuation), "continue after compact");
         assert_eq!(
-            next_line.parent_uuid.as_deref(),
+            continuation.parent_uuid.as_deref(),
             Some(tail.uuid.as_str()),
             "continued history chains off the original persisted tail"
         );
-        let reply = lines.last().expect("continuation reply persisted");
+        let budget = assert_empty_context_and_budget_announcements(
+            &lines[boundary_idx + 3..boundary_idx + 6],
+            &hot_history,
+            &continuation.uuid,
+        );
+        let reply = &lines[boundary_idx + 6];
+        assert_eq!(reply.message_type, "assistant");
         assert_eq!(inner_text(reply), "continued reply");
-        assert_eq!(reply.parent_uuid.as_deref(), Some(next_line.uuid.as_str()));
-        assert!(hot_history.iter().any(|message| {
-            matches!(message, ConversationMessage::Assistant { .. })
-                && message.text_content() == "final reply"
-        }));
+        assert_eq!(reply.parent_uuid.as_deref(), Some(budget.uuid.as_str()));
+        assert_eq!(hot_history.len(), 8);
+        assert!(matches!(
+            &hot_history[2],
+            ConversationMessage::Assistant { .. }
+        ));
+        assert_eq!(hot_history[2].text_content(), "final reply");
+        assert_eq!(hot_history[3].text_content(), "continue after compact");
+        assert!(matches!(
+            &hot_history[7],
+            ConversationMessage::Assistant { .. }
+        ));
+        assert_eq!(hot_history[7].text_content(), "continued reply");
     } else {
         assert!(
             cm.get("preservedMessages").is_none(),
             "full automatic compaction does not preserve a verbatim tail"
         );
-        assert_eq!(next_line.message_type, "assistant");
-        assert_eq!(inner_text(next_line), "final reply");
-        assert_eq!(
-            next_line.parent_uuid.as_deref(),
-            Some(summary.uuid.as_str()),
-            "full automatic compaction chains the reply off the summary"
+        let budget = assert_empty_context_and_budget_announcements(
+            &lines[boundary_idx + 2..boundary_idx + 5],
+            &hot_history,
+            &summary.uuid,
         );
+        let reply = &lines[boundary_idx + 5];
+        assert_eq!(reply.message_type, "assistant");
+        assert_eq!(inner_text(reply), "final reply");
+        assert_eq!(
+            reply.parent_uuid.as_deref(),
+            Some(budget.uuid.as_str()),
+            "full auto follows summary, session_context, date, budget and reply in order"
+        );
+        assert_eq!(hot_history.len(), 6);
+        assert!(matches!(
+            &hot_history[5],
+            ConversationMessage::Assistant { .. }
+        ));
+        assert_eq!(hot_history[5].text_content(), "final reply");
     }
     assert!(
         lines[..boundary_idx]
@@ -343,6 +487,27 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
     let (chain, _tip_sid) = build_conversation_chain(&loaded, "cold-load");
     let session_uuid = uuid::Uuid::new_v4();
     let cold_state = state_from_messages(session_uuid, &chain);
+
+    let post_context_rows = &lines
+        [boundary_idx + if manual { 3 } else { 2 }..boundary_idx + if manual { 6 } else { 5 }];
+    let cold_context_rows = chain
+        .iter()
+        .filter(|row| row.message_type == "attachment")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cold_context_rows.len(),
+        3,
+        "cold model chain retains exactly context, date and budget announcements"
+    );
+    for (cold, persisted) in cold_context_rows.iter().zip(post_context_rows) {
+        assert_eq!(cold.uuid, persisted.uuid);
+        assert_eq!(cold.parent_uuid, persisted.parent_uuid);
+        assert_eq!(
+            serde_json::to_vec(&cold.extra["attachment"]).unwrap(),
+            serde_json::to_vec(&persisted.extra["attachment"]).unwrap(),
+            "cold replay retains every typed attachment payload byte"
+        );
+    }
 
     // The boundary, summary flags, re-spliced preserved tail, and
     // post-compact reply all use the same typed representation after a cold
@@ -417,7 +582,7 @@ async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized
             mock_message_response(
                 vec![LlmContentBlock::Text {
                     text: (*t).to_string(),
-                    cache_control: None,
+                    cache_control: None, citations: None,
                 }],
                 Some("end_turn"),
             )
@@ -506,7 +671,7 @@ fn compact_summary_line_replays_as_user_history() {
     let mut extra = serde_json::Map::new();
     extra.insert("isVisibleInTranscriptOnly".to_string(), Value::Bool(true));
     extra.insert("isCompactSummary".to_string(), Value::Bool(true));
-    let summary = JsonlMessage {
+    let summary = JsonlMessage { json_projection: None,
         message_type: "user".to_string(),
         uuid: "9a1b2c3d-4e5f-6789-abcd-ef0123456789".to_string(),
         parent_uuid: None,

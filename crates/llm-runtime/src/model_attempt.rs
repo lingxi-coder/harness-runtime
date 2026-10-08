@@ -24,6 +24,14 @@ pub enum ModelAttemptUsageCompleteness {
 /// authorization, durable intent, and live policy recheck before dispatch.
 #[async_trait]
 pub trait ModelAttemptHooks: Send + Sync {
+    /// Read the registered origin before provider preparation. The opaque
+    /// registration is authority; model payload fields never supply this ID.
+    fn request_session_id(
+        &self,
+        _context: &ModelAttemptContext,
+    ) -> Option<lingxi_core::types::SessionId> {
+        None
+    }
     /// Prepare exactly one physical attempt after route, body and headers are
     /// final, but before invoking transport. The host must verify this context
     /// belongs to a live registered authority and this exact captured route.
@@ -41,6 +49,13 @@ pub trait ModelAttemptHooks: Send + Sync {
 /// it is incomplete unless an actual complete observation has been retained.
 /// The lease owns its profile permit and originating-session authority.
 pub trait ModelAttemptLease: Send {
+    /// Optional originating-session observer for calls outside a query task.
+    /// It observes response facts and never affects budget admission.
+    fn model_safety_observer(
+        &self,
+    ) -> Option<lingxi_core::host::model_safety::ModelSafetyObserver> {
+        None
+    }
     /// Synchronous final live-policy/freeze check and dispatch marker. Invoke
     /// immediately before transport, with no intervening await. A marker is
     /// not proof that the remote service accepted or billed the request.
@@ -83,6 +98,13 @@ pub(crate) struct WireAttempt {
 }
 
 impl WireAttempt {
+    pub(crate) fn model_safety_observer(
+        &self,
+    ) -> Option<lingxi_core::host::model_safety::ModelSafetyObserver> {
+        self.lease
+            .as_ref()
+            .and_then(|lease| lease.model_safety_observer())
+    }
     pub(crate) fn new(lease: Option<Box<dyn ModelAttemptLease>>) -> Self {
         Self {
             lease,

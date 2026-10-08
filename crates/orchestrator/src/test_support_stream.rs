@@ -42,7 +42,7 @@ pub struct CapturedStreamCall {
     /// Conversation history snapshot at the time of the call.
     pub messages: Vec<ConversationMessage>,
     /// Wire tool definitions advertised on this call (`build_wire_tools`).
-    pub tools: Vec<Value>,
+    pub tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Sanitized Native query source used for provider cache policy.
     pub query_source: String,
     pub skip_global_cache_for_system_prompt: bool,
@@ -120,7 +120,7 @@ impl StreamingApiClient for MockStreamingApiClient {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         query_source: &str,
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
@@ -161,7 +161,7 @@ impl StreamingApiClient for MockStreamingApiClient {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         effort: Option<&str>,
         query_source: &str,
         skip_global_cache_for_system_prompt: bool,
@@ -271,7 +271,7 @@ pub fn content_block_start_text(index: u32) -> HistoryEvent {
 pub fn content_block_start_tool_use(index: u32, id: ToolUseId, name: &str) -> HistoryEvent {
     HistoryEvent::ContentBlockStart {
         index,
-        content_block: LlmContentBlock::ToolCall {
+        content_block: LlmContentBlock::ToolCall { input_projection: None,
             id: id.to_string(),
             name: name.to_string(),
             input: Value::Object(serde_json::Map::new()),

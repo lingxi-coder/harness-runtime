@@ -8,9 +8,9 @@ use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
 use platform_posix::{PosixClock, PosixHttp, PosixRuntime};
 #[cfg(windows)]
-use platform_windows::WindowsMcpTransport;
-#[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
+#[cfg(windows)]
+use platform_windows::WindowsMcpTransport;
 use secret::CredentialManager;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -79,12 +79,13 @@ impl lingxi_core::host::auth::AccountChangeObserver for SubscriptionRefreshGener
 }
 
 use super::{
-    ApiProvider, BuildError, DefaultModelFallbackNotice, DesktopConfig, FusionCatalogClearingAuth,
-    FusionCatalogModelSource, FusionCatalogRefresher, FusionCatalogRegistry, anthropic_models_for,
-    api_provider, connected_provider_fallback, desktop_fusion_catalog_row, filter_fusion_catalog,
-    fusion_route_flag, load_effective_settings_for_config, managed_model_policy_source,
-    managed_model_setting_for_config, model_provenance_for_config, provider_profile_label,
-    register_fusion_catalog_refresher, subscription_seed, subscription_snapshot_from,
+    anthropic_models_for, api_provider, connected_provider_fallback, desktop_fusion_catalog_row,
+    filter_fusion_catalog, fusion_route_flag, load_effective_settings_for_config,
+    managed_model_policy_source, managed_model_setting_for_config, model_provenance_for_config,
+    provider_profile_label, register_fusion_catalog_refresher, subscription_seed,
+    subscription_snapshot_from, ApiProvider, BuildError, DefaultModelFallbackNotice, DesktopConfig,
+    FusionCatalogClearingAuth, FusionCatalogModelSource, FusionCatalogRefresher,
+    FusionCatalogRegistry,
 };
 
 /// Desktop [`ClaudeAiAuthProvider`](tool_cron::ClaudeAiAuthProvider) backed by
@@ -526,8 +527,14 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // OAuth credential.
     let mut credential_origin = orchestrator::api_error_copy::CredentialOrigin::Other;
     let mut has_oauth_token = false;
-    let environment_oauth =
-        llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::capture();
+    let environment_oauth = if cfg.customization_gates.bare {
+        None
+    } else {
+        match &cfg.oauth_environment_lookup {
+        Some(lookup) => llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::capture_with_lookup(lookup.clone()),
+        None => llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::capture(),
+    }
+    };
     let environment_oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>>;
     if let Some(environment) = environment_oauth.as_ref() {
         let auth_source = llm_runtime::auth::anthropic::resolver::resolve(
@@ -573,7 +580,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         }
     }
     // Native vK returns environmental material without consulting stored OAuth.
-    let stored_oauth = if environment_oauth.is_some() {
+    let stored_oauth = if cfg.customization_gates.bare
+        || environment_oauth.is_some() && cfg.oauth_environment_lookup.is_none()
+    {
         Ok(None)
     } else {
         credentials.get_oauth_tokens().await
@@ -631,21 +640,23 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             // Only the two EXTERNAL sources map: `/login managed key` has no
             // LingXi equivalent, and everything else takes the `/login` wording
             // anyway.
-            credential_origin = match &auth_source {
-                llm_runtime::auth::anthropic::resolver::AuthSource::EnvApiKey => {
-                    // This is the ANTHROPIC auth resolver, and its `EnvApiKey`
-                    // is defined as `ANTHROPIC_API_KEY` (see `AuthSource`), so
-                    // naming the variable here is a fact, not a guess. Another
-                    // provider's resolver supplies its own `apiKeyEnv` name.
-                    orchestrator::api_error_copy::CredentialOrigin::EnvApiKey {
-                        var: "ANTHROPIC_API_KEY".to_string(),
+            if environment_oauth_delegate.is_none() {
+                credential_origin = match &auth_source {
+                    llm_runtime::auth::anthropic::resolver::AuthSource::EnvApiKey => {
+                        // This is the ANTHROPIC auth resolver, and its `EnvApiKey`
+                        // is defined as `ANTHROPIC_API_KEY` (see `AuthSource`), so
+                        // naming the variable here is a fact, not a guess. Another
+                        // provider's resolver supplies its own `apiKeyEnv` name.
+                        orchestrator::api_error_copy::CredentialOrigin::EnvApiKey {
+                            var: "ANTHROPIC_API_KEY".to_string(),
+                        }
                     }
-                }
-                llm_runtime::auth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
-                    orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
-                }
-                _ => orchestrator::api_error_copy::CredentialOrigin::Other,
-            };
+                    llm_runtime::auth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
+                        orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
+                    }
+                    _ => orchestrator::api_error_copy::CredentialOrigin::Other,
+                };
+            }
             // Oracle `zv()` = `ms()?.accessToken != null` — reaching this arm
             // means stored OAuth tokens were read.
             has_oauth_token = true;
@@ -655,8 +666,10 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                 tokens.subscription_type.as_ref(),
                 tokens.rate_limit_tier.as_ref(),
             );
-            is_subscriber = seed.is_subscriber;
-            persisted_subscription_type.clone_from(&seed.subscription_type);
+            if environment_oauth_delegate.is_none() {
+                is_subscriber = seed.is_subscriber;
+                persisted_subscription_type.clone_from(&seed.subscription_type);
+            }
             // Re-seed the shared slot with the resolved subscriber flag + the
             // PERSISTED tier so readers see them even before (or without) the
             // background profile+roles fetch landing. SECRECY: deliberately
@@ -664,8 +677,10 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             // non-`Clone`) by exposing + re-wrapping — the audited copy
             // pattern — BEFORE the original moves into `init_refresh_driver`;
             // it is exposed again only inside the spawned fetch task.
-            if let Ok(mut guard) = subscription.write() {
-                *guard = Some(seed);
+            if environment_oauth_delegate.is_none() {
+                if let Ok(mut guard) = subscription.write() {
+                    *guard = Some(seed);
+                }
             }
             let profile_token =
                 lingxi_core::types::Secret::new(tokens.access_token.expose_secret().clone());
@@ -688,7 +703,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                     // queries. Subscriber admission below still controls the
                     // model's OAuth strategy and profile background fetch.
                     oauth_auth_state = Some(auth_state);
-                    if is_subscriber {
+                    if is_subscriber && environment_oauth_delegate.is_none() {
                         // Task 4: background OAuth profile + roles fetch — the
                         // FRESHENER over the persisted-tier seed above (closes
                         // the RENDERING half of the profile-fetch PARITY-GAP
@@ -896,16 +911,35 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // is what injects the required `oauth-2025-04-20` beta on Anthropic routes;
     // the assemble input below drops the key claim when OAuth is effective so
     // the ApiKey strategy can't shadow it.
-    let has_oauth =
-        is_subscriber && (oauth_auth_state.is_some() || environment_oauth_delegate.is_some());
-    let oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> =
+    let has_oauth = is_subscriber
+        && (oauth_auth_state.is_some() || environment_oauth_delegate.is_some())
+        || !cfg.customization_gates.bare && cfg.oauth_environment_lookup.is_some() && !has_api_key;
+    let stored_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> =
+        oauth_auth_state.clone().map(|state| {
+            let driver = Arc::new(RefreshDriver::new(state));
+            Arc::new(OAuthCredentialProvider::new(driver))
+                as Arc<dyn llm_runtime::CredentialProvider>
+        });
+    let oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = if let Some(lookup) = cfg
+        .oauth_environment_lookup
+        .as_ref()
+        .filter(|_| !cfg.customization_gates.bare)
+    {
+        Some(Arc::new(
+            llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::live(
+                lookup.clone(),
+                stored_delegate,
+            ),
+        ))
+    } else {
         environment_oauth_delegate.or_else(|| {
             oauth_auth_state.clone().map(|state| {
                 let driver = Arc::new(RefreshDriver::new(state));
                 Arc::new(OAuthCredentialProvider::new(driver))
                     as Arc<dyn llm_runtime::CredentialProvider>
             })
-        });
+        })
+    };
 
     let provider_region = match effective_settings_for_model
         .as_ref()
@@ -1802,8 +1836,12 @@ mod catalog_default_route_tests {
         let reference = DesktopConfig::default().default_model;
         let model = lingxi_core::host::provider_default_model("anthropic").unwrap();
         let native_models = anthropic_models_for(&reference, None);
-        assert!(native_models.iter().any(|entry| entry.request_model == model));
-        assert!(!native_models.iter().any(|entry| entry.request_model == reference));
+        assert!(native_models
+            .iter()
+            .any(|entry| entry.request_model == model));
+        assert!(!native_models
+            .iter()
+            .any(|entry| entry.request_model == reference));
     }
 
     #[test]

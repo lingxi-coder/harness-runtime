@@ -173,6 +173,159 @@ async fn fire_session_end_dispatches_session_end_with_reason() {
 }
 
 #[tokio::test]
+async fn mod_session_end_receives_resume_identity_at_teardown() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("end.js");
+    std::fs::write(
+        &module,
+        r#"
+        export function register(on) {
+          on('session.end', async ($, e, next) => {
+            if (e.reason !== 'prompt_input_exit' || !e.sessionId ||
+                e.resume?.id !== e.sessionId) throw Error('invalid session.end input');
+            const result = await next({ ...e, sessionId: 'rewritten' });
+            if (result.sessionId !== e.sessionId) throw Error('core lost pinned identity');
+            $.ui.log(`ended:${e.sessionId}`, { to: 'transcript' });
+            return result;
+          });
+        }
+        "#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("end-mod", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let mut registry = HookRegistry::new();
+    registry.set_mod_host(host);
+    let registry = Arc::new(RwLock::new(registry));
+    let exec = Arc::new(HookExecutorImpl::new(
+        registry.clone(),
+        Arc::new(UnusedHttp),
+        Arc::new(UnusedRuntime),
+    ));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        exec,
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_hook_registry(registry);
+    orch.fire_session_end("prompt_input_exit").await;
+    orch.fire_session_end("other").await;
+    let logs: Vec<_> = output
+        .snapshot()
+        .await
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event,
+                lingxi_core::host::OutputEvent::ModLog { plugin, text }
+                if plugin == "end-mod" && text.starts_with("ended:") && text.len() > "ended:".len()
+            )
+        })
+        .collect();
+    assert_eq!(
+        logs.len(),
+        1,
+        "the shared shutdown must not fire a second end event"
+    );
+}
+
+#[tokio::test]
+async fn mod_state_resets_on_session_end_and_clear_with_monotonic_versions() {
+    use lingxi_core::host::OrchestratorHandle;
+
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("state-end.js");
+    std::fs::write(
+        &module,
+        r#"
+        export function register(on) {
+          const ref = { plugin: 'state-end', key: 'counter' };
+          on('tool.call', async ($, e) => ({ result: e.tool === 'Set'
+            ? await $.state.set(ref, e.value)
+            : await $.state.get(ref) }));
+          on('session.end', async ($, e, next) => {
+            const before = await $.state.get(ref);
+            if (before.version !== 1) throw Error('state vanished before session.end');
+            return next(e);
+          });
+        }
+    "#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("state-end", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let mut registry = HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let registry = Arc::new(RwLock::new(registry));
+    let exec = Arc::new(HookExecutorImpl::new(
+        registry.clone(),
+        Arc::new(UnusedHttp),
+        Arc::new(UnusedRuntime),
+    ));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        exec,
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_hook_registry(registry);
+    let set = |value| serde_json::json!({"tool":"Set","value":value});
+    let read = serde_json::json!({"tool":"Read"});
+    let first = host
+        .dispatch("tool.call", set(1), |_| async { panic!("Mod answers") })
+        .await
+        .unwrap();
+    assert_eq!(
+        first["result"],
+        serde_json::json!({"isSet":true,"version":1})
+    );
+    orch.fire_session_end("other").await;
+    let after_end = host
+        .dispatch("tool.call", read.clone(), |_| async {
+            panic!("Mod answers")
+        })
+        .await
+        .unwrap();
+    assert_eq!(after_end["result"], serde_json::json!({"version":0}));
+    let second = host
+        .dispatch("tool.call", set(2), |_| async { panic!("Mod answers") })
+        .await
+        .unwrap();
+    assert_eq!(
+        second["result"],
+        serde_json::json!({"isSet":true,"version":2})
+    );
+    orch.clear_session().await.unwrap();
+    let after_clear = host
+        .dispatch("tool.call", read, |_| async { panic!("Mod answers") })
+        .await
+        .unwrap();
+    assert_eq!(after_clear["result"], serde_json::json!({"version":0}));
+    let third = host
+        .dispatch("tool.call", set(3), |_| async { panic!("Mod answers") })
+        .await
+        .unwrap();
+    assert_eq!(
+        third["result"],
+        serde_json::json!({"isSet":true,"version":3})
+    );
+}
+
+#[tokio::test]
 async fn fire_session_end_round_trips_each_clean_exit_reason() {
     // The three clean REPL exit paths (Ctrl+D, /exit, double-Ctrl+C) all map to
     // `prompt_input_exit`; the defensive default maps to `other`. Each reason

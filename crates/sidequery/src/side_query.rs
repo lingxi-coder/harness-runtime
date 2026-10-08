@@ -38,7 +38,7 @@ pub struct SideQueryRequest {
     /// Conversation messages to feed the model.
     pub messages: Vec<ConversationMessage>,
     /// Tool schemas exposed to the model (may be empty).
-    pub tools: Vec<Value>,
+    pub tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Tool-choice control (e.g. force a specific tool / json mode).
     pub tool_choice: Option<Value>,
     /// Structured-output schema (e.g. JSON Schema for `response_format`).

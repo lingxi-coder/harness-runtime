@@ -304,11 +304,13 @@ impl ToolScheduler {
         let actor_terminated = Arc::new(tokio::sync::Notify::new());
         #[cfg(test)]
         let actor_terminated_task = Arc::clone(&actor_terminated);
-        tokio::spawn(async move {
-            actor.run().await;
-            #[cfg(test)]
-            actor_terminated_task.notify_one();
-        });
+        tokio::spawn(lingxi_core::host::model_safety::bind_current_model_safety(
+            async move {
+                actor.run().await;
+                #[cfg(test)]
+                actor_terminated_task.notify_one();
+            },
+        ));
         Self {
             tx,
             normal_finished,
@@ -865,31 +867,34 @@ impl Actor {
         ));
         let (started_tx, started_rx) = oneshot::channel();
         let dispatch = Arc::clone(&self.dispatch);
-        self.tasks.spawn(async move {
-            let dispatch_future = async move { dispatch(call).await };
-            let mut dispatch_future =
-                Box::pin(std::panic::AssertUnwindSafe(dispatch_future).catch_unwind());
-            let mut started_tx = Some(started_tx);
-            let caught = poll_fn(|cx| {
-                let polled = dispatch_future.as_mut().poll(cx);
-                if let Some(started_tx) = started_tx.take() {
-                    let _ = started_tx.send(());
-                }
-                polled
-            })
-            .await;
-            let outcome = match caught {
-                Ok(outcome) => outcome,
-                Err(_panic) => Err(OrchestratorError::StreamingProtocol(
-                    "owned streaming tool dispatch panicked".into(),
-                )),
-            };
-            #[cfg(test)]
-            if let Some(finished) = dispatch_finished_tx {
-                let _ = finished.send(());
-            }
-            (generation, index, outcome)
-        });
+        self.tasks
+            .spawn(lingxi_core::host::model_safety::bind_current_model_safety(
+                async move {
+                    let dispatch_future = async move { dispatch(call).await };
+                    let mut dispatch_future =
+                        Box::pin(std::panic::AssertUnwindSafe(dispatch_future).catch_unwind());
+                    let mut started_tx = Some(started_tx);
+                    let caught = poll_fn(|cx| {
+                        let polled = dispatch_future.as_mut().poll(cx);
+                        if let Some(started_tx) = started_tx.take() {
+                            let _ = started_tx.send(());
+                        }
+                        polled
+                    })
+                    .await;
+                    let outcome = match caught {
+                        Ok(outcome) => outcome,
+                        Err(_panic) => Err(OrchestratorError::StreamingProtocol(
+                            "owned streaming tool dispatch panicked".into(),
+                        )),
+                    };
+                    #[cfg(test)]
+                    if let Some(finished) = dispatch_finished_tx {
+                        let _ = finished.send(());
+                    }
+                    (generation, index, outcome)
+                },
+            ));
         // Spawn alone does not guarantee the callback was polled. This waits
         // only to first poll, never through permission or tool completion.
         started_rx
@@ -1411,9 +1416,10 @@ mod tests {
             assistant_id,
             facts: ToolUseDispatchFacts {
                 query_history: Vec::new(),
-                assistant_message: ConversationMessage::Assistant {
+                assistant_message: ConversationMessage::Assistant { per_turn_effort: None,
                     id: assistant_id,
                     content: vec![ContentBlock::ToolUse {
+                        input_projection: None,
                         id,
                         name: "Probe".into(),
                         input: json!({}),
@@ -1441,6 +1447,7 @@ mod tests {
         Ok(ToolDispatchPayload {
             dispatch: DeferredToolDispatch {
                 results: vec![ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: id.clone(),
                     content: id.as_str().to_owned(),
                     is_error: Some(false),

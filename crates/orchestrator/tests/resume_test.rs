@@ -755,10 +755,10 @@ fn resume_drops_malformed_text_blocks_without_losing_valid_siblings() {
             content,
             &vec![
                 lingxi_core::types::ContentBlock::Text {
-                    text: "before".into()
+                    text: "before".into(), citations: None
                 },
                 lingxi_core::types::ContentBlock::Text {
-                    text: "after".into()
+                    text: "after".into(), citations: None
                 },
             ]
         );
@@ -1398,7 +1398,7 @@ mod deferred_tool_resume_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "out": "resumed" }),
                 model_content: Some("resumed".into()),
                 new_messages: vec![],
@@ -1997,4 +1997,36 @@ async fn resume_restores_latest_api_usage_from_disk_without_summing_split_rows()
             ..Default::default()
         })
     );
+}
+
+#[test]
+fn resume_normalizes_nontext_tool_results_like_claude_2_1_286() {
+    use lingxi_core::types::ContentBlock;
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/tool-result-2.1.286/cases.json")).unwrap();
+    for case in cases {
+        let sid = Uuid::new_v4();
+        let result_id = Uuid::new_v4();
+        let raw = json!({
+            "type":"user", "uuid":Uuid::new_v4().to_string(), "parentUuid":null,
+            "sessionId":sid.to_string(), "timestamp":"2026-09-30T00:00:00.000Z",
+            "message":{"role":"user","content":[
+                {"type":"text","text":"before"},
+                {"type":"tool_result","tool_use_id":result_id.to_string(),"is_error":false,"content":case["input"]},
+                {"type":"text","text":"after"}
+            ]}
+        });
+        let row: session::jsonl::JsonlMessage = serde_json::from_value(raw).unwrap();
+        let original = row.message.clone();
+        let state = state_from_messages(sid, std::slice::from_ref(&row));
+        let ConversationMessage::User { content, .. } = &state.history[0] else {
+            panic!("user");
+        };
+        assert_eq!(content.len(), 3, "{}: valid siblings survive", case["name"]);
+        let ContentBlock::ToolResult { content: text, .. } = &content[1] else {
+            panic!("tool result");
+        };
+        assert_eq!(text, case["expected"].as_str().unwrap(), "{}", case["name"]);
+        assert_eq!(row.message, original, "raw transcript is not rewritten");
+    }
 }

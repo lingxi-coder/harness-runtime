@@ -405,6 +405,7 @@ async fn stage_assistant_row(
         return;
     }
     let raw = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content,
         stop_reason: stop_reason.map(str::to_owned),
@@ -459,6 +460,7 @@ async fn stage_assistant_row(
             name,
             input,
             provider_id,
+            ..
         } = &source_tool_use
         else {
             continue;
@@ -497,6 +499,9 @@ async fn stage_assistant_row(
             logical_model_profile.clone(),
             tool_context_state.clone(),
         );
+        call_context.input_projection = source_tool_use
+            .projected_tool_input()
+            .expect("source tool input projection is validated before admission");
         // Main's W1 carrier distinguishes the query's pre-call history, the
         // current accepted row and earlier source ToolUse blocks.
         call_context.assistant_message = Some(staged.accepted.clone());
@@ -815,6 +820,7 @@ async fn append_unmatched_stream_tool_results(
                 continue;
             }
             let result = lingxi_core::types::ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: id.clone(),
                 content: format!(
                     "The turn ended on an error, so this tool call was cancelled. If it had already started, some of its effects may have happened. Error: {error}"
@@ -824,6 +830,7 @@ async fn append_unmatched_stream_tool_results(
                 content_blocks: None,
             };
             let message = ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![result],
                 is_meta: false,
@@ -857,6 +864,7 @@ fn live_tool_result_block(
         )),
         Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(_)) => None,
         Err(error) => Some(ContentBlock::ToolResult {
+            content_projection: None,
             tool_use_id: id.clone(),
             content: error.model_tool_result_content(),
             is_error: Some(true),
@@ -895,6 +903,7 @@ async fn publish_live_tool_completion(
     let tool_use_id = id;
     early_tool_result_ids.insert(tool_use_id.clone());
     let row = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![block],
         is_meta: false,
@@ -941,7 +950,23 @@ fn successful_live_tool_result_block(
             .and_then(|_| tool_api::tool_result_media::ephemeral_summary(value))
             .unwrap_or(mapped_text)
     });
+    let wire_content = content_blocks
+        .as_ref()
+        .map(|blocks| serde_json::Value::Array(blocks.clone()))
+        .unwrap_or_else(|| serde_json::Value::String(content.clone()));
+    let content_projection = invocation
+        .data_projection
+        .as_ref()
+        .filter(|p| p.value == wire_content)
+        .or_else(|| {
+            invocation
+                .model_content_projection
+                .as_ref()
+                .filter(|p| p.value == wire_content)
+        })
+        .cloned();
     ContentBlock::ToolResult {
+        content_projection,
         tool_use_id: id.clone(),
         content,
         is_error: Some(invocation.is_error),
@@ -1614,8 +1639,29 @@ pub async fn run_subagent(
         }
     });
     let resumed_history = ctx.resumed_history.clone();
+    let request_session_id = ctx
+        .origin_session_id
+        .or_else(lingxi_core::host::session_flags::current_request_session_id);
+    let safety_observer = ctx
+        .budget
+        .as_ref()
+        .and_then(|budget| budget.model_safety_observer())
+        .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
     let inner: llm_runtime::BoxFuture<'static, ()> =
         Box::pin(run_subagent_inner(ctx, event_rx, out_tx));
+    let inner: llm_runtime::BoxFuture<'static, ()> = if let Some(observer) = safety_observer {
+        Box::pin(lingxi_core::host::model_safety::scope_model_safety(
+            observer, inner,
+        ))
+    } else {
+        inner
+    };
+    let inner: llm_runtime::BoxFuture<'static, ()> = Box::pin(
+        lingxi_core::host::session_flags::scope_subagent_request_session_id(
+            request_session_id,
+            inner,
+        ),
+    );
     crate::transcript::scope_message_row_indexes(
         resumed_history.as_deref(),
         llm_runtime::scope_agent_prompt_cache_ttl(
@@ -2485,6 +2531,7 @@ async fn build_preload_messages(
                     });
                     blocks.extend(load.content);
                     out.push(ConversationMessage::User {
+                        api_message_override: None,
                         id: MessageId::new(),
                         content: blocks,
                         is_meta: true,
@@ -2528,12 +2575,17 @@ fn translate_response_blocks(
                 utf16_code_units: utf16_code_units.clone(),
                 citations: citations.clone(),
             }),
-            llm_runtime::ContentBlock::ToolCall { id, name, input } => {
+            llm_runtime::ContentBlock::ToolCall { id, name, input, input_projection } => {
                 // (cc 2.1.218 `jYd`) Same literal-`\uXXXX` repair the orchestrator
                 // applies — a subagent's tool inputs must be normalized too.
                 let (input, _stats) =
                     llm_runtime::unicode_repair::repair_tool_input(name, input);
+                let mut input_projection = input_projection.clone();
+                if let Some(projection) = &mut input_projection {
+                    projection.rebase_display_value(input.clone()).expect("valid tool projection remains valid after repair");
+                }
                 Some(lingxi_core::types::ContentBlock::ToolUse {
+                    input_projection,
                     // The provider-issued id IS the canonical ToolUseId (byte
                     // parity with claude-code); the provider_id sidecar stays None.
                     id: lingxi_core::types::ToolUseId::from(id.clone()),
@@ -2636,6 +2688,7 @@ async fn emit_parked(
         out_tx,
         agent_id,
         &lingxi_core::types::ConversationMessage::System {
+            api_system: None,
             id: lingxi_core::types::MessageId::new(),
             content: "idle".to_string(),
             subtype: Some("agent_idle".to_string()),
@@ -3033,12 +3086,12 @@ async fn run_subagent_loop(
         tool_schemas.retain(|tool| {
             tool.get("name").and_then(serde_json::Value::as_str) != Some("StructuredOutput")
         });
-        tool_schemas.push(serde_json::json!({
+        tool_schemas.push(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({
             "name": "StructuredOutput",
             "description":
                 "Return the final result as a single structured object matching the required schema.",
             "input_schema": input_schema,
-        }));
+        })));
         Some("StructuredOutput")
     } else {
         None
@@ -3518,6 +3571,9 @@ async fn run_subagent_loop(
                 if let Err(lingxi_core::host::budget::BudgetError::Exceeded { current_nano_usd }) =
                     b.check_and_charge(0).await
                 {
+                    if let Some(token) = &ctx.agent_spawn_token {
+                        token.killed(lingxi_core::host::agent_statistics::AgentKillReason::System);
+                    }
                     // Stop with the 2.1.217 background-agent budget string.
                     #[allow(clippy::cast_precision_loss)]
                     let dollars = current_nano_usd as f64 / 1_000_000_000.0;
@@ -4347,6 +4403,7 @@ async fn run_subagent_loop(
                                 if !salvaged.is_empty() {
                                     if !had_streamed_assistant_rows {
                                         let partial_message = ConversationMessage::Assistant {
+                                            per_turn_effort: None,
                                             id: MessageId::new(),
                                             content: salvaged,
                                             stop_reason: Some("api_error".to_string()),
@@ -4552,6 +4609,7 @@ async fn run_subagent_loop(
                             name,
                             input,
                             provider_id,
+                            ..
                         } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
                         _ => None,
                     })
@@ -4618,6 +4676,7 @@ async fn run_subagent_loop(
                                 Ok(()) => {
                                     structured_result = Some(input.clone());
                                     tool_results.push(ContentBlock::ToolResult {
+                                        content_projection: None,
                                         tool_use_id: tool_use_id.clone(),
                                         // claude's StructuredOutput tool returns
                                         // `data: "Structured output provided successfully"`
@@ -4634,6 +4693,7 @@ async fn run_subagent_loop(
                                     structured_failed_count =
                                         structured_failed_count.saturating_add(1);
                                     tool_results.push(ContentBlock::ToolResult {
+                                        content_projection: None,
                                         tool_use_id: tool_use_id.clone(),
                                         content: format!(
                                             "Output does not match required schema: {detail}"
@@ -4662,6 +4722,7 @@ async fn run_subagent_loop(
                             // boundary, not a typo.
                             let note = companion_note_for_disallowed_tool(name).unwrap_or_default();
                             tool_results.push(ContentBlock::ToolResult {
+                                content_projection: None,
                                 tool_use_id: tool_use_id.clone(),
                                 content: format!(
                                     "tool {name:?} is not in this agent's allowed tools{note}"
@@ -4804,6 +4865,7 @@ async fn run_subagent_loop(
                             Err(error) => {
                                 if !early_tool_result_ids.contains(tool_use_id) {
                                     tool_results.push(ContentBlock::ToolResult {
+                                        content_projection: None,
                                         tool_use_id: tool_use_id.clone(),
                                         content: error.model_tool_result_content(),
                                         is_error: Some(true),
@@ -4821,6 +4883,7 @@ async fn run_subagent_loop(
                     }
                     if !tool_results.is_empty() {
                         let tool_results_msg = ConversationMessage::User {
+                            api_message_override: None,
                             id: MessageId::new(),
                             content: tool_results,
                             is_meta: false,
@@ -5821,7 +5884,7 @@ async fn drain_peer_messages(
 async fn configure_handback_run(
     ctx: &SubagentContext,
     history: &mut Vec<ConversationMessage>,
-    schemas: &mut Vec<serde_json::Value>,
+    schemas: &mut Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     allowed: &mut Vec<String>,
     active: bool,
     out_tx: &mpsc::Sender<SubagentEvent>,
@@ -5839,7 +5902,7 @@ async fn configure_handback_run(
         if active {
             let tool =
                 crate::handback::SubagentHandbackTool(ctx.handback.as_ref().unwrap().clone());
-            schemas.push(serde_json::json!({"name":HANDBACK_TOOL_NAME,"description":HANDBACK_PROMPT,"input_schema":tool_api::Tool::input_schema(&tool)}));
+            schemas.push(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({"name":HANDBACK_TOOL_NAME,"description":HANDBACK_PROMPT,"input_schema":tool_api::Tool::input_schema(&tool)})));
             allowed.push(HANDBACK_TOOL_NAME.into());
         }
     }
@@ -6347,6 +6410,7 @@ fn refusal_fallback_frame(
     banner: &lingxi_core::host::refusal_notice::RefusalNotice,
 ) -> ConversationMessage {
     ConversationMessage::System {
+        api_system: None,
         id,
         content: format!(
             "This model's safeguards flagged this message. Switched to {}.",

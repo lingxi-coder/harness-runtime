@@ -78,6 +78,8 @@ fn memory_files_are_not_spliced_into_the_prompt() {
     // section — the content moves to the additional-context meta message.
     let mut ctx = ctx_minimal();
     ctx.memory_files = vec![MemoryFile {
+        parent: None,
+        source_content: None,
         path: PathBuf::from("/proj/LINGXI.md"),
         body: "notes".into(),
         is_local_override: false,

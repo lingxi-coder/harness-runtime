@@ -23,6 +23,7 @@ use lingxi_core::host::{
     McpPermissionCeiling, McpPromptDto, McpProtocolEra, McpResourceContentDto, McpResourceDto,
     McpToolDto, McpToolResultDto, McpTransportKind, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
 
 use crate::hook_dispatch::HookDispatcher;
@@ -113,7 +114,9 @@ fn retryable_list_connection_error(error: &jsonrpc::ConnectionError) -> bool {
                 && !(400..500).contains(&remote.code)
         }
         jsonrpc::ConnectionError::Router(
-            jsonrpc::RouterError::Timeout(_) | jsonrpc::RouterError::Deserialize(_),
+            jsonrpc::RouterError::Timeout(_)
+            | jsonrpc::RouterError::Deserialize(_)
+            | jsonrpc::RouterError::Projection(_),
         ) => false,
         jsonrpc::ConnectionError::Router(
             jsonrpc::RouterError::WriterClosed
@@ -856,6 +859,29 @@ impl McpClient {
         }
     }
 
+    async fn request_result_projected(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<Utf16JsonProjection, McpResultError> {
+        // SDK connections are explicitly negotiated as legacy. Modern result
+        // streams currently expose a typed Value through their protocol owner.
+        if self.modern() && modern_request_requires_result_type(method) {
+            return self
+                .request_result(method, params)
+                .await
+                .map(Utf16JsonProjection::plain);
+        }
+        self.connection
+            .call_projected_with_timeout(
+                method,
+                Utf16JsonProjection::plain(self.request_params(method, params)),
+                jsonrpc::router::DEFAULT_TIMEOUT,
+            )
+            .await
+            .map_err(McpResultError::Connection)
+    }
+
     async fn call_modern_tool(
         &self,
         tool: &str,
@@ -911,6 +937,8 @@ impl McpClient {
         };
         serde_json::from_value::<ToolCallResponse>(value)
             .map(|resp| McpToolResultDto {
+                result_projection: None,
+
                 content: resp.content,
                 is_error: resp.is_error,
                 meta: resp.meta,
@@ -1004,6 +1032,26 @@ impl McpClient {
             .as_object()
             .expect("elicitation capability is an object")
             .clone();
+        self.initialize_with_params(
+            serde_json::to_value(&params)
+                .map_err(|error| McpClientError::Deserialize(error.to_string()))?,
+        )
+        .await
+    }
+
+    /// SDK-hosted servers use the native empty client-capability handshake.
+    /// Keeping this choice explicit permits replay of host-captured manifests.
+    pub async fn initialize_sdk(&self) -> Result<ServerCapabilitiesDto, McpClientError> {
+        let mut params = serde_json::to_value(InitializeParams::default())
+            .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+        params["capabilities"] = serde_json::json!({});
+        self.initialize_with_params(params).await
+    }
+
+    async fn initialize_with_params(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<ServerCapabilitiesDto, McpClientError> {
         let resp: InitializeResponse = self
             .connection
             .call("initialize", &params)
@@ -1053,7 +1101,7 @@ impl McpClient {
     async fn list_paginated<T>(
         &self,
         method: &'static str,
-        decode: fn(serde_json::Value) -> Result<(Vec<T>, Option<String>), McpClientError>,
+        decode: fn(Utf16JsonProjection) -> Result<(Vec<T>, Option<String>), McpClientError>,
     ) -> Result<Vec<T>, McpClientError> {
         // Claude Code's modern `client.listTools()` path reports one aggregate
         // event, while legacy tools plus every prompts/resources traversal use
@@ -1071,7 +1119,7 @@ impl McpClient {
                 if let Some(cursor) = cursor.as_deref() {
                     params["cursor"] = serde_json::Value::String(cursor.to_string());
                 }
-                let raw_value: serde_json::Value = match self.request_result(method, params).await {
+                let raw_value = match self.request_result_projected(method, params).await {
                     Ok(value) => value,
                     Err(error) => {
                         if !aggregate_tools && page_count > 0 && !emitted_error {
@@ -1242,7 +1290,14 @@ impl McpClient {
                 let search_hint = tool_meta_search_hint(&t.meta);
                 let always_load = tool_meta_always_load(&t.meta);
                 let requires_user_interaction = tool_meta_requires_user_interaction(&t.meta);
+                let mut schema_projection = t.projection.as_ref().and_then(|projection| projection.subprojection("/inputSchema").ok());
+                if let Some(projection) = &mut schema_projection {
+                    if projection.rebase_display_value(decision.schema.clone()).is_err() {return None;}
+                }
                 Some(McpToolDto {
+                    input_schema_projection: schema_projection,
+                    definition_projection: t.projection,
+
                     full_name,
                     server_name: self.server_name.clone(),
                     description: truncate_description(&description).into_owned(),
@@ -1383,7 +1438,7 @@ impl McpClient {
         input: serde_json::Value,
         timeout: std::time::Duration,
     ) -> Result<McpToolResultDto, McpClientError> {
-        self.call_tool_with_meta(full_name, input, timeout, None, None)
+        self.call_tool_with_meta(full_name, input, timeout, None, None, None)
             .await
     }
 
@@ -1406,6 +1461,27 @@ impl McpClient {
             mcp_tool_timeout_for(self.config_timeout_ms),
             tool_use_id,
             on_progress,
+            None,
+        )
+        .await
+    }
+
+    /// Admit invocation-owned exact arguments through the same timeout,
+    /// progress, and tool-result driver as every MCP call.
+    pub async fn call_tool_with_progress_projected(
+        &self,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<McpProgressCallback>,
+    ) -> Result<McpToolResultDto, McpClientError> {
+        self.call_tool_with_meta(
+            full_name,
+            input.value.clone(),
+            mcp_tool_timeout_for(self.config_timeout_ms),
+            tool_use_id,
+            on_progress,
+            Some(input),
         )
         .await
     }
@@ -1435,6 +1511,7 @@ impl McpClient {
         timeout: std::time::Duration,
         tool_use_id: Option<&str>,
         on_progress: Option<McpProgressCallback>,
+        input_projection: Option<Utf16JsonProjection>,
     ) -> Result<McpToolResultDto, McpClientError> {
         // Strip the mcp__<server>__ prefix to recover the wire `name`. The
         // server token is normalized to match how `list_tools` built the FQN
@@ -1563,10 +1640,25 @@ impl McpClient {
         // the millis fraction so non-zero sub-second timeouts don't collapse
         // to "after 0s".
         let secs = timeout.as_secs().max(1);
-        let params = self.request_params("tools/call", params);
-        let fut = self
-            .connection
-            .call::<_, serde_json::Value>("tools/call", params);
+        let mut params = Utf16JsonProjection::plain(self.request_params("tools/call", params));
+        if let Some(input) = input_projection {
+            input
+                .validate()
+                .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+            if params.value.get("arguments") != Some(&input.value) {
+                return Err(McpClientError::Deserialize(
+                    "MCP arguments projection does not match its display value".into(),
+                ));
+            }
+            params
+                .set_field("arguments", input)
+                .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+        }
+        let fut = self.connection.call_projected_with_timeout(
+            "tools/call",
+            params,
+            jsonrpc::router::DEFAULT_TIMEOUT,
+        );
 
         // Race the call against the overall `BHs` timeout and — when enabled —
         // the `GLd` idle watchdog. When the idle watchdog is disabled (`ZERO`)
@@ -1584,14 +1676,7 @@ impl McpClient {
                     }),
                     Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
                     Ok(Ok(value)) => {
-                        serde_json::from_value::<ToolCallResponse>(value)
-                                .map(|resp| McpToolResultDto {
-                                    content: resp.content,
-                                    is_error: resp.is_error,
-                                    meta: resp.meta,
-                                    structured_content: resp.structured_content,
-                                })
-                                .map_err(|e| McpClientError::Deserialize(e.to_string()))
+                        decode_tool_call_projection(value)
                     },
                 },
                 idle = idle_watchdog(idle_timeout, last_activity.clone(), server, idle_tool) => idle,
@@ -1604,14 +1689,7 @@ impl McpClient {
                     secs,
                 }),
                 Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e)),
-                Ok(Ok(value)) => serde_json::from_value::<ToolCallResponse>(value)
-                    .map(|resp| McpToolResultDto {
-                        content: resp.content,
-                        is_error: resp.is_error,
-                        meta: resp.meta,
-                        structured_content: resp.structured_content,
-                    })
-                    .map_err(|e| McpClientError::Deserialize(e.to_string())),
+                Ok(Ok(value)) => decode_tool_call_projection(value),
             }
         };
 
@@ -1709,6 +1787,23 @@ impl McpClient {
             .ok_or_else(|| {
                 McpClientError::Deserialize("resources/read returned empty contents array".into())
             })
+    }
+
+    /// Fetch the native resources/read result without rewriting blobs into
+    /// model-facing saved-file messages. SDK UI resource controls preserve the
+    /// raw content fields and enforce their own native response budget.
+    pub async fn read_resource_native(
+        &self,
+        uri: &str,
+    ) -> Result<Utf16JsonProjection, McpClientError> {
+        let raw = self
+            .request_result_projected("resources/read", serde_json::json!({"uri":uri}))
+            .await
+            .map_err(mcp_client_error_from_result)?;
+        // Validate using the same live-resource contract before exposing it.
+        let _: ResourceReadRichResponse = serde_json::from_value(raw.value.clone())
+            .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+        Ok(raw)
     }
 
     /// Fetch the FULL multi-content `contents[]` array of a resource (MCP-5d).
@@ -2378,6 +2473,8 @@ struct ToolsListResponse {
 /// needs fresh interaction on every call).
 #[derive(Debug, Deserialize)]
 struct RawTool {
+    #[serde(skip)]
+    projection: Option<Utf16JsonProjection>,
     name: String,
     #[serde(default)]
     description: String,
@@ -2394,28 +2491,36 @@ struct RawTool {
 }
 
 fn decode_tools_list_page(
-    raw: serde_json::Value,
+    mut raw: Utf16JsonProjection,
 ) -> Result<(Vec<RawTool>, Option<String>), McpClientError> {
     // `recursivelySanitizeUnicode(result.tools)` is applied to the response
     // before typed processing in the oracle.
-    let response: ToolsListResponse = serde_json::from_value(recursively_sanitize_unicode(raw))
+    raw.rebase_display_value(recursively_sanitize_unicode(raw.value.clone()))
         .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+    let mut response: ToolsListResponse = serde_json::from_value(raw.value.clone())
+        .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+    for (index, tool) in response.tools.iter_mut().enumerate() {
+        tool.projection = Some(
+            raw.subprojection(&format!("/tools/{index}"))
+                .map_err(|error| McpClientError::Deserialize(error.to_string()))?,
+        );
+    }
     Ok((response.tools, response.next_cursor))
 }
 
 fn decode_prompts_list_page(
-    raw: serde_json::Value,
+    raw: Utf16JsonProjection,
 ) -> Result<(Vec<RawPrompt>, Option<String>), McpClientError> {
     let response: PromptsListResponse =
-        serde_json::from_value(recursively_sanitize_unicode(raw))
+        serde_json::from_value(recursively_sanitize_unicode(raw.value))
             .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
     Ok((response.prompts, response.next_cursor))
 }
 
 fn decode_resources_list_page(
-    raw: serde_json::Value,
+    raw: Utf16JsonProjection,
 ) -> Result<(Vec<RawResource>, Option<String>), McpClientError> {
-    let response: ResourcesListResponse = serde_json::from_value(raw)
+    let response: ResourcesListResponse = serde_json::from_value(raw.value)
         .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
     Ok((response.resources, response.next_cursor))
 }
@@ -2457,6 +2562,23 @@ struct ToolCallResponse {
     meta: Option<serde_json::Value>,
     #[serde(rename = "structuredContent", default)]
     structured_content: Option<serde_json::Value>,
+}
+
+fn decode_tool_call_projection(
+    projection: Utf16JsonProjection,
+) -> Result<McpToolResultDto, McpClientError> {
+    projection
+        .validate()
+        .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+    let response: ToolCallResponse = serde_json::from_value(projection.value.clone())
+        .map_err(|error| McpClientError::Deserialize(error.to_string()))?;
+    Ok(McpToolResultDto {
+        result_projection: Some(projection),
+        content: response.content,
+        is_error: response.is_error,
+        meta: response.meta,
+        structured_content: response.structured_content,
+    })
 }
 
 /// Errors emitted by [`McpClient`] operations.
@@ -2957,6 +3079,8 @@ mod constructor_tests {
         let resp: super::ToolCallResponse =
             serde_json::from_value(body).expect("decode tools/call body");
         let dto = super::McpToolResultDto {
+            result_projection: None,
+
             content: resp.content,
             is_error: resp.is_error,
             meta: resp.meta,
@@ -3416,6 +3540,9 @@ mod constructor_tests {
                 BTreeMap::from([(String::from("write"), McpPermissionCeiling::Ask)]),
             );
         let mut tools = vec![McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: "srv".into(),
             tool_name: "write".into(),
             description: "write".into(),

@@ -6,12 +6,12 @@ fn tool_result(
     content: String,
     content_blocks: Option<Vec<serde_json::Value>>,
 ) -> ConversationMessage {
-    ConversationMessage::User {
+    ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
-        content: vec![ContentBlock::ToolResult {
+        content: vec![ContentBlock::ToolResult { content_projection: None,
             tool_use_id: ToolUseId::new(),
             content,
-            is_error: false,
+            is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks,
         }],

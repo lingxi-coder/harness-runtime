@@ -132,7 +132,7 @@ impl ConversationOrchestrator {
         &self,
         input: ModAgentSpawnInput,
         context: ModAgentSpawnContext,
-    ) -> Result<Value, ModError> {
+    ) -> Result<hooks::mods::ModUtf16ValueProjection, ModError> {
         let plugin = match &context.provenance.hook_caller {
             FieldPresence::Value(Value::String(plugin)) => plugin.clone(),
             _ => {
@@ -165,6 +165,7 @@ impl ConversationOrchestrator {
                 Some(context.provenance.clone()),
                 tool,
                 None,
+                None,
             ),
         )
         .await;
@@ -179,11 +180,12 @@ impl ConversationOrchestrator {
         if stage.denial_kind().is_some() {
             let reason = content.strip_prefix("<tool_use_error>").unwrap_or(content);
             let reason = reason.strip_suffix("</tool_use_error>").unwrap_or(reason);
-            return Ok(serde_json::json!({"deny":reason}));
+            return Ok(hooks::mods::ModUtf16ValueProjection::plain(serde_json::json!({"deny":reason})));
         }
         let raw_result = stage
             .tool_use_result
-            .unwrap_or_else(|| Value::String(content.clone()));
+            .clone()
+            .unwrap_or_else(|| Value::String(content.clone()).into());
         if raw_result.get("status").and_then(Value::as_str) == Some("async_launched") {
             if let Some(agent_id) = raw_result.get("agentId").and_then(Value::as_str) {
                 let result = mod_tool_call_agent_result(agent_id, &raw_result);
@@ -206,31 +208,31 @@ impl ConversationOrchestrator {
                         tracing::warn!(%plugin, %agent_id, %error, "Mod detached Agent settlement failed");
                     }
                 });
-                return Ok(serde_json::json!({"result":result,"text":""}));
+                let mut projected = raw_result.clone();
+                projected.rebase_display_value(result).map_err(|error| ModError::Protocol(error.to_string()))?;
+                let mut answer = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({"result":projected.value,"text":""}));
+                answer.set_pointer("/result", projected).map_err(|error| ModError::Protocol(error.to_string()))?;
+                return hooks::mods::ModUtf16ValueProjection::from_core_projection(answer);
             }
         }
-        let mut result = serde_json::Map::new();
-        result.insert(
-            "result".into(),
-            self.mod_agent_teammate_result(raw_result, registry).await?,
-        );
-        result.insert("text".into(), Value::String(content.clone()));
-        if is_error.unwrap_or(false) {
-            result.insert("isError".into(), Value::Bool(true));
-        }
-        Ok(Value::Object(result))
+        let projected = self.mod_agent_teammate_result(raw_result, registry).await?;
+        let mut result = stage.mod_answer_projection(content).map_err(|error| ModError::Protocol(error.to_string()))?;
+        result.set_pointer("/result", projected).map_err(|error| ModError::Protocol(error.to_string()))?;
+        if is_error.unwrap_or(false) { result.value.as_object_mut().unwrap().insert("isError".into(), Value::Bool(true)); }
+        hooks::mods::ModUtf16ValueProjection::from_core_projection(result)
     }
 
     async fn mod_agent_teammate_result(
         &self,
-        mut result: Value,
+        mut source: lingxi_core::types::utf16_json::Utf16JsonProjection,
         registry: &Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
-    ) -> Result<Value, ModError> {
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ModError> {
+        let mut result = source.value.clone();
         if result.get("status").and_then(Value::as_str) != Some("teammate_spawned") {
-            return Ok(result);
+            return Ok(source);
         }
         let Some(teammate_id) = result.get("teammate_id").and_then(Value::as_str) else {
-            return Ok(result);
+            return Ok(source);
         };
         let rows = registry
             .list(TaskListFilter::default())
@@ -270,7 +272,8 @@ impl ConversationOrchestrator {
                 })?;
             result["resolvedModel"] = Value::String(self.mod_agent_child_resolved_model(facts)?);
         }
-        Ok(result)
+        source.rebase_display_value(result).map_err(|error| ModError::Protocol(error.to_string()))?;
+        Ok(source)
     }
 
     fn mod_agent_child_resolved_model(

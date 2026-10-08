@@ -144,12 +144,16 @@ pub(crate) struct TranscriptStore {
     /// subagents never run through it, so every orchestrator is a depth-0 main
     /// chain, where claude writes the field on 17 280 / 17 280 real 2.1.220
     /// lines. Porting the gate would mean inventing a field.
-    pub(crate) tool_use_results: Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    pub(crate) tool_use_results: Mutex<
+        std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    >,
     /// `tool_use_id` → claude's message-level `mcpMeta`, a TOP-LEVEL sibling of
     /// `toolUseResult` (never nested inside it). On the main chain
     /// `Uks(agentId, meta)` (2.1.220 BIN off **232969604**) returns the MCP
     /// server's meta verbatim when `agentId` is absent.
-    pub(crate) tool_use_mcp_meta: Mutex<std::collections::HashMap<String, serde_json::Value>>,
+    pub(crate) tool_use_mcp_meta: Mutex<
+        std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    >,
     /// `tool_use_id` → a successful tool result's turn-end request, consumed by
     /// the turn drivers only after the matching `tool_result` has been
     /// persisted and its post-result hooks/attachments have run.
@@ -338,6 +342,10 @@ pub struct TurnExecutionMetrics {
     pub num_turns: u32,
     /// Actual terminal reason emitted by the driver; absent if it emitted none.
     pub stop_reason: Option<String>,
+    /// HTTP status retained from the typed provider error, absent for local errors.
+    pub api_error_status: Option<u16>,
+    /// Inner stop reason of the final synthetic API-error assistant, if any.
+    pub api_error_stop_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -391,6 +399,35 @@ impl ConversationOrchestrator {
             .as_mut()
         {
             active.stop_reason = Some(stop_reason.to_owned());
+        }
+    }
+
+    pub(crate) fn note_turn_api_error_stop_reason(&self, reason: Option<&str>) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.api_error_stop_reason = reason.map(str::to_owned);
+            if reason.is_none() {
+                active.api_error_status = None;
+            }
+        }
+    }
+
+    pub(crate) fn note_turn_api_error_status(&self, status: Option<u16>) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.api_error_status = status;
         }
     }
 
@@ -458,7 +495,11 @@ pub(crate) struct PromptRuntime {
     /// carrier) and reuses it for the turn's `tool_result` `user` lines; non-`user`
     /// lines never read it. `None` until the first user prompt is persisted.
     pub(crate) current_prompt_id: Mutex<Option<String>>,
+    /// Reserved by cold-fork replay for the next admitted user prompt.
+    pub(crate) pending_prompt_id: Mutex<Option<String>>,
     pub(crate) turn_execution_metrics: std::sync::Mutex<TurnExecutionMetricsState>,
+    pub(crate) remote_ui_host:
+        std::sync::RwLock<Option<Arc<dyn lingxi_core::host::ModRemoteUiHost>>>,
     /// Live plugin output-style registry. Disk/builtin styles remain sourced
     /// from [`OrchestratorConfig`]; this optional registry makes plugin reloads
     /// visible to prompt assembly without rebuilding the orchestrator.
@@ -721,7 +762,9 @@ impl PromptRuntime {
             mod_tool_descriptions: Mutex::new(ModToolDescribeCache::default()),
             mod_command_descriptions: Arc::new(Mutex::new(ModCommandDescribeCache::default())),
             current_prompt_id: Mutex::new(None),
+            pending_prompt_id: Mutex::new(None),
             turn_execution_metrics: std::sync::Mutex::new(TurnExecutionMetricsState::default()),
+            remote_ui_host: std::sync::RwLock::new(None),
             output_style_registry: None,
             live_output_style: Mutex::new(None),
             wire_tool_schema_cache: Mutex::new(None),
@@ -829,6 +872,7 @@ impl PromptRuntime {
         self.invalidate_mod_tool_descriptions().await;
         self.invalidate_mod_command_descriptions().await;
         *self.current_prompt_id.lock().await = None;
+        *self.pending_prompt_id.lock().await = None;
         self.silent_turn_reminder_marks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -926,6 +970,7 @@ mod prompt_runtime_tests {
             block: Some("old git status".to_string()),
         });
         *runtime.current_prompt_id.lock().await = Some("old-prompt".to_string());
+        *runtime.pending_prompt_id.lock().await = Some("reserved-prompt".to_string());
         runtime.mod_prompt_sections.lock().await.answers.insert(
             "memory".encode_utf16().collect(),
             (
@@ -986,6 +1031,7 @@ mod prompt_runtime_tests {
 
         assert!(runtime.git_status_snapshot.lock().await.is_none());
         assert!(runtime.current_prompt_id.lock().await.is_none());
+        assert!(runtime.pending_prompt_id.lock().await.is_none());
         assert!(runtime.mod_prompt_sections.lock().await.answers.is_empty());
         assert!(runtime.mod_prompt_context.lock().await.resolved.is_none());
         assert!(runtime
@@ -1961,5 +2007,62 @@ mod session_switch_supervisor_tests {
             .expect("drain task");
         assert!(errors.is_empty());
         assert!(supervisor.claim().is_err(), "shutdown closes admission");
+    }
+}
+
+#[cfg(test)]
+mod api_error_metrics_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+
+    #[tokio::test]
+    async fn final_api_assistant_marker_survives_without_jsonl_and_later_assistant_clears_it() {
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.begin_turn_metrics();
+        let error = ConversationMessage::Assistant { per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "API Error: bad request".into(),
+                citations: None,
+            }],
+            stop_reason: Some("model_error".into()),
+        };
+        orch.persist_api_error_message_to_jsonl(&error, ApiErrorEnvelope::default())
+            .await;
+        orch.note_turn_api_error_status(Some(400));
+        {
+            let state = orch.prompt_runtime.turn_execution_metrics.lock().unwrap();
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(
+                active.api_error_stop_reason.as_deref(),
+                Some("stop_sequence")
+            );
+            assert_eq!(active.api_error_status, Some(400));
+        }
+        let ordinary = ConversationMessage::Assistant { per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "recovered".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+        };
+        orch.persist_message_to_jsonl(&ordinary).await;
+        orch.complete_turn_metrics(&Err(OrchestratorError::Internal("test completion".into())));
+        let metrics = orch.completed_turn_metrics().unwrap();
+        assert_eq!(metrics.api_error_stop_reason, None);
+        assert_eq!(metrics.api_error_status, None);
     }
 }

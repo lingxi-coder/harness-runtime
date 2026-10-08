@@ -72,7 +72,7 @@ pub struct MockApiClient {
     captured_models: Arc<Mutex<Vec<String>>>,
     captured_msgs: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
     captured_systems: Arc<Mutex<Vec<Option<String>>>>,
-    captured_tools: Arc<Mutex<Vec<Vec<serde_json::Value>>>>,
+    captured_tools: Arc<Mutex<Vec<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>>>,
     captured_prewarm: Arc<Mutex<Vec<MockPrewarmCall>>>,
     close_responses_ws_count: Arc<Mutex<u32>>,
     /// Explicit stream-fallback seeds; one entry per seeded request.
@@ -113,7 +113,7 @@ pub struct MockPrewarmCall {
     /// Conversation messages included in the prewarm request.
     pub messages: Vec<ConversationMessage>,
     /// Wire tool schemas included in the prewarm request.
-    pub tools: Vec<serde_json::Value>,
+    pub tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Native per-request policy flag for global system-prompt caching.
     pub skip_global_cache_for_system_prompt: bool,
 }
@@ -190,7 +190,7 @@ impl MockApiClient {
     /// Snapshot the captured `tools` arguments (one entry per `messages_create`
     /// call). Lets a test assert the orchestrator advertised the registry's
     /// wire tool definitions on the batched path.
-    pub async fn captured_tools(&self) -> Vec<Vec<serde_json::Value>> {
+    pub async fn captured_tools(&self) -> Vec<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>> {
         self.captured_tools.lock().await.clone()
     }
 
@@ -322,7 +322,7 @@ impl OrchestratorApiClient for MockApiClient {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
         self.captured_prewarm.lock().await.push(MockPrewarmCall {
@@ -586,7 +586,7 @@ impl OutputStream for MockOutputStream {
                 message_id: *message_id,
             });
     }
-    async fn emit_text(&self, text: &str) {
+    async fn emit_text(&self, text: &str, _utf16_code_units: Option<&[u16]>) {
         self.events.lock().await.push(OutputEvent::Text {
             text: text.to_string(),
         });
@@ -631,7 +631,7 @@ impl OutputStream for MockOutputStream {
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
         input: &serde_json::Value,
-    ) {
+     _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
         self.events.lock().await.push(OutputEvent::ToolCall {
             id: id.clone(),
             tool: tool.to_string(),
@@ -656,7 +656,7 @@ impl OutputStream for MockOutputStream {
         tool: &str,
         _model_text: &str,
         result: &serde_json::Value,
-    ) {
+     _projection: Option<&lingxi_core::host::ToolResultProjection>) {
         self.events.lock().await.push(OutputEvent::ToolResult {
             id: id.clone(),
             tool: tool.to_string(),
@@ -674,14 +674,14 @@ impl OutputStream for MockOutputStream {
         model_text: &str,
         result: &serde_json::Value,
         denial_kind: &str,
-    ) {
+     _projection: Option<&lingxi_core::host::ToolResultProjection>) {
         self.denials
             .lock()
             .await
             .push((id.clone(), denial_kind.to_string()));
         // Still record the ordinary result event so existing assertions that
         // count/inspect `ToolResult` keep seeing denied tools.
-        self.emit_tool_result(id, tool, model_text, result).await;
+        self.emit_tool_result(id, tool, model_text, result, None).await;
     }
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
         self.events.lock().await.push(OutputEvent::EndTurn {
@@ -1876,8 +1876,8 @@ mod tests {
     #[tokio::test]
     async fn mock_output_stream_captures_text() {
         let m = MockOutputStream::new();
-        m.emit_text("hello").await;
-        m.emit_text("world").await;
+        m.emit_text("hello", None).await;
+        m.emit_text("world", None).await;
         let texts = m.text_events().await;
         assert_eq!(texts, vec!["hello".to_string(), "world".to_string()]);
     }
@@ -1888,9 +1888,9 @@ mod tests {
         let id = lingxi_core::types::ToolUseId::new();
         let input = serde_json::json!({"file_path": "/tmp/x"});
         let result = serde_json::json!({"content": "ok"});
-        m.emit_tool_call(&id, "Read", &input).await;
+        m.emit_tool_call(&id, "Read", &input, None).await;
         m.emit_tool_heartbeat(&id, "Read", 1_250).await;
-        m.emit_tool_result(&id, "Read", "ok", &result).await;
+        m.emit_tool_result(&id, "Read", "ok", &result, None).await;
         let snap = m.snapshot().await;
         assert_eq!(snap.len(), 3);
         assert!(matches!(&snap[0], OutputEvent::ToolCall { id: gid, .. } if *gid == id));

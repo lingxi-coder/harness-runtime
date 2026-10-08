@@ -35,7 +35,7 @@ async fn prepare_projection(
     orch: &ConversationOrchestrator,
     model: &str,
     profile: Option<&str>,
-    tools: &[Value],
+    tools: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
 ) -> Result<Option<llm_runtime::computer::ComputerRequestProjection>, OrchestratorError> {
     recover_before_request(orch).await?;
     super::prepare_projection(orch, model, profile, tools).await
@@ -772,7 +772,7 @@ impl Fixture {
         response: &llm_runtime::HistoryResponse,
     ) -> Result<(), OrchestratorError> {
         let blocks = self.bind(response).await?;
-        let message = ConversationMessage::Assistant {
+        let message = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: blocks,
             stop_reason: response.stop_reason.clone(),
@@ -805,7 +805,7 @@ impl Fixture {
         let mut assistant_message =
             existing
                 .clone()
-                .unwrap_or_else(|| ConversationMessage::Assistant {
+                .unwrap_or_else(|| ConversationMessage::Assistant { per_turn_effort: None,
                     id: MessageId::new(),
                     content: blocks.clone(),
                     stop_reason: Some("tool_use".into()),
@@ -853,7 +853,7 @@ impl Fixture {
                     name,
                     input,
                     provider_id,
-                } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
+                 .. } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -915,7 +915,7 @@ impl Fixture {
         }
         for content in messages {
             final_model_result(&self.orch, &content).await.unwrap();
-            let message = ConversationMessage::User {
+            let message = ConversationMessage::User { api_message_override: None,
                 id: MessageId::new(),
                 content,
                 is_meta: false,
@@ -966,7 +966,7 @@ fn claude_screenshot() -> llm_runtime::HistoryResponse {
     response(
         NativeComputerProvider::Anthropic,
         vec![
-            llm_runtime::ContentBlock::ToolCall {
+            llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: "call-1".into(),
                 name: "screenshot".into(),
                 input: json!({}),
@@ -994,7 +994,7 @@ async fn ordinary_batch_images_use_the_existing_turn_driver_and_final_hook_outpu
     for remove_images in [false, true] {
         let request = response(
             NativeComputerProvider::OpenAi,
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: "batch-1".into(),
                 name: "computer".into(),
                 input: json!({"action":"computer_batch","actions":[{"action":"screenshot"}]}),
@@ -1525,7 +1525,7 @@ async fn live_unfinished_native_outputs_abandon_the_old_call_without_replaying_i
             // A fresh ordinary observation must remain usable on later turns;
             // old unfinished audit facts cannot continually revoke it.
             let observed = fixture
-                .dispatch(vec![ContentBlock::ToolUse {
+                .dispatch(vec![ContentBlock::ToolUse { input_projection: None,
                     id: ToolUseId::new(),
                     name: "computer".into(),
                     input: json!({"action":"screenshot"}),
@@ -1578,7 +1578,7 @@ async fn native_members_keep_their_position_among_ordinary_calls() {
     let mut response = claude_screenshot();
     response.content.insert(
         0,
-        llm_runtime::ContentBlock::ToolCall {
+        llm_runtime::ContentBlock::ToolCall { input_projection: None,
             id: "click-1".into(),
             name: "left_click".into(),
             input: json!({"coordinate":[0,0]}),
@@ -1731,7 +1731,7 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
         .native
         .is_none());
     let function = fixture
-        .dispatch(vec![ContentBlock::ToolUse {
+        .dispatch(vec![ContentBlock::ToolUse { input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: json!({"action":"request_access"}),
@@ -1752,7 +1752,7 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
         .await
         .unwrap();
     blocks.extend(
-        ["Read", "mcp__computer-use__click"].map(|name| ContentBlock::ToolUse {
+        ["Read", "mcp__computer-use__click"].map(|name| ContentBlock::ToolUse { input_projection: None,
             id: ToolUseId::new(),
             name: name.into(),
             input: json!({}),
@@ -1826,7 +1826,7 @@ async fn partial_backend_keeps_working_function_tools_without_native_declaration
         .await
         .unwrap();
     let dispatched = fixture
-        .dispatch(vec![ContentBlock::ToolUse {
+        .dispatch(vec![ContentBlock::ToolUse { input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: json!({"action":"screenshot"}),
@@ -2113,7 +2113,7 @@ async fn old_unknown_call_id_does_not_invalidate_a_new_successful_response_scope
         .is_none());
 
     let observed = fixture
-        .dispatch(vec![ContentBlock::ToolUse {
+        .dispatch(vec![ContentBlock::ToolUse { input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: json!({"action":"screenshot"}),
@@ -2211,7 +2211,7 @@ async fn compacted_unknown_input_uses_its_durable_binding_without_replaying_or_r
         ConversationMessage::User { content, .. } if content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))
     )));
     let observed = fixture
-        .dispatch(vec![ContentBlock::ToolUse {
+        .dispatch(vec![ContentBlock::ToolUse { input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: json!({"action":"screenshot"}),
@@ -2644,7 +2644,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 );
                 let later_id = later.id();
                 fixture.orch.session.lock().await.history.push(later);
-                let exact = ConversationMessage::User {
+                let exact = ConversationMessage::User { api_message_override: None,
                     id: MessageId::new(),
                     is_meta: false,
                     is_compact_summary: false,
@@ -2658,7 +2658,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 let exact_id = exact.id();
                 fixture.orch.persist_message_to_jsonl(&exact).await;
                 fixture.orch.session.lock().await.history.push(exact);
-                let derived = ConversationMessage::User {
+                let derived = ConversationMessage::User { api_message_override: None,
                     id: MessageId::new(),
                     is_meta: true,
                     is_compact_summary: false,

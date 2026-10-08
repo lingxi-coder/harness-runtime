@@ -136,6 +136,12 @@ impl CwdChangedFirer for OrchestratorCwdChangedFirer {
         // caller's cwd update. The aggregate result is intentionally dropped —
         // `CwdChanged` is observational.
         let _ = self.hooks.execute(event, ctx).await;
+        // A committed cwd rehome is a global Client render-version change in
+        // Native. Keep it separate from site/plugin-scoped `ui.invalidate`
+        // counters so nonmatching Client sites also observe the new token.
+        if let Some(mod_host) = self.hooks.mod_host().await {
+            mod_host.note_client_ui_global_render_change().await;
+        }
         // Watcher-rebind half of claude-code's `onCwdChanged` (function `g`):
         // AFTER the `CwdChanged` hooks fire, ask the file-changed watcher to
         // re-resolve its `FileChanged` matchers against the new cwd and restart

@@ -272,7 +272,7 @@ mod tests {
         let mut req = LlmRequest::new("model");
         push_history(
             &mut req,
-            Message {
+            Message { api_output_config: None,
                 role: "user".to_string(),
                 content: vec![ContentBlock::Image {
                     media_type: "image/png".to_string(),
@@ -288,23 +288,24 @@ mod tests {
         let mut req = LlmRequest::new("model");
         push_history(
             &mut req,
-            Message {
+            Message { api_output_config: None,
                 role: "assistant".to_string(),
                 content: vec![
                     ContentBlock::TextJsUtf16 {
                         text: "structured text".to_string(),
                         utf16_code_units: "structured text".encode_utf16().collect(),
                         cache_control: None,
+                        citations: None,
                     },
-                    ContentBlock::ToolCall {
+                    ContentBlock::ToolCall { input_projection: None,
                         id: "call-1".to_string(),
                         name: "lookup".to_string(),
                         input: serde_json::json!({"query": "weather in San Francisco"}),
                     },
-                    ContentBlock::ToolResult {
+                    ContentBlock::ToolResult { output_projection: None,
                         tool_call_id: "call-1".to_string(),
                         output: serde_json::json!({"temperature": 18, "unit": "celsius"}),
-                        is_error: false,
+                        is_error: Some(false),
                         cache_control: None,
                         cache_reference: None,
                     },
@@ -383,23 +384,25 @@ mod tests {
         let mut plain = LlmRequest::new("model");
         push_history(
             &mut plain,
-            Message {
+            Message { api_output_config: None,
                 role: "user".to_string(),
                 content: vec![ContentBlock::Text {
                     text: text.clone(),
                     cache_control: None,
+                    citations: None,
                 }],
             },
         );
         let mut exact_utf16 = LlmRequest::new("model");
         push_history(
             &mut exact_utf16,
-            Message {
+            Message { api_output_config: None,
                 role: "user".to_string(),
                 content: vec![ContentBlock::TextJsUtf16 {
                     utf16_code_units: text.encode_utf16().collect(),
                     text,
                     cache_control: None,
+                    citations: None,
                 }],
             },
         );
@@ -414,12 +417,13 @@ mod tests {
         let mut exact = LlmRequest::new("model");
         push_history(
             &mut exact,
-            Message {
+            Message { api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: display,
                     utf16_code_units: vec![0xd800; 300],
                     cache_control: None,
+                    citations: None,
                 }],
             },
         );
@@ -613,7 +617,7 @@ mod tests {
             .clone()
             .expect("request sent");
         assert!(
-            seen.url.ends_with("/v1/messages/count_tokens"),
+            seen.url.ends_with("/v1/messages/count_tokens?beta=true"),
             "url={}",
             seen.url
         );
@@ -647,10 +651,14 @@ mod tests {
             crate::model::betas::Endpoint::CountTokens,
             &crate::model::betas::BetaContext::for_model("claude-sonnet-4-20250514"),
         );
+        let expected = format!(
+            "{expected},{}",
+            lingxi_llm_client::providers::anthropic::request_policy::TOKEN_COUNTING
+        );
         assert_eq!(
             seen.headers.get("anthropic-beta").map(String::as_str),
             Some(expected.as_str()),
-            "anthropic-beta header must equal assemble_beta_header(Anthropic, CountTokens); got: {:?}",
+            "countTokens appends the mandatory SDK beta after model betas; got: {:?}",
             seen.headers.get("anthropic-beta"),
         );
     }

@@ -529,6 +529,10 @@ pub struct ToolInvocationResult {
     pub is_error: bool,
     /// Structured result retained for tool consumers and media handling.
     pub data: Value,
+    /// Exact source associated with structured tool data.
+    pub data_projection: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Exact string associated with model-facing prose.
+    pub model_content_projection: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Optional prose supplied by the tool's model-facing result mapper.
     pub model_content: Option<String>,
     /// Extra conversation messages returned by the underlying tool.
@@ -538,6 +542,8 @@ pub struct ToolInvocationResult {
     pub context_modifier: Option<ToolInvocationContextModifier>,
     /// Opaque tool metadata retained for host-side result handling.
     pub mcp_meta: Option<Value>,
+    /// Exact associated MCP metadata source.
+    pub mcp_meta_projection: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Trusted host-computed control. Model input or result JSON cannot set it.
     pub turn_end: Option<ToolResultTurnEnd>,
     /// Model-only reminders attached by `tool.call` after the tool result.
@@ -623,7 +629,7 @@ pub trait ToolInvoker: Send + Sync + Any {
     ) -> Result<ToolInvocationResult, ToolInvokerError> {
         self.invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
             .await
-            .map(|data| ToolInvocationResult {
+            .map(|data| ToolInvocationResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 is_error: false,
                 data,
                 model_content: None,

@@ -376,7 +376,7 @@ impl Tool for CronDeleteTool {
 }
 
 fn cancelled_result(id: &str) -> ToolCallResult {
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data: json!({
             "id": id,
             "content": format!("Cancelled job {id}."),

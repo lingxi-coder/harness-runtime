@@ -41,6 +41,7 @@
 //! * settings-env-change agent rebuild (`XY()`), `/doctor` diagnostic rows, and
 //!   startup-telemetry fields — cross-cutting surfaces outside the transport.
 
+use lingxi_llm_client::transport::http_backend as reqwest;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -675,19 +676,25 @@ mod tests {
             with_id.apply_to_builder(builder.resolve(host, addr))
         })
         .unwrap();
-        let mut response = provider
-            .send_stream(lingxi_llm_client::HttpStreamRequest {
-                method: "POST".into(),
-                url: url.clone(),
-                headers: vec![],
-                body: futures_util::stream::empty().boxed(),
-                content_length: 0,
-                timeout: Some(std::time::Duration::from_secs(5)),
-            })
-            .await
-            .expect("SDK upload must inherit custom CA and mTLS identity");
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body.next().await.unwrap().unwrap(), "ok");
+        for http1_header_layout in [
+            None,
+            Some(lingxi_llm_client::Http1HeaderLayout::NativeFetch),
+        ] {
+            let mut response = provider
+                .send_stream(lingxi_llm_client::HttpStreamRequest {
+                    http1_header_layout,
+                    method: "POST".into(),
+                    url: url.clone(),
+                    headers: vec![],
+                    body: futures_util::stream::empty().boxed(),
+                    content_length: 0,
+                    timeout: Some(std::time::Duration::from_secs(5)),
+                })
+                .await
+                .expect("SDK upload must inherit custom CA and mTLS identity");
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body.next().await.unwrap().unwrap(), "ok");
+        }
 
         // Without identity → the server rejects the handshake.
         let without_id = TlsSettings {
@@ -710,20 +717,26 @@ mod tests {
             without_id.apply_to_builder(builder.resolve(host, addr))
         })
         .unwrap();
-        let result = provider
-            .send_stream(lingxi_llm_client::HttpStreamRequest {
-                method: "POST".into(),
-                url,
-                headers: vec![],
-                body: futures_util::stream::empty().boxed(),
-                content_length: 0,
-                timeout: Some(std::time::Duration::from_secs(5)),
-            })
-            .await;
-        assert!(
-            result.is_err(),
-            "SDK must not bypass the server's mTLS requirement"
-        );
+        for http1_header_layout in [
+            None,
+            Some(lingxi_llm_client::Http1HeaderLayout::NativeFetch),
+        ] {
+            let result = provider
+                .send_stream(lingxi_llm_client::HttpStreamRequest {
+                    http1_header_layout,
+                    method: "POST".into(),
+                    url: url.clone(),
+                    headers: vec![],
+                    body: futures_util::stream::empty().boxed(),
+                    content_length: 0,
+                    timeout: Some(std::time::Duration::from_secs(5)),
+                })
+                .await;
+            assert!(
+                result.is_err(),
+                "SDK must not bypass the server's mTLS requirement"
+            );
+        }
     }
 
     /// The WebSocket connector must inherit both custom CA trust and the mTLS
@@ -814,6 +827,7 @@ mod tests {
         })
         .unwrap();
         let request = || lingxi_llm_client::HttpRequest {
+            http1_header_layout: None,
             method: "GET".into(),
             url: url.clone(),
             headers: vec![],

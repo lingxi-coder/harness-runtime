@@ -90,7 +90,7 @@ impl agent::SubagentApiClient for Api {
         let response = llm_runtime::HistoryResponse {
             id: "fake-panel".into(),
             model: "mock".into(),
-            content: vec![llm_runtime::ContentBlock::ToolCall {
+            content: vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: "report".into(),
                 name: "StructuredOutput".into(),
                 input: json!({"schema_version":1,"summary":"summary","candidate_answer":"answer","claims":[],"evidence":[],"assumptions":[],"risks":[],"unresolved_questions":[]}),

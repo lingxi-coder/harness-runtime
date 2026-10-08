@@ -78,7 +78,7 @@ impl Tool for DeferTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: serde_json::json!({}),
             model_content: None,
             new_messages: vec![],
@@ -123,9 +123,9 @@ async fn orch(reg: ToolRegistry, assistant_turns: usize) -> ConversationOrchestr
         let mut s = orch.session.lock().await;
         for _ in 0..assistant_turns {
             s.history
-                .push(lingxi_core::types::ConversationMessage::Assistant {
+                .push(lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                     id: MessageId::new(),
-                    content: vec![lingxi_core::types::ContentBlock::Text { text: "ok".into() }],
+                    content: vec![lingxi_core::types::ContentBlock::Text { text: "ok".into(), citations: None }],
                     stop_reason: None,
                 });
         }

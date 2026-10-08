@@ -274,9 +274,9 @@ async fn prompt_origin_survives_compaction_and_durable_task_notifications_in_bot
                 let incoming = if fresh_human {
                     ConversationMessage::user(MessageId::new(), "new human prompt".into())
                 } else {
-                    ConversationMessage::User {
+                    ConversationMessage::User { api_message_override: None,
                         id: MessageId::new(),
-                        content: vec![ContentBlock::ToolResult {
+                        content: vec![ContentBlock::ToolResult { content_projection: None,
                             tool_use_id: ToolUseId::from("tu_before_compact"),
                             content: "tool completed".into(),
                             is_error: Some(false),

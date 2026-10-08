@@ -10,7 +10,7 @@
 
 use crate::error::OrchestratorError;
 use crate::sse::accumulator::BlockAccumulator;
-use crate::sse::event_router::{RouterAction, dispatch_event};
+use crate::sse::event_router::{dispatch_event, RouterAction};
 use crate::streaming_executor::StreamingToolExecutor;
 use futures::stream::{BoxStream, StreamExt};
 use lingxi_core::host::{OutputStream, ServerFallbackTombstoneMessage};
@@ -107,6 +107,7 @@ pub struct ObservedToolUse {
 /// were current when the block completed.
 #[derive(Debug, Clone)]
 pub(crate) struct CompletedAssistantRow {
+    pub(crate) per_turn_effort: Option<String>,
     /// Monotonic pump arrival order; provider block indexes may be reused by
     /// later accepted fallback responses in the same host turn.
     pub(crate) stream_order: u64,
@@ -162,6 +163,7 @@ pub(crate) fn native_server_fallback_supersedes_enabled(query_source: &str) -> b
 /// Outcome of consuming one stream.
 #[derive(Debug, Default)]
 pub struct PumpedTurn {
+    pub per_turn_effort: Option<String>,
     /// Host-owned sweeps of exact live executor ids. These are runtime control
     /// facts and never become provider events or synthetic tool-result rows.
     pub tool_use_removals: Vec<lingxi_core::host::tool_use_lifecycle::ToolUseRemoval>,
@@ -1762,6 +1764,7 @@ async fn pump_stream_inner(
         // Capture MessageStart usage before dispatching (dispatch consumes the event).
         if let HistoryEvent::MessageStart { ref response } = event {
             message_start_usage = Some(response.usage.clone());
+            turn.per_turn_effort = response.per_turn_effort().map(str::to_owned);
         }
         // `Hr` (binary @219640711): a non-thinking `content_block_start` flips
         // `real_content_started`, disqualifying the mid-stream transient retry.
@@ -1842,6 +1845,7 @@ async fn pump_stream_inner(
                 turn.assistant_blocks.insert(position, block.clone());
                 assistant_block_row_ids.insert(position, row_id);
                 let row = CompletedAssistantRow {
+                    per_turn_effort: turn.per_turn_effort.clone(),
                     stream_order: next_row_order,
                     row_id,
                     provider_message_id: provider_message_id.clone(),
@@ -1917,11 +1921,13 @@ async fn pump_stream_inner(
                 id,
                 name,
                 input,
+                input_projection,
                 provider_id,
             } => {
                 let api_block_index =
                     completed_block_index.expect("completed tool action has an index");
                 let block = ContentBlock::ToolUse {
+                    input_projection,
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
@@ -1929,6 +1935,7 @@ async fn pump_stream_inner(
                 };
                 let row_id = MessageId::new();
                 let mut row = CompletedAssistantRow {
+                    per_turn_effort: turn.per_turn_effort.clone(),
                     stream_order: next_row_order,
                     row_id,
                     provider_message_id: provider_message_id.clone(),
@@ -1976,6 +1983,7 @@ async fn pump_stream_inner(
                     let dispatch_facts = crate::turn_loop::ToolUseDispatchFacts {
                         query_history: p.query_history.clone(),
                         assistant_message: ConversationMessage::Assistant {
+                            per_turn_effort: turn.per_turn_effort.clone(),
                             id: row.row_id,
                             content: row.content.clone(),
                             stop_reason: None,
@@ -2479,13 +2487,11 @@ mod tests {
                 assert!(
                     matches!(result.unwrap_err(), OrchestratorError::Streaming(actual) if Some(&actual) == error.as_ref())
                 );
-                assert!(
-                    !sink
-                        .partial_stream_event_snapshot()
-                        .await
-                        .iter()
-                        .any(|frame| frame == "{\"type\":\"message_stop\"}")
-                );
+                assert!(!sink
+                    .partial_stream_event_snapshot()
+                    .await
+                    .iter()
+                    .any(|frame| frame == "{\"type\":\"message_stop\"}"));
             }
         }
     }
@@ -2518,13 +2524,11 @@ mod tests {
                 OrchestratorError::StreamEndedWithoutStop | OrchestratorError::StreamingProtocol(_)
             ));
             assert!(sink.tool_calls().await.is_empty());
-            assert!(
-                !sink
-                    .partial_stream_event_snapshot()
-                    .await
-                    .iter()
-                    .any(|frame| frame == "{\"type\":\"message_stop\"}")
-            );
+            assert!(!sink
+                .partial_stream_event_snapshot()
+                .await
+                .iter()
+                .any(|frame| frame == "{\"type\":\"message_stop\"}"));
         }
     }
 
@@ -2557,12 +2561,10 @@ mod tests {
         assert_eq!(turn.cost_quote.unwrap().total_cost_usd, Some(0.00075));
         let usage = turn.usage.unwrap();
         assert!(usage.cost_estimate.is_none());
-        assert!(
-            serde_json::to_value(usage)
-                .unwrap()
-                .get("cost_estimate")
-                .is_none()
-        );
+        assert!(serde_json::to_value(usage)
+            .unwrap()
+            .get("cost_estimate")
+            .is_none());
     }
 
     /// 2.1.263 src_160988549.js @4784072 has-output notices + `tee` cause names.

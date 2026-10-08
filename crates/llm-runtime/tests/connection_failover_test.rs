@@ -193,7 +193,13 @@ async fn a_rate_limited_connection_hands_the_request_to_the_next_one() {
     let api = service(transport.clone());
 
     let response = api
-        .messages_create("shared-model", None, None, Vec::new(), Vec::new())
+        .messages_create(llm_runtime::MessagesCreateRequest::new(
+            "shared-model",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        ))
         .await
         .expect("the second connection must serve the request");
 
@@ -217,13 +223,13 @@ async fn a_request_scoped_to_a_connection_still_fails_over() {
     let api = service(transport.clone());
 
     let _ = api
-        .messages_create(
+        .messages_create(llm_runtime::MessagesCreateRequest::new(
             "shared-model",
             Some("grouped:intl"),
             None,
             Vec::new(),
             Vec::new(),
-        )
+        ))
         .await;
 
     assert_eq!(
@@ -284,7 +290,13 @@ async fn a_single_connection_provider_does_not_fail_over() {
     );
 
     let _ = api
-        .messages_create("shared-model", None, None, Vec::new(), Vec::new())
+        .messages_create(llm_runtime::MessagesCreateRequest::new(
+            "shared-model",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        ))
         .await;
 
     let hops = transport.connections();
@@ -381,16 +393,24 @@ async fn cross_protocol_model_fallback_rebuilds_history_cache_policy() {
         None,
         None,
     );
-    api.messages_create_with_fallback(
-        "claude-opus-4-6",
-        None,
-        Some("cached system"),
-        vec![],
-        vec![],
-        Some("shared-model"),
-        false,
-        false,
-    )
+    api.messages_create({
+        let mut request = llm_runtime::MessagesCreateRequest::new(
+            "claude-opus-4-6",
+            None,
+            Some(llm_runtime::SystemPromptInput::source_vector(
+                vec!["cached system".into()],
+                None,
+                None,
+            )),
+            vec![],
+            vec![],
+        );
+        request.opts.fallback = match Some("shared-model") {
+            Some(models) => llm_runtime::FallbackPolicy::from_models_csv(models),
+            None => llm_runtime::FallbackPolicy::Configured,
+        };
+        request
+    })
     .await
     .expect("cross-protocol model fallback must succeed");
     assert_eq!(transport.connections(), vec!["intl", "intl", "intl", "cn"]);

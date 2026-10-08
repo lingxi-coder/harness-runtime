@@ -188,7 +188,7 @@ impl tool_api::Tool for PromptAgentTool {
         _ctx: tool_api::ToolUseContext,
         _progress_tx: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
-        Ok(tool_api::ToolCallResult {
+        Ok(tool_api::ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: serde_json::json!({"ok": true}),
             model_content: None,
             new_messages: Vec::new(),
@@ -283,8 +283,9 @@ impl tool_api::Tool for PromptAgentTool {
 ///
 /// Claude emits one extra first block carrying a private
 /// `x-anthropic-billing-header` attestation. LingXi deliberately does not
-/// spoof that private billing identity, so its request contains the remaining
-/// two observable blocks: the LingXi brand prefix and the normalized body.
+/// spoof that private billing identity. This fixture uses no provider route
+/// and carries the visible prompt as one source element; its body locks exclude
+/// the permitted brand header. Actual cache/source grouping is checked separately.
 #[test]
 fn production_prompt_bodies_match_their_byte_locks() {
     let temp = tempfile::tempdir().expect("temp cwd");
@@ -346,22 +347,30 @@ fn production_prompt_bodies_match_their_byte_locks() {
     for (model, expected_len, expected_sha) in cases {
         let assembled =
             assemble_system_prompt(&prompt_context(model, cwd.clone(), memory_dir.clone()));
-        let blocks = llm_runtime::prompt_format::split_system_blocks(&assembled, true);
-        assert_eq!(
-            blocks.len(),
-            2,
-            "{model}: private Anthropic billing attestation must not be fabricated"
+        // This visible-body fixture carries one source element. Provider/cache
+        // section boundaries are covered by the SDK's source-vector tests.
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![assembled.clone().into()],
+            None,
+            None,
         );
-        assert_eq!(
-            blocks[0].text,
-            "You are LingXi, an agentic command-line coding assistant."
+        let blocks = lingxi_llm_client::providers::anthropic::system_prompt::project_system_prompt(
+            &system,
+            None,
+            model,
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            Default::default(),
         );
-        assert!(
-            blocks[1].text.starts_with('\n'),
-            "{model}: the body block retains Claude's leading LF"
-        );
+        assert_eq!(blocks.len(), 1, "{model}: no provider metadata in this fixture");
+        assert_eq!(blocks[0].block.text, assembled);
+        let body_text = blocks[0]
+            .block
+            .text
+            .strip_prefix("You are LingXi, an agentic command-line coding assistant.\n\n")
+            .expect("brand header followed by the complete two-LF section separator");
+        assert!(body_text.starts_with('\n'), "{model}: body retains leading LF");
 
-        let body = normalize_prompt_body(&blocks[1].text, &cwd, &memory_dir);
+        let body = normalize_prompt_body(body_text, &cwd, &memory_dir);
         assert_eq!(body.len(), expected_len, "{model}: body length drifted");
         let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
         assert_eq!(digest, expected_sha, "{model}: normalized body drifted");
@@ -443,6 +452,8 @@ async fn live_orchestrator_prompt_uses_production_context() {
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::with_files(vec![MemoryFile {
+            parent: None,
+            source_content: None,
             path: cwd.join("LINGXI.md"),
             body: memory_body.to_string(),
             is_local_override: false,
@@ -533,10 +544,29 @@ fn production_output_style_bodies_match_their_byte_locks() {
                 keep_coding_instructions: style.keep_coding_instructions,
             }),
         );
-        let blocks = llm_runtime::prompt_format::split_system_blocks(&assembled, true);
-        assert_eq!(blocks.len(), 2);
+        // This visible-body fixture carries one source element. Provider/cache
+        // section boundaries are covered by the SDK's source-vector tests.
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![assembled.clone().into()],
+            None,
+            None,
+        );
+        let blocks = lingxi_llm_client::providers::anthropic::system_prompt::project_system_prompt(
+            &system,
+            None,
+            "claude-opus-5",
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            Default::default(),
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block.text, assembled);
+        let body_text = blocks[0]
+            .block
+            .text
+            .strip_prefix("You are LingXi, an agentic command-line coding assistant.\n\n")
+            .expect("brand header followed by the complete two-LF section separator");
 
-        let body = normalize_prompt_body(&blocks[1].text, &cwd, &memory_dir);
+        let body = normalize_prompt_body(body_text, &cwd, &memory_dir);
         assert_eq!(
             body.len(),
             expected_len,

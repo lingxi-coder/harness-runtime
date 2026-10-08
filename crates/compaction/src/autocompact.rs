@@ -62,8 +62,8 @@ pub enum CompactionError {
     /// Autocompact does not apply to this state.
     #[error("not applicable")]
     NotApplicable,
-    /// A manual `/compact` needs at least one completed exchange to summarize
-    /// while preserving a valid recent tail.
+    /// A manual `/compact` needs at least two API-round groups and substantive
+    /// conversation content.
     #[error("Not enough messages to compact.")]
     NotEnoughMessages,
     /// The provider returned no usable summary or an explicit API error.
@@ -85,6 +85,10 @@ pub struct AutocompactConfig {
     pub max_output_tokens: Option<u64>,
     /// User prompt instructing the summarizer.
     pub compact_user_prompt: String,
+    /// Permit the 2.1.286 `summarize_all` last resort after the recent-round
+    /// ladder is exhausted (`allowFallback !== false && Amt()`, default true).
+    /// Only affects manual and reactive compaction.
+    pub allow_fallback: bool,
 }
 
 impl Default for AutocompactConfig {
@@ -95,6 +99,7 @@ impl Default for AutocompactConfig {
             // Byte-faithful base compact prompt (TS `getCompactPrompt(None)`),
             // including the no-tools preamble/trailer.
             compact_user_prompt: crate::prompt::get_compact_prompt(None),
+            allow_fallback: true,
         }
     }
 }
@@ -203,17 +208,12 @@ impl Autocompactor {
 
     /// Run the explicit `/compact` manual path.
     ///
-    /// VERIFIED against the 2.1.211 binary (`edy → Juy → mXi → Nto`): the
-    /// manual compactor is the SAME group compactor as the reactive path —
-    /// it starts with `s = 1` (the LAST API-round group preserved verbatim,
-    /// `messagesToPreserve: m.flat()`), and errors `too_few_groups` when the
-    /// summarize prefix contains no assistant message. (The full-history
-    /// `messagesToKeep: []` path — `Pto` — is only ever called with
-    /// `isAutoCompact: !0`.) Where the manual path DOES differ from auto:
-    /// - no wired summarizer is a hard error (an explicit command must never
-    ///   fake success), and
-    /// - no valid preserved-tail split is `Not enough messages to compact.`
-    ///   (auto falls back to full replacement instead).
+    /// The 2.1.286 manual and reactive paths share `Hre`: first preserve the
+    /// last API round, then fall back to `summarize_all` when the prefix has no
+    /// assistant. `Qho` retains a pending user request after the last assistant
+    /// or tool result. A single completed exchange therefore succeeds, while
+    /// fewer than two groups still returns `Not enough messages to compact.`.
+    /// An explicit command always requires a real summarizer.
     pub async fn compact_manual_with_instructions(
         &self,
         messages: Vec<ConversationMessage>,
@@ -325,8 +325,33 @@ impl Autocompactor {
                 .any(|message| matches!(message, ConversationMessage::Assistant { .. }))
                 .then_some(split_at)
         };
+        let mut summarize_all = false;
+        let mut opening_round = false;
+        let mut opening_attempted = false;
+        let mut full_gap_hint = initial_token_gap;
         let mut split_at = if preserve_tail {
-            split_prefix(groups_preserved).ok_or(CompactionError::NotEnoughMessages)?
+            match split_prefix(groups_preserved) {
+                Some(split) => split,
+                None if self.config.allow_fallback => {
+                    let keep_at = summarize_all_split(&messages);
+                    let kept_tokens =
+                        crate::grouping::estimate_tokens_for_range(&messages[keep_at..]);
+                    if groups.len().saturating_sub(groups_preserved) == 1
+                        && initial_token_gap.is_some_and(|gap| {
+                            gap > kept_tokens
+                                && can_summarize_opening_round(&messages, &groups, gap)
+                        })
+                    {
+                        opening_round = true;
+                        opening_attempted = true;
+                        groups[0].end
+                    } else {
+                        summarize_all = true;
+                        keep_at
+                    }
+                }
+                None => return Err(CompactionError::NotEnoughMessages),
+            }
         } else {
             messages.len()
         };
@@ -349,6 +374,13 @@ impl Autocompactor {
             let mut summarize = messages[..split_at].to_vec();
             let mut stripped_media = false;
             let mut head_truncations = 0;
+            if summarize_all {
+                let fallback = prepare_summarize_all(&messages, full_gap_hint, false, false)
+                    .ok_or(CompactionError::NotEnoughMessages)?;
+                split_at = fallback.keep_at;
+                summarize = fallback.messages;
+                head_truncations = fallback.head_truncations;
+            }
             // The message-selector path brings its own body (`xer`); every other
             // path uses the base prompt, prebuilt unless focus text was given.
             let prompt = if let Some(overrides) = selector.as_ref() {
@@ -363,7 +395,15 @@ impl Autocompactor {
             // Ejt reuses its prompt, while each PCo attempt creates a new row.
             let mut summary_request =
                 ConversationMessage::user(lingxi_core::types::MessageId::new(), prompt.clone());
+            let mut issued_request = false;
             let result = loop {
+                if issued_request {
+                    // The caller races this future against cancellation. Give
+                    // its biased select a chance to observe a cancel raised by
+                    // the preceding response before dispatching a fallback.
+                    tokio::task::yield_now().await;
+                }
+                issued_request = true;
                 if preserve_tail {
                     summary_request = ConversationMessage::user(
                         lingxi_core::types::MessageId::new(),
@@ -391,6 +431,36 @@ impl Autocompactor {
                         .map(|value| u32::try_from(value).unwrap_or(u32::MAX)),
                 };
                 let response = runner.run(req).await;
+                // Xho gives a very large opening round one chance to produce a
+                // real <summary>. An error, untagged response, or a second
+                // media failure discards this attempt and only then drops it.
+                let discard_opening =
+                    opening_round
+                        && match &response {
+                            Ok(result) => {
+                                !result.final_text.starts_with(
+                                    crate::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE,
+                                ) && !has_summary_block(&result.final_text)
+                            }
+                            Err(sidequery::ForkError::Api(sidequery::SideQueryError::Api(
+                                llm_runtime::LlmError::ContextOverflow { .. },
+                            ))) => false,
+                            Err(sidequery::ForkError::Api(sidequery::SideQueryError::Api(
+                                error,
+                            ))) if is_media_compaction_error(error) => stripped_media,
+                            Err(_) => true,
+                        };
+                if discard_opening {
+                    let fallback =
+                        prepare_summarize_all(&messages, full_gap_hint, true, stripped_media)
+                            .ok_or(CompactionError::MaxRetriesExceeded)?;
+                    split_at = fallback.keep_at;
+                    summarize = fallback.messages;
+                    head_truncations = fallback.head_truncations;
+                    summarize_all = true;
+                    opening_round = false;
+                    continue;
+                }
                 let token_gap = match response {
                     Ok(result) => {
                         if !result
@@ -419,7 +489,36 @@ impl Autocompactor {
                     Err(error) => return Err(CompactionError::Summary(error.to_string())),
                 };
 
-                if preserve_tail {
+                if summarize_all && head_truncations == 0 && !opening_attempted && token_gap > 0 {
+                    let reported_full_gap = token_gap.saturating_add(
+                        crate::grouping::estimate_tokens_for_range(&messages[split_at..]),
+                    );
+                    if can_summarize_opening_round(&messages, &groups, reported_full_gap) {
+                        full_gap_hint = Some(full_gap_hint.unwrap_or(0).max(reported_full_gap));
+                        opening_attempted = true;
+                        opening_round = true;
+                        summarize_all = false;
+                        groups_preserved = groups.len() - 1;
+                        split_at = groups[0].end;
+                        summarize = messages[..split_at].to_vec();
+                        continue;
+                    }
+                }
+
+                if preserve_tail && !summarize_all {
+                    // Ee is the most recent ordinary round failure; older
+                    // round gaps must not force excessive head truncation.
+                    // Opening-only failures additionally retain the original
+                    // Ee / Pe bound, matching Hre's separate Ne hint.
+                    if !opening_round {
+                        full_gap_hint = initial_token_gap;
+                    }
+                    if token_gap > 0 {
+                        let reported_full_gap = token_gap.saturating_add(
+                            crate::grouping::estimate_tokens_for_range(&messages[split_at..]),
+                        );
+                        full_gap_hint = Some(full_gap_hint.unwrap_or(0).max(reported_full_gap));
+                    }
                     // x0e keeps more trailing rounds after PTL. The oldest
                     // conversation remains in every request and in the result.
                     let summarized_groups = groups.len().saturating_sub(groups_preserved);
@@ -427,18 +526,58 @@ impl Autocompactor {
                         &group_tokens[..summarized_groups],
                         (token_gap > 0).then_some(token_gap),
                     );
-                    split_at = split_prefix(groups_preserved)
-                        .ok_or(CompactionError::MaxRetriesExceeded)?;
-                    summarize = messages[..split_at].to_vec();
+                    if let Some(split) = split_prefix(groups_preserved) {
+                        split_at = split;
+                        summarize = messages[..split_at].to_vec();
+                    } else if self.config.allow_fallback {
+                        // Hre's Qho last resort preserves a pending user turn,
+                        // not a complete assistant-led API round. Account for
+                        // the tail absent from the failed request when moving
+                        // its token gap onto the full summarize set.
+                        let keep_at = summarize_all_split(&messages);
+                        let kept_tokens =
+                            crate::grouping::estimate_tokens_for_range(&messages[keep_at..]);
+                        if !opening_attempted
+                            && groups.len().saturating_sub(groups_preserved) == 1
+                            && full_gap_hint.is_some_and(|gap| {
+                                gap > kept_tokens
+                                    && can_summarize_opening_round(&messages, &groups, gap)
+                            })
+                        {
+                            opening_attempted = true;
+                            opening_round = true;
+                            split_at = groups[0].end;
+                            summarize = messages[..split_at].to_vec();
+                            continue;
+                        }
+                        let fallback =
+                            prepare_summarize_all(&messages, full_gap_hint, true, stripped_media)
+                                .ok_or(CompactionError::MaxRetriesExceeded)?;
+                        split_at = fallback.keep_at;
+                        summarize = fallback.messages;
+                        head_truncations = fallback.head_truncations;
+                        summarize_all = true;
+                        opening_round = false;
+                    } else {
+                        return Err(CompactionError::MaxRetriesExceeded);
+                    }
                 } else {
                     // Ejt full automatic compaction retries only the summary
                     // request, with up to three oldest-group truncations.
                     if head_truncations >= crate::thresholds::MAX_PTL_RETRIES {
                         return Err(CompactionError::MaxRetriesExceeded);
                     }
+                    if summarize_all && stripped_media {
+                        summarize = crate::strip_media::strip_images_from_messages(summarize);
+                    }
                     summarize = crate::ptl_retry::truncate_head_for_ptl_retry(summarize, token_gap)
                         .ok_or(CompactionError::MaxRetriesExceeded)?;
                     head_truncations += 1;
+                    if summarize_all
+                        && !has_substantive_fallback_content(&summarize, &messages[split_at..])
+                    {
+                        return Err(CompactionError::MaxRetriesExceeded);
+                    }
                 }
             };
             let raw_summary_text = crate::prompt::trim_compact_text(&result.final_text).to_owned();
@@ -510,6 +649,148 @@ impl Autocompactor {
             messages_to_preserve: Vec::new(),
         })
     }
+}
+
+struct SummarizeAll {
+    keep_at: usize,
+    messages: Vec<ConversationMessage>,
+    head_truncations: u32,
+}
+
+fn prepare_summarize_all(
+    messages: &[ConversationMessage],
+    full_gap: Option<u64>,
+    after_failed_round: bool,
+    stripped_media: bool,
+) -> Option<SummarizeAll> {
+    let keep_at = summarize_all_split(messages);
+    let kept = &messages[keep_at..];
+    let kept_tokens = crate::grouping::estimate_tokens_for_range(kept);
+    let truncate_gap = match full_gap {
+        Some(gap) => gap.checked_sub(kept_tokens).filter(|gap| *gap > 0),
+        None if after_failed_round => Some(0),
+        None => None,
+    };
+    let mut summarize = messages[..keep_at].to_vec();
+    if let Some(gap) = truncate_gap {
+        if stripped_media {
+            summarize = crate::strip_media::strip_images_from_messages(summarize);
+        }
+        summarize = crate::ptl_retry::truncate_head_for_ptl_retry(summarize, gap)?;
+    }
+    // Hre validates the fresh summarize set alone. Only a planned head drop
+    // may count substantive content retained in the pending user tail.
+    if !has_substantive_fallback_content(
+        &summarize,
+        if truncate_gap.is_some() { kept } else { &[] },
+    ) {
+        return None;
+    }
+    Some(SummarizeAll {
+        keep_at,
+        messages: summarize,
+        head_truncations: u32::from(truncate_gap.is_some()),
+    })
+}
+
+/// 2.1.286 nAt: preserve a substantive opening round when it alone can cover
+/// the overflow plus the 20k + 5*5k + 25k request/restoration allowance, even
+/// after reserving ten percent of that round for its summary.
+fn can_summarize_opening_round(
+    messages: &[ConversationMessage],
+    groups: &[crate::grouping::ApiRoundGroup],
+    gap: u64,
+) -> bool {
+    let Some(first) = groups.first() else {
+        return false;
+    };
+    let opening = &messages[first.start..first.end];
+    if !has_substantive_fallback_content(opening, &[]) {
+        return false;
+    }
+    // ConversationMessage lacks isApiErrorMessage. A leading PTL marker is a
+    // conservative counterpart of nAt's fge guard until that flag is typed.
+    if groups.get(1).and_then(|group| messages.get(group.start)).is_some_and(|message| {
+        matches!(message, ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, lingxi_core::types::ContentBlock::Text { text, .. } if text.starts_with(crate::prompt_too_long::PROMPT_TOO_LONG_ERROR_MESSAGE))))
+    }) {
+        return false;
+    }
+    let tokens = crate::grouping::estimate_tokens_for_range(opening);
+    tokens.saturating_sub(tokens.div_ceil(10)) >= gap.saturating_add(70_000)
+}
+
+fn has_summary_block(text: &str) -> bool {
+    static ANALYSIS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?s)<analysis>.*?</analysis>").expect("valid analysis pattern")
+    });
+    static SUMMARY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?s)<summary>.*?</summary>").expect("valid summary pattern")
+    });
+    SUMMARY.is_match(&ANALYSIS.replace(text, ""))
+}
+
+/// 2.1.286 `Qho`: a pending real user turn stays after the summary. Tool results
+/// anchor their preceding tool call in the summarize set; meta rows never
+/// become the pending turn. The typed conversation currently has no upstream
+/// `isVirtual` / `isApiErrorMessage` flags to classify here.
+fn summarize_all_split(messages: &[ConversationMessage]) -> usize {
+    let anchor = messages.iter().rposition(|message| {
+        matches!(message, ConversationMessage::Assistant { .. }) || is_tool_result_message(message)
+    });
+    messages
+        .iter()
+        .enumerate()
+        .rfind(|(index, message)| {
+            anchor.is_none_or(|anchor| *index > anchor)
+                && matches!(message, ConversationMessage::User { is_meta: false, .. })
+                && !is_tool_result_message(message)
+                && !is_compaction_sentinel(message)
+        })
+        .map_or(messages.len(), |(index, _)| index)
+}
+
+fn is_tool_result_message(message: &ConversationMessage) -> bool {
+    matches!(message, ConversationMessage::User { content, .. }
+        if content.iter().any(|block| matches!(block, lingxi_core::types::ContentBlock::ToolResult { .. })))
+}
+
+/// 2.1.286 `fD` / `iAe`: interruption and no-response rows are not substantive.
+fn is_compaction_sentinel(message: &ConversationMessage) -> bool {
+    let content = match message {
+        ConversationMessage::User { content, .. }
+        | ConversationMessage::Assistant { content, .. } => content,
+        ConversationMessage::System { .. } => return false,
+    };
+    matches!(content.first(), Some(lingxi_core::types::ContentBlock::Text { text, .. }) if matches!(text.as_str(),
+        "[Request interrupted by user]"
+        | "[Request interrupted by user for tool use]"
+        | "No response requested."
+        | "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed."
+        | "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+    ))
+}
+
+/// 2.1.286 `bIe` / `iAt`: reject a request containing only synthetic retry
+/// markers or a tiny user-only conversation.
+fn has_substantive_fallback_content(
+    summarize: &[ConversationMessage],
+    keep: &[ConversationMessage],
+) -> bool {
+    if summarize.iter().chain(keep).any(|message| {
+        matches!(message, ConversationMessage::Assistant { .. }) && !is_compaction_sentinel(message)
+    }) {
+        return true;
+    }
+    summarize
+        .iter()
+        .chain(keep)
+        .filter(|message| {
+            matches!(message, ConversationMessage::User { is_meta: false, .. })
+                && !is_compaction_sentinel(message)
+        })
+        .map(|message| crate::grouping::estimate_tokens_for_range(std::slice::from_ref(message)))
+        .sum::<u64>()
+        >= 1_000
 }
 
 /// 2.1.261 rPn: sum from the summarize tail, falling back to half the
@@ -722,9 +1003,9 @@ mod tests {
 
     /// Assistant message carrying a tool-use block under `id` (opens a group).
     fn assistant_tool(id: MessageId, tool: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id,
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: ToolUseId::new(),
                 name: tool.into(),
                 input: json!({}),
@@ -735,12 +1016,12 @@ mod tests {
     }
 
     fn tool_result_msg() -> ConversationMessage {
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "ok".into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -892,6 +1173,344 @@ mod tests {
         assert!(!result.summary_messages[0]
             .text_content()
             .contains("Recent messages are preserved verbatim."));
+    }
+
+    /// 2.1.286 Hre / Qho, also observed through the real CLI on a single
+    /// complete exchange: the ordinary prefix has no assistant, so the
+    /// default-enabled last resort summarizes both messages.
+    #[tokio::test]
+    async fn one_complete_exchange_uses_summarize_all_for_manual_and_reactive() {
+        let history = vec![user_msg("q1"), assistant_text("only reply")];
+        for reactive in [false, true] {
+            let (compactor, client) = wired("<summary>one round</summary>", history.clone()).await;
+            let result = if reactive {
+                compactor
+                    .compact_reactive_with_instructions(
+                        history.clone(),
+                        Some("keep the answer"),
+                        None,
+                    )
+                    .await
+            } else {
+                compactor
+                    .compact_manual_with_instructions(history.clone(), Some("keep the answer"))
+                    .await
+            }
+            .expect("286 summarizes one complete exchange");
+            assert!(result.messages_to_preserve.is_empty());
+            assert_eq!(result.raw_summary_text, "<summary>one round</summary>");
+            assert!(result.compaction_usage.is_some());
+            let request = client.seen.lock().unwrap();
+            let request = request.as_ref().unwrap();
+            assert_eq!(&request.messages[..history.len()], &history);
+            assert_eq!(
+                request.messages.last().unwrap().text_content(),
+                crate::prompt::get_compact_prompt(Some("keep the answer"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oracle_286_short_history_fallback_traces() {
+        fn expand_text(value: &serde_json::Value) -> String {
+            value.as_str().map(str::to_string).unwrap_or_else(|| {
+                value["text"]
+                    .as_str()
+                    .unwrap()
+                    .repeat(value["repeat"].as_u64().unwrap_or(1) as usize)
+            })
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/claude_2_1_286_compact_fallback.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let history = case["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    let text = expand_text(row);
+                    if row["role"] == "assistant" {
+                        assistant_text(&text)
+                    } else if row["meta"] == true {
+                        ConversationMessage::user_meta(MessageId::new(), text)
+                    } else {
+                        user_msg(&text)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut responses = case["responses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|reply| {
+                    if let Some(summary) = reply["summary"].as_str() {
+                        return Ok(summary.to_owned());
+                    }
+                    match reply.as_str().or_else(|| reply["reason"].as_str()).unwrap() {
+                        "prompt_too_long" => match reply["tokenGap"].as_u64() {
+                            Some(token_gap) => {
+                                Err(llm_runtime::LlmError::ContextOverflow { token_gap })
+                            }
+                            None => Ok("Prompt is too long".into()),
+                        },
+                        "media_too_large" => Err(llm_runtime::LlmError::RequestTooLarge),
+                        "error" => Err(llm_runtime::LlmError::InvalidRequest {
+                            message: "test-error".into(),
+                        }),
+                        reason => panic!("unsupported oracle response {reason}"),
+                    }
+                })
+                .collect::<Vec<_>>();
+            responses.push(Ok("<summary>oracle summary</summary>".into()));
+            let (mut compactor, client) = wired_seq(Vec::new(), history.clone()).await;
+            *client.texts.lock().unwrap() = responses.into();
+            compactor.config.allow_fallback = case["allowFallback"].as_bool().unwrap_or(true);
+            let result = compactor
+                .compact_reactive_with_instructions(history, None, case["initialTokenGap"].as_u64())
+                .await;
+            let expected = &case["expected"];
+            let requests = client
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| {
+                    request.messages[..request.messages.len() - 1]
+                        .iter()
+                        .map(ConversationMessage::text_content)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let expected_requests = expected["requests"].as_array().unwrap();
+            assert_eq!(
+                requests.len(),
+                expected_requests.len(),
+                "case {}",
+                case["name"]
+            );
+            for (attempt, (request, expected_request)) in
+                requests.iter().zip(expected_requests).enumerate()
+            {
+                let expected_request = expected_request.as_array().unwrap();
+                assert_eq!(
+                    request.len(),
+                    expected_request.len(),
+                    "case {}, attempt {attempt}",
+                    case["name"]
+                );
+                for (row, (text, expected_text)) in request.iter().zip(expected_request).enumerate()
+                {
+                    assert!(
+                        *text == expand_text(expected_text),
+                        "case {}, attempt {attempt}, row {row}: byte mismatch",
+                        case["name"]
+                    );
+                }
+            }
+            match result {
+                Ok(result) => {
+                    assert_eq!(expected["ok"], true, "case {}", case["name"]);
+                    let expected_kept = expected["kept"].as_array().unwrap();
+                    assert_eq!(
+                        result.messages_to_preserve.len(),
+                        expected_kept.len(),
+                        "case {}",
+                        case["name"]
+                    );
+                    for (message, expected) in result.messages_to_preserve.iter().zip(expected_kept)
+                    {
+                        assert!(
+                            message.text_content() == expand_text(expected),
+                            "case {}: kept bytes differ",
+                            case["name"]
+                        );
+                    }
+                    assert_eq!(
+                        result.summary_messages[0].text_content().contains(
+                            "the earliest part of the conversation was too large to include"
+                        ),
+                        expected["headTruncations"].as_u64().unwrap() > 0
+                    );
+                }
+                Err(error) => {
+                    assert_eq!(expected["ok"], false, "case {}: {error}", case["name"]);
+                    let reason = match error {
+                        CompactionError::NotEnoughMessages => "too_few_groups",
+                        CompactionError::MaxRetriesExceeded => "exhausted",
+                        error => panic!("unexpected compaction failure: {error}"),
+                    };
+                    assert_eq!(
+                        reason,
+                        expected["reason"].as_str().unwrap(),
+                        "case {}",
+                        case["name"]
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_all_preserves_the_last_pending_real_user_turn() {
+        let history = vec![
+            user_msg("q1"),
+            assistant_text("answer"),
+            user_msg("queued one"),
+            user_msg("queued two"),
+            ConversationMessage::user_meta(MessageId::new(), "meta context".into()),
+        ];
+        let (compactor, client) = wired("<summary>first exchange</summary>", history.clone()).await;
+        let result = compactor
+            .compact_manual_with_instructions(history.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(result.messages_to_preserve, history[3..]);
+        assert_eq!(
+            &client.seen.lock().unwrap().as_ref().unwrap().messages[..3],
+            &history[..3]
+        );
+    }
+
+    #[test]
+    fn summarize_all_split_keeps_tool_results_with_their_call() {
+        let tool_result = ConversationMessage::User { api_message_override: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult { content_projection: None,
+                tool_use_id: ToolUseId::new(),
+                content: "done".into(),
+                is_error: Some(false),
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+        };
+        let mut history = vec![
+            user_msg("q1"),
+            assistant_text("tool call"),
+            user_msg("queued"),
+            tool_result,
+        ];
+        assert_eq!(
+            summarize_all_split(&history),
+            4,
+            "a later tool result anchors the queued user into the summary"
+        );
+        history.push(user_msg("pending"));
+        history.push(user_msg("[Request interrupted by user]"));
+        assert_eq!(summarize_all_split(&history), 4);
+    }
+
+    #[tokio::test]
+    async fn summarize_all_respects_group_minimum_and_explicit_opt_out() {
+        for history in [
+            vec![],
+            vec![user_msg("unanswered")],
+            vec![assistant_text("no prior user")],
+        ] {
+            let (compactor, client) = wired("unused", history.clone()).await;
+            assert!(matches!(
+                compactor
+                    .compact_manual_with_instructions(history, None)
+                    .await,
+                Err(CompactionError::NotEnoughMessages)
+            ));
+            assert!(client.seen.lock().unwrap().is_none());
+        }
+        let history = vec![user_msg("q1"), assistant_text("a1")];
+        let (mut compactor, client) = wired("unused", history.clone()).await;
+        compactor.config.allow_fallback = false;
+        assert!(matches!(
+            compactor
+                .compact_manual_with_instructions(history, None)
+                .await,
+            Err(CompactionError::NotEnoughMessages)
+        ));
+        assert!(client.seen.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn exhausted_round_ladder_uses_bounded_head_truncation_last_resort() {
+        let history = vec![
+            user_msg("oldest"),
+            assistant_text("a1"),
+            user_msg("q2"),
+            assistant_text("a2"),
+        ];
+        let (compactor, client) = wired_seq(
+            vec![
+                "Prompt is too long".into(),
+                "<summary>last resort</summary>".into(),
+            ],
+            history.clone(),
+        )
+        .await;
+        let result = compactor
+            .compact_manual_with_instructions(history.clone(), None)
+            .await
+            .unwrap();
+        let requests = client.seen.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(&requests[0].messages[..3], &history[..3]);
+        assert_eq!(
+            requests[1].messages[0].text_content(),
+            crate::ptl_retry::PTL_RETRY_MARKER
+        );
+        assert_eq!(&requests[1].messages[1..4], &history[1..]);
+        assert!(result.messages_to_preserve.is_empty());
+        assert!(result.summary_messages[0].text_content().contains("the earliest part of the conversation was too large to include and is NOT covered by this summary"));
+    }
+
+    #[tokio::test]
+    async fn summarize_all_ptl_retry_cannot_loop_on_a_synthetic_marker() {
+        let history = vec![user_msg("q1"), assistant_text("a1")];
+        let (compactor, client) =
+            wired_seq(vec!["Prompt is too long".into(); 4], history.clone()).await;
+        assert!(matches!(
+            compactor
+                .compact_manual_with_instructions(history, None)
+                .await,
+            Err(CompactionError::MaxRetriesExceeded)
+        ));
+        assert_eq!(
+            client.seen.lock().unwrap().len(),
+            2,
+            "only the first attempt can drop a substantive group"
+        );
+    }
+
+    #[tokio::test]
+    async fn summarize_all_does_not_summarize_interruption_only_content() {
+        let history = vec![
+            user_msg("q1"),
+            assistant_text("[Request interrupted by user]"),
+        ];
+        let (compactor, client) = wired("unused", history.clone()).await;
+        assert!(matches!(
+            compactor
+                .compact_manual_with_instructions(history, None)
+                .await,
+            Err(CompactionError::NotEnoughMessages)
+        ));
+        assert!(client.seen.lock().unwrap().is_none());
+        assert!(!has_substantive_fallback_content(
+            &[ConversationMessage::user_meta(
+                MessageId::new(),
+                "x".repeat(5_000)
+            )],
+            &[]
+        ));
+        assert!(!has_substantive_fallback_content(
+            &[user_msg(&"x".repeat(3_997))],
+            &[]
+        ));
+        assert!(has_substantive_fallback_content(
+            &[user_msg(&"x".repeat(3_998))],
+            &[]
+        ));
     }
 
     // ===== `/rewind` message-selector summarize (oracle `zir`) ==============
@@ -1189,9 +1808,9 @@ mod tests {
     // --- #58: preserved recent-message tail ------------------------------ //
 
     fn assistant_text(text: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text { text: text.into(), citations: None }],
             stop_reason: Some("end_turn".into()),
         }
     }
@@ -1282,7 +1901,7 @@ mod tests {
 
     #[tokio::test]
     async fn media_recovery_retries_same_prefix_once_with_stripped_images() {
-        let image = ConversationMessage::User {
+        let image = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Image {
                 source: lingxi_core::types::ImageSource::Url {

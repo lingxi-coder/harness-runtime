@@ -59,13 +59,17 @@ const SHELL_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 #[derive(Clone)]
 pub struct ShellMobileTool {
     ctx: BuiltinToolContext,
+    precommit_latch: tool_api::bash_precommit::BashPrecommitLatch,
 }
 
 impl ShellMobileTool {
     /// Construct from the builtin tool context.
     #[must_use]
     pub fn new(ctx: BuiltinToolContext) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            precommit_latch: Default::default(),
+        }
     }
 }
 
@@ -220,7 +224,7 @@ impl Tool for ShellMobileTool {
         }
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
+    async fn prompt(&self, opts: &PromptOptions) -> String {
         let (applets, sh_version, bundled, runtime_label) = match self.ctx.mobile_shell() {
             Some(a) => (
                 a.applets.clone(),
@@ -320,6 +324,15 @@ impl Tool for ShellMobileTool {
         }
         if let Some(v) = sh_version {
             prompt.push_str(&format!("Shell version: {v}.\n"));
+        }
+        let precommit = self.precommit_latch.suggestion(
+            opts.bash_precommit_skills,
+            opts.bash_precommit_session_generation,
+        );
+        if !precommit.is_empty() {
+            prompt.push('\n');
+            prompt.push_str(&precommit);
+            prompt.push('\n');
         }
         prompt
     }
@@ -447,7 +460,7 @@ impl Tool for ShellMobileTool {
 
         let permission_denied = output_reports_permission_denial(&stdout, &stderr);
         let command_failed = out.exit_code != 0 || permission_denied;
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "exit_code": out.exit_code,
                 "stdout":    stdout,
@@ -775,6 +788,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mobile_prompt_uses_native_precommit_sentence_and_request_carrier() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../shell/tests/fixtures/bash_precommit_286.json"
+        ))
+        .unwrap();
+        let case = fixture["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "all_three")
+            .unwrap();
+        let expected = case["outputs"][0]["suggestion"].as_str().unwrap();
+        let (ctx, _, _) = enabled_ctx(ok_output(""));
+        let tool = ShellMobileTool::new(ctx);
+        assert!(!tool
+            .prompt(&PromptOptions::default())
+            .await
+            .contains("Always run `/"));
+        let prompt = tool
+            .clone()
+            .prompt(&PromptOptions {
+                bash_precommit_skills: tool_api::tool_trait::BashPrecommitSkills {
+                    custom_verify: true,
+                    custom_simplify: true,
+                    code_review: true,
+                },
+                ..Default::default()
+            })
+            .await;
+        assert!(prompt.contains(expected), "{prompt}");
+    }
+
+    #[tokio::test]
     async fn prompt_declares_mksh_dialect_and_lists_applets() {
         let (ctx, _, _) = enabled_ctx(ok_output(""));
         let tool = ShellMobileTool::new(ctx);
@@ -783,6 +829,7 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert!(
@@ -821,6 +868,7 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert!(prompt.contains("mksh"), "still mksh dialect: {prompt}");
@@ -845,6 +893,7 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert!(

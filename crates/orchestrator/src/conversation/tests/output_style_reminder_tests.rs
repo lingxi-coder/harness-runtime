@@ -18,6 +18,165 @@ const EXPLANATORY_REMINDER: &str = "<system-reminder>\nExplanatory output style 
 const LEARNING_REMINDER: &str = "<system-reminder>\nLearning output style is active. \
      Remember to follow the specific guidelines for this style.\n</system-reminder>";
 
+#[tokio::test]
+async fn plan_attachment_precedes_output_style_in_outgoing_order() {
+    let orch = ConversationOrchestrator::new(
+        config_with_style("Explanatory"),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    {
+        let session = orch.session();
+        let mut state = session.lock().await;
+        state.plan_mode = true;
+        state.plan_reminder_shown = false;
+    }
+    let reminders = orch.collect_turn_reminders(true, true, None).await;
+    let plan = reminders
+        .transient
+        .iter()
+        .position(|message| message.text_content().contains("Plan mode is active."))
+        .expect("plan reminder");
+    let style = reminders
+        .transient
+        .iter()
+        .position(|message| message.text_content() == EXPLANATORY_REMINDER)
+        .expect("output style reminder");
+    assert!(plan < style, "native attachment fan-out sends plan first");
+}
+
+#[tokio::test]
+async fn mod_attachment_rewrites_the_outgoing_style_reminder_and_caches_by_message_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("attachment.js");
+    std::fs::write(
+        &module,
+        r#"let calls = 0;
+           export function register(on) {
+             on('prompt.attachment', { type: 'output_style' }, ($, e, next) =>
+               e.text.startsWith('Learning')
+                 ? { text: null }
+                 : next({ ...e, text: `rewritten ${++calls}` }));
+             on('prompt.submit', ($, e, next) => {
+               $.ui.invalidate('prompt.attachment');
+               return next(e);
+             });
+           }"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load("attachment", dir.path(), &module, serde_json::json!({}))
+        .await
+        .unwrap();
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host.clone());
+    let orch = ConversationOrchestrator::new(
+        config_with_style("Explanatory"),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+
+    let reminders = orch.collect_turn_reminders(true, true, None).await;
+    assert!(reminders.transient.iter().any(|message| {
+        text_of(message) == "<system-reminder>\nrewritten 1\n</system-reminder>"
+    }));
+    assert!(!reminders
+        .transient
+        .iter()
+        .any(|message| text_of(message) == EXPLANATORY_REMINDER));
+
+    let original = orch.output_style_reminder_message().await.unwrap();
+    let first = orch
+        .mod_prompt_attachment(
+            "output_style",
+            original.clone(),
+            serde_json::json!({"kind":"engine"}),
+        )
+        .await
+        .unwrap();
+    let replay = orch
+        .mod_prompt_attachment(
+            "output_style",
+            original,
+            serde_json::json!({"kind":"engine"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        text_of(&first),
+        "<system-reminder>\nrewritten 2\n</system-reminder>"
+    );
+    assert_eq!(text_of(&replay), text_of(&first));
+
+    let another = orch.output_style_reminder_message().await.unwrap();
+    let another = orch
+        .mod_prompt_attachment(
+            "output_style",
+            another,
+            serde_json::json!({"kind":"engine"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        text_of(&another),
+        "<system-reminder>\nrewritten 3\n</system-reminder>"
+    );
+
+    host.dispatch_with_log_at_session(
+        "prompt.submit",
+        serde_json::json!({"text":"refresh"}),
+        &orch,
+        |event| async move { Ok(event) },
+        |_, _| async {},
+    )
+    .await
+    .unwrap();
+    let refreshed = orch.output_style_reminder_message().await.unwrap();
+    let refreshed = orch
+        .mod_prompt_attachment(
+            "output_style",
+            refreshed,
+            serde_json::json!({"kind":"engine"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        text_of(&refreshed),
+        "<system-reminder>\nrewritten 4\n</system-reminder>"
+    );
+
+    let mut registry = hooks::HookRegistry::new();
+    registry.set_mod_host(host);
+    let learning = ConversationOrchestrator::new(
+        config_with_style("Learning"),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+    assert!(!learning
+        .collect_turn_reminders(true, true, None)
+        .await
+        .transient
+        .iter()
+        .any(|message| text_of(message) == LEARNING_REMINDER));
+}
+
 /// Config with a non-default builtin output style active.
 fn config_with_style(style: &str) -> OrchestratorConfig {
     OrchestratorConfig {
@@ -33,7 +192,7 @@ fn text_of(msg: &ConversationMessage) -> String {
         | ConversationMessage::Assistant { content, .. } => content
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -46,15 +205,30 @@ fn is_reminder(msg: &ConversationMessage, expected: &str) -> bool {
     matches!(msg, ConversationMessage::User { .. }) && text_of(msg) == expected
 }
 
-/// True when `msg` is the leading `additionalContext` (`# claudeMd` /
-/// `# userEmail` / `# currentDate`) meta message prepended each turn
-/// (R-P1c/R-P1d). With `StaticMemoryProvider::empty()` and no `user_email`
-/// it carries only the always-present `# currentDate` entry.
-fn is_additional_context(msg: &ConversationMessage) -> bool {
-    matches!(msg, ConversationMessage::User { .. })
-        && text_of(msg).starts_with(
-            "<system-reminder>\nAs you answer the user's questions, you can use the following context:",
-        )
+/// Empty eager files still announce a durable session-context anchor and date
+/// after the human prompt; the empty anchor has no model projection.
+fn assert_normal_empty_context(
+    orch: &ConversationOrchestrator,
+    sent: &[ConversationMessage],
+    prompt: &str,
+) {
+    assert_eq!(text_of(&sent[0]), prompt);
+    assert!(
+        matches!(&sent[1], ConversationMessage::System { content, subtype, .. }
+        if content.is_empty() && subtype.as_deref() == Some("model_reminder_attachment"))
+    );
+    let date = crate::prompt::env_meta::current_date_string();
+    assert_eq!(
+        orch.context_attachment_history(&sent[1..3]),
+        vec![
+            serde_json::json!({"type":"session_context", "context":{}}),
+            serde_json::json!({"type":"date", "date":date}),
+        ]
+    );
+    assert_eq!(
+        text_of(&sent[2]),
+        format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+    );
 }
 
 // ----- direct unit coverage of the reminder builder -----
@@ -311,6 +485,7 @@ async fn batched_active_style_appends_transient_reminder_not_persisted() {
         vec![LlmContentBlock::Text {
             text: "assistant body".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -329,48 +504,37 @@ async fn batched_active_style_appends_transient_reminder_not_persisted() {
 
     orch.run_turn("user prompt body").await.expect("turn");
 
-    // OUTGOING snapshot: [additionalContext(meta), user(prompt), reminder,
-    // total_tokens reminder] —
-    // the leading additional-context meta message (R-P1c/d) prepends the
-    // user prompt; the output-style reminder trails it (TS position).
+    // Ordinary Or announcements precede the transient style fan-out. The
+    // durable total-token attachment is last, with its original identity.
     let outgoing = api.captured_msgs().await;
     assert_eq!(outgoing.len(), 1, "exactly one batched API call");
     let sent = &outgoing[0];
     assert_eq!(
         sent.len(),
-        4,
-        "additionalContext + prompt + reminder + total_tokens; got {sent:?}"
+        5,
+        "prompt + empty session_context + date + style + total_tokens"
     );
-    assert!(
-        is_additional_context(&sent[0]),
-        "leading meta; got {:?}",
-        sent[0]
+    assert_normal_empty_context(&orch, sent, "user prompt body");
+    assert!(is_reminder(&sent[3], EXPLANATORY_REMINDER));
+    assert_eq!(
+        orch.context_attachment_history(&sent[4..5])[0]["type"],
+        "total_tokens_reminder"
     );
-    assert_eq!(text_of(&sent[1]), "user prompt body");
-    assert!(
-        is_reminder(&sent[2], EXPLANATORY_REMINDER),
-        "style message must be the byte-exact reminder; got {:?}",
-        sent[2]
-    );
-    assert!(
-        text_of(&sent[3]).contains("<total_tokens>"),
-        "total-tokens reminder trails the batch; got {:?}",
-        sent[3]
-    );
-
-    // STORED history: [user(prompt), assistant] — the reminder was NOT pushed.
+    assert!(text_of(&sent[4]).contains("<total_tokens>"));
     let history = orch.session.lock().await.history.clone();
-    assert_eq!(history.len(), 2, "user + assistant only; got {history:?}");
-    assert!(
-        history
-            .iter()
-            .all(|m| !is_reminder(m, EXPLANATORY_REMINDER)),
-        "the reminder must never enter stored history; got {history:?}"
+    assert_eq!(
+        history.len(),
+        5,
+        "human + context anchor + date + total_tokens + assistant"
     );
-    assert_eq!(text_of(&history[0]), "user prompt body");
-    assert_eq!(text_of(&history[1]), "assistant body");
+    assert!(history
+        .iter()
+        .all(|message| !is_reminder(message, EXPLANATORY_REMINDER)));
+    assert_eq!(&history[..3], &sent[..3]);
+    assert_eq!(history[3], sent[4]);
+    assert_eq!(text_of(&history[4]), "assistant body");
 
-    // JSONL transcript: user + assistant only, reminder text absent.
+    // JSONL retains the ordinary durable attachments, with style reminder text absent.
     let on_disk = std::fs::read_to_string(&session_path).expect("read jsonl");
     assert!(on_disk.contains("user prompt body"));
     assert!(on_disk.contains("assistant body"));
@@ -386,6 +550,7 @@ async fn batched_default_style_sends_no_reminder() {
         vec![LlmContentBlock::Text {
             text: "body".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -405,21 +570,17 @@ async fn batched_default_style_sends_no_reminder() {
 
     let outgoing = api.captured_msgs().await;
     assert_eq!(outgoing.len(), 1);
-    // No output-style reminder; additional context leads and the stock
-    // total-tokens reminder trails the prompt.
     assert_eq!(
         outgoing[0].len(),
-        3,
-        "additionalContext + prompt + total_tokens; got {:?}",
-        outgoing[0]
+        4,
+        "prompt + session_context + date + total_tokens"
     );
-    assert!(
-        is_additional_context(&outgoing[0][0]),
-        "leading meta; got {:?}",
-        outgoing[0][0]
+    assert_normal_empty_context(&orch, &outgoing[0], "just the prompt");
+    assert_eq!(
+        orch.context_attachment_history(&outgoing[0][3..4])[0]["type"],
+        "total_tokens_reminder"
     );
-    assert_eq!(text_of(&outgoing[0][1]), "just the prompt");
-    assert!(text_of(&outgoing[0][2]).contains("<total_tokens>"));
+    assert!(text_of(&outgoing[0][3]).contains("<total_tokens>"));
     assert!(
         !outgoing[0]
             .iter()
@@ -451,53 +612,40 @@ async fn streaming_active_style_appends_transient_reminder_not_persisted() {
         message_delta_stop("end_turn"),
         message_stop(),
     ]]));
-    let orch = ConversationOrchestrator::new_with_streaming(
-        config_with_style("Learning"),
-        Arc::new(MockApiClient::new(vec![])),
-        streaming.clone(),
-        Arc::new(ToolRegistry::new()),
-        noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
-        Arc::new(StaticMemoryProvider::empty()),
-        dir.path().to_path_buf(),
-    )
-    .with_jsonl_writer(writer);
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            config_with_style("Learning"),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer),
+    );
 
     orch.run_turn_streaming("streaming prompt")
         .await
         .expect("streaming turn");
 
-    // OUTGOING snapshot to the stream: [additionalContext(meta), user(prompt),
-    // output-style reminder, total_tokens reminder]. The total-tokens block
-    // comes LAST, matching the oracle's fan-out order
-    // (`…critical_system_reminder, silent_turn_reminder,
-    // total_tokens_reminder`), and it is present because that reminder
-    // defaults ON as it does upstream.
     let calls = streaming.captured_calls().await;
     assert_eq!(calls.len(), 1, "exactly one streaming call");
     let sent = &calls[0].messages;
     assert_eq!(
         sent.len(),
-        4,
-        "additionalContext + prompt + style reminder + total_tokens; got {sent:?}"
+        5,
+        "prompt + session_context + date + style + total_tokens"
     );
-    assert!(
-        is_additional_context(&sent[0]),
-        "leading meta; got {:?}",
-        sent[0]
+    assert_normal_empty_context(&orch, sent, "streaming prompt");
+    assert!(is_reminder(&sent[3], LEARNING_REMINDER));
+    assert_eq!(
+        orch.context_attachment_history(&sent[4..5])[0]["type"],
+        "total_tokens_reminder"
     );
-    assert_eq!(text_of(&sent[1]), "streaming prompt");
-    assert!(
-        is_reminder(&sent[2], LEARNING_REMINDER),
-        "the style reminder must be the byte-exact Learning reminder; got {:?}",
-        sent[2]
-    );
-    assert!(
-        text_of(&sent[3]).contains("<total_tokens>"),
-        "total-tokens reminder trails the batch; got {:?}",
-        sent[3]
-    );
+    assert!(text_of(&sent[4]).contains("<total_tokens>"));
 
     // STORED history: reminder absent.
     let history = orch.session.lock().await.history.clone();
@@ -505,7 +653,14 @@ async fn streaming_active_style_appends_transient_reminder_not_persisted() {
         history.iter().all(|m| !is_reminder(m, LEARNING_REMINDER)),
         "the reminder must never enter stored history; got {history:?}"
     );
-    assert_eq!(text_of(&history[0]), "streaming prompt");
+    assert_eq!(
+        history.len(),
+        5,
+        "human + context anchor + date + total_tokens + assistant"
+    );
+    assert_eq!(&history[..3], &sent[..3]);
+    assert_eq!(history[3], sent[4]);
+    assert_eq!(text_of(&history[4]), "streamed body");
 
     // JSONL transcript: reminder text absent.
     let on_disk = std::fs::read_to_string(&session_path).expect("read jsonl");
@@ -526,7 +681,7 @@ async fn streaming_default_style_sends_no_reminder() {
         message_delta_stop("end_turn"),
         message_stop(),
     ]]));
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(), // output_style: None
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
@@ -536,7 +691,7 @@ async fn streaming_default_style_sends_no_reminder() {
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
 
     orch.run_turn_streaming("only prompt")
         .await
@@ -544,26 +699,15 @@ async fn streaming_default_style_sends_no_reminder() {
 
     let calls = streaming.captured_calls().await;
     assert_eq!(calls.len(), 1);
-    // No output-style reminder. The leading additional-context meta
-    // (always present via `# currentDate`) prepends the prompt, and the
-    // `total_tokens_reminder` trails it — that reminder defaults ON, as it
-    // does in a stock Claude Code session, so it is part of every outgoing
-    // list now. See `crate::prompt::total_tokens`.
     assert_eq!(
         calls[0].messages.len(),
-        3,
-        "additionalContext + prompt + total_tokens_reminder; got {:?}",
-        calls[0].messages
+        4,
+        "prompt + session_context + date + total_tokens"
     );
-    assert!(
-        is_additional_context(&calls[0].messages[0]),
-        "leading meta; got {:?}",
-        calls[0].messages[0]
+    assert_normal_empty_context(&orch, &calls[0].messages, "only prompt");
+    assert_eq!(
+        orch.context_attachment_history(&calls[0].messages[3..4])[0]["type"],
+        "total_tokens_reminder"
     );
-    assert_eq!(text_of(&calls[0].messages[1]), "only prompt");
-    assert!(
-        text_of(&calls[0].messages[2]).contains("<total_tokens>"),
-        "trailing total-tokens reminder; got {:?}",
-        calls[0].messages[2]
-    );
+    assert!(text_of(&calls[0].messages[3]).contains("<total_tokens>"));
 }

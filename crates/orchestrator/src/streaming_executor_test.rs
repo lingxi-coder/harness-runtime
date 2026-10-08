@@ -159,7 +159,7 @@ mod tests {
             if let Some(call_entries) = &self.call_entries {
                 call_entries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
@@ -340,7 +340,7 @@ mod tests {
                 "new-generation-layer"
             }
             .to_owned();
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "step": step }),
                 model_content: None,
                 new_messages: Vec::new(),
@@ -508,7 +508,7 @@ mod tests {
                     context
                 }) as tool_api::ContextModifier
             });
-            let result = ToolCallResult {
+            let result = ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
@@ -646,9 +646,9 @@ mod tests {
 
     #[async_trait]
     impl lingxi_core::host::OutputStream for BlockingProgressSink {
-        async fn emit_text(&self, _text: &str) {}
+        async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
 
-        async fn emit_tool_call(&self, _id: &ToolUseId, _tool: &str, _input: &serde_json::Value) {
+        async fn emit_tool_call(&self, _id: &ToolUseId, _tool: &str, _input: &serde_json::Value, _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
             self.tool_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
@@ -659,7 +659,7 @@ mod tests {
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
-        ) {
+         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
             self.tool_results
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
@@ -1056,7 +1056,7 @@ mod tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
@@ -2303,7 +2303,7 @@ mod tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
@@ -2432,7 +2432,7 @@ mod tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
@@ -2526,7 +2526,7 @@ mod tests {
                     )));
                 }
             }
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": input["step"] }),
                 model_content: None,
                 new_messages: vec![],
@@ -2556,15 +2556,15 @@ mod tests {
                 self.release_second.notify_one();
             }
         }
-        async fn emit_text(&self, _text: &str) {}
-        async fn emit_tool_call(&self, _id: &ToolUseId, _tool: &str, _input: &serde_json::Value) {}
+        async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
+        async fn emit_tool_call(&self, _id: &ToolUseId, _tool: &str, _input: &serde_json::Value, _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {}
         async fn emit_tool_result(
             &self,
             id: &ToolUseId,
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
-        ) {
+         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
             self.events.lock().unwrap().push(format!("result:{id}"));
         }
         async fn emit_end_turn(
@@ -4470,12 +4470,12 @@ mod tests {
                     cache_control: None,
                     citations: Some(None),
                 },
-                llm_runtime::ContentBlock::ToolCall {
+                llm_runtime::ContentBlock::ToolCall { input_projection: None,
                     id: first_id.into(),
                     name: "W1Capture".into(),
                     input: json!({ "hold": false }),
                 },
-                llm_runtime::ContentBlock::ToolCall {
+                llm_runtime::ContentBlock::ToolCall { input_projection: None,
                     id: second_id.into(),
                     name: "W1Capture".into(),
                     input: json!({ "hold": false }),
@@ -4537,7 +4537,7 @@ mod tests {
         assert!(first.same_turn_tool_uses.is_empty());
         assert_eq!(
             second.same_turn_tool_uses,
-            vec![ContentBlock::ToolUse {
+            vec![ContentBlock::ToolUse { input_projection: None,
                 id: ToolUseId::from(first_id),
                 name: "W1Capture".into(),
                 input: json!({ "hold": false }),
@@ -4866,20 +4866,20 @@ mod tests {
             "layered_permission_mode": "plan",
         });
         let second_input = json!({"hold": false});
-        let full_row = lingxi_core::types::ConversationMessage::Assistant {
+        let full_row = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
             id: assistant_id.clone(),
             content: vec![
                 ContentBlock::Text {
                     text: "prefix before tools".into(),
                     citations: Some(None),
                 },
-                ContentBlock::ToolUse {
+                ContentBlock::ToolUse { input_projection: None,
                     id: first_id.clone(),
                     name: "W1Capture".into(),
                     input: first_input.clone(),
                     provider_id: None,
                 },
-                ContentBlock::ToolUse {
+                ContentBlock::ToolUse { input_projection: None,
                     id: second_id.clone(),
                     name: "W1Capture".into(),
                     input: second_input.clone(),
@@ -4923,7 +4923,7 @@ mod tests {
                 crate::turn_loop::ToolUseDispatchFacts {
                     query_history: query_history.clone(),
                     assistant_message: full_row,
-                    same_turn_tool_uses: vec![ContentBlock::ToolUse {
+                    same_turn_tool_uses: vec![ContentBlock::ToolUse { input_projection: None,
                         id: first_id.clone(),
                         name: "W1Capture".into(),
                         input: json!({"hold": true}),
@@ -4976,7 +4976,7 @@ mod tests {
             }
             assert_eq!(
                 captured[1].same_turn_tool_uses,
-                vec![ContentBlock::ToolUse {
+                vec![ContentBlock::ToolUse { input_projection: None,
                     id: first_id.clone(),
                     name: "W1Capture".into(),
                     input: json!({"hold": true}),
@@ -5061,9 +5061,9 @@ mod tests {
             .unwrap();
 
         let first_input = json!({"hold": true, "layered_model": "old-generation-layer"});
-        let first_row = lingxi_core::types::ConversationMessage::Assistant {
+        let first_row = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
             id: assistant_id,
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: first_id.clone(),
                 name: "W1Capture".into(),
                 input: first_input.clone(),
@@ -5106,9 +5106,9 @@ mod tests {
         assert!(executor.tools.is_empty());
 
         let second_input = json!({"hold": false, "layered_model": "new-generation-layer"});
-        let second_row = lingxi_core::types::ConversationMessage::Assistant {
+        let second_row = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
             id: assistant_id,
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: second_id.clone(),
                 name: "W1Capture".into(),
                 input: second_input.clone(),
@@ -5272,9 +5272,9 @@ mod tests {
                     assistant_id,
                     crate::turn_loop::ToolUseDispatchFacts {
                         query_history: query_history.clone(),
-                        assistant_message: ConversationMessage::Assistant {
+                        assistant_message: ConversationMessage::Assistant { per_turn_effort: None,
                             id: assistant_id,
-                            content: vec![ContentBlock::ToolUse {
+                            content: vec![ContentBlock::ToolUse { input_projection: None,
                                 id,
                                 name: "W1Capture".into(),
                                 input,

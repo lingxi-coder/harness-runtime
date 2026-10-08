@@ -4971,9 +4971,9 @@ async fn workflow_observer_projects_message_rows_and_refusal_rows_without_treati
     let agent_id = lingxi_core::types::AgentId::new();
     let message_id = lingxi_core::types::MessageId::new();
     let tool_use_id = lingxi_core::types::ToolUseId::new();
-    let assistant = lingxi_core::types::ConversationMessage::Assistant {
+    let assistant = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
         id: message_id,
-        content: vec![lingxi_core::types::ContentBlock::ToolUse {
+        content: vec![lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
             id: tool_use_id,
             name: "Read".into(),
             input: serde_json::json!({"file_path":"review.md"}),

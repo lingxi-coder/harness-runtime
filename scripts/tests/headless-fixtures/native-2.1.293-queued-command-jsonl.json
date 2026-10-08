@@ -1,0 +1,31 @@
+{
+  "version": "2.1.293",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "scope": "Bounded exact rows from the existing two native midtool captures; no Harness parity claim",
+  "rows": [
+    {
+      "side": "native-a",
+      "path": "/private/tmp/headless-baseline-293-input-queue-live/probe-input-midtool/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-queue-live-probe-input-midtool-workspace/0e68f4f3-7799-4b4b-83b0-91608da1fc17.jsonl",
+      "sha256": "5e6ba8628edfdf1630664d919311282f68fb6afb8bac016f0a1ac7aa9d84625f",
+      "rawLine": "{\"parentUuid\":\"d29e1ba1-b49b-484c-927d-4f8d39d9e2c2\",\"isSidechain\":false,\"attachment\":{\"type\":\"queued_command\",\"prompt\":\"HEADLESS_MIDTOOL_B\",\"source_uuid\":\"00000000-0000-4000-8000-000000000042\",\"delivery_id\":\"119c38e4-af2a-4320-b9e3-1ce64daa1c9e\",\"commandMode\":\"prompt\",\"timestamp\":\"2026-10-08T06:46:19.587Z\"},\"type\":\"attachment\",\"uuid\":\"3f9ab29a-9904-4c27-b9af-be52908adbc7\",\"timestamp\":\"2026-10-08T06:46:19.587Z\",\"rendered\":[{\"content\":\"<system-reminder>\\nThe user sent a new message while you were working:\\nHEADLESS_MIDTOOL_B\\n\\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\\n</system-reminder>\"}],\"renderedRole\":\"system\",\"userType\":\"external\",\"entrypoint\":\"sdk-cli\",\"cwd\":\"/private/tmp/headless-baseline-293-input-queue-live/probe-input-midtool/workspace\",\"sessionId\":\"0e68f4f3-7799-4b4b-83b0-91608da1fc17\",\"version\":\"2.1.293\",\"gitBranch\":\"HEAD\"}"
+    },
+    {
+      "side": "native-a",
+      "path": "/private/tmp/headless-baseline-293-input-queue-live/probe-input-midtool/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-queue-live-probe-input-midtool-workspace/0e68f4f3-7799-4b4b-83b0-91608da1fc17.jsonl",
+      "sha256": "e06604a33443db1b7cb36cabc5ef342a8654125a8dd3193c4dc3925194ef9cdb",
+      "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"remove\",\"timestamp\":\"2026-10-08T06:46:19.822Z\",\"sessionId\":\"0e68f4f3-7799-4b4b-83b0-91608da1fc17\",\"content\":\"HEADLESS_MIDTOOL_B\",\"reason\":\"absorbed_mid_turn\",\"commandUuid\":\"00000000-0000-4000-8000-000000000042\",\"deliveryId\":\"119c38e4-af2a-4320-b9e3-1ce64daa1c9e\"}"
+    },
+    {
+      "side": "native-b",
+      "path": "/private/tmp/headless-baseline-293-input-queue-live/probe-input-midtool/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-queue-live-probe-input-midtool-workspace/0e68f4f3-7799-4b4b-83b0-91608da1fc17.jsonl",
+      "sha256": "ac44ac422452e06a0012b960a636e9bfc6a522b26b033f2860772af025253e21",
+      "rawLine": "{\"parentUuid\":\"d56156df-83ce-4749-ab2a-1ff881efe34b\",\"isSidechain\":false,\"attachment\":{\"type\":\"queued_command\",\"prompt\":\"HEADLESS_MIDTOOL_B\",\"source_uuid\":\"00000000-0000-4000-8000-000000000042\",\"delivery_id\":\"249939c5-d0be-4fc8-a0ad-4830662da034\",\"commandMode\":\"prompt\",\"timestamp\":\"2026-10-08T06:46:20.030Z\"},\"type\":\"attachment\",\"uuid\":\"0b2bb2d1-fb55-4bf3-8b24-e3f1d5a3cfc3\",\"timestamp\":\"2026-10-08T06:46:20.030Z\",\"rendered\":[{\"content\":\"<system-reminder>\\nThe user sent a new message while you were working:\\nHEADLESS_MIDTOOL_B\\n\\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\\n</system-reminder>\"}],\"renderedRole\":\"system\",\"userType\":\"external\",\"entrypoint\":\"sdk-cli\",\"cwd\":\"/private/tmp/headless-baseline-293-input-queue-live/probe-input-midtool/workspace\",\"sessionId\":\"0e68f4f3-7799-4b4b-83b0-91608da1fc17\",\"version\":\"2.1.293\",\"gitBranch\":\"HEAD\"}"
+    },
+    {
+      "side": "native-b",
+      "path": "/private/tmp/headless-baseline-293-input-queue-live/probe-input-midtool/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-queue-live-probe-input-midtool-workspace/0e68f4f3-7799-4b4b-83b0-91608da1fc17.jsonl",
+      "sha256": "307c1ffdb7d7add0fb4ad015a26398fc85587d37aa99f0f3246a8b00a552a41e",
+      "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"remove\",\"timestamp\":\"2026-10-08T06:46:20.261Z\",\"sessionId\":\"0e68f4f3-7799-4b4b-83b0-91608da1fc17\",\"content\":\"HEADLESS_MIDTOOL_B\",\"reason\":\"absorbed_mid_turn\",\"commandUuid\":\"00000000-0000-4000-8000-000000000042\",\"deliveryId\":\"249939c5-d0be-4fc8-a0ad-4830662da034\"}"
+    }
+  ]
+}

@@ -3,7 +3,8 @@
 //!
 //! Arms a background monitor on a shell `command`; in the binary each stdout line
 //! becomes a live `TaskNotification` (token-bucket rate-limited, with suppression),
-//! bounded by `timeout_ms` (default 5m, max 1h) unless `persistent`.
+//! bounded by `timeout_ms` (default 5m, capped to 30m, or 10m in single-prompt
+//! mode). The legacy persistent branch remains behind the rollout kill switch.
 //!
 //! **Gated off by default.** `isEnabled = Eq() && mu()` where
 //! `Eq() = nt("tengu_amber_sentinel", false)` (no live GrowthBook → false) and
@@ -648,7 +649,7 @@ impl Tool for MonitorTool {
                 )
                 .await
                 .map_err(|error| ToolError::Internal(format!("Monitor: {error}")))?;
-            return Ok(ToolCallResult {
+            return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({"taskId":task_id,"timeoutMs":reported_timeout,"persistent":persistent}),
                 model_content: Some(started_message(&task_id, timeout_ms, persistent)),
                 is_error: false,
@@ -766,7 +767,7 @@ impl Tool for MonitorTool {
 
         let model_content = started_message(&task_id, timeout_ms, persistent);
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "taskId": task_id,
                 "timeoutMs": reported_timeout,
@@ -873,7 +874,7 @@ mod tests {
         let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_REMOTE");
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);
-        telemetry::test_clear_flag("tengu_breezy_crescent");
+        telemetry::test_set_flag("tengu_breezy_crescent", false);
         lingxi_core::host::session_flags::set_single_shot_print_session(false);
         telemetry::test_clear_flag("tengu_kairos_push_notifications");
         lingxi_core::host::session_flags::set_agent_push_notif_enabled(false);
@@ -1212,9 +1213,13 @@ mod tests {
         };
         fn invocation_context() -> SubagentInvocationContext {
             SubagentInvocationContext {
+                input_projection: None,
+                cancellation_token: lingxi_core::host::CancellationToken::new(),
                 permission_pause_observer: None,
                 parent_agent_id: None,
                 origin_session_id: None,
+                instruction_context: None,
+                fork_context: None,
                 tool_execution_policy: ToolExecutionPolicy::Ordinary,
                 agent_name: None,
                 team_name: None,
@@ -1228,6 +1233,11 @@ mod tests {
                 observer: None,
                 parent_model: None,
                 parent_model_profile: None,
+                agent_spawn_provenance: Default::default(),
+                tool_context_state: None,
+                assistant_message: None,
+                same_turn_tool_uses: Vec::new(),
+                current_history: Vec::new(),
                 mode_override: None,
                 request_source: None,
                 frozen_command_denies: Vec::new(),
@@ -1273,7 +1283,7 @@ mod tests {
                 );
             }
         }
-        telemetry::test_clear_flag("tengu_breezy_crescent");
+        telemetry::test_set_flag("tengu_breezy_crescent", false);
         let tasks = Arc::new(RecordingRegistry::default());
         let tool = tool_with_registry(tasks.clone());
         let input =
@@ -1427,6 +1437,28 @@ mod tests {
         assert!(result.is_err());
         assert!(registry.websocket.lock().unwrap().is_none());
     }
+    #[test]
+    fn bounded_monitors_are_enabled_by_default_in_286() {
+        let _g = guard();
+        telemetry::test_clear_flag("tengu_breezy_crescent");
+        let monitor = tool();
+        assert!(cron::bounded_monitors_enabled());
+        assert_eq!(*monitor.input_schema(), *BOUNDED_INPUT_SCHEMA);
+        let parsed = monitor
+            .parse_native_input(&json!({
+                "description": "watch", "command": "tail -f log", "persistent": true
+            }))
+            .unwrap()
+            .unwrap();
+        assert!(parsed.get("persistent").is_none());
+        assert_eq!(apply_ccr_timeout_cap(3_600_000, true), (1_800_000, false));
+        lingxi_core::host::session_flags::set_single_shot_print_session(true);
+        assert_eq!(*monitor.input_schema(), *SINGLE_SHOT_INPUT_SCHEMA);
+        assert_eq!(apply_ccr_timeout_cap(3_600_000, true), (600_000, false));
+        lingxi_core::host::session_flags::set_single_shot_print_session(false);
+        telemetry::test_set_flag("tengu_breezy_crescent", false);
+    }
+
     #[tokio::test]
     async fn bounded_monitor_schema_cap_and_result_match_270() {
         let _guard = guard();
@@ -1462,7 +1494,7 @@ mod tests {
             .unwrap()
             .contains("expires in 10m unless the source ends first"));
         lingxi_core::host::session_flags::set_single_shot_print_session(false);
-        telemetry::test_clear_flag("tengu_breezy_crescent");
+        telemetry::test_set_flag("tengu_breezy_crescent", false);
     }
     #[test]
     fn legacy_remote_cap_uses_javascript_environment_truthiness() {

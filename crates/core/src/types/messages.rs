@@ -107,6 +107,10 @@ pub enum ContentBlock {
         name: String,
         /// Tool-specific structured input.
         input: Value,
+        /// Exact JavaScript input paired with its display tree. Native JSON
+        /// codecs consume this runtime-only carrier; it is never a wire field.
+        #[serde(skip)]
+        input_projection: Option<crate::types::utf16_json::Utf16JsonProjection>,
         /// Verbatim provider-issued tool-call id (e.g. Anthropic `"toolu_01…"`,
         /// `OpenAI` `"call_…"`). `ToolUseId` is a UUID newtype and cannot hold a
         /// provider string, so the original is preserved here and replayed
@@ -147,6 +151,9 @@ pub enum ContentBlock {
         /// wire form is unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content_blocks: Option<Vec<serde_json::Value>>,
+        /// Exact provider-visible string or content-block array. Never a wire field.
+        #[serde(skip)]
+        content_projection: Option<crate::types::utf16_json::Utf16JsonProjection>,
     },
     /// Extended-thinking reasoning trace.
     Thinking {
@@ -441,6 +448,94 @@ pub struct CompactBoundaryMetadata {
 }
 
 impl ContentBlock {
+    /// Associate a validated native result source with the accepted typed view.
+    /// Result mappers may remove fields; exact leaves and keys remain attached
+    /// only where the accepted display tree still contains their source value.
+    pub fn rebase_tool_result_projection(
+        &mut self,
+        mut source: crate::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<(), crate::types::utf16_json::Utf16JsonProjectionError> {
+        use crate::types::utf16_json::Utf16JsonProjectionError;
+        source.validate()?;
+        let Self::ToolResult {
+            content,
+            content_blocks,
+            content_projection,
+            ..
+        } = self
+        else {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "result source requires a tool result block",
+            ));
+        };
+        let value = content_blocks
+            .as_ref()
+            .map(|blocks| Value::Array(blocks.clone()))
+            .unwrap_or_else(|| Value::String(content.clone()));
+        source.rebase_display_value(value)?;
+        *content_projection = Some(source);
+        Ok(())
+    }
+    /// Recover the accepted provider-visible tool result and verify association.
+    pub fn projected_tool_result(
+        &self,
+    ) -> Result<
+        Option<crate::types::utf16_json::Utf16JsonProjection>,
+        crate::types::utf16_json::Utf16JsonProjectionError,
+    > {
+        use crate::types::utf16_json::{Utf16JsonProjection, Utf16JsonProjectionError};
+        let Self::ToolResult {
+            content,
+            content_blocks,
+            content_projection,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        let value = content_blocks
+            .as_ref()
+            .map(|blocks| Value::Array(blocks.clone()))
+            .unwrap_or_else(|| Value::String(content.clone()));
+        let Some(projection) = content_projection else {
+            return Ok(Some(Utf16JsonProjection::plain(value)));
+        };
+        if projection.value != value {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "tool result projection belongs to different content",
+            ));
+        }
+        projection.validate()?;
+        Ok(Some(projection.clone()))
+    }
+    /// Recover the exact tool input belonging to this block. An invalid or
+    /// stale carrier is an error instead of a lossy display fallback.
+    pub fn projected_tool_input(
+        &self,
+    ) -> Result<
+        Option<crate::types::utf16_json::Utf16JsonProjection>,
+        crate::types::utf16_json::Utf16JsonProjectionError,
+    > {
+        use crate::types::utf16_json::{Utf16JsonProjection, Utf16JsonProjectionError};
+        let Self::ToolUse {
+            input,
+            input_projection,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        let Some(projection) = input_projection else {
+            return Ok(Some(Utf16JsonProjection::plain(input.clone())));
+        };
+        if projection.value != *input {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "tool block projection belongs to different input",
+            ));
+        }
+        projection.validate()?;
+        Ok(Some(projection.clone()))
+    }
     /// Text a user-facing renderer may display from this block.
     ///
     /// Anthropic text blocks with unknown native fields stay as one raw
@@ -458,6 +553,33 @@ impl ContentBlock {
             _ => None,
         }
     }
+
+    /// Exact source units accompanying [`Self::visible_text`], when this block
+    /// carries a JavaScript UTF-16 string rather than an authored Rust string.
+    #[must_use]
+    pub fn visible_text_utf16_units(&self) -> Option<&[u16]> {
+        match self {
+            Self::TextJsUtf16 {
+                utf16_code_units, ..
+            } => Some(utf16_code_units),
+            _ => None,
+        }
+    }
+}
+
+/// Host-created API system row or projection. Original user rows retain their
+/// transcript identity while an admitted projection changes only model input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiSystemMessage {
+    pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<ApiSystemOutputConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiSystemOutputConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// A single message in a conversation, role-tagged for serde.
@@ -497,6 +619,10 @@ pub enum ConversationMessage {
             skip_serializing_if = "std::ops::Not::not"
         )]
         is_visible_in_transcript_only: bool,
+        /// Model-facing representation of an admitted user row, when it differs
+        /// from the original transcript (for example a queued human envelope).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_message_override: Option<ApiSystemMessage>,
     },
     /// Assistant-authored message — may include tool-use blocks.
     Assistant {
@@ -506,6 +632,14 @@ pub enum ConversationMessage {
         content: Vec<ContentBlock>,
         /// Provider-reported stop reason, if any.
         stop_reason: Option<String>,
+        /// Native admitted effort used by this successful response. Provider
+        /// output cannot populate this owner-only history field.
+        #[serde(
+            default,
+            rename = "perTurnEffort",
+            skip_serializing_if = "Option::is_none"
+        )]
+        per_turn_effort: Option<String>,
     },
     /// System prompt — flat string, no tool blocks.
     System {
@@ -516,6 +650,10 @@ pub enum ConversationMessage {
         /// Structured system-message subtype, when present.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subtype: Option<String>,
+        /// Explicit model-facing API system row. Ordinary transcript-only
+        /// system notices have no payload and remain excluded from requests.
+        #[serde(default, rename = "apiSystem", skip_serializing_if = "Option::is_none")]
+        api_system: Option<ApiSystemMessage>,
         /// Typed compact-boundary metadata.
         #[serde(
             default,
@@ -646,10 +784,70 @@ pub struct RefusalFallbackMetadata {
 }
 
 impl ConversationMessage {
+    /// Attach this message's exact typed content to its native JSON view.
+    /// The view owns the outward shape; typed blocks own associated input,
+    /// result, and text code units. Private carrier fields are never emitted.
+    pub fn project_native_content(
+        &self,
+        value: Value,
+        content_pointer: &str,
+    ) -> Result<
+        crate::types::utf16_json::Utf16JsonProjection,
+        crate::types::utf16_json::Utf16JsonProjectionError,
+    > {
+        use crate::types::utf16_json::{Utf16JsonProjection, Utf16JsonProjectionError};
+        let mut projected = Utf16JsonProjection::plain(value);
+        let content = match self {
+            Self::User { content, .. } | Self::Assistant { content, .. } => content,
+            Self::System { .. } => return Ok(projected),
+        };
+        if projected
+            .value
+            .pointer(content_pointer)
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            != Some(content.len())
+        {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "native content differs from typed message",
+            ));
+        }
+        for (index, block) in content.iter().enumerate() {
+            let base = format!("{content_pointer}/{index}");
+            let source = match block {
+                ContentBlock::ToolUse { .. } => {
+                    block.projected_tool_input()?.map(|input| ("input", input))
+                }
+                ContentBlock::ToolResult { .. } => block
+                    .projected_tool_result()?
+                    .map(|output| ("content", output)),
+                ContentBlock::TextJsUtf16 {
+                    text,
+                    utf16_code_units,
+                    ..
+                } => Some((
+                    "text",
+                    Utf16JsonProjection::root_string(text.clone(), utf16_code_units.clone())?,
+                )),
+                _ => None,
+            };
+            if let Some((field, source)) = source {
+                let pointer = format!("{base}/{field}");
+                if projected.value.pointer(&pointer) != Some(&source.value) {
+                    return Err(Utf16JsonProjectionError::InvalidProjection(
+                        "native block field differs from typed source",
+                    ));
+                }
+                projected.set_pointer(&pointer, source)?;
+            }
+        }
+        Ok(projected)
+    }
     /// Construct a simple user message containing a single text block.
     #[must_use]
     pub fn user(id: MessageId, text: String) -> Self {
         Self::User {
+            api_message_override: None,
             id,
             content: vec![ContentBlock::Text {
                 text,
@@ -668,6 +866,7 @@ impl ConversationMessage {
     #[must_use]
     pub fn user_meta(id: MessageId, text: String) -> Self {
         Self::User {
+            api_message_override: None,
             id,
             content: vec![ContentBlock::Text {
                 text,
@@ -684,6 +883,7 @@ impl ConversationMessage {
     #[must_use]
     pub fn user_meta_js_utf16(id: MessageId, text: String, utf16_code_units: Vec<u16>) -> Self {
         Self::User {
+            api_message_override: None,
             id,
             content: vec![ContentBlock::TextJsUtf16 {
                 text,
@@ -700,6 +900,7 @@ impl ConversationMessage {
     #[must_use]
     pub fn user_media_analysis(id: MessageId, analysis: MediaAnalysis) -> Self {
         Self::User {
+            api_message_override: None,
             id,
             content: vec![ContentBlock::MediaAnalysis { analysis }],
             is_meta: true,
@@ -712,6 +913,7 @@ impl ConversationMessage {
     #[must_use]
     pub fn compact_summary(id: MessageId, text: String) -> Self {
         Self::User {
+            api_message_override: None,
             id,
             content: vec![ContentBlock::Text {
                 text,
@@ -731,6 +933,7 @@ impl ConversationMessage {
         metadata: CompactBoundaryMetadata,
     ) -> Self {
         Self::System {
+            api_system: None,
             id,
             content,
             subtype: Some("compact_boundary".to_string()),
@@ -774,6 +977,7 @@ impl ConversationMessage {
             content.push(ContentBlock::Image { source });
         }
         Self::User {
+            api_message_override: None,
             id,
             content,
             is_meta: false,
@@ -800,6 +1004,7 @@ impl ConversationMessage {
             content.push(ContentBlock::Document { source });
         }
         Self::User {
+            api_message_override: None,
             id,
             content,
             is_meta: false,
@@ -929,6 +1134,7 @@ mod tests {
     #[test]
     fn text_content_includes_native_anthropic_text_once() {
         let message = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::ProviderContent {
@@ -1059,6 +1265,7 @@ mod tests {
     #[test]
     fn conversation_message_with_image_roundtrips_jsonl() {
         let m = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Image {
                 source: ImageSource::Base64 {
@@ -1133,6 +1340,7 @@ mod tests {
             uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
         );
         let message = ConversationMessage::System {
+            api_system: None,
             id,
             content: "notice".to_string(),
             subtype: None,
@@ -1202,6 +1410,7 @@ mod tests {
     #[test]
     fn assistant_message_with_tool_use_extracts_tool_calls() {
         let m = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -1209,6 +1418,7 @@ mod tests {
                     citations: None,
                 },
                 ContentBlock::ToolUse {
+                    input_projection: None,
                     id: ToolUseId::new(),
                     name: "Read".into(),
                     input: serde_json::json!({"path": "/tmp/x"}),
@@ -1226,6 +1436,7 @@ mod tests {
         // Backward compat: a `None` provider_id MUST NOT appear on the wire, so
         // existing locked JSONL fixtures stay byte-identical.
         let block = ContentBlock::ToolUse {
+            input_projection: None,
             id: ToolUseId::from("toolu_01ABC"),
             name: "Read".into(),
             input: serde_json::json!({"path": "/tmp/x"}),
@@ -1241,6 +1452,7 @@ mod tests {
     #[test]
     fn tool_use_provider_id_preserved_when_some() {
         let block = ContentBlock::ToolUse {
+            input_projection: None,
             id: ToolUseId::new(),
             name: "Read".into(),
             input: serde_json::json!({}),
@@ -1295,6 +1507,7 @@ mod tests {
     #[test]
     fn conversation_message_json_retains_mod_presence_for_resume() {
         let message = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -1302,6 +1515,7 @@ mod tests {
                     citations: Some(None),
                 },
                 ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: ToolUseId::from("toolu_01ABC"),
                     content: "done".into(),
                     is_error: None,
@@ -1331,6 +1545,7 @@ mod tests {
         assert_eq!(
             absent,
             ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: ToolUseId::from("toolu_01ABC"),
                 content: "ok".into(),
                 is_error: None,
@@ -1378,6 +1593,7 @@ mod tests {
     #[test]
     fn tool_result_provider_tool_use_id_skipped_when_none_preserved_when_some() {
         let none_block = ContentBlock::ToolResult {
+            content_projection: None,
             tool_use_id: ToolUseId::from("toolu_01ABC"),
             content: "ok".into(),
             is_error: Some(false),
@@ -1388,6 +1604,7 @@ mod tests {
         assert!(v.get("provider_tool_use_id").is_none());
 
         let some_block = ContentBlock::ToolResult {
+            content_projection: None,
             tool_use_id: ToolUseId::new(),
             content: "ok".into(),
             is_error: Some(false),
@@ -1406,6 +1623,7 @@ mod tests {
         // Byte parity with claude-code: the tool_use `id` is the canonical
         // provider string and NO `provider_id` sidecar appears on the wire.
         let block = ContentBlock::ToolUse {
+            input_projection: None,
             id: ToolUseId::from("toolu_01ABC"),
             name: "Read".into(),
             input: serde_json::json!({}),
@@ -1421,6 +1639,7 @@ mod tests {
     #[test]
     fn tool_result_canonical_id_serializes_as_bare_provider_string() {
         let block = ContentBlock::ToolResult {
+            content_projection: None,
             tool_use_id: ToolUseId::from("toolu_01ABC"),
             content: "ok".into(),
             is_error: Some(false),
@@ -1560,5 +1779,148 @@ mod tests {
         let line = serde_json::to_string(&message).unwrap();
         let back: ConversationMessage = serde_json::from_str(&line).unwrap();
         assert_eq!(back, message);
+    }
+}
+
+impl ConversationMessage {
+    /// Construct a model-facing system row without changing transcript-only notices.
+    pub fn api_system(id: MessageId, message: ApiSystemMessage) -> Self {
+        Self::System {
+            id,
+            content: String::new(),
+            subtype: Some("api_system".into()),
+            api_system: Some(message),
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        }
+    }
+}
+
+/// Native `Fdr`/`xtn`: infer each user turn's effort from its succeeding
+/// successful assistant, with the new request's admitted effort as the tail.
+/// This creates an API history projection; original transcript rows are intact.
+pub fn project_per_turn_effort(
+    messages: Vec<ConversationMessage>,
+    current: &str,
+) -> Vec<ConversationMessage> {
+    let mut effort = current.to_owned();
+    let mut levels = vec![String::new(); messages.len()];
+    for (index, message) in messages.iter().enumerate().rev() {
+        if let ConversationMessage::Assistant {
+            per_turn_effort: Some(saved),
+            ..
+        } = message
+        {
+            effort = saved.clone();
+        }
+        levels[index] = effort.clone();
+    }
+    let mut projected = Vec::with_capacity(messages.len() + 1);
+    let mut active: Option<String> = None;
+    let mut pending: Option<String> = None;
+    for (index, mut message) in messages.into_iter().enumerate() {
+        if !matches!(message, ConversationMessage::User { .. }) {
+            if let Some(effort) = pending.take() {
+                active = Some(effort.clone());
+                if let ConversationMessage::System {
+                    api_system: Some(payload),
+                    ..
+                } = &mut message
+                {
+                    payload.output_config = Some(ApiSystemOutputConfig {
+                        effort: Some(effort),
+                    });
+                } else {
+                    projected.push(ConversationMessage::api_system(
+                        MessageId::new(),
+                        ApiSystemMessage {
+                            content: Vec::new(),
+                            output_config: Some(ApiSystemOutputConfig {
+                                effort: Some(effort),
+                            }),
+                        },
+                    ));
+                }
+            }
+        }
+        if matches!(message, ConversationMessage::User { .. }) {
+            pending =
+                (active.as_deref() != Some(levels[index].as_str())).then(|| levels[index].clone());
+        }
+        projected.push(message);
+    }
+    if let Some(effort) = pending {
+        projected.push(ConversationMessage::api_system(
+            MessageId::new(),
+            ApiSystemMessage {
+                content: Vec::new(),
+                output_config: Some(ApiSystemOutputConfig {
+                    effort: Some(effort),
+                }),
+            },
+        ));
+    }
+    projected
+}
+
+#[cfg(test)]
+mod per_turn_effort_tests {
+    use super::*;
+    fn assistant(effort: &str) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "response".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            per_turn_effort: Some(effort.into()),
+        }
+    }
+    #[test]
+    fn effort_projection_uses_historical_assistant_and_merges_next_api_row() {
+        let original = vec![
+            ConversationMessage::user(MessageId::new(), "one".into()),
+            assistant("low"),
+            ConversationMessage::user(MessageId::new(), "two".into()),
+            ConversationMessage::api_system(
+                MessageId::new(),
+                ApiSystemMessage {
+                    content: vec![ContentBlock::Text {
+                        text: "host instruction".into(),
+                        citations: None,
+                    }],
+                    output_config: None,
+                },
+            ),
+        ];
+        let projected = project_per_turn_effort(original.clone(), "medium");
+        assert_eq!(projected.len(), 5);
+        assert!(
+            matches!(&projected[1],ConversationMessage::System {api_system:Some(payload),..} if payload.content.is_empty() && payload.output_config.as_ref().and_then(|config|config.effort.as_deref())==Some("low"))
+        );
+        assert!(
+            matches!(&projected[4],ConversationMessage::System {api_system:Some(payload),..} if payload.content.len()==1 && payload.output_config.as_ref().and_then(|config|config.effort.as_deref())==Some("medium"))
+        );
+        assert!(
+            matches!(&original[3],ConversationMessage::System {api_system:Some(payload),..} if payload.output_config.is_none())
+        );
+    }
+    #[test]
+    fn equal_effort_does_not_add_another_marker_after_completed_turn() {
+        let projected = project_per_turn_effort(
+            vec![
+                ConversationMessage::user(MessageId::new(), "one".into()),
+                assistant("medium"),
+                ConversationMessage::user(MessageId::new(), "two".into()),
+            ],
+            "medium",
+        );
+        assert_eq!(projected.len(), 4);
+        assert!(matches!(
+            projected.last(),
+            Some(ConversationMessage::User { .. })
+        ));
     }
 }

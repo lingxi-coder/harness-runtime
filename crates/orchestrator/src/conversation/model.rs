@@ -392,6 +392,11 @@ fn move_session_sidecar_best_effort(source: &std::path::Path, target: &std::path
 }
 
 impl ConversationOrchestrator {
+    /// Capture the composition-owned session writer before publishing a host
+    /// input transport. The returned owner is independent of later responses.
+    pub fn session_transcript_writer(&self) -> Option<Arc<session::jsonl::JsonlWriter>> {
+        self.transcript.jsonl_writer.clone()
+    }
     /// Exact captured model/profile's native provider identity for host metadata.
     pub fn model_is_first_party_route(&self, model: &str, profile: Option<&str>) -> bool {
         self.api.is_first_party_route(model, profile)
@@ -713,6 +718,7 @@ impl ConversationOrchestrator {
         plugin: &str,
         exact_prompt_units: Option<Vec<u16>>,
     ) -> Result<serde_json::Value, hooks::mods::ModError> {
+        let safety_observer = self.model_safety_observer().await;
         let plugin_error = |message: String| hooks::mods::ModError::Native(message);
         let shown = |value: &serde_json::Value| {
             value
@@ -832,7 +838,7 @@ impl ConversationOrchestrator {
         };
         let reserve = if claude_thinking { 2048 } else { 0 };
         let messages = match exact_prompt_units {
-            Some(utf16_code_units) => vec![ConversationMessage::User {
+            Some(utf16_code_units) => vec![ConversationMessage::User { api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: prompt.to_owned(),
@@ -869,7 +875,10 @@ impl ConversationOrchestrator {
         let outcome = match timeout_ms {
             Some(ms) => match tokio::time::timeout(
                 std::time::Duration::from_millis(ms.min(600_000)),
-                runner.query_mod_complete(request),
+                lingxi_core::host::model_safety::bind_model_safety(
+                    safety_observer.clone(),
+                    runner.query_mod_complete(request),
+                ),
             )
             .await
             {
@@ -883,7 +892,13 @@ impl ConversationOrchestrator {
                     }));
                 }
             },
-            None => runner.query_mod_complete(request).await,
+            None => {
+                lingxi_core::host::model_safety::bind_model_safety(
+                    safety_observer,
+                    runner.query_mod_complete(request),
+                )
+                .await
+            }
         };
         let response = match outcome {
             Ok(result) => {
@@ -924,6 +939,7 @@ impl ConversationOrchestrator {
         &self,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, hooks::mods::ModError> {
+        let safety_observer = self.model_safety_observer().await;
         let prompt = input
             .get("prompt")
             .and_then(serde_json::Value::as_str)
@@ -997,7 +1013,12 @@ impl ConversationOrchestrator {
             query_source: sidequery::QuerySource::Custom("hook_prompt".into()),
             max_output_tokens: None,
         };
-        let first = match runner.run(request.clone()).await {
+        let first = match lingxi_core::host::model_safety::bind_model_safety(
+            safety_observer.clone(),
+            runner.run(request.clone()),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(error) => {
                 return Ok(serde_json::json!({
@@ -1034,6 +1055,7 @@ impl ConversationOrchestrator {
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
                 assistant_content.push(ContentBlock::ToolUse {
+                    input_projection: None,
                     id: id.clone(),
                     name: name.to_owned(),
                     input: call
@@ -1043,6 +1065,7 @@ impl ConversationOrchestrator {
                     provider_id: provider_id.clone(),
                 });
                 denied.push(ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: id,
                     content: "A model fork cannot use tools".into(),
                     is_error: Some(true),
@@ -1053,7 +1076,7 @@ impl ConversationOrchestrator {
             if !denied.is_empty() {
                 request
                     .prompt_messages
-                    .push(ConversationMessage::Assistant {
+                    .push(ConversationMessage::Assistant { per_turn_effort: None,
                         id: MessageId::new(),
                         content: assistant_content,
                         stop_reason: Some("tool_use".into()),
@@ -1063,7 +1086,12 @@ impl ConversationOrchestrator {
                     *content = denied;
                 }
                 request.prompt_messages.push(denied_message);
-                match runner.run(request).await {
+                match lingxi_core::host::model_safety::bind_model_safety(
+                    safety_observer.clone(),
+                    runner.run(request),
+                )
+                .await
+                {
                     Ok(second) => {
                         usage.add(&second.usage);
                         if !second.final_text.is_empty() {
@@ -1459,6 +1487,7 @@ impl ConversationOrchestrator {
         &self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<lingxi_core::host::RecapOutcome, lingxi_core::host::HandleError> {
+        let safety_observer = self.model_safety_observer().await;
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed("recap unavailable".into())
         })?;
@@ -1496,7 +1525,7 @@ impl ConversationOrchestrator {
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(lingxi_core::host::RecapOutcome::Cancelled),
-            r = runner.run(req) => match r {
+            r = lingxi_core::host::model_safety::bind_model_safety(safety_observer, runner.run(req)) => match r {
                 Ok(res) => Ok(lingxi_core::host::RecapOutcome::Text(res.final_text.trim().to_string())),
                 Err(e) => Err(lingxi_core::host::HandleError::ActionFailed(e.to_string())),
             }
@@ -1544,6 +1573,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         &self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Option<String>, lingxi_core::host::HandleError> {
+        let safety_observer = self.model_safety_observer().await;
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed(
                 "session name generation unavailable".into(),
@@ -1580,7 +1610,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(None),
-            result = runner.run(req) => match result {
+            result = lingxi_core::host::model_safety::bind_model_safety(safety_observer, runner.run(req)) => match result {
                 Ok(result) => parse_generated_session_name(&result.final_text)
                     .map(Some)
                     .ok_or_else(|| lingxi_core::host::HandleError::ActionFailed(
@@ -1596,6 +1626,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         &self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Option<String>, lingxi_core::host::HandleError> {
+        let safety_observer = self.model_safety_observer().await;
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed(
                 "prompt suggestion generation unavailable".into(),
@@ -1669,7 +1700,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(None),
-            result = runner.run(req) => match result {
+            result = lingxi_core::host::model_safety::bind_model_safety(safety_observer, runner.run(req)) => match result {
                 Ok(result) => Ok(parse_prompt_suggestion_response(&result.final_text)),
                 Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error.to_string())),
             }
@@ -1696,6 +1727,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         question: &str,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<lingxi_core::host::RecapOutcome, lingxi_core::host::HandleError> {
+        let safety_observer = self.model_safety_observer().await;
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed("side question unavailable".into())
         })?;
@@ -1751,7 +1783,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(lingxi_core::host::RecapOutcome::Cancelled),
-            r = runner.run(req) => match r {
+            r = lingxi_core::host::model_safety::bind_model_safety(safety_observer, runner.run(req)) => match r {
                 Ok(res) => {
                     // Claude's extractor prefers any non-empty text block and
                     // only surfaces a denied tool call when the assistant had
@@ -1797,7 +1829,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         &self,
         system: Option<&str>,
         model: &str,
-        tools: &[serde_json::Value],
+        tools: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
     ) {
         let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
             return;
@@ -1811,7 +1843,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         &self,
         system: Option<&str>,
         model: &str,
-        tools: &[serde_json::Value],
+        tools: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
     ) -> sidequery::CacheSafeParams {
         let (fork_context_messages, session_id, model_profile) = {
             let s = self.session.lock().await;
@@ -2039,7 +2071,8 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         // Pin the tracker view to the session id captured above. Clear/resume
         // can switch the active projection between awaits; reading the active
         // tracker here would otherwise return session B's costs labeled as A.
-        let state = tracker.scoped(session_id).snapshot().await;
+        let scoped_tracker = tracker.scoped(session_id);
+        let state = scoped_tracker.snapshot().await;
         // Sum per-model usage into aggregate token counters. api_calls comes
         // from our own counter because cost::Usage does not carry a
         // per-call count (its `add()` merges token totals only).
@@ -2108,6 +2141,11 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                     output_tokens: mu.usage.tokens.output,
                     cache_read_input_tokens: mu.cache_read_input_tokens,
                     cache_creation_input_tokens: mu.cache_creation_input_tokens,
+                    reasoning_tokens: mu.usage.tokens.reasoning_output,
+                    web_search_requests: mu
+                        .usage
+                        .server_tool_use
+                        .map_or(0, |tools| u64::from(tools.web_search_requests)),
                 })
                 .collect(),
             unknown_models: !state.unpriced_models.is_empty(),
@@ -2119,6 +2157,18 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                     cache_read_input_tokens: state.last_cache_read_input_tokens,
                     cache_creation_input_tokens: state.last_cache_creation_input_tokens,
                 }),
+            current_usage_details: state.last_usage.map(|usage| {
+                lingxi_core::host::orchestrator::ResponseUsageDetailsSnapshot {
+                    reasoning_tokens: usage.tokens.reasoning_output,
+                    web_search_requests: usage
+                        .server_tool_use
+                        .map_or(0, |tools| u64::from(tools.web_search_requests)),
+                    cache_creation_1h_input_tokens: usage.tokens.cache_write_1h,
+                    cache_creation_5m_input_tokens: usage.tokens.cache_write,
+                    fast_mode: usage.speed == Some(cost::usage::ApiSpeed::Fast),
+                }
+            }),
+            safety_stops: Some(scoped_tracker.safety_stops()),
             loops,
         }
     }
@@ -2287,7 +2337,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                 );
             }
             let content = Self::refusal_warning_text(&e.banner.serving_model);
-            self.output.emit_text(&content).await;
+            self.output.emit_text(&content, None).await;
             // claude-code carries this notice as a TYPED system message in the
             // conversation (`Dcr`, `src_163219561.js`), not only as banner text.
             // Emitting it on the stream alone made it ephemeral: it never
@@ -2298,7 +2348,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // `convert_messages` drops every `System` before the wire
             // (`llm-runtime/src/convert.rs`), so this is transcript + TUI only
             // and never becomes model context.
-            let notice_msg = lingxi_core::types::ConversationMessage::System {
+            let notice_msg = lingxi_core::types::ConversationMessage::System { api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 content,
                 subtype: Some("model_refusal_fallback".to_string()),
@@ -2602,6 +2652,13 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     )
                 }
             }
+            // Provider SDK errors retain `${status} ${body}`. Local validation
+            // uses the same variant but has no HTTP status and keeps its own text.
+            // Native 2.1.293's terminal APIError uses the normalized provider
+            // detail, e.g. `API Error: 400 HEADLESS_LOCAL_PROVIDER_ERROR`.
+            LlmError::InvalidRequest { .. } if err.http_status().is_some() => {
+                format!("API Error: {}", llm_runtime::error_display_text(err))
+            }
             other => other.to_string(),
         }
     }
@@ -2786,7 +2843,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             .cloned();
         if !crate::prompt::bash_output_note::should_attach(
             &tool_name,
-            data.as_ref(),
+            data.as_ref().map(|projection| &projection.value),
             self.config.interactive_session,
         ) {
             return None;
@@ -2801,6 +2858,28 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// Update the thinking policy for the next API request.
     pub fn set_thinking_config(&self, thinking: llm_runtime::model::thinking::ThinkingConfig) {
         self.api.set_thinking_config(thinking);
+    }
+
+    /// Capture the originating session's safety observation capability before
+    /// invoking hooks or transferring model work to another task.
+    pub async fn model_safety_observer(
+        &self,
+    ) -> Option<lingxi_core::host::model_safety::ModelSafetyObserver> {
+        if let Some(origin) = lingxi_core::host::model_safety::current_model_safety_observer() {
+            return Some(origin);
+        }
+        let pinned = self
+            .model_runtime
+            .cost_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pinned) = pinned {
+            return Some(pinned.model_safety_observer());
+        }
+        let tracker = self.model_runtime.cost_tracker.as_ref()?;
+        let session_id = self.session.lock().await.session_id;
+        Some(tracker.session_scope(session_id).model_safety_observer())
     }
 
     pub(crate) fn scope_api_session<'a, F: std::future::Future + 'a>(
@@ -2844,6 +2923,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     })
                 }));
             }
+            let request_session_id =
+                match lingxi_core::host::session_flags::current_request_session_id() {
+                    Some(id) => id,
+                    None => self.session.lock().await.session_id,
+                };
+            let safety_observer = self.model_safety_observer().await;
+            let future = async {
+                if let Some(observer) = safety_observer {
+                    lingxi_core::host::model_safety::scope_model_safety(observer, future).await
+                } else {
+                    future.await
+                }
+            };
+            let future = lingxi_core::host::session_flags::scope_request_session_id(
+                request_session_id,
+                future,
+            );
             llm_runtime::thinking_scope::scope_thinking_recovery(
                 scope,
                 lingxi_core::host::session_flags::scope_non_interactive_session(
@@ -3979,7 +4075,7 @@ mod session_sidecar_tests {
 
     #[test]
     fn prompt_suggestion_gate_recognizes_synthetic_api_error_assistants() {
-        let assistant = |reason: &str| ConversationMessage::Assistant {
+        let assistant = |reason: &str| ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "response".to_string(),

@@ -1,0 +1,5 @@
+{
+  "type": "ui_client_frame",
+  "runtime_id": "runtime-1",
+  "frame_json": "{\"type\":\"ui.render\",\"tree\":{}}"
+}

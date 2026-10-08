@@ -246,14 +246,14 @@ where
 struct QuietOutput;
 #[async_trait]
 impl lingxi_core::host::OutputStream for QuietOutput {
-    async fn emit_text(&self, _: &str) {}
+    async fn emit_text(&self, _: &str, _utf16_code_units: Option<&[u16]>) {}
     async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
     async fn emit_tool_call(
         &self,
         _: &lingxi_core::types::ToolUseId,
         _: &str,
         _: &serde_json::Value,
-    ) {
+     _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
     }
     async fn emit_tool_result(
         &self,
@@ -261,7 +261,7 @@ impl lingxi_core::host::OutputStream for QuietOutput {
         _: &str,
         _: &str,
         _: &serde_json::Value,
-    ) {
+     _projection: Option<&lingxi_core::host::ToolResultProjection>) {
     }
 }
 #[async_trait]
@@ -588,19 +588,25 @@ mod tests {
             replayed.state.history[0].text_content(),
             "latest foreground message"
         );
-        assert!(writers
-            .claim_session_id(&id.as_uuid().to_string(), std::process::id())
-            .is_err());
+        assert!(
+            writers
+                .claim_session_id(&id.as_uuid().to_string(), std::process::id())
+                .is_err()
+        );
         // This is the construction field consumed by build_with_credential_stack.
         let mut construction = config;
         construction.session_writer_lease = Some(lease);
-        assert!(writers
-            .claim_session_id(&id.as_uuid().to_string(), std::process::id())
-            .is_err());
+        assert!(
+            writers
+                .claim_session_id(&id.as_uuid().to_string(), std::process::id())
+                .is_err()
+        );
         drop(construction);
-        assert!(writers
-            .claim_session_id(&id.as_uuid().to_string(), std::process::id())
-            .is_ok());
+        assert!(
+            writers
+                .claim_session_id(&id.as_uuid().to_string(), std::process::id())
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -657,17 +663,21 @@ mod supervision_tests {
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
         cleaning.notified().await;
-        assert!(supervisor
-            .cancel_run("cancelled-run")
-            .await
-            .unwrap_err()
-            .contains("cleanup"));
+        assert!(
+            supervisor
+                .cancel_run("cancelled-run")
+                .await
+                .unwrap_err()
+                .contains("cleanup")
+        );
         assert!(!cleaned.load(Ordering::SeqCst));
-        assert!(supervisor
-            .runs
-            .lock()
-            .unwrap()
-            .contains_key("cancelled-run"));
+        assert!(
+            supervisor
+                .runs
+                .lock()
+                .unwrap()
+                .contains_key("cancelled-run")
+        );
         release.send(()).unwrap();
         supervisor.cancel_run("cancelled-run").await.unwrap();
         assert!(cleaned.load(Ordering::SeqCst));
@@ -722,13 +732,15 @@ mod supervision_tests {
             .get("cleanup-retry")
             .unwrap()
             .clone();
-        assert!(status
-            .cleanup_error
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .contains("worker"));
+        assert!(
+            status
+                .cleanup_error
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .contains("worker")
+        );
         allowed.store(true, Ordering::SeqCst);
         assert_eq!(caller.await.unwrap().unwrap().summary, "done");
         assert!(attempts.load(Ordering::SeqCst) >= 2);

@@ -24,11 +24,11 @@ mod tests {
     /// Simulate a prior full `Read` of `target` so the read-before-write
     /// staleness guard (Batch F) is satisfied: records the file's current
     /// raw-UTF-8 content (the same form `Read` stores) and its current floored
-    /// mtime under the canonicalized key, with `offset`/`limit` = `None` (a
-    /// full read). Call AFTER writing the file's bytes so the seeded mtime
-    /// matches the on-disk mtime (guard fires only when current mtime is
-    /// strictly greater).
+    /// mtime under Native's normalized session-cwd route key, with
+    /// `offset`/`limit` = `None` (a full read). Canonical remains the source
+    /// for disk access only. Call AFTER writing the bytes so mtime matches.
     fn seed_full_read(ctx: &BuiltinToolContext, target: &std::path::Path) {
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(target).unwrap();
         let bytes = std::fs::read(&canon).unwrap();
         // Decode the SAME way the guard compares (raw UTF-8, BOM-stripped),
@@ -42,7 +42,7 @@ mod tests {
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         tool_api::read_file_state::set(
             &ctx.read_file_state,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content,
                 mtime_ms,
@@ -70,7 +70,14 @@ mod tests {
         std::fs::write(&target, "original").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        seed_full_read(&ctx, &target);
+        crate::read::FileReadTool::new(ctx.clone())
+            .call(
+                json!({ "file_path": link.to_string_lossy() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read the same lexical route before testing the write refusal");
         let tool = FileEditTool::new(ctx);
 
         let error = tool
@@ -1379,6 +1386,7 @@ that bypasses Perforce tracking."
         std::fs::write(&target, "a\nb\nc\n").unwrap();
         set_file_mtime(&target, FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(&target).unwrap();
         let mtime_ms = std::fs::metadata(&canon)
             .ok()
@@ -1387,7 +1395,7 @@ that bypasses Perforce tracking."
         // Seed a PARTIAL read (offset/limit set) — a ranged view, not a full one.
         tool_api::read_file_state::set(
             &ctx.read_file_state,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content: "a\nb\nc\n".into(),
                 mtime_ms,
@@ -1414,6 +1422,42 @@ that bypasses Perforce tracking."
             .expect("ranged read + unchanged mtime must let the edit proceed");
         assert!(!res.is_error);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "a\nB\nc\n");
+    }
+
+    #[tokio::test]
+    async fn actual_read_then_edit_uses_the_normalized_session_route_key() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("nested")).unwrap();
+        let target = tmp.path().join("source.txt");
+        std::fs::write(&target, "old text\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let state = ctx.read_file_state.clone();
+        let input_path = "nested/../source.txt";
+        let route = crate::normalize_model_file_path(input_path, &ctx.cwd());
+
+        crate::read::FileReadTool::new(ctx.clone())
+            .call(
+                json!({ "file_path": input_path }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read succeeds through the active session cwd");
+        assert!(tool_api::read_file_state::get(&state, &route).is_some());
+
+        FileEditTool::new(ctx)
+            .call(
+                json!({
+                    "file_path": input_path,
+                    "old_string": "old text",
+                    "new_string": "new text"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Edit looks up the same Native lexical route that Read recorded");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "new text\n");
     }
 
     #[tokio::test]
@@ -1572,6 +1616,7 @@ that bypasses Perforce tracking."
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert!(long.starts_with(
@@ -1606,6 +1651,7 @@ that bypasses Perforce tracking."
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert_eq!(p, EDIT_PROMPT_SHORT);

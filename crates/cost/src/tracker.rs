@@ -7,6 +7,7 @@
 //! writes corrupting the on-disk snapshot.
 
 use crate::{
+    ModelRef,
     calculator::CostCalculator,
     persistence::{
         CostDurabilityGate, CostDurabilityTurn, CostHydration, CostHydrator, CostMutationId,
@@ -14,7 +15,6 @@ use crate::{
     },
     pricing::{PricingCatalog, PricingResolution},
     usage::Usage,
-    ModelRef,
 };
 use indexmap::IndexMap;
 use lingxi_core::types::SessionId;
@@ -23,9 +23,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use telemetry::AnalyticsBus;
-use tokio::sync::{mpsc, Mutex, OwnedMutexGuard, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, mpsc};
 
 mod attempts;
+#[cfg(test)]
+mod safety_tests;
 pub(crate) use attempts::AttemptLifecycle;
 pub use attempts::{CostAttemptReceipt, CostAttemptSettlement};
 
@@ -392,6 +394,9 @@ impl std::fmt::Debug for PreparedCostSession {
 }
 
 impl CostSessionScope {
+    pub fn model_safety_observer(&self) -> lingxi_core::host::model_safety::ModelSafetyObserver {
+        self.tracker.selected_entry().safety_stops.observer()
+    }
     /// Pin one tracker view to its canonical originating session.
     #[must_use]
     pub fn new(tracker: Arc<CostTracker>) -> Self {
@@ -612,6 +617,7 @@ struct SessionEntry {
     response_settlements: std::sync::Mutex<HashMap<CostMutationId, Arc<CostResponseSlot>>>,
     attempt_settlements: std::sync::Mutex<attempts::AttemptRegistry>,
     attempt_outputs: Arc<Vec<crate::AttemptOutputRecovery>>,
+    safety_stops: Arc<crate::safety::SafetyStops>,
 }
 
 impl SessionEntry {
@@ -629,6 +635,7 @@ impl SessionEntry {
             response_settlements: std::sync::Mutex::new(HashMap::new()),
             attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: Arc::new(Vec::new()),
+            safety_stops: Arc::new(crate::safety::SafetyStops::default()),
         })
     }
 
@@ -646,6 +653,7 @@ impl SessionEntry {
             response_settlements: std::sync::Mutex::new(HashMap::new()),
             attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: Arc::new(Vec::new()),
+            safety_stops: Arc::new(crate::safety::SafetyStops::default()),
         })
     }
 }
@@ -665,6 +673,7 @@ impl SessionLedger {
                 response_settlements: std::sync::Mutex::new(HashMap::new()),
                 attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
                 attempt_outputs: Arc::new(Vec::new()),
+                safety_stops: Arc::new(crate::safety::SafetyStops::default()),
             }),
         );
         Self {
@@ -737,6 +746,13 @@ mod retirement;
 pub use retirement::CostSessionRetirement;
 
 impl CostTracker {
+    pub fn model_safety_observer(&self) -> lingxi_core::host::model_safety::ModelSafetyObserver {
+        self.selected_entry().safety_stops.observer()
+    }
+    /// Ephemeral observations in this pinned session authority, never WAL state.
+    pub fn safety_stops(&self) -> u64 {
+        self.selected_entry().safety_stops.snapshot()
+    }
     pub(crate) fn shares_ledger(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.ledger, &other.ledger)
     }
@@ -817,6 +833,7 @@ impl CostTracker {
             response_settlements: std::sync::Mutex::new(HashMap::new()),
             attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: Arc::new(hydration.attempt_outputs),
+            safety_stops: Arc::new(crate::safety::SafetyStops::default()),
         }));
         self.ledger
             .hydrated_sessions
@@ -1276,6 +1293,7 @@ impl CostTracker {
                 response_settlements: std::sync::Mutex::new(HashMap::new()),
                 attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
                 attempt_outputs: Arc::new(hydration.attempt_outputs),
+                safety_stops: Arc::new(crate::safety::SafetyStops::default()),
             });
             entries.insert(session_id, replacement.clone());
             replacement
@@ -1414,6 +1432,7 @@ impl CostTracker {
                     response_settlements: std::sync::Mutex::new(HashMap::new()),
                     attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
                     attempt_outputs: Arc::new(hydration.attempt_outputs),
+                    safety_stops: Arc::new(crate::safety::SafetyStops::default()),
                 });
                 entries.insert(session_id, entry.clone());
                 entry
@@ -1536,6 +1555,7 @@ impl CostTracker {
             response_settlements: std::sync::Mutex::new(HashMap::new()),
             attempt_settlements: std::sync::Mutex::new(attempts::AttemptRegistry::default()),
             attempt_outputs: source.attempt_outputs.clone(),
+            safety_stops: source.safety_stops.clone(),
         });
         assert!(entries.insert(session_id, replacement).is_none());
         let mut hydrated = self
@@ -2254,6 +2274,7 @@ impl CostTracker {
             authority.durability_gate.freeze(error.to_string());
             return;
         }
+        authority.safety_stops.reset();
         self.ledger
             .hydrated_sessions
             .lock()
@@ -2460,11 +2481,13 @@ mod tests {
             .settle()
             .await;
         assert_eq!(unknown.observed_nano_usd(), 30_000_000);
-        assert!(tracker
-            .snapshot()
-            .await
-            .unpriced_models
-            .contains(&model_ref));
+        assert!(
+            tracker
+                .snapshot()
+                .await
+                .unpriced_models
+                .contains(&model_ref)
+        );
     }
 
     #[tokio::test]
@@ -2770,10 +2793,12 @@ mod tests {
             Arc::new(PricingCatalog::empty()),
             persist_tx.clone(),
         );
-        assert!(ephemeral
-            .scoped(session)
-            .validate_attempt_host_binding(session)
-            .is_err());
+        assert!(
+            ephemeral
+                .scoped(session)
+                .validate_attempt_host_binding(session)
+                .is_err()
+        );
         let (requests, _) = tokio::sync::mpsc::unbounded_channel();
         let tracker = CostTracker::new(session, Arc::new(PricingCatalog::empty()), persist_tx)
             .try_with_durable_persistence(
@@ -2786,13 +2811,17 @@ mod tests {
         assert!(tracker.validate_attempt_host_binding(session).is_err());
         let captured = tracker.scoped(session);
         assert!(captured.validate_attempt_host_binding(session).is_ok());
-        assert!(captured
-            .validate_attempt_host_binding(SessionId::new())
-            .is_err());
-        assert!(tracker
-            .scoped(SessionId::new())
-            .validate_attempt_host_binding(session)
-            .is_err());
+        assert!(
+            captured
+                .validate_attempt_host_binding(SessionId::new())
+                .is_err()
+        );
+        assert!(
+            tracker
+                .scoped(SessionId::new())
+                .validate_attempt_host_binding(session)
+                .is_err()
+        );
         captured.durability_gate().freeze("host unavailable");
         assert!(matches!(
             captured.validate_attempt_host_binding(session),

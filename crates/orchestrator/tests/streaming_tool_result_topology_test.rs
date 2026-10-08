@@ -97,7 +97,7 @@ impl Tool for EchoTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "content": format!("result-of-{}", self.name) }),
             model_content: None,
             new_messages: vec![],

@@ -4,8 +4,7 @@
 //! bundled `rg` binary; this Rust port keeps an **in-process** engine built on
 //! the `ignore` + `grep_*` crates (which is what ripgrep itself is built on),
 //! so flag parity is *behavioral*, not process-identical. The model-facing
-//! result is a single `content` string (read verbatim by the turn-loop
-//! `tool_result_to_model_text` serialization rule).
+//! result is mapped from structured data to a model-facing string.
 //!
 //! Documented divergences from the `rg` CLI (behavioral parity, not blockers):
 //! - Engine is `ignore::WalkBuilder` + `grep_searcher`, not the `rg` process.
@@ -236,6 +235,98 @@ fn format_limit_info(applied_limit: Option<usize>, applied_offset: usize) -> Str
         parts.push(format!("offset: {applied_offset}"));
     }
     parts.join(", ")
+}
+
+/// Claude Code 2.1.287 `Grep.mapToolResultToToolResultBlockParam`. The data's
+/// `content` is the unadorned search output; pagination and summary text are
+/// produced here for both ordinary results and Mod replacements.
+fn map_grep_result_text(data: &Value) -> Option<String> {
+    let limit = data
+        .get("appliedLimit")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let offset = data
+        .get("appliedOffset")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let pagination = format_limit_info(limit, offset);
+    let content = data.get("content").and_then(Value::as_str).unwrap_or("");
+    match data
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("files_with_matches")
+    {
+        "content" => {
+            let body = if !content.is_empty() {
+                content
+            } else if offset > 0 && data.get("totalLines").and_then(Value::as_u64).unwrap_or(0) > 0
+            {
+                "No entries at this offset"
+            } else {
+                "No matches found"
+            };
+            Some(if pagination.is_empty() {
+                body.to_string()
+            } else {
+                format!("{body}\n\n[Showing results with pagination = {pagination}]")
+            })
+        }
+        "count" => {
+            let matches = data.get("numMatches").and_then(Value::as_u64).unwrap_or(0);
+            let files = data.get("numFiles").and_then(Value::as_u64).unwrap_or(0);
+            let body = if !content.is_empty() {
+                content
+            } else if matches > 0 {
+                "No entries at this offset"
+            } else {
+                "No matches found"
+            };
+            let suffix = if pagination.is_empty() {
+                String::new()
+            } else {
+                format!(" with pagination = {pagination}")
+            };
+            Some(format!(
+                "{body}\n\nFound {matches} total {} across {files} {}.{suffix}",
+                if matches == 1 {
+                    "occurrence"
+                } else {
+                    "occurrences"
+                },
+                if files == 1 { "file" } else { "files" },
+            ))
+        }
+        _ => {
+            let count = data.get("numFiles")?.as_u64()?;
+            if count == 0 {
+                return Some(
+                    if offset > 0 && data.get("totalFiles").and_then(Value::as_u64).unwrap_or(0) > 0
+                    {
+                        format!("No entries at this offset. [Showing results with pagination = {pagination}]")
+                    } else {
+                        "No files found".to_string()
+                    },
+                );
+            }
+            let filenames = data
+                .get("filenames")?
+                .as_array()?
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            let suffix = if pagination.is_empty() {
+                String::new()
+            } else {
+                format!(" {pagination}")
+            };
+            Some(format!(
+                "Found {count} {}{suffix}\n{}",
+                if count == 1 { "file" } else { "files" },
+                filenames.join("\n")
+            ))
+        }
+    }
 }
 
 /// `plural` (`stringUtils.ts:32-38`).
@@ -623,6 +714,25 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    json!({
+        "type":"object",
+        "required":["numFiles","filenames"],
+        "properties":{
+            "mode":{"type":"string","enum":["content","files_with_matches","count"]},
+            "numFiles":{"type":"number"},
+            "filenames":{"type":"array","items":{"type":"string"}},
+            "content":{"type":"string"},
+            "numLines":{"type":"number"},
+            "numMatches":{"type":"number"},
+            "totalFiles":{"type":"number"},
+            "totalLines":{"type":"number"},
+            "appliedLimit":{"type":"number"},
+            "appliedOffset":{"type":"number"}
+        }
+    })
+});
+
 struct GrepWalkArgs {
     canon_base: PathBuf,
     search_resolution: SearchResolutionSnapshot,
@@ -817,6 +927,12 @@ impl Tool for GrepTool {
     }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
+    }
+    fn output_schema(&self) -> Option<&Value> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    fn map_result_text(&self, result: &Value) -> Option<String> {
+        map_grep_result_text(result)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -1177,13 +1293,11 @@ impl Tool for GrepTool {
         }
 
         // --- Assemble per-mode result data (claude-code GrepTool outputSchema,
-        // 2.1.191) + the model text. Field order mirrors the binary's construction
-        // (preserve_order). content/count keep the matching text IN `data.content`
-        // (the model reads it via the fallback); files_with_matches has NO content
-        // (the filenames ARE the result), so its model text rides on
-        // `model_content`. No `truncated` — not part of the binary result. ---
+        // 2.1.287) + model text. `data.content` is the raw search output; the
+        // mapper adds empty-result wording, pagination, and count summaries.
+        // No `truncated` — not part of the binary result. ---
         let mut data = Map::new();
-        let mut mc_channel: Option<String> = None;
+        let mc_channel: Option<String>;
         let applied_offset = if offset > 0 { Some(offset) } else { None };
 
         if content_mode {
@@ -1205,7 +1319,7 @@ impl Tool for GrepTool {
                     "No matches found".to_string()
                 }
             } else {
-                content_str
+                content_str.clone()
             };
             let model = if limit_info.is_empty() {
                 result_content
@@ -1216,7 +1330,7 @@ impl Tool for GrepTool {
             data.insert("mode".to_string(), json!("content"));
             data.insert("numFiles".to_string(), json!(0));
             data.insert("filenames".to_string(), json!([] as [String; 0]));
-            data.insert("content".to_string(), json!(model));
+            data.insert("content".to_string(), json!(content_str));
             data.insert("numLines".to_string(), json!(num_lines));
             data.insert("totalLines".to_string(), json!(total_lines));
             if let Some(l) = applied_limit {
@@ -1225,6 +1339,7 @@ impl Tool for GrepTool {
             if let Some(o) = applied_offset {
                 data.insert("appliedOffset".to_string(), json!(o));
             }
+            mc_channel = Some(model);
         } else if count_mode {
             let total_file_count = u64::try_from(count_lines.len()).unwrap_or(u64::MAX);
             let (limited, applied_limit) = apply_head_limit(count_lines, head_limit, offset);
@@ -1267,7 +1382,7 @@ impl Tool for GrepTool {
             data.insert("mode".to_string(), json!("count"));
             data.insert("numFiles".to_string(), json!(total_file_count));
             data.insert("filenames".to_string(), json!([] as [String; 0]));
-            data.insert("content".to_string(), json!(model));
+            data.insert("content".to_string(), json!(limited.join("\n")));
             data.insert("numMatches".to_string(), json!(total));
             if let Some(l) = applied_limit {
                 data.insert("appliedLimit".to_string(), json!(l));
@@ -1275,6 +1390,7 @@ impl Tool for GrepTool {
             if let Some(o) = applied_offset {
                 data.insert("appliedOffset".to_string(), json!(o));
             }
+            mc_channel = Some(model);
         } else {
             // files_with_matches (default). Sort mtime-desc + filename tiebreak;
             // pure filename sort under cfg!(test) (TS NODE_ENV === 'test').
@@ -1348,7 +1464,7 @@ impl Tool for GrepTool {
             mc_channel = Some(model);
         }
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: Value::Object(data),
             model_content: mc_channel,
             new_messages: vec![],
@@ -1425,15 +1541,60 @@ mod tests {
     }
 
     fn content_str(result: &ToolCallResult) -> String {
-        // content/count keep the text in `data.content`; files_with_matches has no
-        // content field, so its model text rides on `model_content`.
+        // The structured content/count payload is raw; all three modes carry
+        // their model-facing render on `model_content`.
         result
-            .data
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .or(result.model_content.as_deref())
+            .model_content
+            .as_deref()
+            .or_else(|| result.data.get("content").and_then(Value::as_str))
             .expect("content in data or model_content channel")
             .to_string()
+    }
+
+    #[test]
+    fn mod_replacement_uses_greps_result_mapper() {
+        assert!(tool_api::output_schema::validate(
+            &OUTPUT_SCHEMA,
+            &json!({"numFiles":0,"filenames":[],"mode":"content","content":""})
+        )
+        .is_ok());
+        assert!(tool_api::output_schema::validate(
+            &OUTPUT_SCHEMA,
+            &json!({"numFiles":0,"filenames":[],"mode":"invalid"})
+        )
+        .is_err());
+        let content = json!({
+            "mode":"content", "content":"a.rs:1:match", "appliedLimit":3,
+            "numFiles":0, "filenames":[]
+        });
+        assert_eq!(
+            map_grep_result_text(&content).as_deref(),
+            Some("a.rs:1:match\n\n[Showing results with pagination = limit: 3]")
+        );
+        let count = json!({
+            "mode":"count", "content":"", "numMatches":2,
+            "numFiles":1, "filenames":[], "appliedOffset":5
+        });
+        assert_eq!(
+            map_grep_result_text(&count).as_deref(),
+            Some("No entries at this offset\n\nFound 2 total occurrences across 1 file. with pagination = offset: 5")
+        );
+        let files = json!({
+            "mode":"files_with_matches", "numFiles":2,
+            "filenames":["a.rs","b.rs"], "appliedOffset":1
+        });
+        assert_eq!(
+            map_grep_result_text(&files).as_deref(),
+            Some("Found 2 files offset: 1\na.rs\nb.rs")
+        );
+        let past_end = json!({
+            "mode":"files_with_matches", "numFiles":0, "filenames":[],
+            "totalFiles":4, "appliedOffset":10
+        });
+        assert_eq!(
+            map_grep_result_text(&past_end).as_deref(),
+            Some("No entries at this offset. [Showing results with pagination = offset: 10]")
+        );
     }
 
     #[test]
@@ -1462,6 +1623,7 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert_eq!(long, grep_description(true));
@@ -1471,6 +1633,7 @@ mod tests {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert_eq!(short, GREP_PROMPT_SHORT);
@@ -2152,6 +2315,14 @@ mod tests {
         );
         assert_eq!(result.data["numLines"], 3);
         assert_eq!(result.data["appliedLimit"], 3);
+        assert!(!result.data["content"]
+            .as_str()
+            .unwrap()
+            .contains("[Showing results"));
+        assert_eq!(
+            map_grep_result_text(&result.data).as_deref(),
+            Some(c.as_str())
+        );
     }
 
     #[tokio::test]
@@ -2288,6 +2459,14 @@ mod tests {
         assert!(c.contains("b.rs:1"), "per-file count: {c}");
         assert_eq!(result.data["numMatches"], 3);
         assert_eq!(result.data["numFiles"], 2);
+        assert!(!result.data["content"]
+            .as_str()
+            .unwrap()
+            .contains("Found 3 total occurrences"));
+        assert_eq!(
+            map_grep_result_text(&result.data).as_deref(),
+            Some(c.as_str())
+        );
     }
 
     #[tokio::test]

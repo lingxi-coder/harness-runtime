@@ -1,0 +1,178 @@
+{
+  "versions": {
+    "2.1.288": "bbe93063f7a0879a1021b2891e5c9354e5b3b98433e32efe6750f7710afed750",
+    "2.1.289": "03d66745e3bb69ec727d66023696f3820bc0a00a8a5ba725eb6706d0c67cbe69"
+  },
+  "sourceByteRanges": [
+    {
+      "version": "2.1.288",
+      "label": "accepted server fallback internal QueryEvent sequence",
+      "start": 195142622,
+      "end": 195143001,
+      "sha256": "4caa8b706acf3d45acf13588fd6337e076c84fcbb98078db54833c90b5748140"
+    },
+    {
+      "version": "2.1.288",
+      "label": "internal refusal_continuation event schema",
+      "start": 180656306,
+      "end": 180656711,
+      "sha256": "13834ac216144f7adf654c2d23c895ea7c942741cee84e6a8957dfeafff01ab3"
+    },
+    {
+      "version": "2.1.288",
+      "label": "internal tombstone event schema",
+      "start": 180628383,
+      "end": 180628846,
+      "sha256": "8465c3e5ae1ad7311102699cd56fb0fc4608e63f35e795c996c7ec070e90050e"
+    },
+    {
+      "version": "2.1.288",
+      "label": "headless output frame passed to Q.write",
+      "start": 206106613,
+      "end": 206106654,
+      "sha256": "545f816299366fb00ca878c249249eb22629e65c2993b9dcdc4284f315ed6fdf"
+    },
+    {
+      "version": "2.1.288",
+      "label": "stream-json writer trackWrite",
+      "start": 205245177,
+      "end": 205245817,
+      "sha256": "e56ded37f4480bebe1c02b5e637d69b865ab10a81ec8a4917a420b9eb395a58d"
+    },
+    {
+      "version": "2.1.288",
+      "label": "stream-json writer write method",
+      "start": 205247212,
+      "end": 205247398,
+      "sha256": "d1cec00c08b78b9613b64ad477769c717146c7807cad25d01aecca3281ad7272"
+    },
+    {
+      "version": "2.1.288",
+      "label": "headless stream-json writer call",
+      "start": 206107200,
+      "end": 206107228,
+      "sha256": "e06379d7a063b2f79db0fa92aae653bbaa6aa2d75bd4c47a09fdb24e07ab1ffb"
+    },
+    {
+      "version": "2.1.289",
+      "label": "accepted server fallback internal QueryEvent sequence",
+      "start": 195457859,
+      "end": 195458238,
+      "sha256": "4caa8b706acf3d45acf13588fd6337e076c84fcbb98078db54833c90b5748140"
+    },
+    {
+      "version": "2.1.289",
+      "label": "internal refusal_continuation event schema",
+      "start": 180919040,
+      "end": 180919445,
+      "sha256": "32a9f7a9958bc247cda96200e0f72f3b36e2303462eee7306e983273edf60260"
+    },
+    {
+      "version": "2.1.289",
+      "label": "internal tombstone event schema",
+      "start": 180891117,
+      "end": 180891580,
+      "sha256": "d906349e2b4fdf9b1f9c23b0511c800b1b5e8c320020ed01a90268e21b834e13"
+    },
+    {
+      "version": "2.1.289",
+      "label": "headless output frame passed to Q.write",
+      "start": 206442107,
+      "end": 206442148,
+      "sha256": "545f816299366fb00ca878c249249eb22629e65c2993b9dcdc4284f315ed6fdf"
+    },
+    {
+      "version": "2.1.289",
+      "label": "stream-json writer trackWrite",
+      "start": 205579907,
+      "end": 205580547,
+      "sha256": "8ebb0488a7120a8fc041a453b32f7f30c94ff2dac4d0f0cc9af47b9c1e3d6122"
+    },
+    {
+      "version": "2.1.289",
+      "label": "stream-json writer write method",
+      "start": 205581942,
+      "end": 205582128,
+      "sha256": "99da2da7ffa1f9da8c36797f396b7f9b95a383de655509b22c1264acb8770140"
+    },
+    {
+      "version": "2.1.289",
+      "label": "headless stream-json writer call",
+      "start": 206442694,
+      "end": 206442722,
+      "sha256": "bfee3435accd1e66eb223a616b4160d52fd7aec633d607af076ec5ba8dd3e339"
+    }
+  ],
+  "internalFallbackProducer": {
+    "eventNames": [
+      "query_model_change",
+      "tombstone",
+      "refusal_continuation"
+    ],
+    "eventOrder": [
+      "append discarded and compensation rows internally",
+      "query_model_change",
+      "tombstone discarded rows with displayOnly=true",
+      "tombstone compensation rows with displayOnly=true",
+      "refusal_continuation phase=begin"
+    ],
+    "rawBegin": "yield{type:\"refusal_continuation\",phase:\"begin\",salvageText:J.text,join:\"exact\",replacesUuids:J.originals.map((ke)=>ke.uuid)}",
+    "sameAcceptedBranchBytes288And289": true,
+    "sourceSha288": "4caa8b706acf3d45acf13588fd6337e076c84fcbb98078db54833c90b5748140",
+    "sourceSha289": "4caa8b706acf3d45acf13588fd6337e076c84fcbb98078db54833c90b5748140",
+    "markerCounts": {
+      "2.1.288": {
+        "assistantContinuationBegin": 0,
+        "queryModelChangeSchema": 0
+      },
+      "2.1.289": {
+        "assistantContinuationBegin": 0,
+        "queryModelChangeSchema": 0
+      }
+    }
+  },
+  "internalSchemas": {
+    "tombstone": {
+      "description": "Internal QueryEvent; wire shape pending a dedicated schema; schema has message/uuid/session_id fields.",
+      "versions": [
+        "2.1.288",
+        "2.1.289"
+      ]
+    },
+    "refusalContinuation": {
+      "description": "Internal QueryEvent schema uses salvage_text plus uuid/session_id; producer begin object uses salvageText/join/replacesUuids and does not include top-level uuid/session_id.",
+      "versions": [
+        "2.1.288",
+        "2.1.289"
+      ]
+    },
+    "queryModelChange": "No type:R(\"query_model_change\") schema in either pinned binary."
+  },
+  "publicStreamJsonBoundary": {
+    "headlessPassesFrameWithoutMapping": true,
+    "localWriterProbe": [
+      {
+        "type": "query_model_change",
+        "toModel": "fallback-model"
+      },
+      {
+        "type": "tombstone",
+        "message": {
+          "uuid": "old"
+        },
+        "displayOnly": true
+      },
+      {
+        "type": "refusal_continuation",
+        "phase": "begin",
+        "salvageText": "kept",
+        "join": "exact",
+        "replacesUuids": [
+          "old"
+        ]
+      }
+    ],
+    "probeScope": "Runs the pinned trackWrite/write methods with JSON.stringify supplied for imported Lae and a capturing lr callback. The probe proves no event-type filter in those methods; it is not an end-to-end CLI output capture.",
+    "conclusion": "The output writer serializes the object it receives and does not type-filter these names. The source-pinned raw fallback producer emits internal QueryEvents; tombstone and refusal_continuation schemas are marked @internal, and query_model_change has no matching SDK schema (the raw refusal_continuation fields also differ from its schema). The complete lower-level QueryEvent-to-headless-generator path is not traced here, so this oracle does not claim that these internal events do or do not reach stdout. Do not add a new public server_fallback_* or assistant_continuation_begin frame based on this producer alone."
+  }
+}

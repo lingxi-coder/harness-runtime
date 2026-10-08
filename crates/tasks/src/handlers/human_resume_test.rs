@@ -1,4 +1,5 @@
 use super::*;
+use futures::StreamExt;
 use lingxi_core::host::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
 
 #[derive(Default)]
@@ -38,82 +39,90 @@ struct HumanApi {
 }
 #[async_trait]
 impl agent::SubagentApiClient for HumanApi {
-    async fn messages_create(
+    async fn stream(
         &self,
-        _: &str,
-        _: Option<&str>,
-        messages: Vec<lingxi_core::types::ConversationMessage>,
-        _: Vec<serde_json::Value>,
-    ) -> Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> {
-        let history = serde_json::to_string(&messages).unwrap();
-        let index = {
-            let mut calls = self.calls.lock().unwrap();
-            let index = calls.len();
-            calls.push(history.clone());
-            index
-        };
-        if index > 0 {
-            let ids = self.gate.ids.lock().unwrap().clone();
-            assert!(
-                ids.iter().all(|id| id == &ids[0]),
-                "human restore allocates the original Pool identity"
-            );
-            let row = self
-                .registry
-                .get()
-                .unwrap()
-                .upgrade()
-                .unwrap()
-                .get("ahumanalias")
-                .await
-                .unwrap();
-            assert!(
-                matches!(row, crate::state::TaskState::LocalAgent(agent) if agent.agent_id == ids[0])
-            );
-            assert!(
-                history.contains("first answer"),
-                "actual transcript history must survive stop"
-            );
-        }
-        if index > 0 && self.block_calls.load(std::sync::atomic::Ordering::SeqCst) {
-            struct InFlight {
-                cancelled: Arc<std::sync::atomic::AtomicBool>,
-                finished: bool,
+        request: agent::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        let messages = request.messages;
+        let response: Result<llm_runtime::HistoryResponse, llm_runtime::LlmError> = {
+            let history = serde_json::to_string(&messages).unwrap();
+            let index = {
+                let mut calls = self.calls.lock().unwrap();
+                let index = calls.len();
+                calls.push(history.clone());
+                index
+            };
+            if index > 0 {
+                let ids = self.gate.ids.lock().unwrap().clone();
+                assert!(
+                    ids.iter().all(|id| id == &ids[0]),
+                    "human restore allocates the original Pool identity"
+                );
+                let row = self
+                    .registry
+                    .get()
+                    .unwrap()
+                    .upgrade()
+                    .unwrap()
+                    .get("ahumanalias")
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(row, crate::state::TaskState::LocalAgent(agent) if agent.agent_id == ids[0])
+                );
+                assert!(
+                    history.contains("first answer"),
+                    "actual transcript history must survive stop"
+                );
             }
-            impl Drop for InFlight {
-                fn drop(&mut self) {
-                    if !self.finished {
-                        self.cancelled
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
+            if index > 0 && self.block_calls.load(std::sync::atomic::Ordering::SeqCst) {
+                struct InFlight {
+                    cancelled: Arc<std::sync::atomic::AtomicBool>,
+                    finished: bool,
+                }
+                impl Drop for InFlight {
+                    fn drop(&mut self) {
+                        if !self.finished {
+                            self.cancelled
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
                     }
                 }
+                let mut in_flight = InFlight {
+                    cancelled: self.cancelled_call.clone(),
+                    finished: false,
+                };
+                self.call_entered.notify_one();
+                self.call_release.notified().await;
+                in_flight.finished = true;
             }
-            let mut in_flight = InFlight {
-                cancelled: self.cancelled_call.clone(),
-                finished: false,
-            };
-            self.call_entered.notify_one();
-            self.call_release.notified().await;
-            in_flight.finished = true;
-        }
-        Ok(llm_runtime::HistoryResponse {
-            id: "human-response".into(),
-            model: "mock".into(),
-            content: vec![llm_runtime::ContentBlock::Text {
-                text: if index == 0 {
-                    "first answer"
-                } else {
-                    "human answer"
-                }
-                .into(),
-                cache_control: None,
-            }],
-            stop_reason: Some("end_turn".into()),
-            stop_details: None,
-            usage: llm_runtime::ExecutionUsage::default(),
-            cost: None,
-            provider_metadata: serde_json::Value::Null,
-        })
+            Ok(llm_runtime::HistoryResponse {
+                id: "human-response".into(),
+                model: "mock".into(),
+                content: vec![llm_runtime::ContentBlock::Text {
+                    text: if index == 0 {
+                        "first answer"
+                    } else {
+                        "human answer"
+                    }
+                    .into(),
+                    cache_control: None, citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                stop_details: None,
+                usage: llm_runtime::ExecutionUsage::default(),
+                cost: None,
+                provider_metadata: serde_json::Value::Null,
+            })
+        };
+        let events = llm_runtime::stream_accumulator::response_to_stream_events(response?);
+        Ok(futures::stream::iter(events.into_iter().map(Ok)).boxed())
     }
 }
 struct Fixture {
@@ -212,6 +221,114 @@ async fn wait_parked(registry: &crate::registry::TaskRegistry, id: &str) {
     .await
     .expect("real runner reaches parked boundary");
 }
+
+#[tokio::test]
+async fn handback_stopped_restore_preserves_exact_surrogates_and_rejects_hidden_unit_forgery() {
+    use lingxi_core::host::handback::*;
+    use lingxi_core::host::task_registry::TaskRegistryHandle;
+    use lingxi_core::types::{MessageId, SessionId};
+
+    for forged in [false, true] {
+        let f = fixture().await;
+        let recipient = f.gate.ids.lock().unwrap()[0];
+        let sender = AgentId::new();
+        let scope = HandbackSessionScope {
+            session_id: SessionId::new(),
+            activation_epoch: 1,
+        };
+        let units = vec![65, 0xd83d];
+        let body = String::from_utf16_lossy(&units);
+        let envelope = PreparedHandbackReport {
+            message_id: MessageId::new(),
+            report: HandbackReport {
+                text: body.clone(),
+                warning: None,
+            },
+            body,
+            body_utf16: Some(units),
+            sender_name: "worker".into(),
+            sender_id: sender.to_string(),
+            sender_task_id: sender.to_string(),
+            agent_type: "worker".into(),
+            flagged: false,
+        }
+        .envelope(
+            HandbackRunKey {
+                scope,
+                agent_id: sender,
+                run_epoch: 1,
+            },
+            HandbackRecipient::Agent {
+                scope,
+                agent_id: recipient,
+            },
+        );
+        let row = json!({
+            "type": "attachment",
+            "uuid": envelope.receipt.message_id,
+            "agent_id": recipient,
+            "message": envelope.model_message(),
+            "attachment": {"type": "subagent_handback", "envelope": envelope},
+        });
+        let mut overrides = envelope.transcript_utf16_overrides();
+        if forged {
+            // Both malformed surrogates have the same U+FFFD display. Only the
+            // exact native string exposes this envelope/body contradiction.
+            overrides.insert("/attachment/envelope/body".into(), vec![65, 0xde00]);
+        }
+        let mut bytes =
+            lingxi_core::types::exact_json::to_vec_with_overrides(&row, &overrides).unwrap();
+        bytes.push(b'\n');
+        let line = String::from_utf8(bytes).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&line).is_err());
+        let path = f
+            .handler
+            .streaming_spawner
+            .as_ref()
+            .unwrap()
+            .transcript_path(recipient)
+            .unwrap();
+        f.handler
+            .output_manager
+            .fs_for_test()
+            .append_file(path.to_str().unwrap(), &line)
+            .await
+            .unwrap();
+        let result = TaskRegistryHandle::send_human_task_message(
+            f.registry.as_ref(),
+            "ahumanalias",
+            "continue from retained history",
+        )
+        .await;
+        if forged {
+            assert!(
+                result.is_err(),
+                "same display text must not hide changed units"
+            );
+            assert_eq!(f.api.calls.lock().unwrap().len(), 1);
+        } else {
+            result.expect("native malformed UTF-16 peer row remains restorable");
+            wait_parked(&f.registry, &f.id).await;
+            let calls = f.api.calls.lock().unwrap();
+            let history: serde_json::Value = serde_json::from_str(&calls[1]).unwrap();
+            assert!(history.as_array().unwrap().iter().any(|message| {
+                message["id"] == serde_json::to_value(envelope.receipt.message_id).unwrap()
+                    && message["is_meta"] == true
+                    && message["content"][0]["utf16_code_units"]
+                        == serde_json::to_value(
+                            lingxi_core::host::handback_wire::render_agent_message_utf16(
+                                &envelope.origin.from,
+                                envelope.body_utf16.as_ref().unwrap(),
+                            ),
+                        )
+                        .unwrap()
+            }));
+            drop(calls);
+            f.registry.kill_with_reason(&f.id, "user").await.unwrap();
+        }
+    }
+}
+
 #[tokio::test]
 async fn human_message_restores_stopped_real_pool_with_history_and_original_alias() {
     let f = fixture().await;
@@ -390,7 +507,10 @@ impl lingxi_core::host::worktree::WorktreeManager for WorktreeGate {
         _: &str,
         base: Option<&str>,
         _: &[PathBuf],
-    ) -> Result<lingxi_core::host::worktree::WorktreeHandle, lingxi_core::host::worktree::WorktreeError> {
+    ) -> Result<
+        lingxi_core::host::worktree::WorktreeHandle,
+        lingxi_core::host::worktree::WorktreeError,
+    > {
         assert_eq!(base, Some("pinned-base"));
         self.creating.notify_one();
         if self.block_create.load(std::sync::atomic::Ordering::SeqCst) {
@@ -418,8 +538,10 @@ impl lingxi_core::host::worktree::WorktreeManager for WorktreeGate {
     }
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<lingxi_core::host::worktree::WorktreeInfo>, lingxi_core::host::worktree::WorktreeError>
-    {
+    ) -> Result<
+        Vec<lingxi_core::host::worktree::WorktreeInfo>,
+        lingxi_core::host::worktree::WorktreeError,
+    > {
         Ok(vec![])
     }
     async fn cleanup_stale(
@@ -446,7 +568,10 @@ impl lingxi_core::host::worktree::WorktreeManager for WorktreeGate {
     async fn enter_existing(
         &self,
         path: &std::path::Path,
-    ) -> Result<lingxi_core::host::worktree::WorktreeHandle, lingxi_core::host::worktree::WorktreeError> {
+    ) -> Result<
+        lingxi_core::host::worktree::WorktreeHandle,
+        lingxi_core::host::worktree::WorktreeError,
+    > {
         Ok(lingxi_core::host::worktree::WorktreeHandle {
             path: path.to_owned(),
             branch_name: "restored".into(),

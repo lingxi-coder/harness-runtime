@@ -437,7 +437,7 @@ impl Tool for VoiceTool {
             _ => return Err(ToolError::InvalidInput("unknown voice action".into())),
         };
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content: None,
             new_messages: vec![],

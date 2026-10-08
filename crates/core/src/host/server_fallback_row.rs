@@ -105,7 +105,7 @@ impl ServerFallbackApiErrorRow {
     /// for append hooks, output events and persistence.
     #[must_use]
     pub fn query_message(&self) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: self.uuid,
             content: self.message.content.clone(),
             stop_reason: Some(self.message.stop_reason.clone()),

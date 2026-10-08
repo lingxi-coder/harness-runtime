@@ -805,7 +805,7 @@ mod tests {
     fn transcript_budget_keeps_last_assistant_and_its_tool_results() {
         let messages = vec![
             ConversationMessage::user(MessageId::new(), "old".repeat(100)),
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "latest".into(), citations: None,
@@ -829,7 +829,7 @@ mod tests {
     #[test]
     fn transcript_budget_preserves_split_assistant_identity_across_tool_results() {
         let id = MessageId::new();
-        let assistant = |text: &str| ConversationMessage::Assistant {
+        let assistant = |text: &str| ConversationMessage::Assistant { per_turn_effort: None,
             id,
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: text.into(),
@@ -897,7 +897,7 @@ mod tests {
         request.transcript_path = Some(dir.path().to_path_buf());
         let messages = vec![
             ConversationMessage::user(MessageId::new(), "unpersisted evidence".into()),
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "just completed".into(), citations: None,
@@ -1136,7 +1136,7 @@ mod tests {
         request.transcript = Some(hooks::PromptHookTranscript {
             messages: vec![
                 ConversationMessage::user(MessageId::new(), "run tests".into()),
-                ConversationMessage::Assistant {
+                ConversationMessage::Assistant { per_turn_effort: None,
                     id: MessageId::new(),
                     content: vec![
                         // A DeepSeek trace: no signature, which the Anthropic
@@ -1152,7 +1152,7 @@ mod tests {
                     stop_reason: None,
                 },
                 ConversationMessage::user(MessageId::new(), "and again".into()),
-                ConversationMessage::Assistant {
+                ConversationMessage::Assistant { per_turn_effort: None,
                     id: MessageId::new(),
                     content: vec![
                         lingxi_core::types::ContentBlock::Thinking {

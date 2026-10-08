@@ -1624,6 +1624,7 @@ fn make_request(
     }
 
     SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
         handback_opt_in: false,
         parent_permission_mode: None,

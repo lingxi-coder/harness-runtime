@@ -189,6 +189,7 @@ mod tests {
 
     fn fresh_ctx_with_registry(registry: Arc<ToolRegistry>) -> ToolUseContext {
         ToolUseContext {
+            input_projection: None,
             agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
                 debug: false,
@@ -347,7 +348,9 @@ mod tests {
         bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
 
         let tool = AgentTool::new(bctx);
-        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let statistics_session = lingxi_core::types::SessionId::new();
+        ctx.origin_session_id = Some(statistics_session);
         let input = serde_json::json!({
             "description": "do work",
             "subagent_type": "Plan",
@@ -376,6 +379,10 @@ mod tests {
             0,
             "budget rejection must not consume a lifetime spawn slot"
         );
+        let statistics = lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(registry.as_ref(), statistics_session).unwrap().snapshot();
+        assert_eq!(statistics.refused.budget, 1);
+        assert_eq!(statistics.spawned, 0);
+
     }
 
     // =====================================================================
@@ -588,6 +595,8 @@ mod tests {
         );
         let tool = AgentTool::new(bctx);
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let statistics_session = lingxi_core::types::SessionId::new();
+        ctx.origin_session_id = Some(statistics_session);
         let limit = lingxi_core::host::subagent_spawn::max_subagent_spawn_depth();
         ctx.depth = limit;
         let err = tool
@@ -610,6 +619,10 @@ mod tests {
         }
         assert!(spawner.invocations().is_empty());
         assert_eq!(registry.get_total_agent_spawns(), 0);
+        let statistics = lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(registry.as_ref(), statistics_session).unwrap().snapshot();
+        assert_eq!(statistics.refused.depth_limit, 1);
+        assert_eq!(statistics.spawned, 0);
+
     }
 
     #[tokio::test]
@@ -626,7 +639,9 @@ mod tests {
             arc_mock_budget(u64::MAX),
         );
         let tool = AgentTool::new(bctx);
-        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let statistics_session = lingxi_core::types::SessionId::new();
+        ctx.origin_session_id = Some(statistics_session);
         let cap = lingxi_core::host::subagent_spawn::max_concurrent_subagents();
         let err = tool
             .call(
@@ -648,6 +663,10 @@ mod tests {
         }
         assert!(spawner.invocations().is_empty());
         assert_eq!(registry.get_total_agent_spawns(), 0);
+        let statistics = lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(registry.as_ref(), statistics_session).unwrap().snapshot();
+        assert_eq!(statistics.refused.concurrency_limit, 1);
+        assert_eq!(statistics.spawned, 0);
+
     }
 
     #[tokio::test]
@@ -4713,7 +4732,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 _: ToolUseContext,
                 _: ToolProgressSender,
             ) -> Result<ToolCallResult, ToolError> {
-                Ok(ToolCallResult {
+                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     data: json!({}),
                     model_content: None,
                     new_messages: vec![],
@@ -4792,6 +4811,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 "NoopTool",
                 serde_json::json!({}),
                 lingxi_core::host::tool_invoker::SubagentInvocationContext {
+                    input_projection: None,
                     cancellation_token: lingxi_core::host::CancellationToken::new(),
                     permission_pause_observer: None,
                     parent_agent_id: None,
@@ -5645,14 +5665,14 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
     }
 
     fn parent_assistant_with_tool_use() -> lingxi_core::types::ConversationMessage {
-        lingxi_core::types::ConversationMessage::Assistant {
+        lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Text {
                     text: "I'll run a command".into(),
                     citations: None,
                 },
-                lingxi_core::types::ContentBlock::ToolUse {
+                lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
                     id: lingxi_core::types::ToolUseId::new(),
                     name: "Bash".into(),
                     input: serde_json::json!({"command": "ls"}),
@@ -5891,7 +5911,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_budget(u64::MAX),
         );
         let tool = AgentTool::new(bctx);
-        let boilerplate = lingxi_core::types::ConversationMessage::User {
+        let boilerplate = lingxi_core::types::ConversationMessage::User { api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: lingxi_core::host::fork_subagent::build_child_message("prior directive"),

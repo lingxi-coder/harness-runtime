@@ -50,9 +50,9 @@ const TRUNCATION_SUFFIX: &str = "...(truncated)";
 /// U+2014 EM DASH with one ASCII space either side.
 const TIMEOUT_MARKER: &str = "[Monitor timed out \u{2014} re-arm if needed.]";
 
-/// 2.1.270 `Az()`: bounded Monitor rollout, independently gated from availability.
+/// 2.1.286 `l7()`: bounded Monitor rollout, enabled by default.
 pub fn bounded_monitors_enabled() -> bool {
-    telemetry::flag_bool("tengu_breezy_crescent", false)
+    telemetry::flag_bool("tengu_breezy_crescent", true)
 }
 
 /// 2.1.270 `Vye()`: ten minutes for single-shot print, thirty otherwise.
@@ -1644,7 +1644,7 @@ mod tests {
         }
         handler.spawn(input, ctx).await.unwrap();
         assert_eq!(await_terminal(&sink).await, TaskStatus::Killed);
-        assert_eq!(sink.events(), vec![TIMEOUT_MARKER.to_string()]);
+        assert_eq!(sink.events(), vec![timeout_notice(300_000, 0, true)]);
     }
     #[test]
     fn high_volume_stop_requires_more_than_thirty_seconds() {

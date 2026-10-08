@@ -85,7 +85,7 @@ impl Tool for AlwaysFailingTool {
 async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() {
     let tool_use_id = ToolUseId::new();
     let r1 = mock_message_response(
-        vec![LlmContentBlock::ToolCall {
+        vec![LlmContentBlock::ToolCall { input_projection: None,
             id: tool_use_id.to_string(),
             name: "AlwaysFail".into(),
             input: json!({}),
@@ -95,7 +95,7 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
     let r2 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "sorry, fix it later".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );
@@ -160,7 +160,7 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
                     assert_eq!(*id, tool_use_id);
                     assert!(text.starts_with("Error: "), "byte-locked prefix: {text}");
                     assert!(text.contains("disk on fire"), "preserves payload: {text}");
-                    assert!(*is_error);
+                    assert!(is_error.unwrap_or(false));
                 }
                 _ => panic!("expected ToolResult content block"),
             }

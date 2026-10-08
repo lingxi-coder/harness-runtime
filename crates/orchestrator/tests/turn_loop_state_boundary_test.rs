@@ -62,7 +62,7 @@ fn response(text: &str) -> HistoryResponse {
         model: "claude-opus-4-7".into(),
         content: vec![LlmContentBlock::Text {
             text: text.into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         stop_reason: Some("end_turn".into()),
         stop_details: None,

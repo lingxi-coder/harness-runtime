@@ -39,7 +39,7 @@ struct MockSubagentApiClient {
     /// The messages the LAST call was given — lets a test assert what the
     /// runner actually seeded the conversation with.
     last_messages: Mutex<Vec<ConversationMessage>>,
-    last_tools: Mutex<Vec<serde_json::Value>>,
+    last_tools: Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
 }
 
 #[derive(Clone, Debug)]
@@ -125,7 +125,7 @@ struct StreamingMockApiClient {
     calls: AtomicUsize,
     /// Tools seen on the most recent streaming request — lets a
     /// test prove `ctx.tool_schemas` threads through the seam.
-    last_tools: Mutex<Vec<serde_json::Value>>,
+    last_tools: Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     /// The model each call was issued against, in order — lets a test prove a
     /// refusal hop actually re-issued against the fallback.
     models: Mutex<Vec<String>>,
@@ -169,7 +169,7 @@ impl StreamingMockApiClient {
     fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
-    fn last_tools(&self) -> Vec<serde_json::Value> {
+    fn last_tools(&self) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         self.last_tools.lock().unwrap().clone()
     }
     fn physical_calls(&self) -> Vec<CapturedSubagentCall> {
@@ -263,6 +263,7 @@ impl crate::api::SubagentApiClient for ToolThenStreamErrorApi {
             llm_runtime::HistoryEvent::ContentBlockStart {
                 index: 2,
                 content_block: llm_runtime::ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "toolu-before-error".into(),
                     name: "Agent".into(),
                     input: serde_json::Value::Null,
@@ -318,6 +319,7 @@ impl GatedFallbackApiClient {
             llm_runtime::HistoryEvent::ContentBlockStart {
                 index: 0,
                 content_block: llm_runtime::ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "toolu-before-hop".into(),
                     name: "Agent".into(),
                     input: serde_json::Value::Null,
@@ -334,6 +336,7 @@ impl GatedFallbackApiClient {
             llm_runtime::HistoryEvent::ContentBlockStart {
                 index: 1,
                 content_block: llm_runtime::ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "toolu-after-hop".into(),
                     name: "Agent".into(),
                     input: serde_json::Value::Null,
@@ -461,11 +464,14 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
         let tool_use_id = ctx.tool_use_id.clone().unwrap_or_default();
         self.contexts.lock().unwrap().push(ctx);
         Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             is_error: false,
             data: serde_json::json!("ok"),
             model_content: None,
             new_messages: vec![
-                ConversationMessage::User {
+                ConversationMessage::User { api_message_override: None,
                     id: MessageId::new(),
                     content: vec![
                         ContentBlock::Text {
@@ -483,7 +489,7 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
                 },
-                ConversationMessage::Assistant {
+                ConversationMessage::Assistant { per_turn_effort: None,
                     id: MessageId::new(),
                     content: vec![ContentBlock::Text {
                         text: format!("executor assistant context {tool_use_id}"),
@@ -491,7 +497,7 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
                     }],
                     stop_reason: None,
                 },
-                ConversationMessage::System {
+                ConversationMessage::System { api_system: None,
                     id: MessageId::new(),
                     content: format!("executor system context {tool_use_id}"),
                     subtype: None,
@@ -848,11 +854,13 @@ async fn streamed_tool_invocations_keep_query_history_current_row_and_prior_sibl
         model: "mock".into(),
         content: vec![
             llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: "toolu-sibling-a".into(),
                 name: "Read".into(),
                 input: serde_json::json!({"file_path":"a.txt"}),
             },
             llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: "toolu-sibling-b".into(),
                 name: "Read".into(),
                 input: serde_json::json!({"file_path":"b.txt"}),
@@ -1090,7 +1098,7 @@ async fn streamed_tool_invocations_keep_query_history_current_row_and_prior_sibl
 
 #[tokio::test]
 async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
-    let discarded = ConversationMessage::Assistant {
+    let discarded = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "discarded non-tool K row".into(),
@@ -1098,7 +1106,7 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
         }],
         stop_reason: None,
     };
-    let retained = ConversationMessage::Assistant {
+    let retained = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "retained K row".into(),
@@ -1109,9 +1117,10 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
     let result_a_id = MessageId::new();
     let note_a_id = MessageId::new();
     let result_b_id = MessageId::new();
-    let je_a = ConversationMessage::User {
+    let je_a = ConversationMessage::User { api_message_override: None,
         id: result_a_id,
         content: vec![ContentBlock::ToolResult {
+            content_projection: None,
             tool_use_id: ToolUseId::from("toolu-result-a".to_string()),
             content: "result A".into(),
             is_error: Some(false),
@@ -1123,9 +1132,10 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
         is_visible_in_transcript_only: false,
     };
     let note_a = ConversationMessage::user(note_a_id, "attachment/user note A".into());
-    let je_b = ConversationMessage::User {
+    let je_b = ConversationMessage::User { api_message_override: None,
         id: result_b_id,
         content: vec![ContentBlock::ToolResult {
+            content_projection: None,
             tool_use_id: ToolUseId::from("toolu-result-b".to_string()),
             content: "result B".into(),
             is_error: Some(false),
@@ -1335,6 +1345,7 @@ fn streamed_tool_use_turn(name: &str, stop: &str) -> Vec<llm_runtime::HistoryEve
         HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: ContentBlock::ToolCall {
+                input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: name.into(),
                 input: serde_json::Value::Null,
@@ -1385,6 +1396,7 @@ fn streamed_tool_use_with_input_turn(
         HistoryEvent::ContentBlockStart {
             index: 1,
             content_block: ContentBlock::ToolCall {
+                input_projection: None,
                 id: id.to_owned(),
                 name: name.to_owned(),
                 input: serde_json::Value::Null,
@@ -1629,6 +1641,7 @@ fn tool_use_response(name: &str, stop_reason: Option<&str>) -> llm_runtime::Hist
         id: "mock".into(),
         model: "mock".into(),
         content: vec![llm_runtime::ContentBlock::ToolCall {
+            input_projection: None,
             id: ToolUseId::new().to_string(),
             name: name.into(),
             input: serde_json::json!({}),
@@ -1648,6 +1661,7 @@ fn tool_uses_response(names: &[&str]) -> llm_runtime::HistoryResponse {
         content: names
             .iter()
             .map(|name| llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: (*name).into(),
                 input: serde_json::json!({}),
@@ -1679,6 +1693,7 @@ fn text_and_tool_response(
                 citations: None,
             },
             llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: name.into(),
                 input: serde_json::json!({}),
@@ -1797,6 +1812,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         structured_output_mode: lingxi_core::host::subagent_spawn::StructuredOutputMode::Forced,
         budget: None,
         hook_executor: None,
+        agent_spawn_token: None,
         stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
         subagent_stop_firer: None,
         strict_plugin_only_hooks: false,
@@ -2026,6 +2042,9 @@ impl lingxi_core::host::ToolInvoker for RouteChangingCleanupInvoker {
         context.options.main_loop_model = ctx.parent_model.unwrap();
         context.options.model_profile = ctx.parent_model_profile;
         Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             is_error: false,
             data: serde_json::Value::Null,
             model_content: None,
@@ -3440,7 +3459,7 @@ async fn workflow_watchdog_retries_five_times_then_fails_without_partial_salvage
 
 /// Build a minimal assistant message with a single text block.
 fn assistant_text(text: &str) -> ConversationMessage {
-    ConversationMessage::Assistant {
+    ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: text.to_string(),
@@ -5089,6 +5108,7 @@ async fn schema_forces_structured_output_and_returns_the_tool_input() {
     let structured = serde_json::json!({ "answer": 42, "ok": true });
     let resp = llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
+            input_projection: None,
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
             input: structured.clone(),
@@ -5113,6 +5133,7 @@ async fn schema_forces_structured_output_and_returns_the_tool_input() {
 async fn schema_invalid_output_retried_then_captured() {
     let so = |input: serde_json::Value| llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
+            input_projection: None,
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
             input,
@@ -5152,6 +5173,7 @@ async fn schema_invalid_output_retried_then_captured() {
 async fn schema_rejected_attempt_is_not_surfaced_beside_its_retry() {
     let so = |input: serde_json::Value| llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
+            input_projection: None,
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
             input,
@@ -5196,6 +5218,7 @@ async fn schema_rejected_attempt_is_not_surfaced_beside_its_retry() {
 async fn schema_retry_cap_exceeded_aborts() {
     let bad_so = || llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
+            input_projection: None,
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
             input: serde_json::json!({ "answer": "still-wrong" }),
@@ -5336,6 +5359,7 @@ impl crate::api::SubagentApiClient for StructuredOutputModeCapturingApiClient {
 fn structured_output_call_response(input: serde_json::Value) -> llm_runtime::HistoryResponse {
     llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
+            input_projection: None,
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
             input,
@@ -5648,6 +5672,7 @@ async fn schema_with_other_tools_never_pins_tool_choice_even_after_a_nudge() {
         // Round 3 (post-nudge): the model finally calls StructuredOutput.
         Ok(llm_runtime::HistoryResponse {
             content: vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: "StructuredOutput".into(),
                 input: structured.clone(),
@@ -5718,6 +5743,7 @@ async fn schema_only_tool_in_registry_forces_from_round_one() {
     let structured = serde_json::json!({ "answer": 7 });
     let api = RecordingForceApiClient::new(vec![Ok(llm_runtime::HistoryResponse {
         content: vec![llm_runtime::ContentBlock::ToolCall {
+            input_projection: None,
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
             input: structured.clone(),
@@ -6579,11 +6605,18 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
     let api = MockSubagentApiClient::new(vec![Ok(text_response("unused", Some("end_turn")))]);
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.budget = Some(Arc::new(MockBudget { exceeded: true }));
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    let token = statistics.prepare_spawn("worker".into(), None, true, 1);
+    token.started();
+    ctx.agent_spawn_token = Some(token);
 
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
+    assert_eq!(statistics.snapshot().killed.system, 1);
+    assert_eq!(statistics.snapshot().failed, 0);
 
     assert_eq!(
         api.call_count(),
@@ -9388,6 +9421,7 @@ async fn local_app_create_json_correction_rejects_mixed_server_or_incomplete_res
                 }
             } else {
                 llm_runtime::ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "other".into(),
                     name: "Read".into(),
                     input: serde_json::json!({}),
@@ -9606,6 +9640,7 @@ async fn design_parse_recovery_does_not_dispatch_or_retry_mixed_tool_response() 
             Ok(llm_runtime::HistoryEvent::ContentBlockStart {
                 index: 1,
                 content_block: llm_runtime::ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "other".into(),
                     name: "Write".into(),
                     input: serde_json::json!({}),
@@ -10142,9 +10177,10 @@ async fn oversized_mandatory_prompt_is_rejected_before_provider_call() {
 
 /// Build an assistant message whose only content block is a `ToolUse`.
 fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
-    ConversationMessage::Assistant {
+    ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolUse {
+            input_projection: None,
             id,
             name: name.to_string(),
             input: serde_json::json!({}),
@@ -10156,9 +10192,10 @@ fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
 
 /// Build a user message whose only content block is the matching `ToolResult`.
 fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
-    ConversationMessage::User {
+    ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
+            content_projection: None,
             tool_use_id,
             content: content.to_string(),
             is_error: Some(false),
@@ -11200,7 +11237,10 @@ async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
         let mut picked = tool_use_response("Skill", Some("tool_use"));
         if let Some(name) = second_tool {
             picked.content.push(llm_runtime::ContentBlock::ToolCall {
-                id: ToolUseId::new().to_string(), name: name.into(), input: serde_json::json!({}),
+                input_projection: None,
+                id: ToolUseId::new().to_string(),
+                name: name.into(),
+                input: serde_json::json!({}),
             });
         }
         let api = MockSubagentApiClient::new(vec![
@@ -11212,8 +11252,8 @@ async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
         ctx.agent_definition.model = AgentModel::Explicit("initial".into());
         ctx.model_profile = Some("origin-provider".into());
         ctx.refusal_fallback_chain = vec!["nested-model-final".into()];
-        ctx.model_resolution_context_provider = Some(Arc::new(
-            |model: &str, profile: Option<&str>| {
+        ctx.model_resolution_context_provider =
+            Some(Arc::new(|model: &str, profile: Option<&str>| {
                 Ok(crate::model_resolution::ModelResolutionContext {
                     route: crate::model_resolution::ModelRouteFacts {
                         model: model.to_string(),
@@ -11228,20 +11268,30 @@ async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
         ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
             transcript_dir.path().to_path_buf(),
         )));
-        let transcript_path = transcript_dir.path().join(format!("agent-{}.jsonl", ctx.agent_id));
+        let transcript_path = transcript_dir
+            .path()
+            .join(format!("agent-{}.jsonl", ctx.agent_id));
         let (event_tx, event_rx) = mpsc::channel(1);
         drop(event_tx);
         let (out_tx, out_rx) = mpsc::channel(64);
         run_subagent(ctx, event_rx, out_tx).await;
-        assert!(drain(out_rx).await.iter().any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        assert!(drain(out_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
         let calls = api.physical_calls();
         let physical_model = if second_tool == Some("NestedReselectInitial") {
             "initial"
         } else {
             "nested-model-final"
         };
-        assert_eq!(calls.iter().map(|call| call.request.model.as_str()).collect::<Vec<_>>(),
-            ["initial", "nested-model-final", physical_model]);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.request.model.as_str())
+                .collect::<Vec<_>>(),
+            ["initial", "nested-model-final", physical_model]
+        );
         let serving = calls[1].fallback_target.as_ref().unwrap();
         assert_eq!(serving.user_model, "initial");
         assert!(serving.is_target("nested-model-final", str::to_string));
@@ -11252,16 +11302,24 @@ async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
             assert!(!selected.is_target(physical_model, str::to_string));
         } else {
             assert_eq!(selected.user_model, "initial");
-            assert_eq!(selected.turn_override.as_deref(), Some("nested-model-final"));
-            assert!(selected.is_target(physical_model, str::to_string),
-                "a prompt-only modifier retains the serving refusal route");
+            assert_eq!(
+                selected.turn_override.as_deref(),
+                Some("nested-model-final")
+            );
+            assert!(
+                selected.is_target(physical_model, str::to_string),
+                "a prompt-only modifier retains the serving refusal route"
+            );
         }
         let expected_profile = if second_tool == Some("NestedMutateSecond") {
             "nested-profile-final"
-        } else { "origin-provider" };
+        } else {
+            "origin-provider"
+        };
         assert_eq!(calls[2].request.profile.as_deref(), Some(expected_profile));
         let transcript = tokio::fs::read_to_string(transcript_path).await.unwrap();
-        let selections: Vec<serde_json::Value> = transcript.lines()
+        let selections: Vec<serde_json::Value> = transcript
+            .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .filter(|row| row["type"] == "model-selection")
             .collect();
@@ -11513,7 +11571,7 @@ async fn a_subagent_that_never_refused_carries_no_note() {
 /// do: the notices are how the retraction is expressed at all.
 #[test]
 fn retracted_messages_are_dropped_but_notices_survive() {
-    let assistant = |text: &str| ConversationMessage::Assistant {
+    let assistant = |text: &str| ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: text.to_string(),
@@ -11639,6 +11697,9 @@ async fn tool_reported_error_and_context_reach_model_history() {
             lingxi_core::host::tool_invoker::ToolInvokerError,
         > {
             Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: serde_json::json!({"code": "unavailable"}),
                 model_content: Some("Contract unavailable".into()),
                 is_error: true,
@@ -11716,6 +11777,9 @@ async fn child_tool_context_is_one_plugin_attachment_in_the_model_snapshot() {
             lingxi_core::host::tool_invoker::ToolInvokerError,
         > {
             Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: serde_json::json!({"ok":true}),
                 model_content: Some("read ok".into()),
                 is_error: false,
@@ -12224,6 +12288,7 @@ async fn complete_only_assistant_row_keeps_one_native_row_for_mod_and_sibling_to
                 citations: None,
             },
             llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tool_a_id.into(),
                 name: "ToolA".into(),
                 input: tool_a_input.clone(),
@@ -12234,6 +12299,7 @@ async fn complete_only_assistant_row_keeps_one_native_row_for_mod_and_sibling_to
                 citations: None,
             },
             llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: tool_b_id.into(),
                 name: "ToolB".into(),
                 input: tool_b_input.clone(),
@@ -12501,7 +12567,7 @@ async fn cold_resumed_child_screens_source_attachment_without_sending_restore_ma
         MessageId::new(),
         "<system-reminder>\ntool.call hook additional context: original\n</system-reminder>".into(),
     );
-    let marker = ConversationMessage::System {
+    let marker = ConversationMessage::System { api_system: None,
         id: MessageId::new(),
         content: serde_json::json!({
             "messageId":original.id(),
@@ -12771,17 +12837,15 @@ fn nested_model_modifiers_resolve_in_order_without_mutating_original_state() {
         .unwrap();
     assert_eq!(original.options.main_loop_model, "start");
     assert_eq!(original.options.model_profile.as_deref(), Some("a"));
-    assert!(
-        apply_nested_tool_context_modifiers(
-            &state,
-            vec![],
-            vec![nested_route_modifier("balanced", None)],
-            "start",
-            Some("a"),
-            None,
-        )
-        .is_err()
-    );
+    assert!(apply_nested_tool_context_modifiers(
+        &state,
+        vec![],
+        vec![nested_route_modifier("balanced", None)],
+        "start",
+        Some("a"),
+        None,
+    )
+    .is_err());
 }
 
 #[async_trait]
@@ -12875,6 +12939,9 @@ impl tool_api::Tool for NestedToolEffectsProbe {
                 let order = self.modifier_order.clone();
                 let calls = self.modifier_calls.clone();
                 Ok(tool_api::ToolCallResult {
+                    mcp_meta_projection: None,
+                    model_content_projection: None,
+                    data_projection: None,
                     data: serde_json::json!({"structured":"first"}),
                     model_content: Some("first model text".into()),
                     new_messages: vec![ConversationMessage::user(
@@ -12896,6 +12963,9 @@ impl tool_api::Tool for NestedToolEffectsProbe {
                 let order = self.modifier_order.clone();
                 let calls = self.modifier_calls.clone();
                 Ok(tool_api::ToolCallResult {
+                    mcp_meta_projection: None,
+                    model_content_projection: None,
+                    data_projection: None,
                     data: serde_json::json!({"structured":"second"}),
                     model_content: Some("second model text".into()),
                     new_messages: vec![ConversationMessage::user(
@@ -12920,6 +12990,9 @@ impl tool_api::Tool for NestedToolEffectsProbe {
                 })
             }
             "NestedReselectInitial" => Ok(tool_api::ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: serde_json::json!({"selected":"initial"}),
                 model_content: None,
                 new_messages: Vec::new(),
@@ -12960,6 +13033,7 @@ async fn concurrency_safe_skill_override_updates_the_next_query_after_same_turn_
 
     let mut first = tool_use_response("Skill", Some("tool_use"));
     first.content.push(llm_runtime::ContentBlock::ToolCall {
+        input_projection: None,
         id: ToolUseId::new().to_string(),
         name: "NestedMutateSecond".into(),
         input: serde_json::json!({}),

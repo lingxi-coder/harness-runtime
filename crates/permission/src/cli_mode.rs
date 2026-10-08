@@ -139,11 +139,9 @@ pub(crate) const ENV_SCRUB_FORCED_TO_DEFAULT_MSG: &str = "Permission mode forced
 /// U+2014.
 pub(crate) const BYPASS_DISCLAIMER_DOWNGRADE_MSG: &str = "Permission mode downgraded to default \u{2014} bypass requires accepting the disclaimer interactively first";
 
-/// PERM-09 / claude-code `kqd`'s IDE branch: the byte-exact notice shown when a
-/// settings `defaultMode: "bypassPermissions"` is IGNORED because a VS
-/// Code-owned session never consented to it. Em-dash is U+2014; the quoted
-/// setting name is Claude Code's own VS Code setting and is reproduced verbatim.
-pub const IDE_BYPASS_UNCONSENTED_MSG: &str = "Permission mode bypassPermissions from settings was ignored \u{2014} enable the \"Claude Code: Allow Dangerously Skip Permissions\" setting in VS Code to consent to it";
+/// Notice shown when an IDE-owned session has not consented to bypassing
+/// permissions, so the settings default is ignored.
+pub const IDE_BYPASS_UNCONSENTED_MSG: &str = "Permission mode bypassPermissions from settings was ignored \u{2014} enable dangerous permission skipping in the IDE and consent to it";
 
 /// `YCe()` (binary @281977270) — is this session OWNED BY THE IDE, and did the
 /// user consent to bypass in it?
@@ -456,8 +454,7 @@ mod tests {
         assert_eq!(notice.as_deref(), Some(IDE_BYPASS_UNCONSENTED_MSG));
         assert_eq!(
             IDE_BYPASS_UNCONSENTED_MSG,
-            "Permission mode bypassPermissions from settings was ignored \u{2014} enable the \
-\"Claude Code: Allow Dangerously Skip Permissions\" setting in VS Code to consent to it"
+            "Permission mode bypassPermissions from settings was ignored \u{2014} enable dangerous permission skipping in the IDE and consent to it"
         );
     }
 

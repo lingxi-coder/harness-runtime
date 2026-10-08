@@ -18,10 +18,21 @@ pub struct ParsedSlashCommand {
 #[must_use]
 pub fn parse_slash_command(input: &str) -> Option<ParsedSlashCommand> {
     let trimmed_input = input.strip_prefix('/')?;
-    let (name, args_str) = match trimmed_input.find(char::is_whitespace) {
-        Some(i) => (&trimmed_input[..i], trimmed_input[i + 1..].trim_start()),
-        None => (trimmed_input, ""),
-    };
+    let (name, args_str) =
+        match trimmed_input.find(lingxi_core::host::effort::javascript_whitespace) {
+            Some(i) => {
+                let separator = trimmed_input[i..]
+                    .chars()
+                    .next()
+                    .expect("located separator");
+                (
+                    &trimmed_input[..i],
+                    trimmed_input[i + separator.len_utf8()..]
+                        .trim_start_matches(lingxi_core::host::effort::javascript_whitespace),
+                )
+            }
+            None => (trimmed_input, ""),
+        };
     let positional = tokenize_args(args_str);
     Some(ParsedSlashCommand {
         name: name.to_string(),
@@ -38,7 +49,7 @@ pub fn parse_slash_command(input: &str) -> Option<ParsedSlashCommand> {
 /// (`*`/`?`), and comment (`#…`) entries become non-string `ParseEntry` objects
 /// that are dropped. On a shell-quote parse error (a `${…}` "Bad substitution")
 /// the TS code falls back to `args.split(/\s+/).filter(Boolean)`; we mirror that
-/// with [`str::split_whitespace`].
+/// with ECMAScript whitespace splitting.
 ///
 /// Shared with [`crate::argument_substitution::parse_arguments`].
 #[must_use]
@@ -46,7 +57,11 @@ pub(crate) fn tokenize_args(s: &str) -> Vec<String> {
     match shell_quote_parse(s) {
         Ok(tokens) => tokens,
         // TS: `tryParseShellCommand` failed -> `args.split(/\s+/).filter(Boolean)`.
-        Err(ShellParseError::BadSubstitution) => s.split_whitespace().map(str::to_string).collect(),
+        Err(ShellParseError::BadSubstitution) => s
+            .split(lingxi_core::host::effort::javascript_whitespace)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+            .collect(),
     }
 }
 
@@ -312,6 +327,17 @@ fn parse_env_var(chars: &[char], i: &mut usize) -> Result<String, ShellParseErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_separators_use_ecmascript_whitespace_and_complete_utf8_characters() {
+        for separator in ["\u{00a0}", "\u{2003}", "\u{feff}"] {
+            let parsed = parse_slash_command(&format!("/effort{separator}low")).unwrap();
+            assert_eq!(parsed.name, "effort");
+            assert_eq!(parsed.raw_args, "low");
+        }
+        let parsed = parse_slash_command("/effort \u{0085}low\u{0085}").unwrap();
+        assert_eq!(parsed.raw_args, "\u{0085}low\u{0085}");
+    }
 
     fn toks(s: &str) -> Vec<String> {
         tokenize_args(s)

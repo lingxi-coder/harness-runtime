@@ -152,14 +152,14 @@ async fn model_fork_uses_captured_prefix_and_reports_cold_session() {
     assert!(client.requests.lock().unwrap().is_empty());
 
     let history = ConversationMessage::user(MessageId::new(), "history".into());
-    let latest = ConversationMessage::Assistant {
+    let latest = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             lingxi_core::types::ContentBlock::Text {
                 text: "thinking aloud".into(),
                 citations: None,
             },
-            lingxi_core::types::ContentBlock::ToolUse {
+            lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
                 id: lingxi_core::types::ToolUseId::new(),
                 name: "Read".into(),
                 input: serde_json::json!({"file_path":"README.md"}),

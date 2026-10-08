@@ -68,7 +68,7 @@ fn cwd_s_own_memory_file_is_not_surfaced() {
 /// `let o=new Set()` INSIDE `Rop`, created per call, so a second call re-finds
 /// the same files. Session-level "don't send this twice" is
 /// `loadedNestedMemoryPaths`, which lives at the CALLER (see
-/// `nested_memory_reminder_message`) — not here. Keeping the two apart is what
+/// `nested_memory_reminder_messages`) — not here. Keeping the two apart is what
 /// lets a LINGXI.md created mid-session still be discovered.
 #[test]
 fn discovery_is_per_call_and_re_finds_the_same_files() {

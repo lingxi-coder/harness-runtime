@@ -190,7 +190,7 @@ impl Tool for InjectingTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "content": "TOOL-RESULT",
                 "model_content": "Launching skill: demo",
@@ -267,7 +267,7 @@ impl Tool for PlainTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "content": "TOOL-RESULT", "model_content": "ok" }),
             model_content: None,
             new_messages: vec![],
@@ -359,7 +359,7 @@ async fn streaming_replays_tool_injected_new_messages_into_history() {
         .iter()
         .position(|m| {
             matches!(m, ConversationMessage::User { content, .. }
-                if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "EXPANDED-SKILL-PROMPT")))
+                if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "EXPANDED-SKILL-PROMPT")))
         })
         .expect("injected skill-prompt message present in streaming history");
 
@@ -424,7 +424,7 @@ async fn streaming_tool_without_new_messages_leaves_history_unchanged() {
     // No injected message text anywhere in history.
     assert!(
         !s.history.iter().any(|m| matches!(m, ConversationMessage::User { content, .. }
-            if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == "EXPANDED-SKILL-PROMPT")))),
+            if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "EXPANDED-SKILL-PROMPT")))),
         "a tool with no new_messages must not inject any history message"
     );
 
@@ -502,7 +502,7 @@ async fn streaming_pre_tool_additional_context_is_a_separate_message_after_tool_
         .iter()
         .position(|m| {
             matches!(m, ConversationMessage::User { content, .. }
-                if content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text == ctx_text)))
+                if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. } if text == ctx_text)))
         })
         .expect("standalone additionalContext message present in streaming history");
 

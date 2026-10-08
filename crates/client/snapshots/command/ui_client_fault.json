@@ -1,0 +1,5 @@
+{
+  "type": "ui_client_fault",
+  "request_id": "fault-1",
+  "request_json": "{\"subtype\":\"ui_client_fault\"}"
+}

@@ -29,6 +29,11 @@ engine = [
 ]
 desktop = [
     "engine",
+    "dep:msgqueue",
+    "tokio/io-util",
+    "dep:uuid",
+    "dep:chrono",
+    "dep:jsonrpc",
     "dep:branding",
     "command-api/builtin-handlers",
     "dep:cron",
@@ -167,6 +172,7 @@ collaboration = [
 ]
 
 [dependencies]
+chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
 
 mobile-linux-api.workspace = true
 
@@ -287,6 +293,7 @@ path = "tests/decision_contract.rs"
 [[test]]
 name = "sdk_surface"
 path = "tests/sdk_surface.rs"
+required-features = ["engine"]
 
 [[test]]
 name = "audio_injection"

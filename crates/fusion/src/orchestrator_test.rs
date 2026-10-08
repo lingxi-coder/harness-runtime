@@ -1338,6 +1338,7 @@ impl FakeSpawner {
                 },
             }),
             Some(FakePanel::SalvagedIncomplete(report)) => Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
                 usage: SubagentUsage {
@@ -1367,6 +1368,7 @@ impl FakeSpawner {
                 usage_complete: false,
             }),
             Some(FakePanel::MaxTurnsExhausted) => Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: AgentId::new(),
                 content: serde_json::json!({
                     "reason": "max_turns_exhausted",
@@ -1383,6 +1385,7 @@ impl FakeSpawner {
                 usage_complete: true,
             }),
             Some(FakePanel::Report(report)) => Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: AgentId::new(),
                 content: serde_json::to_value(&report).unwrap(),
                 usage: SubagentUsage {
@@ -1411,6 +1414,7 @@ impl FakeSpawner {
             }),
             Some(FakePanel::ReportWithReasoning(report, reasoning)) => {
                 Ok(SubagentResult::Completed {
+                    handback: None,
                     agent_id: AgentId::new(),
                     content: serde_json::to_value(&report).unwrap(),
                     usage: SubagentUsage {
@@ -1448,6 +1452,7 @@ impl FakeSpawner {
                     reasoning_output_tokens: 0,
                 };
                 Ok(SubagentResult::Completed {
+                    handback: None,
                     agent_id: AgentId::new(),
                     content: value,
                     usage: usage.clone(),
@@ -1462,6 +1467,7 @@ impl FakeSpawner {
                 })
             }
             Some(FakePanel::MalformedReport) => Ok(SubagentResult::Completed {
+                handback: None,
                 agent_id: AgentId::new(),
                 content: json!({"not": "a valid panel report"}),
                 usage: SubagentUsage {
@@ -2550,6 +2556,7 @@ impl SubagentSpawner for WatchdogSpawner {
         // healthy response may therefore outlive one idle interval in total.
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: AgentId::new(),
             content: serde_json::to_value(report("heartbeat")).unwrap(),
             usage: SubagentUsage::default(),
@@ -6226,6 +6233,7 @@ impl SubagentSpawner for MessageCountSpawner {
         _inherit: SubagentInheritance,
     ) -> Result<SubagentResult, SubagentSpawnError> {
         Ok(SubagentResult::Completed {
+            handback: None,
             agent_id: AgentId::new(),
             content: serde_json::to_value(report("ANSWER")).unwrap(),
             usage: SubagentUsage::default(),
@@ -6273,6 +6281,11 @@ async fn provider_requests_reflects_assistant_message_count_not_a_hardcoded_one(
 
 #[tokio::test]
 async fn a_pool_full_spawn_error_aborts_the_still_running_sibling() {
+    // PoolFull's error detail uses the shared output guard before the panel
+    // completion reaches the abort bar. Initialize its regex table before
+    // timing cancellation so cold sanitizer startup is not charged to it.
+    crate::panel::parse_and_sanitize(&serde_json::to_value(report("WARMUP")).unwrap())
+        .expect("initialize the panel output guard");
     let mut config = test_config();
     config.min_successful_panels = 2;
     config.panel_total_timeout_ms = 5_000;

@@ -217,7 +217,7 @@ pub struct SubagentApiRequest {
     /// Current oldest-first conversation history.
     pub messages: Vec<lingxi_core::types::ConversationMessage>,
     /// Advertised tool definitions for this round-trip.
-    pub tools: Vec<serde_json::Value>,
+    pub tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Explicit tool choice for the designated structured-output turn.
     pub forced_tool: Option<String>,
     /// Per-request thinking-effort hint.
@@ -449,7 +449,7 @@ mod tests {
             String::new(),
         );
         if let lingxi_core::types::ConversationMessage::User { content, .. } = &mut tool_result {
-            *content = vec![lingxi_core::types::ContentBlock::ToolResult {
+            *content = vec![lingxi_core::types::ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "ordinary tool output".into(),
                 is_error: Some(false),
@@ -474,7 +474,7 @@ mod tests {
         sink.emit_terminal(completed());
         sink.try_emit(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::System {
+            message: lingxi_core::types::ConversationMessage::System { api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: "idle".into(),
                 subtype: Some("agent_idle".into()),

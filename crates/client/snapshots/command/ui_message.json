@@ -1,0 +1,5 @@
+{
+  "type": "ui_message",
+  "request_id": "message-1",
+  "request_json": "{\"subtype\":\"ui_message\"}"
+}

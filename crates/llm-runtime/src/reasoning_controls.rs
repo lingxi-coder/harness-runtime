@@ -30,6 +30,8 @@ mod tests {
         };
         request.input.thinking = Some(thinking.clone());
         let target = ReasoningTarget {
+            inference: &Default::default(),
+            features: &Default::default(),
             profile_name: None,
             protocol: &ProtocolFamily::OpenAiResponses,
             base_url: "https://api.openai.com/v1",
@@ -46,6 +48,8 @@ mod tests {
     #[test]
     fn apply_selection_sets_canonical_thinking_controls() {
         let target = ReasoningTarget {
+            inference: &Default::default(),
+            features: &Default::default(),
             profile_name: None,
             protocol: &ProtocolFamily::OpenAiResponses,
             base_url: "https://api.openai.com/v1",

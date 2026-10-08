@@ -1,0 +1,1446 @@
+{
+  "schemaVersion": 1,
+  "baseline": "2.1.293/darwin-arm64",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "researchOnly": true,
+  "acceptedMatrix": false,
+  "harnessInvoked": false,
+  "parityEstablished": false,
+  "selectedCases": 8,
+  "nativeProcesses": 16,
+  "allCapturesComplete": true,
+  "missingToolReminder": "[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now.",
+  "invalidToolContinuation": "Existing assistant tool_use plus user tool_result; no new user retry text",
+  "cases": [
+    {
+      "id": "probe-schema-no-tool",
+      "root": "/tmp/headless-baseline-293-schema-edges",
+      "captureComplete": true,
+      "native-a": {
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 2,
+        "resultCount": 1,
+        "result": {
+          "duration_api_ms": 13,
+          "stop_reason": "end_turn",
+          "session_id": "5d745a75-fb30-470a-81f6-e01ea21fc6ee",
+          "total_cost_usd": 0.000044,
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 4,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 2,
+              "outputTokens": 4,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000044,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 2,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "HEADLESS_SCHEMA_WITHOUT_TOOL",
+          "ttft_ms": 26,
+          "type": "result",
+          "duration_ms": 36,
+          "uuid": "693d01d5-9613-4d81-9fda-4f67a6cd41d1",
+          "ttft_stream_ms": 26,
+          "time_to_request_ms": 21,
+          "first_content_frame_ms": 26,
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1593,
+        "stdoutSha256": "e450cc9b0034ef85ab6e46c7f9cf7f5223de6984f9d68a4ea056cd070e8e5083"
+      },
+      "native-b": {
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 2,
+        "resultCount": 1,
+        "result": {
+          "duration_api_ms": 11,
+          "stop_reason": "end_turn",
+          "session_id": "5d745a75-fb30-470a-81f6-e01ea21fc6ee",
+          "total_cost_usd": 0.000044,
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 4,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 2,
+              "outputTokens": 4,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000044,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 2,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "HEADLESS_SCHEMA_WITHOUT_TOOL",
+          "ttft_ms": 24,
+          "type": "result",
+          "duration_ms": 32,
+          "uuid": "9957fcd9-a3ff-410b-a837-0277352e7a63",
+          "ttft_stream_ms": 23,
+          "time_to_request_ms": 19,
+          "first_content_frame_ms": 23,
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1593,
+        "stdoutSha256": "468b675a5f4b295680fd79f8b7296c2d31df8744e36b63c57949d5fc830b917b"
+      }
+    },
+    {
+      "id": "probe-schema-max-zero",
+      "root": "/tmp/headless-baseline-293-schema-edges",
+      "captureComplete": true,
+      "native-a": {
+        "exit": {
+          "code": 1,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": 1,
+        "result": {
+          "is_error": true,
+          "duration_api_ms": 0,
+          "num_turns": 2,
+          "stop_reason": "tool_use",
+          "session_id": "03bf4f74-670f-4b2f-8e84-df7792b0a13f",
+          "total_cost_usd": 0.000022,
+          "usage": {
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 0,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 1,
+              "outputTokens": 2,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000022,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "structured_output_retry_exhausted",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "subtype": "error_max_structured_output_retries",
+          "errors": [
+            "Failed to provide valid structured output after 0 attempts — last StructuredOutput error: Output does not match required schema: /answer: must be string"
+          ],
+          "type": "result",
+          "duration_ms": 45,
+          "uuid": "e76c6fbb-22a0-47e9-8c67-bf7e08134f5a",
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1662,
+        "stdoutSha256": "9a3f701d08991b55ef60a124d5c5bf9f9db2967f6d14993f68f3a1231e776ede"
+      },
+      "native-b": {
+        "exit": {
+          "code": 1,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": 1,
+        "result": {
+          "is_error": true,
+          "duration_api_ms": 0,
+          "num_turns": 2,
+          "stop_reason": "tool_use",
+          "session_id": "03bf4f74-670f-4b2f-8e84-df7792b0a13f",
+          "total_cost_usd": 0.000022,
+          "usage": {
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 0,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 1,
+              "outputTokens": 2,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000022,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "structured_output_retry_exhausted",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "subtype": "error_max_structured_output_retries",
+          "errors": [
+            "Failed to provide valid structured output after 0 attempts — last StructuredOutput error: Output does not match required schema: /answer: must be string"
+          ],
+          "type": "result",
+          "duration_ms": 45,
+          "uuid": "f6ca841a-49a0-4e6a-8f6b-1539097692e2",
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1662,
+        "stdoutSha256": "6eb3954f900d9d3cf5286438294f01db86b840c18c43dfee74f04c344b66f09b"
+      }
+    },
+    {
+      "id": "probe-schema-max-negative",
+      "root": "/tmp/headless-baseline-293-schema-edges",
+      "captureComplete": true,
+      "native-a": {
+        "exit": {
+          "code": 1,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": 1,
+        "result": {
+          "is_error": true,
+          "duration_api_ms": 0,
+          "num_turns": 2,
+          "stop_reason": "tool_use",
+          "session_id": "3e97ed1e-a77a-4ef7-893b-9216b3b283f8",
+          "total_cost_usd": 0.000022,
+          "usage": {
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 0,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 1,
+              "outputTokens": 2,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000022,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "structured_output_retry_exhausted",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "subtype": "error_max_structured_output_retries",
+          "errors": [
+            "Failed to provide valid structured output after -1 attempts — last StructuredOutput error: Output does not match required schema: /answer: must be string"
+          ],
+          "type": "result",
+          "duration_ms": 44,
+          "uuid": "bae96182-88de-47c2-80bc-eaf0bb20eaae",
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1663,
+        "stdoutSha256": "40bed91c507f078f94437e6299e51bd990bdd4d9e6a9ba360e78418c709b8529"
+      },
+      "native-b": {
+        "exit": {
+          "code": 1,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": 1,
+        "result": {
+          "is_error": true,
+          "duration_api_ms": 0,
+          "num_turns": 2,
+          "stop_reason": "tool_use",
+          "session_id": "3e97ed1e-a77a-4ef7-893b-9216b3b283f8",
+          "total_cost_usd": 0.000022,
+          "usage": {
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 0,
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 1,
+              "outputTokens": 2,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000022,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "structured_output_retry_exhausted",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "subtype": "error_max_structured_output_retries",
+          "errors": [
+            "Failed to provide valid structured output after -1 attempts — last StructuredOutput error: Output does not match required schema: /answer: must be string"
+          ],
+          "type": "result",
+          "duration_ms": 44,
+          "uuid": "b636522e-3c2c-4930-946c-45abdc3049e0",
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1663,
+        "stdoutSha256": "581e9f366481a9679543130a7436c2f048465610b938c21de374d46f8eb7d3ae"
+      }
+    },
+    {
+      "id": "probe-schema-max-prefix",
+      "root": "/tmp/headless-baseline-293-schema-edges",
+      "captureComplete": true,
+      "native-a": {
+        "exit": {
+          "code": 1,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 2,
+        "resultCount": 1,
+        "result": {
+          "is_error": true,
+          "duration_api_ms": 12,
+          "num_turns": 3,
+          "stop_reason": "tool_use",
+          "session_id": "8384bb8f-523f-4e0d-8356-fe05199e8ef0",
+          "total_cost_usd": 0.000044,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 2,
+              "outputTokens": 4,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000044,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "structured_output_retry_exhausted",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "subtype": "error_max_structured_output_retries",
+          "errors": [
+            "Failed to provide valid structured output after 2 attempts — last StructuredOutput error: Output does not match required schema: /answer: must be string"
+          ],
+          "type": "result",
+          "duration_ms": 51,
+          "uuid": "66878bf8-96ec-4e7e-95d1-d73e8aa90a33",
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1663,
+        "stdoutSha256": "3286f4fea7c614962cb74e84d4be3c86c93680134c8adfcbd705dd7da7c1e71a"
+      },
+      "native-b": {
+        "exit": {
+          "code": 1,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 2,
+        "resultCount": 1,
+        "result": {
+          "is_error": true,
+          "duration_api_ms": 12,
+          "num_turns": 3,
+          "stop_reason": "tool_use",
+          "session_id": "8384bb8f-523f-4e0d-8356-fe05199e8ef0",
+          "total_cost_usd": 0.000044,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 2,
+              "outputTokens": 4,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000044,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "structured_output_retry_exhausted",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "subtype": "error_max_structured_output_retries",
+          "errors": [
+            "Failed to provide valid structured output after 2 attempts — last StructuredOutput error: Output does not match required schema: /answer: must be string"
+          ],
+          "type": "result",
+          "duration_ms": 51,
+          "uuid": "cbe896ed-a1b1-4638-83ec-7bb3aac168ec",
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1663,
+        "stdoutSha256": "0c5cc6f3bec6fc52bf90b91a7cf179851c11ae7a31e51e163df77d443b015ef4"
+      }
+    },
+    {
+      "id": "probe-schema-max-nan",
+      "root": "/tmp/headless-baseline-293-schema-edges",
+      "captureComplete": true,
+      "native-a": {
+        "exit": {
+          "code": 1,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 5,
+        "resultCount": 1,
+        "result": {
+          "is_error": true,
+          "duration_api_ms": 24,
+          "num_turns": 6,
+          "stop_reason": "tool_use",
+          "session_id": "32698203-261d-4009-8b75-3cfd4a701e32",
+          "total_cost_usd": 0.00010999999999999999,
+          "usage": {
+            "input_tokens": 4,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 8,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 5,
+              "outputTokens": 10,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.00010999999999999999,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "structured_output_retry_exhausted",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "subtype": "error_max_structured_output_retries",
+          "errors": [
+            "Failed to provide valid structured output after 5 attempts — last StructuredOutput error: Output does not match required schema: /answer: must be string"
+          ],
+          "type": "result",
+          "duration_ms": 66,
+          "uuid": "04fc563e-127f-4601-ba07-d027ea7f42ae",
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1692,
+        "stdoutSha256": "8efdd495fcf7d9a9b28ee33253b3c889ac6bc873831f6f93afacd6ce19c5643e"
+      },
+      "native-b": {
+        "exit": {
+          "code": 1,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 5,
+        "resultCount": 1,
+        "result": {
+          "is_error": true,
+          "duration_api_ms": 26,
+          "num_turns": 6,
+          "stop_reason": "tool_use",
+          "session_id": "32698203-261d-4009-8b75-3cfd4a701e32",
+          "total_cost_usd": 0.00010999999999999999,
+          "usage": {
+            "input_tokens": 4,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 8,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 5,
+              "outputTokens": 10,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.00010999999999999999,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "structured_output_retry_exhausted",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "subtype": "error_max_structured_output_retries",
+          "errors": [
+            "Failed to provide valid structured output after 5 attempts — last StructuredOutput error: Output does not match required schema: /answer: must be string"
+          ],
+          "type": "result",
+          "duration_ms": 70,
+          "uuid": "7c2a1267-73b3-482a-b31a-0b1c79a1b0c3",
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1692,
+        "stdoutSha256": "51cde40cc196f76384c4adb70959a2587eaaa2f35acb0efbd89b4e1974590660"
+      }
+    },
+    {
+      "id": "probe-schema-success-turns-1",
+      "root": "/tmp/headless-baseline-293-schema-edges",
+      "captureComplete": true,
+      "native-a": {
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": 1,
+        "result": {
+          "duration_api_ms": 12,
+          "stop_reason": "tool_use",
+          "session_id": "803ee153-4b9c-44c9-8c26-d0c6ec6a72f9",
+          "total_cost_usd": 0.000022,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 1,
+              "outputTokens": 2,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000022,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 2,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "{\"answer\":\"HEADLESS_SCHEMA_RESPONSE\"}",
+          "structured_output": {
+            "answer": "HEADLESS_SCHEMA_RESPONSE"
+          },
+          "ttft_ms": 23,
+          "type": "result",
+          "duration_ms": 29,
+          "uuid": "28acf796-2fc1-404d-9909-3c8611d050ba",
+          "ttft_stream_ms": 22,
+          "time_to_request_ms": 18,
+          "first_content_frame_ms": 22,
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1664,
+        "stdoutSha256": "2bace749c8c56e55c401cdeef152669f561002be44eab2a0e06c253d57274576"
+      },
+      "native-b": {
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": 1,
+        "result": {
+          "duration_api_ms": 12,
+          "stop_reason": "tool_use",
+          "session_id": "803ee153-4b9c-44c9-8c26-d0c6ec6a72f9",
+          "total_cost_usd": 0.000022,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 1,
+              "outputTokens": 2,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000022,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 2,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "{\"answer\":\"HEADLESS_SCHEMA_RESPONSE\"}",
+          "structured_output": {
+            "answer": "HEADLESS_SCHEMA_RESPONSE"
+          },
+          "ttft_ms": 23,
+          "type": "result",
+          "duration_ms": 29,
+          "uuid": "cdd7a3a9-d179-431a-8818-df420434f520",
+          "ttft_stream_ms": 23,
+          "time_to_request_ms": 18,
+          "first_content_frame_ms": 23,
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1664,
+        "stdoutSha256": "ef110a8e41549b8c3deb6c088b115ba5bea03f950c02ebe34e3c77ecc8b9552b"
+      }
+    },
+    {
+      "id": "probe-schema-success-turns-2",
+      "root": "/tmp/headless-baseline-293-schema-edges",
+      "captureComplete": true,
+      "native-a": {
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": 1,
+        "result": {
+          "duration_api_ms": 12,
+          "stop_reason": "tool_use",
+          "session_id": "cb3af332-3697-433f-8490-3dc6054da71c",
+          "total_cost_usd": 0.000022,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 1,
+              "outputTokens": 2,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000022,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 2,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "{\"answer\":\"HEADLESS_SCHEMA_RESPONSE\"}",
+          "structured_output": {
+            "answer": "HEADLESS_SCHEMA_RESPONSE"
+          },
+          "ttft_ms": 23,
+          "type": "result",
+          "duration_ms": 28,
+          "uuid": "2271888c-b2c1-4843-b230-fc0f4524d596",
+          "ttft_stream_ms": 22,
+          "time_to_request_ms": 18,
+          "first_content_frame_ms": 22,
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1664,
+        "stdoutSha256": "a104b59282685ec078f34e7b38a1d446e211828998b8f3582aef2f0159a2c9f9"
+      },
+      "native-b": {
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": 1,
+        "result": {
+          "duration_api_ms": 13,
+          "stop_reason": "tool_use",
+          "session_id": "cb3af332-3697-433f-8490-3dc6054da71c",
+          "total_cost_usd": 0.000022,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 1,
+              "outputTokens": 2,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 0.000022,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 0,
+            "requested": {
+              "background": 0,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 0,
+            "max_depth": 0,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {}
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 2,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "{\"answer\":\"HEADLESS_SCHEMA_RESPONSE\"}",
+          "structured_output": {
+            "answer": "HEADLESS_SCHEMA_RESPONSE"
+          },
+          "ttft_ms": 25,
+          "type": "result",
+          "duration_ms": 32,
+          "uuid": "6675a237-16e9-48d2-8506-7f98d69223e8",
+          "ttft_stream_ms": 24,
+          "time_to_request_ms": 20,
+          "first_content_frame_ms": 25,
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        "stdoutBytes": 1664,
+        "stdoutSha256": "7b0cc9ff4bc17db6226e08f009345be0237cb47e285fa3683371ff1e982aa5c4"
+      }
+    },
+    {
+      "id": "probe-schema-success-text",
+      "root": "/tmp/headless-baseline-293-schema-text",
+      "captureComplete": true,
+      "native-a": {
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": null,
+        "result": {
+          "answer": "HEADLESS_SCHEMA_RESPONSE"
+        },
+        "stdoutBytes": 38,
+        "stdoutSha256": "e30469e85bedc5b0daa668fba5bf3e7963010a6031f98c5987fa4af53ecf001f",
+        "text": "{\"answer\":\"HEADLESS_SCHEMA_RESPONSE\"}\n"
+      },
+      "native-b": {
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "providerRequests": 1,
+        "resultCount": null,
+        "result": {
+          "answer": "HEADLESS_SCHEMA_RESPONSE"
+        },
+        "stdoutBytes": 38,
+        "stdoutSha256": "e30469e85bedc5b0daa668fba5bf3e7963010a6031f98c5987fa4af53ecf001f",
+        "text": "{\"answer\":\"HEADLESS_SCHEMA_RESPONSE\"}\n"
+      }
+    }
+  ]
+}

@@ -427,7 +427,7 @@ impl Tool for PowerShellTool {
                 meta.insert("truncated".into(), AnalyticsValue::Bool(truncated));
                 self.ctx.bus.log_event(POWERSHELL_COMPLETED, meta).await;
 
-                Ok(ToolCallResult {
+                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     data,
                     model_content: None,
                     new_messages: vec![],

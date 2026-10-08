@@ -79,7 +79,7 @@ impl Tool for AlwaysOkTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({"ok": true}),
             model_content: None,
             new_messages: vec![],
@@ -97,9 +97,9 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
         vec![
             LlmContentBlock::Text {
                 text: "let me check".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             },
-            LlmContentBlock::ToolCall {
+            LlmContentBlock::ToolCall { input_projection: None,
                 id: tool_use_id.to_string(),
                 name: "AlwaysOk".into(),
                 input: json!({"x": 1}),
@@ -110,7 +110,7 @@ async fn two_turns_with_one_tool_use_drives_loop_to_end_turn() {
     let r2 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "all good".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );

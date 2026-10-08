@@ -30,8 +30,8 @@ use lingxi_core::host::{
     SkillInfo, StatusSnapshot,
 };
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::process::Command;
 
@@ -100,7 +100,10 @@ impl ConversationOrchestrator {
         // restoring the transcript. The token is cancelled before waiting for
         // already-admitted durable attachment commits, so stale producers are
         // rejected while accepted writes finish against the old session.
-        self.lifecycle_runtime.session_tool_hook_generation.reset().await;
+        self.lifecycle_runtime
+            .session_tool_hook_generation
+            .reset()
+            .await;
         self.tools.reset_bash_precommit_prompt_session();
         // `/clear` and in-place resume can switch the session without a
         // separate SessionEnd dispatch. Apply the same state reset; it is
@@ -443,6 +446,9 @@ impl ConversationOrchestrator {
         let mut instruction_context = self.prompt_runtime.instruction_context.lock().await;
         let mut last_jsonl_uuid = self.transcript.last_jsonl_uuid.lock().await;
         let old_session_id = s.session_id;
+        if let Some(registry) = &self.task_registry {
+            registry.reset_agent_session_statistics(new_session_id_value, Some(old_session_id));
+        }
         // All fallible and awaiting work is complete. Publish the captured
         // transcript authority, cost scope, and conversation state in one
         // synchronous critical section so caller cancellation cannot split it.
@@ -615,6 +621,9 @@ impl ConversationOrchestrator {
         let mut reports = self.main_reports.state.lock().await;
         let mut s = self.session.lock().await;
         let mut instruction_context = self.prompt_runtime.instruction_context.lock().await;
+        if let Some(registry) = &self.task_registry {
+            registry.reset_agent_session_statistics(session_id, None);
+        }
         prepared_transcript.activate();
         self.model_runtime.activate_cost_session(prepared_cost);
         self.install_output_session(prepared_output);
@@ -1071,6 +1080,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let codename = format!("fork-{}", &uuid::Uuid::new_v4().simple().to_string()[..4]);
 
         let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
@@ -1229,7 +1239,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         if !partial.is_empty() {
             conversation
                 .history
-                .push(lingxi_core::types::ConversationMessage::Assistant {
+                .push(lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: partial.to_string(),
@@ -2268,7 +2278,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             return Ok(());
         }
 
-        let mut messages = vec![lingxi_core::types::ConversationMessage::User {
+        let mut messages = vec![lingxi_core::types::ConversationMessage::User { api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: raw.to_string(),
@@ -2279,7 +2289,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             is_visible_in_transcript_only: false,
         }];
         if !display.trim().is_empty() {
-            messages.push(lingxi_core::types::ConversationMessage::Assistant {
+            messages.push(lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: display.to_string(),
@@ -2324,7 +2334,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 text.to_string(),
             )
         } else {
-            lingxi_core::types::ConversationMessage::Assistant {
+            lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: text.to_string(),
@@ -2777,15 +2787,15 @@ fn estimate_bytes_as_tokens(bytes: usize) -> u64 {
         / crate::model::count_tokens::APPROX_CHARS_PER_TOKEN
 }
 
-fn estimate_json_tokens(values: &[serde_json::Value]) -> u64 {
+fn estimate_json_tokens(values: &[lingxi_core::types::utf16_json::Utf16JsonProjection]) -> u64 {
     values
         .iter()
-        .map(|value| serde_json::to_vec(value).map_or(0, |bytes| bytes.len()))
+        .map(|value| value.to_json_string().map_or(0, |raw| raw.len()))
         .map(estimate_bytes_as_tokens)
         .fold(0, u64::saturating_add)
 }
 
-fn is_mcp_wire_tool(value: &serde_json::Value) -> bool {
+fn is_mcp_wire_tool(value: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
     value
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -3025,8 +3035,8 @@ fn resolve_editor() -> String {
 mod tests {
     use super::*;
     use crate::test_support::{
-        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-        noop_hook_executor,
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
     };
     use std::sync::Arc;
 
@@ -3898,8 +3908,8 @@ mod tests {
     #[tokio::test]
     async fn hot_resume_replaces_main_thread_agent_and_its_hooks() {
         use crate::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
         use std::collections::HashMap;
         use std::sync::Arc;
@@ -3988,13 +3998,12 @@ mod tests {
             assert_eq!(restored.agent_type, "reviewer");
             assert_eq!(restored.system_prompt.as_deref(), Some("review carefully"));
         }
-        assert!(
-            orch.lifecycle_runtime
-                .main_thread_agent_hook_id
-                .lock()
-                .await
-                .is_some()
-        );
+        assert!(orch
+            .lifecycle_runtime
+            .main_thread_agent_hook_id
+            .lock()
+            .await
+            .is_some());
         assert!(orch.hooks.has_hooks_for(&hooks::HookEventType::Stop).await);
 
         lingxi_core::host::OrchestratorHandle::resume_session(
@@ -4008,20 +4017,18 @@ mod tests {
         .await
         .expect("resume default-agent session");
 
-        assert!(
-            orch.lifecycle_runtime
-                .main_thread_agent
-                .read()
-                .await
-                .is_none()
-        );
-        assert!(
-            orch.lifecycle_runtime
-                .main_thread_agent_hook_id
-                .lock()
-                .await
-                .is_none()
-        );
+        assert!(orch
+            .lifecycle_runtime
+            .main_thread_agent
+            .read()
+            .await
+            .is_none());
+        assert!(orch
+            .lifecycle_runtime
+            .main_thread_agent_hook_id
+            .lock()
+            .await
+            .is_none());
         assert!(!orch.hooks.has_hooks_for(&hooks::HookEventType::Stop).await);
     }
 
@@ -4066,8 +4073,8 @@ mod tests {
     #[tokio::test]
     async fn hot_resume_adopts_agent_frontmatter_model_when_no_user_model() {
         use crate::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
         use std::sync::Arc;
 
@@ -4139,8 +4146,8 @@ mod tests {
     #[tokio::test]
     async fn hot_resume_keeps_the_resolved_empty_or_missing_profile() {
         use crate::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
 
         for selected_profile in [None, Some(String::new())] {
@@ -4200,8 +4207,8 @@ mod tests {
     #[tokio::test]
     async fn hot_resume_qualified_agent_model_changes_provider_profile() {
         use crate::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
 
         let orch = crate::ConversationOrchestrator::new(
@@ -4223,11 +4230,13 @@ mod tests {
                 let (model, profile) = match model {
                     "openai/gpt-4o" => {
                         if profile == Some("anthropic") {
-                            return Err(agent::model_resolution::ModelResolutionError::RouteUnavailable {
-                                model: model.into(),
-                                profile: profile.map(str::to_owned),
-                                reason: "model is unavailable on the parent's profile".into(),
-                            });
+                            return Err(
+                                agent::model_resolution::ModelResolutionError::RouteUnavailable {
+                                    model: model.into(),
+                                    profile: profile.map(str::to_owned),
+                                    reason: "model is unavailable on the parent's profile".into(),
+                                },
+                            );
                         }
                         assert_eq!(
                             profile, None,
@@ -4268,8 +4277,8 @@ mod tests {
     #[tokio::test]
     async fn hot_resume_model_route_error_preserves_live_agent_and_model() {
         use crate::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
 
         struct OutputAccount {
@@ -4396,7 +4405,10 @@ mod tests {
                     assert_eq!(profile, Some("resumed-profile"));
                 }
                 if model == "live-model" {
-                    assert!(profile.is_none(), "resume preflight must use the target session route");
+                    assert!(
+                        profile.is_none(),
+                        "resume preflight must use the target session route"
+                    );
                 }
                 if model == "openai/unavailable" {
                     return Err(
@@ -4494,11 +4506,9 @@ mod tests {
         )
         .await
         .expect_err("invalid resumed routes must surface their error");
-        assert!(
-            error
-                .to_string()
-                .contains("configured model is unavailable")
-        );
+        assert!(error
+            .to_string()
+            .contains("configured model is unavailable"));
         assert_eq!(
             orch.main_thread_agent_type().await.as_deref(),
             Some("previous-agent")
@@ -4544,8 +4554,8 @@ mod tests {
     #[tokio::test]
     async fn hot_resume_keeps_session_model_when_gated_or_inherit() {
         use crate::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
         use std::sync::Arc;
 
@@ -4635,8 +4645,8 @@ mod tests {
     #[tokio::test]
     async fn context_window_usage_is_live_and_model_aware() {
         use crate::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
         use std::sync::Arc;
 
@@ -4690,11 +4700,11 @@ mod tests {
     #[tokio::test]
     async fn ultracode_control_and_effort_selection_remain_independent() {
         use crate::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
-        use lingxi_core::host::OrchestratorHandle;
         use lingxi_core::host::effort_table::SessionEffort;
+        use lingxi_core::host::OrchestratorHandle;
         let orch = crate::ConversationOrchestrator::new(
             crate::OrchestratorConfig {
                 effort: Some("low".into()),
@@ -4727,8 +4737,8 @@ mod tests {
     #[tokio::test]
     async fn handle_reads_the_real_plan_store_and_updates_live_effort() {
         use crate::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
         use std::sync::Arc;
 
@@ -4752,12 +4762,10 @@ mod tests {
             std::env::temp_dir(),
         );
 
-        assert!(
-            lingxi_core::host::OrchestratorHandle::current_plan(&orch)
-                .await
-                .expect("read absent plan")
-                .is_none()
-        );
+        assert!(lingxi_core::host::OrchestratorHandle::current_plan(&orch)
+            .await
+            .expect("read absent plan")
+            .is_none());
         let session_id = orch.session.lock().await.session_id;
         let path = ConversationOrchestrator::plan_file_path(
             &session_id,

@@ -54,7 +54,7 @@ pub(crate) fn context_attachment_projection(
 ) -> ConversationMessage {
     match render_instruction_attachment(attachment) {
         Some(body) => ConversationMessage::user_meta(id, body),
-        None => ConversationMessage::System {
+        None => ConversationMessage::System { api_system: None,
             id,
             content: String::new(),
             subtype: Some("model_reminder_attachment".into()),
@@ -151,6 +151,9 @@ impl ConversationOrchestrator {
         history: &[ConversationMessage],
         reason: &str,
     ) -> Vec<(ConversationMessage, serde_json::Value)> {
+        if self.config.bare {
+            return Vec::new();
+        }
         let mut context = self.instruction_context_snapshot().await;
         context.announcement_history = self.context_attachment_history(history);
         if context.rendering == InstructionRendering::Inline {

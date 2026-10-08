@@ -519,7 +519,7 @@ impl Tool for EnterPlanModeTool {
         }
         let duration_ms = started_at.elapsed().as_millis() as u64;
         self.emit_completed(&invocation_id, duration_ms).await;
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             // claude-code EnterPlanModeTool result: `{message}` (the exploration
             // guidance — `EnterPlanModeTool.ts:96-125`). The model reads it via the
             // `model_content` channel (the prior `{marker, plan_mode, instructions}`
@@ -831,7 +831,7 @@ impl Tool for ExitPlanModeTool {
             }
         };
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "plan": plan_text,
                 "isAgent": is_agent,

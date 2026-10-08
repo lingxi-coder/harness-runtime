@@ -15,8 +15,8 @@
 //! glob test (with a cc 2.1.198 realpath symlink fallback in
 //! [`relative_path_for_match`] — the only disk access here), and
 //! [`render_reminder`] formats a matched rule. The orchestrator
-//! ([`crate::conversation::ConversationOrchestrator::conditional_rules_reminder_message`])
-//! owns the caching + sent-set and drives these helpers.
+//! ([`crate::conversation::ConversationOrchestrator::nested_memory_reminder_messages`])
+//! owns fresh rule selection + the session sent-set and drives these helpers.
 #![forbid(unsafe_code)]
 
 use crate::prompt::MemoryFile;
@@ -187,11 +187,7 @@ pub fn rule_matches_touched_file(rule: &MemoryFile, touched: &Path, cwd: &Path) 
 /// [`memory_block::format`]: crate::prompt::memory_block::format
 #[must_use]
 pub fn render_reminder(rule: &MemoryFile) -> String {
-    let inner = format!(
-        "Contents of {}:\n\n{}",
-        rule.path.display(),
-        rule.body.trim()
-    );
+    let inner = format!("Contents of {}:\n\n{}", rule.path.display(), rule.body);
     format!("<system-reminder>\n{inner}\n</system-reminder>")
 }
 
@@ -201,6 +197,8 @@ mod tests {
 
     fn rule(path: &str, tier: LingxiMdTier, globs: Option<Vec<&str>>) -> MemoryFile {
         MemoryFile {
+            parent: None,
+            source_content: None,
             path: PathBuf::from(path),
             body: "RULE BODY".into(),
             is_local_override: tier == LingxiMdTier::Local,

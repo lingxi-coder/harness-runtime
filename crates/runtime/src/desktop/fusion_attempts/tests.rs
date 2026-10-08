@@ -252,12 +252,10 @@ impl DurableHarness {
             Default::default(),
             lingxi_core::host::ModelAttemptBillingMode::MeteredAttempts,
         );
-        assert!(
-            inner
-                .captured
-                .control
-                .activate_at(tokio::time::Instant::now())
-        );
+        assert!(inner
+            .captured
+            .control
+            .activate_at(tokio::time::Instant::now()));
         let mut pinned = route();
         pinned.resolved = service
             .resolve_media_route("wire", Some("profile"))
@@ -354,13 +352,11 @@ async fn desktop_attempt_panel_fence_waits_for_durable_receipt_and_keeps_analyst
     let intent = harness.queue.recv().await.unwrap();
     assert_eq!(harness.authority.state.lock().unwrap().panel_pending, 1);
     harness.authority.close();
-    assert!(
-        harness
-            .service
-            .stream_request(harness.request.clone())
-            .await
-            .is_err()
-    );
+    assert!(harness
+        .service
+        .stream_request(harness.request.clone())
+        .await
+        .is_err());
     assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
     let authority = harness.authority.clone();
     let mut fence = Box::pin(authority.wait());
@@ -394,13 +390,11 @@ async fn desktop_attempt_panel_fence_waits_for_durable_receipt_and_keeps_analyst
     assert!(!authority.state.lock().unwrap().closed);
     authority.live((ModelAttemptStage::Analyst, None)).unwrap();
     assert!(authority.live((ModelAttemptStage::Panel, Some(0))).is_err());
-    assert!(
-        authority
-            .tracker
-            .durability_gate()
-            .frozen_reason()
-            .is_none()
-    );
+    assert!(authority
+        .tracker
+        .durability_gate()
+        .frozen_reason()
+        .is_none());
 }
 
 #[tokio::test]
@@ -621,16 +615,12 @@ async fn desktop_attempt_registration_allows_pick_when_optional_synthesis_is_una
         .unwrap()
         .upgrade()
         .unwrap();
-    assert!(
-        authority
-            .routes
-            .contains_key(&(ModelAttemptStage::Panel, Some(0)))
-    );
-    assert!(
-        authority
-            .routes
-            .contains_key(&(ModelAttemptStage::Analyst, None))
-    );
+    assert!(authority
+        .routes
+        .contains_key(&(ModelAttemptStage::Panel, Some(0))));
+    assert!(authority
+        .routes
+        .contains_key(&(ModelAttemptStage::Analyst, None)));
     assert_eq!(harness.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -639,22 +629,18 @@ async fn desktop_attempt_default_run_cap_keeps_session_and_output_limits() {
     use fusion::FusionAttemptFinalizer;
     for (money, output) in [(1, 1_000), (10_000, 1)] {
         let mut harness = DurableHarness::with_limits(true, money, output).await;
-        assert!(
-            harness
-                .authority
-                .captured
-                .snapshot
-                .config
-                .max_reserved_nano_usd
-                .is_none()
-        );
-        assert!(
-            harness
-                .service
-                .stream_request(harness.request.clone())
-                .await
-                .is_err()
-        );
+        assert!(harness
+            .authority
+            .captured
+            .snapshot
+            .config
+            .max_reserved_nano_usd
+            .is_none());
+        assert!(harness
+            .service
+            .stream_request(harness.request.clone())
+            .await
+            .is_err());
         let summary = Box::new(RunFinalizer {
             authority: Some(harness.authority.clone()),
         })
@@ -670,14 +656,12 @@ async fn desktop_attempt_default_run_cap_keeps_session_and_output_limits() {
             harness.authority.budget.active_reservation_nano_usd().await,
             0
         );
-        assert!(
-            harness
-                .authority
-                .tracker
-                .durability_gate()
-                .frozen_reason()
-                .is_none()
-        );
+        assert!(harness
+            .authority
+            .tracker
+            .durability_gate()
+            .frozen_reason()
+            .is_none());
         assert_eq!(harness.permits(), 4);
         assert!(
             harness.queue.try_recv().is_err(),
@@ -856,14 +840,12 @@ fn desktop_attempt_quote_rejects_native_tools_ambiguous_caps_and_unpriced_fast()
         json!({"max_tokens":50,"speed":42}),
         json!({"max_tokens":50,"web_search_options":{}}),
     ] {
-        assert!(
-            pricing::quote_body(
-                &route,
-                ProtocolFamily::OpenAiChat,
-                &ProviderRequest::post_json("https://unused.invalid", body)
-            )
-            .is_err()
-        );
+        assert!(pricing::quote_body(
+            &route,
+            ProtocolFamily::OpenAiChat,
+            &ProviderRequest::post_json("https://unused.invalid", body)
+        )
+        .is_err());
     }
 }
 
@@ -946,15 +928,13 @@ fn desktop_attempt_explicit_reasoning_zero_and_fast_override_stay_pinned() {
         billing_mode: Some(lingxi_core::host::ModelBillingMode::Subscription),
         ..Default::default()
     };
-    assert!(
-        pricing::captured_prices(
-            &catalog,
-            &route.pricing.model_ref,
-            &route.resolved,
-            &subscription
-        )
-        .is_err()
-    );
+    assert!(pricing::captured_prices(
+        &catalog,
+        &route.pricing.model_ref,
+        &route.resolved,
+        &subscription
+    )
+    .is_err());
 }
 
 #[tokio::test]

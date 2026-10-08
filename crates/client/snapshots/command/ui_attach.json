@@ -1,0 +1,5 @@
+{
+  "type": "ui_attach",
+  "surface": "desktop",
+  "client_id": "electron-window-1"
+}

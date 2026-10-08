@@ -42,6 +42,7 @@
 #![allow(dead_code)]
 
 use async_trait::async_trait;
+use lingxi_core::host::computer_control::{canonical_computer_key as canonical_key, ComputerError};
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -57,7 +58,11 @@ use tool_api::tool_trait::{
 use tool_api::BuiltinToolContext;
 
 mod access_resolver;
+#[cfg(test)]
+mod execution_tests;
+mod extensions;
 mod lock;
+mod native;
 mod permission_model;
 mod validate;
 
@@ -127,6 +132,45 @@ pub struct ComputerTool {
     /// `$HOME/.lingxi` (or a concurrently-running real session's lock).
     lock_home: std::path::PathBuf,
     runtime: std::sync::Arc<Mutex<ExecutionState>>,
+}
+
+#[derive(Default)]
+struct ExecutionState {
+    owner: Option<String>,
+    active: bool,
+    sequence: bool,
+    sequence_generation: Option<u64>,
+    sequence_dirty: bool,
+    lease: Option<lock::DesktopLease>,
+    held_keys: std::collections::BTreeSet<String>,
+    held_mouse: bool,
+    backend_inputs_dirty: bool,
+    backend_mouse_dirty: bool,
+    observation_invalidation_pending: bool,
+    frames: std::collections::HashMap<String, native::ObservedFrame>,
+    snapshots: std::collections::HashMap<String, native::ObservedFrame>,
+    capture_generation: u64,
+    pending_observations: std::collections::HashMap<String, Option<String>>,
+}
+struct CallLease<'a> {
+    tool: &'a ComputerTool,
+}
+impl Drop for CallLease<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.tool.runtime.lock() {
+            state.active = false;
+            if !state.sequence
+                && state.held_keys.is_empty()
+                && !state.held_mouse
+                && !state.backend_inputs_dirty
+                && !state.backend_mouse_dirty
+                && !state.observation_invalidation_pending
+            {
+                state.lease = None;
+                state.owner = None;
+            }
+        }
+    }
 }
 
 impl ComputerTool {
@@ -474,8 +518,104 @@ fn scroll_delta(input: &Value) -> Result<(i32, i32), ToolError> {
     Ok((dx, dy))
 }
 
+fn signed_delta(input: &Value, key: &str) -> Result<i32, ToolError> {
+    input.get(key).map_or(Ok(0), |v| {
+        v.as_i64()
+            .and_then(|n| i32::try_from(n).ok())
+            .filter(|n| n.unsigned_abs() <= 100_000)
+            .ok_or_else(|| {
+                ToolError::InvalidInput(format!("{key} must be an integer within 100000"))
+            })
+    })
+}
+
 #[async_trait]
 impl Tool for ComputerTool {
+    fn map_result_text(&self, result: &Value) -> Option<String> {
+        tool_api::tool_result_media::computer_batch_model_text(result)
+    }
+    fn native_computer_capabilities(
+        &self,
+    ) -> Option<lingxi_llm_client::protocol::computer::ComputerCapabilities> {
+        self.native_capabilities()
+    }
+    fn lower_computer_operation(
+        &self,
+        operation: &lingxi_llm_client::protocol::computer::ComputerOperation,
+        frame: &lingxi_llm_client::protocol::computer::ComputerFrame,
+    ) -> Result<Value, ToolError> {
+        self.lower_native(operation, frame)
+    }
+    async fn native_computer_frame(
+        &self,
+        ctx: &ToolUseContext,
+    ) -> Result<Option<lingxi_llm_client::protocol::computer::ComputerFrame>, ToolError> {
+        self.ready_frame(ctx).await
+    }
+    async fn invalidate_computer_observation(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        self.invalidate_frame(ctx).await;
+        Ok(())
+    }
+    async fn computer_model_output(
+        &self,
+        ctx: &ToolUseContext,
+        content: &str,
+        blocks: Option<&[Value]>,
+    ) -> Result<(), ToolError> {
+        self.apply_model_observation(ctx, content, blocks).await
+    }
+    async fn begin_computer_sequence(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        let _call = self.acquire_call("screenshot", ctx).await?;
+        let generation = self.desktop_generation()?;
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+        runtime.sequence_generation = Some(generation);
+        runtime.sequence = true;
+        Ok(())
+    }
+    async fn end_computer_sequence(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        let owner = Self::owner(ctx).await;
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+        if runtime.owner.as_ref() == Some(&owner) {
+            runtime.sequence = false;
+            runtime.sequence_generation = None;
+            if runtime.sequence_dirty {
+                runtime.frames.remove(&owner);
+                runtime.pending_observations.remove(&owner);
+                runtime
+                    .snapshots
+                    .retain(|_, snapshot| snapshot.owner != owner);
+            }
+            runtime.sequence_dirty = false;
+            let current = runtime
+                .frames
+                .values()
+                .map(|frame| frame.frame.geometry_version.clone())
+                .collect::<std::collections::HashSet<_>>();
+            runtime
+                .snapshots
+                .retain(|version, _| current.contains(version));
+            if runtime.held_keys.is_empty()
+                && !runtime.held_mouse
+                && !runtime.active
+                && !runtime.backend_inputs_dirty
+                && !runtime.backend_mouse_dirty
+                && !runtime.observation_invalidation_pending
+            {
+                runtime.lease = None;
+                runtime.owner = None;
+            }
+        }
+        Ok(())
+    }
+    async fn cleanup_computer_inputs(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        self.release_owned_inputs(ctx).await
+    }
     fn name(&self) -> &str {
         TOOL_NAME
     }
@@ -628,91 +768,6 @@ impl Tool for ComputerTool {
             self.check_cancel(&ctx)?;
         }
         result
-    }
-    fn map_result_text(&self, result: &Value) -> Option<String> {
-        tool_api::tool_result_media::computer_batch_model_text(result)
-    }
-    fn native_computer_capabilities(
-        &self,
-    ) -> Option<lingxi_llm_client::protocol::computer::ComputerCapabilities> {
-        self.native_capabilities()
-    }
-    fn lower_computer_operation(
-        &self,
-        operation: &lingxi_llm_client::protocol::computer::ComputerOperation,
-        frame: &lingxi_llm_client::protocol::computer::ComputerFrame,
-    ) -> Result<Value, ToolError> {
-        self.lower_native(operation, frame)
-    }
-    async fn native_computer_frame(
-        &self,
-        ctx: &ToolUseContext,
-    ) -> Result<Option<lingxi_llm_client::protocol::computer::ComputerFrame>, ToolError> {
-        self.ready_frame(ctx).await
-    }
-    async fn invalidate_computer_observation(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
-        self.invalidate_frame(ctx).await;
-        Ok(())
-    }
-    async fn computer_model_output(
-        &self,
-        ctx: &ToolUseContext,
-        content: &str,
-        blocks: Option<&[Value]>,
-    ) -> Result<(), ToolError> {
-        self.apply_model_observation(ctx, content, blocks).await
-    }
-    async fn begin_computer_sequence(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
-        let _call = self.acquire_call("screenshot", ctx).await?;
-        let generation = self.desktop_generation()?;
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
-        runtime.sequence_generation = Some(generation);
-        runtime.sequence = true;
-        Ok(())
-    }
-    async fn end_computer_sequence(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
-        let owner = Self::owner(ctx).await;
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
-        if runtime.owner.as_ref() == Some(&owner) {
-            runtime.sequence = false;
-            runtime.sequence_generation = None;
-            if runtime.sequence_dirty {
-                runtime.frames.remove(&owner);
-                runtime.pending_observations.remove(&owner);
-                runtime
-                    .snapshots
-                    .retain(|_, snapshot| snapshot.owner != owner);
-            }
-            runtime.sequence_dirty = false;
-            let current = runtime
-                .frames
-                .values()
-                .map(|frame| frame.frame.geometry_version.clone())
-                .collect::<std::collections::HashSet<_>>();
-            runtime
-                .snapshots
-                .retain(|version, _| current.contains(version));
-            if runtime.held_keys.is_empty()
-                && !runtime.held_mouse
-                && !runtime.active
-                && !runtime.backend_inputs_dirty
-                && !runtime.backend_mouse_dirty
-                && !runtime.observation_invalidation_pending
-            {
-                runtime.lease = None;
-                runtime.owner = None;
-            }
-        }
-        Ok(())
-    }
-    async fn cleanup_computer_inputs(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
-        self.release_owned_inputs(ctx).await
     }
 }
 
@@ -1004,6 +1059,126 @@ impl ComputerTool {
         ))
     }
 
+    /// Enforce the cross-session computer lock (parity with the binary's
+    /// `cu_lock_held` gate). Exempts the two purely session-local
+    /// bookkeeping actions (`request_access`, `list_granted_applications`) —
+    /// neither touches the shared physical machine, so two sessions doing
+    /// their OWN permission bookkeeping concurrently is harmless. Every
+    /// other action (including `switch_display` and `computer_batch`, which
+    /// dispatch outside [`Self::execute_one`]) claims — or re-claims — the
+    /// lock for this process, or fails with [`LOCK_HELD_AT_CALL`] when a
+    /// different live process already holds it.
+    async fn owner(ctx: &ToolUseContext) -> String {
+        let session = if let Some(id) = &ctx.origin_session_id {
+            id.to_string()
+        } else if let Some(session) = &ctx.session {
+            session.lock().await.session_id.to_string()
+        } else {
+            "legacy".into()
+        };
+        format!(
+            "{}:{}",
+            session,
+            ctx.agent_id
+                .as_ref()
+                .map_or_else(|| "main".into(), ToString::to_string)
+        )
+    }
+    async fn acquire_call(
+        &self,
+        action: &str,
+        ctx: &ToolUseContext,
+    ) -> Result<Option<CallLease<'_>>, ToolError> {
+        if matches!(action, "request_access" | "list_granted_applications") {
+            return Ok(None);
+        }
+        let owner = Self::owner(ctx).await;
+        let lock_scope = self
+            .ctx
+            .computer_control
+            .as_ref()
+            .and_then(|backend| backend.desktop_lock_scope())
+            .unwrap_or_else(|| self.lock_home.clone());
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+        if runtime.active || runtime.owner.as_ref().is_some_and(|o| o != &owner) {
+            return Err(ToolError::PermissionDenied(LOCK_HELD_AT_CALL.into()));
+        }
+        if matches!(
+            lock::check(&lock_scope, std::process::id() as i32),
+            lock::Holder::Other { .. }
+        ) {
+            return Err(ToolError::PermissionDenied(LOCK_HELD_AT_CALL.into()));
+        }
+        if runtime.lease.is_none() {
+            runtime.lease = Some(lock::DesktopLease::acquire(&lock_scope).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::WouldBlock {
+                    ToolError::PermissionDenied(LOCK_HELD_AT_CALL.into())
+                } else {
+                    ToolError::Internal(format!("computer desktop lock unavailable: {e}"))
+                }
+            })?);
+        }
+        runtime.owner = Some(owner);
+        runtime.active = true;
+        Ok(Some(CallLease { tool: self }))
+    }
+    fn check_cancel(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        if ctx
+            .cancel
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+        {
+            Err(ToolError::Aborted)
+        } else {
+            Ok(())
+        }
+    }
+    async fn wait_cancellable(&self, seconds: f64, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        self.check_cancel(ctx)?;
+        let sleep = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds));
+        if let Some(cancel) = &ctx.cancel {
+            tokio::select! { biased; ()=cancel.cancelled()=>Err(ToolError::Aborted), ()=sleep=>Ok(()) }
+        } else {
+            sleep.await;
+            Ok(())
+        }
+    }
+    fn validate_final_input(&self, action: &str, input: &Value) -> Result<(), ToolError> {
+        if !ACTIONS.contains(&action) {
+            return Err(ToolError::InvalidInput(format!("unknown action: {action}")));
+        }
+        extensions::validate(action, input)?;
+        if action == "computer_batch" {
+            let items = input
+                .get("actions")
+                .and_then(Value::as_array)
+                .filter(|a| !a.is_empty())
+                .ok_or_else(|| {
+                    ToolError::InvalidInput("actions must be a non-empty array".into())
+                })?;
+            if items.len() > 1000 {
+                return Err(ToolError::InvalidInput(
+                    "actions exceeds maximum of 1000".into(),
+                ));
+            }
+            for (i, item) in items.iter().enumerate() {
+                let sub = item.get("action").and_then(Value::as_str).ok_or_else(|| {
+                    ToolError::InvalidInput(format!("actions[{i}].action must be a string"))
+                })?;
+                if !allowed_in_batch(sub) {
+                    return Err(ToolError::InvalidInput(format!(
+                        "actions[{i}].action=\"{sub}\" is not allowed in a batch"
+                    )));
+                }
+                self.validate_final_input(sub, item)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Enforce the frontmost-app tier gate for actions that touch the screen.
     /// Read-only/meta actions, and anything called with NO live backend at
     /// all, are waved through — there's nothing to compare against, matching
@@ -1175,172 +1350,6 @@ impl ComputerTool {
         let release = self.release_keys(&added).await;
         let result = result.and_then(|value| release.map(|()| value));
         result
-    }
-
-    fn require_grant_flag(
-        &self,
-        get: impl Fn(GrantFlags) -> bool,
-        flag_name: &str,
-    ) -> Result<(), ToolError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
-        if get(state.grant_flags) {
-            Ok(())
-        } else {
-            Err(ToolError::PermissionDenied(format!(
-                "Clipboard {} is not granted. Request `{flag_name}` via request_access.",
-                if flag_name == "clipboardRead" {
-                    "read"
-                } else {
-                    "write"
-                }
-            )))
-        }
-    }
-
-    /// System-level shortcuts (quit app, switch app, lock screen, …) need the
-    /// `systemKeyCombos` grant regardless of the frontmost app's tier. Best-
-    /// effort detection over the most common macOS system chords — the
-    /// binary's own detector isn't reconstructable byte-for-byte from strings
-    /// alone, so this list is a documented approximation, not a verified
-    /// byte-exact port.
-    fn enforce_system_shortcut_grant(&self, chord: &str) -> Result<(), ToolError> {
-        if !validate::is_system_shortcut(chord) {
-            return Ok(());
-        }
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
-        if state.grant_flags.system_key_combos {
-            Ok(())
-        } else {
-            Err(ToolError::PermissionDenied(format!(
-                "\"{chord}\" is a system-level shortcut. Request the `systemKeyCombos` grant via request_access to use it."
-            )))
-        }
-    }
-
-    /// Enforce the cross-session computer lock (parity with the binary's
-    /// `cu_lock_held` gate). Exempts the two purely session-local
-    /// bookkeeping actions (`request_access`, `list_granted_applications`) —
-    /// neither touches the shared physical machine, so two sessions doing
-    /// their OWN permission bookkeeping concurrently is harmless. Every
-    /// other action (including `switch_display` and `computer_batch`, which
-    /// dispatch outside [`Self::execute_one`]) claims — or re-claims — the
-    /// lock for this process, or fails with [`LOCK_HELD_AT_CALL`] when a
-    /// different live process already holds it.
-    async fn owner(ctx: &ToolUseContext) -> String {
-        let session = if let Some(id) = &ctx.origin_session_id {
-            id.to_string()
-        } else if let Some(session) = &ctx.session {
-            session.lock().await.session_id.to_string()
-        } else {
-            "legacy".into()
-        };
-        format!(
-            "{}:{}",
-            session,
-            ctx.agent_id
-                .as_ref()
-                .map_or_else(|| "main".into(), ToString::to_string)
-        )
-    }
-    async fn acquire_call(
-        &self,
-        action: &str,
-        ctx: &ToolUseContext,
-    ) -> Result<Option<CallLease<'_>>, ToolError> {
-        if matches!(action, "request_access" | "list_granted_applications") {
-            return Ok(None);
-        }
-        let owner = Self::owner(ctx).await;
-        let lock_scope = self
-            .ctx
-            .computer_control
-            .as_ref()
-            .and_then(|backend| backend.desktop_lock_scope())
-            .unwrap_or_else(|| self.lock_home.clone());
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
-        if runtime.active || runtime.owner.as_ref().is_some_and(|o| o != &owner) {
-            return Err(ToolError::PermissionDenied(LOCK_HELD_AT_CALL.into()));
-        }
-        if matches!(
-            lock::check(&lock_scope, std::process::id() as i32),
-            lock::Holder::Other { .. }
-        ) {
-            return Err(ToolError::PermissionDenied(LOCK_HELD_AT_CALL.into()));
-        }
-        if runtime.lease.is_none() {
-            runtime.lease = Some(lock::DesktopLease::acquire(&lock_scope).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    ToolError::PermissionDenied(LOCK_HELD_AT_CALL.into())
-                } else {
-                    ToolError::Internal(format!("computer desktop lock unavailable: {e}"))
-                }
-            })?);
-        }
-        runtime.owner = Some(owner);
-        runtime.active = true;
-        Ok(Some(CallLease { tool: self }))
-    }
-    fn check_cancel(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
-        if ctx
-            .cancel
-            .as_ref()
-            .is_some_and(|token| token.is_cancelled())
-        {
-            Err(ToolError::Aborted)
-        } else {
-            Ok(())
-        }
-    }
-    async fn wait_cancellable(&self, seconds: f64, ctx: &ToolUseContext) -> Result<(), ToolError> {
-        self.check_cancel(ctx)?;
-        let sleep = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds));
-        if let Some(cancel) = &ctx.cancel {
-            tokio::select! { biased; ()=cancel.cancelled()=>Err(ToolError::Aborted), ()=sleep=>Ok(()) }
-        } else {
-            sleep.await;
-            Ok(())
-        }
-    }
-    fn validate_final_input(&self, action: &str, input: &Value) -> Result<(), ToolError> {
-        if !ACTIONS.contains(&action) {
-            return Err(ToolError::InvalidInput(format!("unknown action: {action}")));
-        }
-        extensions::validate(action, input)?;
-        if action == "computer_batch" {
-            let items = input
-                .get("actions")
-                .and_then(Value::as_array)
-                .filter(|a| !a.is_empty())
-                .ok_or_else(|| {
-                    ToolError::InvalidInput("actions must be a non-empty array".into())
-                })?;
-            if items.len() > 1000 {
-                return Err(ToolError::InvalidInput(
-                    "actions exceeds maximum of 1000".into(),
-                ));
-            }
-            for (i, item) in items.iter().enumerate() {
-                let sub = item.get("action").and_then(Value::as_str).ok_or_else(|| {
-                    ToolError::InvalidInput(format!("actions[{i}].action must be a string"))
-                })?;
-                if !allowed_in_batch(sub) {
-                    return Err(ToolError::InvalidInput(format!(
-                        "actions[{i}].action=\"{sub}\" is not allowed in a batch"
-                    )));
-                }
-                self.validate_final_input(sub, item)?;
-            }
-        }
-        Ok(())
     }
 
     async fn validate_host_parameters(&self, action: &str, input: &Value) -> Result<(), ToolError> {
@@ -2020,6 +2029,75 @@ impl ComputerTool {
         }
         Ok(())
     }
+    fn require_grant_flag(
+        &self,
+        get: impl Fn(GrantFlags) -> bool,
+        flag_name: &str,
+    ) -> Result<(), ToolError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
+        if get(state.grant_flags) {
+            Ok(())
+        } else {
+            Err(ToolError::PermissionDenied(format!(
+                "Clipboard {} is not granted. Request `{flag_name}` via request_access.",
+                if flag_name == "clipboardRead" {
+                    "read"
+                } else {
+                    "write"
+                }
+            )))
+        }
+    }
+
+    /// System-level shortcuts (quit app, switch app, lock screen, …) need the
+    /// `systemKeyCombos` grant regardless of the frontmost app's tier. Best-
+    /// effort detection over the most common macOS system chords — the
+    /// binary's own detector isn't reconstructable byte-for-byte from strings
+    /// alone, so this list is a documented approximation, not a verified
+    /// byte-exact port.
+    fn enforce_system_shortcut_grant(&self, chord: &str) -> Result<(), ToolError> {
+        if !validate::is_system_shortcut(chord) {
+            return Ok(());
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
+        if state.grant_flags.system_key_combos {
+            Ok(())
+        } else {
+            Err(ToolError::PermissionDenied(format!(
+                "\"{chord}\" is a system-level shortcut. Request the `systemKeyCombos` grant via request_access to use it."
+            )))
+        }
+    }
+}
+
+fn changes_desktop(action: &str) -> bool {
+    matches!(
+        action,
+        "mouse_move"
+            | "mouse_click"
+            | "left_click"
+            | "right_click"
+            | "middle_click"
+            | "double_click"
+            | "triple_click"
+            | "left_click_drag"
+            | "left_mouse_down"
+            | "left_mouse_up"
+            | "type"
+            | "key"
+            | "key_down"
+            | "key_up"
+            | "hold_key"
+            | "scroll"
+            | "write_clipboard"
+            | "open_application"
+    )
 }
 
 /// Attach the user-facing one-line summary (parity with `RESULT_SUMMARY`) to the
@@ -2044,7 +2122,7 @@ fn finish(mut data: Value, action: &str) -> ToolCallResult {
             None => "[Image content provided in tool result.]".to_string(),
         })
         .or_else(|| tool_api::tool_result_media::computer_batch_model_text(&data));
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data,
         model_content,
         new_messages: vec![],
@@ -3057,83 +3135,4 @@ mod integration_tests {
         let _ = my_pid;
         assert!(lock::DesktopLease::acquire(&home).is_ok());
     }
-}
-use lingxi_core::host::computer_control::{canonical_computer_key as canonical_key, ComputerError};
-#[cfg(test)]
-mod execution_tests;
-mod extensions;
-mod native;
-
-#[derive(Default)]
-struct ExecutionState {
-    owner: Option<String>,
-    active: bool,
-    sequence: bool,
-    sequence_generation: Option<u64>,
-    sequence_dirty: bool,
-    lease: Option<lock::DesktopLease>,
-    held_keys: std::collections::BTreeSet<String>,
-    held_mouse: bool,
-    backend_inputs_dirty: bool,
-    backend_mouse_dirty: bool,
-    observation_invalidation_pending: bool,
-    frames: std::collections::HashMap<String, native::ObservedFrame>,
-    snapshots: std::collections::HashMap<String, native::ObservedFrame>,
-    capture_generation: u64,
-    pending_observations: std::collections::HashMap<String, Option<String>>,
-}
-struct CallLease<'a> {
-    tool: &'a ComputerTool,
-}
-impl Drop for CallLease<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut state) = self.tool.runtime.lock() {
-            state.active = false;
-            if !state.sequence
-                && state.held_keys.is_empty()
-                && !state.held_mouse
-                && !state.backend_inputs_dirty
-                && !state.backend_mouse_dirty
-                && !state.observation_invalidation_pending
-            {
-                state.lease = None;
-                state.owner = None;
-            }
-        }
-    }
-}
-
-fn signed_delta(input: &Value, key: &str) -> Result<i32, ToolError> {
-    input.get(key).map_or(Ok(0), |v| {
-        v.as_i64()
-            .and_then(|n| i32::try_from(n).ok())
-            .filter(|n| n.unsigned_abs() <= 100_000)
-            .ok_or_else(|| {
-                ToolError::InvalidInput(format!("{key} must be an integer within 100000"))
-            })
-    })
-}
-
-fn changes_desktop(action: &str) -> bool {
-    matches!(
-        action,
-        "mouse_move"
-            | "mouse_click"
-            | "left_click"
-            | "right_click"
-            | "middle_click"
-            | "double_click"
-            | "triple_click"
-            | "left_click_drag"
-            | "left_mouse_down"
-            | "left_mouse_up"
-            | "type"
-            | "key"
-            | "key_down"
-            | "key_up"
-            | "hold_key"
-            | "scroll"
-            | "write_clipboard"
-            | "open_application"
-    )
 }

@@ -101,6 +101,7 @@ impl AgentExecutor {
         };
 
         let req = SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
             agent_spawn_provenance: Default::default(),
             teammate_color: None,

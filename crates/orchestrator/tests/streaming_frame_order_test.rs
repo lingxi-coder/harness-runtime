@@ -122,7 +122,7 @@ impl Tool for ExclusiveTool {
         // Long enough that an immediately-`completed` later tool would certainly
         // win any race that was not explicitly ordered.
         tokio::time::sleep(Duration::from_millis(120)).await;
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({"tool": "Exclusive"}),
             model_content: None,
             new_messages: vec![],
@@ -173,7 +173,7 @@ async fn a_ready_result_waits_behind_an_executing_exclusive_tool() {
 
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![turn1, turn2]));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
         api.clone(),
@@ -183,7 +183,7 @@ async fn a_ready_result_waits_behind_an_executing_exclusive_tool() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
-    );
+    ));
 
     orch.run_turn_streaming("call both").await.expect("ok");
 

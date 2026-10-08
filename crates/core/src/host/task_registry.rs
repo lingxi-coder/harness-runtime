@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Presence of a JavaScript-origin field when lowering host state for native
@@ -1929,6 +1930,26 @@ pub trait TaskRegistryHandle: Send + Sync {
             Ok(Vec::new())
         }
     }
+
+    /// Ephemeral running statistics for the local Agent tool in this session.
+    /// An unwired host returns None rather than synthesizing zero counters.
+    fn agent_session_statistics(
+        &self,
+        _session_id: crate::types::SessionId,
+    ) -> Option<Arc<crate::host::agent_statistics::AgentSessionStatistics>> {
+        None
+    }
+
+    /// A still-running old agent keeps its originating authority even if the
+    /// same durable session ID is subsequently resumed in this runtime.
+    async fn agent_statistics_for_parent(&self, _agent_id: crate::types::AgentId) -> Option<Arc<crate::host::agent_statistics::AgentSessionStatistics>> { None }
+
+    /// Adopt a new ephemeral statistics scope. A clear reuses and zeroes the
+    /// previous authority; a resume starts a fresh authority even for the same ID.
+    fn reset_agent_session_statistics(&self, _session_id: crate::types::SessionId, _clear_previous: Option<crate::types::SessionId>) {}
+
+    /// Bind an Agent-only capability to the existing task lifecycle owner.
+    fn bind_agent_spawn_token(&self, _task_id: &str, _token: crate::host::agent_statistics::AgentSpawnToken) {}
 
     /// Total number of subagents spawned so far this session (claude 2.1.212
     /// `taskRegistry.getTotalAgentSpawns()`). The `Agent` tool reads this before

@@ -164,7 +164,7 @@ pub fn build_forked_messages(
             content,
             stop_reason,
             ..
-        } => ConversationMessage::Assistant {
+        } => ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: content.clone(),
             stop_reason: stop_reason.clone(),
@@ -190,7 +190,7 @@ pub fn build_forked_messages(
 
     // (3) No tool_use blocks → single directive user message (TS fallback).
     if tool_uses.is_empty() {
-        return vec![ConversationMessage::User {
+        return vec![ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: build_child_message(directive), citations: None,
@@ -205,7 +205,7 @@ pub fn build_forked_messages(
     // trailing directive Text block — all in one user message.
     let mut content: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len() + 1);
     for (id, provider_id) in &tool_uses {
-        content.push(ContentBlock::ToolResult {
+        content.push(ContentBlock::ToolResult { content_projection: None,
             tool_use_id: (*id).clone(),
             content: FORK_PLACEHOLDER_RESULT.to_string(),
             is_error: Some(false),
@@ -219,7 +219,7 @@ pub fn build_forked_messages(
 
     vec![
         cloned_assistant,
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content,
             is_meta: false,
@@ -274,7 +274,7 @@ mod tests {
     fn fork_context_keeps_completed_assistant_and_later_lazy_policy() {
         let messages = vec![
             ConversationMessage::user(MessageId::new(), "parent task".into()),
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: "completed parent answer".into(), citations: None,
@@ -408,7 +408,7 @@ Your directive: Fix the bug in foo.rs";
 
     #[test]
     fn is_in_fork_child_detects_boilerplate_tag() {
-        let child = ConversationMessage::User {
+        let child = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: build_child_message("do it"), citations: None,
@@ -424,7 +424,7 @@ Your directive: Fix the bug in foo.rs";
 
         // Assistant message containing the tag does NOT trip the guard (only
         // User-message Text blocks are scanned — claude `m.type !== 'user'`).
-        let asst = ConversationMessage::Assistant {
+        let asst = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "<fork-boilerplate>".into(), citations: None,
@@ -435,7 +435,7 @@ Your directive: Fix the bug in foo.rs";
     }
 
     fn tu(id_str: &str, provider: Option<&str>) -> ContentBlock {
-        ContentBlock::ToolUse {
+        ContentBlock::ToolUse { input_projection: None,
             id: ToolUseId::new(),
             name: "Bash".into(),
             input: json!({"command": id_str}),
@@ -445,7 +445,7 @@ Your directive: Fix the bug in foo.rs";
 
     #[test]
     fn build_forked_messages_with_tool_uses() {
-        let assistant = ConversationMessage::Assistant {
+        let assistant = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Thinking {
@@ -513,7 +513,7 @@ Your directive: Fix the bug in foo.rs";
 
     #[test]
     fn build_forked_messages_no_tool_uses_fallback() {
-        let assistant = ConversationMessage::Assistant {
+        let assistant = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "no tools here".into(), citations: None,

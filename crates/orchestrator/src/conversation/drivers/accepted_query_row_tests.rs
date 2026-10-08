@@ -1,12 +1,12 @@
-use crate::OrchestratorConfig;
 use crate::conversation::ConversationOrchestrator;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use permission::PermissionDecisionReason;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -145,12 +145,13 @@ async fn accepted_assistant_row_is_w1_current_row_but_not_prequery_history() {
 
     let tool_use_id = ToolUseId::new();
     let source_tool_use = ContentBlock::ToolUse {
+        input_projection: None,
         id: tool_use_id.clone(),
         name: "ContextCapture".into(),
         input: json!({"original":true}),
         provider_id: Some("toolu_original".into()),
     };
-    let source_row = ConversationMessage::Assistant {
+    let source_row = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             ContentBlock::Text {

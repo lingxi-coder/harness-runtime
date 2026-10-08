@@ -740,6 +740,7 @@ impl LocalAgentHandler {
             .as_ref()
             .and_then(|r| r.forked_skill_name.clone());
         let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
             agent_spawn_provenance: Default::default(),
             handback_opt_in: false,
@@ -1737,6 +1738,7 @@ mod tests {
     /// resolved before dispatch (the P1-01 ownership transfer).
     fn request_with_worktree(prompt: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: Default::default(),
             agent_spawn_provenance: Default::default(),
             handback_opt_in: false,
@@ -2160,6 +2162,7 @@ mod tests {
         // occur later in the actual persistent spawner's detached worker.
         for actor in actors {
             let request = SubagentSpawnRequest {
+                agent_spawn_token: None,
                 subagent_type: "general-purpose".into(),
                 run_in_background: true,
                 resumed_history: Some(vec![lingxi_core::types::ConversationMessage::user(
@@ -2808,7 +2811,7 @@ mod tests {
                 lingxi_core::types::MessageId::new(),
                 "prompt from the runner".into(),
             ),
-            lingxi_core::types::ConversationMessage::Assistant {
+            lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "actual last assistant row".into(), citations: None,
@@ -4211,6 +4214,7 @@ mod tests {
         let inherited_budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(MockBudget);
         let creator_agent_id = lingxi_core::types::AgentId::new();
         let expected = SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: Default::default(),
             agent_spawn_provenance: Default::default(),
             handback_opt_in: false,

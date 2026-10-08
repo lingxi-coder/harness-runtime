@@ -23,6 +23,44 @@ mod tests {
     }
 
     #[test]
+    fn host_rate_limit_state_projects_typed_sdk_header_values() {
+        let headers = vec![
+            (
+                "anthropic-ratelimit-unified-status".into(),
+                "rejected".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-representative-claim".into(),
+                "five_hour".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-5h-utilization".into(),
+                "0.95".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-5h-reset".into(),
+                "1700000000".into(),
+            ),
+            (
+                "anthropic-ratelimit-unified-overage-in-use".into(),
+                "true".into(),
+            ),
+        ];
+        let decoded =
+            lingxi_llm_client::providers::response_headers::AnthropicRateLimitHeaders::decode(
+                &headers,
+            );
+        let info = RateLimitInfo::from_decoded_at(&decoded, UNIX_EPOCH);
+        let raw = RawUtilization::from_decoded(&decoded);
+
+        assert_eq!(info.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(info.utilization, Some(0.95));
+        assert_eq!(info.claim_resets_at, Some(1_700_000_000));
+        assert!(info.overage_in_use);
+        assert_eq!(raw.five_hour.unwrap().resets_at, 1_700_000_000);
+    }
+
+    #[test]
     fn unified_reset_future_epoch_yields_delay() {
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         // reset 60s in the future (epoch seconds 1_000_060)
@@ -50,7 +88,7 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
         // reset a year out → capped at 6h
         let r = parse_unified_reset(&h("anthropic-ratelimit-unified-reset", "1031536000"), now);
-        assert_eq!(r, Some(Duration::from_millis(PERSISTENT_RESET_CAP_MS)));
+        assert_eq!(r, Some(Duration::from_secs(6 * 60 * 60)));
     }
 
     #[test]
@@ -69,7 +107,8 @@ mod tests {
             overage_disabled_reason(&h(
                 "anthropic-ratelimit-unified-overage-disabled-reason",
                 "spend_limit"
-            )),
+            ))
+            .as_deref(),
             Some("spend_limit")
         );
         assert_eq!(overage_disabled_reason(&[]), None);
@@ -129,7 +168,7 @@ mod tests {
     fn anthropic_ratelimit_reset_parses_future_iso8601() {
         // 2026-05-23T12:00:00Z relative to 2026-05-23T11:59:50Z should be 10s.
         let now = SystemTime::UNIX_EPOCH
-            + Duration::from_secs(parse_iso8601_utc("2026-05-23T11:59:50Z").unwrap());
+            + Duration::from_secs(1779537590);
         let r = parse_anthropic_ratelimit_reset(
             &h("anthropic-ratelimit-requests-reset", "2026-05-23T12:00:00Z"),
             now,
@@ -140,7 +179,7 @@ mod tests {
     #[test]
     fn anthropic_ratelimit_reset_past_clamps_to_zero() {
         let now = SystemTime::UNIX_EPOCH
-            + Duration::from_secs(parse_iso8601_utc("2026-05-23T13:00:00Z").unwrap());
+            + Duration::from_secs(1779541200);
         let r = parse_anthropic_ratelimit_reset(
             &h("anthropic-ratelimit-requests-reset", "2026-05-23T12:00:00Z"),
             now,
@@ -161,7 +200,12 @@ mod tests {
     fn iso8601_parser_handles_2026_05_23_correctly() {
         // 2026-05-23T00:00:00Z must round-trip to a positive Unix epoch
         // and be exactly 56 years × 365.25 days × 86400 sec ≈ 1.77 * 10^9.
-        let secs = parse_iso8601_utc("2026-05-23T00:00:00Z").unwrap();
+        let secs = AnthropicRateLimitHeaders::request_reset_delay(
+            &h("anthropic-ratelimit-requests-reset", "2026-05-23T00:00:00Z"),
+            SystemTime::UNIX_EPOCH,
+        )
+        .unwrap()
+        .as_secs();
         assert!(secs > 1_700_000_000 && secs < 1_900_000_000);
     }
 
@@ -408,7 +452,7 @@ mod format_reset_time_tests {
         // the tz suffix. The date/time prefix is byte-faithful; the parenthesised
         // suffix is the chrono %Z offset (documented divergence), so assert the
         // prefix + shape rather than a literal zone.
-        let f = formatted_reset_times_at(&headers, now);
+        let f = formatted_reset_times_at(&AnthropicRateLimitHeaders::decode(&headers), now);
         let rt = f.reset_time.as_deref().unwrap();
         assert!(rt.starts_with("1pm ("), "got {rt}");
         assert!(rt.ends_with(')'), "got {rt}");
@@ -440,14 +484,14 @@ mod format_reset_time_tests {
     fn formatted_reset_times_absent_or_non_numeric_headers_yield_none() {
         let now = local(2026, 6, 5, 10, 0);
         // Missing both → all None (Number(undefined) → NaN → undefined).
-        let f = formatted_reset_times_at(&[], now);
+        let f = formatted_reset_times_at(&AnthropicRateLimitHeaders::default(), now);
         assert_eq!(f.reset_time, None);
         assert_eq!(f.overage_reset_time, None);
         assert_eq!(f.reset_is_earlier, None);
 
         // Non-numeric `reset` header → None (Number("soon") → NaN).
         let headers = vec![("anthropic-ratelimit-unified-reset".into(), "soon".into())];
-        let f2 = formatted_reset_times_at(&headers, now);
+        let f2 = formatted_reset_times_at(&AnthropicRateLimitHeaders::decode(&headers), now);
         assert_eq!(f2.reset_time, None);
         assert_eq!(f2.reset_is_earlier, None);
     }
@@ -460,7 +504,7 @@ mod format_reset_time_tests {
             "anthropic-ratelimit-unified-overage-reset".into(),
             overage_at.to_string(),
         )];
-        let f = formatted_reset_times_at(&headers, now);
+        let f = formatted_reset_times_at(&AnthropicRateLimitHeaders::decode(&headers), now);
         assert_eq!(f.reset_time, None);
         // showTimezone=true → "2pm (<offset>)"; assert prefix/shape.
         let ort = f.overage_reset_time.as_deref().unwrap();
@@ -823,7 +867,7 @@ mod unified_header_parse {
     }
 
     #[test]
-    fn malformed_utilization_is_none() {
+    fn utilization_headers_drop_empty_and_non_numeric_values() {
         for bad in ["abc", "", "NaN", "inf"] {
             let headers = hdrs(&[
                 (
@@ -834,14 +878,14 @@ mod unified_header_parse {
                 ("anthropic-ratelimit-unified-5h-reset", "1750000100"),
             ]);
             let p = RateLimitInfo::from_headers(&headers);
-            assert_eq!(p.utilization, None, "utilization {bad:?} should be None");
+            assert_eq!(p.utilization, None, "Native finite reading {bad:?}");
             // The sibling reset header still parses on its own.
             assert_eq!(p.claim_resets_at, Some(1_750_000_100));
         }
     }
 
     #[test]
-    fn malformed_resets_are_none() {
+    fn empty_reset_is_absent_at_the_current_timestamp_boundary() {
         let headers = hdrs(&[
             ("anthropic-ratelimit-unified-reset", "soon"),
             (
@@ -1123,22 +1167,46 @@ mod early_warning {
     }
 
     #[test]
-    fn surpassed_threshold_header_fires_on_presence_even_when_malformed() {
-        // getHeaderBasedEarlyWarning gates on header PRESENCE alone
-        // (`!== null`, claudeAiLimits.ts:268) — the value is only `Number()`ed
-        // for storage (ts:288). A malformed value therefore still fires the
-        // warning; our documented divergence stores `None` where TS would
-        // store `NaN`.
+    fn empty_and_invalid_thresholds_do_not_create_a_header_warning() {
+        for raw in ["", "garbage", "NaN", "Infinity", "-Infinity"] {
+            let headers = h(&[
+                ("anthropic-ratelimit-unified-status", "allowed"),
+                ("anthropic-ratelimit-unified-5h-surpassed-threshold", raw),
+            ]);
+            let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+            assert_eq!(p.status.as_deref(), Some("allowed"), "{raw:?}");
+            assert_eq!(p.rate_limit_type, None, "{raw:?}");
+            assert_eq!(p.surpassed_threshold, None, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn whitespace_and_zero_thresholds_remain_present() {
+        for raw in [" ", "0", "-0"] {
+            let headers = h(&[
+                ("anthropic-ratelimit-unified-status", "allowed"),
+                ("anthropic-ratelimit-unified-5h-surpassed-threshold", raw),
+            ]);
+            let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
+            assert_eq!(p.status.as_deref(), Some("allowed_warning"), "{raw:?}");
+            assert_eq!(p.rate_limit_type.as_deref(), Some("five_hour"), "{raw:?}");
+            assert_eq!(p.surpassed_threshold, Some(0.0), "{raw:?}");
+            assert_eq!(p.surpassed_threshold.unwrap().is_sign_negative(), raw == "-0");
+        }
+    }
+
+    #[test]
+    fn invalid_threshold_still_allows_a_time_relative_warning() {
         let headers = h(&[
             ("anthropic-ratelimit-unified-status", "allowed"),
-            (
-                "anthropic-ratelimit-unified-5h-surpassed-threshold",
-                "garbage",
-            ),
+            ("anthropic-ratelimit-unified-5h-surpassed-threshold", "garbage"),
+            ("anthropic-ratelimit-unified-5h-utilization", "0.95"),
+            ("anthropic-ratelimit-unified-5h-reset", "1009000"),
         ]);
         let p = RateLimitInfo::from_headers_at(&headers, at(1_000_000));
         assert_eq!(p.status.as_deref(), Some("allowed_warning"));
         assert_eq!(p.rate_limit_type.as_deref(), Some("five_hour"));
+        assert_eq!(p.utilization, Some(0.95));
         assert_eq!(p.surpassed_threshold, None);
     }
 

@@ -17,7 +17,7 @@
 
 use client::protocol::commands::{
     AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
-    ProviderCredentialSecretDto,
+    ProviderCredentialSecretDto, UiSurfaceDto,
 };
 use client::protocol::controls::ReasoningSelectionDto;
 use client::protocol::listings::TaskStatusDto;
@@ -535,6 +535,156 @@ fn unit_control_commands_round_trip() {
         assert_eq!(json["type"], tag, "{cmd:?} tag mismatch");
         let back: ClientCommand = serde_json::from_value(json).expect("deserialize unit command");
         assert_eq!(back, cmd);
+    }
+}
+
+#[test]
+fn ui_surface_lifecycle_commands_round_trip() {
+    let commands = [
+        (
+            ClientCommand::UiAttach {
+                surface: UiSurfaceDto::Desktop,
+                client_id: "electron-window-1".into(),
+            },
+            "ui_attach",
+        ),
+        (
+            ClientCommand::UiDetach {
+                client_id: "electron-window-1".into(),
+            },
+            "ui_detach",
+        ),
+    ];
+    for (command, tag) in commands {
+        let json = serde_json::to_value(&command).expect("serialize UI lifecycle command");
+        assert_eq!(json["type"], tag);
+        assert_eq!(json["client_id"], "electron-window-1");
+        if tag == "ui_attach" {
+            assert_eq!(json["surface"], "desktop");
+        }
+        let decoded: ClientCommand =
+            serde_json::from_value(json).expect("deserialize UI lifecycle command");
+        assert_eq!(decoded, command);
+    }
+
+    let surface_cases = [
+        (UiSurfaceDto::Desktop, "desktop"),
+        (UiSurfaceDto::Mobile, "mobile"),
+        (UiSurfaceDto::Vscode, "vscode"),
+    ];
+    for (surface, wire) in surface_cases {
+        assert_eq!(serde_json::to_value(surface).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<UiSurfaceDto>(wire.into()).unwrap(),
+            surface
+        );
+    }
+}
+
+#[test]
+fn mod_ui_control_commands_round_trip_raw_json_and_outer_correlators() {
+    let commands = [
+        (
+            ClientCommand::UiRender {
+                request_id: "ui-render-1".into(),
+                request_json: r#"{"subtype":"ui_render"}"#.into(),
+            },
+            "ui_render",
+            "ui-render-1",
+        ),
+        (
+            ClientCommand::UiClientModule {
+                request_id: "ui-module-1".into(),
+                plugin: "review".into(),
+            },
+            "ui_client_module",
+            "ui-module-1",
+        ),
+        (
+            ClientCommand::UiMessage {
+                request_id: "ui-message-1".into(),
+                request_json: r#"{"subtype":"ui_message"}"#.into(),
+            },
+            "ui_message",
+            "ui-message-1",
+        ),
+        (
+            ClientCommand::UiClientFault {
+                request_id: "ui-fault-1".into(),
+                request_json: r#"{"subtype":"ui_client_fault"}"#.into(),
+            },
+            "ui_client_fault",
+            "ui-fault-1",
+        ),
+        (
+            ClientCommand::UiClientPress {
+                request_id: "ui-press-1".into(),
+                request_json: r#"{"subtype":"ui_client_press"}"#.into(),
+            },
+            "ui_client_press",
+            "ui-press-1",
+        ),
+        (
+            ClientCommand::UiPress {
+                request_id: "parent-press-1".into(),
+                request_json: r#"{"subtype":"ui_press"}"#.into(),
+            },
+            "ui_press",
+            "parent-press-1",
+        ),
+        (
+            ClientCommand::UiInput {
+                request_id: "parent-input-1".into(),
+                request_json: r#"{"subtype":"ui_input"}"#.into(),
+            },
+            "ui_input",
+            "parent-input-1",
+        ),
+        (
+            ClientCommand::UiSelect {
+                request_id: "parent-select-1".into(),
+                request_json: r#"{"subtype":"ui_select"}"#.into(),
+            },
+            "ui_select",
+            "parent-select-1",
+        ),
+        (
+            ClientCommand::UiClientOperation {
+                request_id: "ui-operation-1".into(),
+                operation_json: r#"{"subtype":"mount"}"#.into(),
+            },
+            "ui_client_operation",
+            "ui-operation-1",
+        ),
+    ];
+
+    for (command, tag, request_id) in commands {
+        let json = serde_json::to_value(&command).expect("serialize Mod UI command");
+        assert_eq!(json["type"], tag);
+        assert_eq!(json["request_id"], request_id);
+        match &command {
+            ClientCommand::UiRender { request_json, .. }
+            | ClientCommand::UiMessage { request_json, .. }
+            | ClientCommand::UiClientFault { request_json, .. }
+            | ClientCommand::UiClientPress { request_json, .. }
+            | ClientCommand::UiPress { request_json, .. }
+            | ClientCommand::UiInput { request_json, .. }
+            | ClientCommand::UiSelect { request_json, .. } => {
+                assert_eq!(json["request_json"], request_json.as_str());
+                assert!(json["request_json"].is_string());
+            }
+            ClientCommand::UiClientModule { plugin, .. } => {
+                assert_eq!(json["plugin"], plugin.as_str());
+            }
+            ClientCommand::UiClientOperation { operation_json, .. } => {
+                assert_eq!(json["operation_json"], operation_json.as_str());
+                assert!(json["operation_json"].is_string());
+            }
+            _ => unreachable!("the cases above contain only Mod UI commands"),
+        }
+        let decoded: ClientCommand =
+            serde_json::from_value(json).expect("deserialize Mod UI command");
+        assert_eq!(decoded, command);
     }
 }
 

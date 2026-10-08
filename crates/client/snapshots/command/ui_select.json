@@ -1,0 +1,5 @@
+{
+  "type": "ui_select",
+  "request_id": "parent-select-1",
+  "request_json": "{\"subtype\":\"ui_select\"}"
+}

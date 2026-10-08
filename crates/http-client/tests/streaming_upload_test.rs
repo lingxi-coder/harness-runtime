@@ -60,6 +60,7 @@ async fn streaming_upload_and_error_download_are_incremental_binary_streams() {
     let mut response = tokio::time::timeout(
         Duration::from_secs(5),
         transport.send_stream(HttpStreamRequest {
+            http1_header_layout: None,
             method: "POST".into(),
             url: format!("http://{address}/files"),
             headers: vec![
@@ -110,6 +111,7 @@ async fn streaming_upload_rejects_conflicting_framing_headers_without_polling() 
         let result = provider_transport()
             .unwrap()
             .send_stream(HttpStreamRequest {
+                http1_header_layout: None,
                 method: "POST".into(),
                 url: "http://127.0.0.1:9/files".into(),
                 headers,
@@ -131,6 +133,7 @@ async fn streaming_upload_errors_do_not_expose_url_credentials() {
     for transport in [provider_transport().unwrap(), provider_transport().unwrap()] {
         let error = transport
             .send_stream(HttpStreamRequest {
+                http1_header_layout: None,
                 method: "POST".into(),
                 url: format!(
                     "http://{address}/upload?Signature=private-signature&upload_id=private-session"
@@ -167,6 +170,7 @@ async fn streaming_upload_surfaces_redirect_without_replaying_the_body() {
     let response = provider_transport()
         .unwrap()
         .send_stream(HttpStreamRequest {
+            http1_header_layout: None,
             method: "POST".into(),
             url: format!("http://{address}/files"),
             headers: vec![],
@@ -202,6 +206,7 @@ async fn sdk_raw_download_exposes_error_headers_before_the_body_finishes() {
     let mut response = tokio::time::timeout(
         Duration::from_secs(5),
         transport.send(HttpRequest {
+            http1_header_layout: None,
             method: "GET".into(),
             url: format!("http://{address}/files/content"),
             headers: vec![],

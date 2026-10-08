@@ -48,11 +48,11 @@ async fn retry_request_omits_malformed_and_thinking_only_attempts() {
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
             path.clone(), Arc::new(platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()))));
         let output = Arc::new(MockOutputStream::new());
-        let orch = ConversationOrchestrator::new_with_streaming(
+        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
             OrchestratorConfig::default(), Arc::new(MockApiClient::new(vec![])), api.clone(),
             Arc::new(ToolRegistry::new()), noop_hook_executor(), Arc::new(NoOpPermissionGate),
             output.clone(), Arc::new(StaticMemoryProvider::empty()), PathBuf::from("/tmp"),
-        ).with_jsonl_writer(writer);
+        ).with_jsonl_writer(writer));
         assert!(matches!(orch.run_turn_streaming("answer the question").await.unwrap(),
             ConversationOutcome::EndTurn { .. }));
         let rows: Vec<serde_json::Value> = std::fs::read_to_string(&path).unwrap().lines()
@@ -70,7 +70,7 @@ async fn retry_request_omits_malformed_and_thinking_only_attempts() {
         )), "failed attempt must be removed from the retry request: {stop}");
         assert!(calls[1].messages.iter().any(|message| matches!(message,
             ConversationMessage::User { content, is_meta: true, .. }
-                if content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text == expected_nudge))
+                if content.iter().any(|block| matches!(block, ContentBlock::Text { text, .. } if text == expected_nudge))
         )), "byte-exact clean meta nudge missing: {stop}");
     }
 }
@@ -99,18 +99,20 @@ async fn terminal_streaming_errors_persist_api_error_envelopes() {
         let api = Arc::new(MockStreamingApiClient::with_turns(
             (0..attempts).map(|_| attempt(stop, false)).collect(),
         ));
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(vec![])),
-            api,
-            Arc::new(ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        )
-        .with_jsonl_writer(writer);
+        let orch = ConversationOrchestrator::into_shared(
+            ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                api,
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            )
+            .with_jsonl_writer(writer),
+        );
         orch.run_turn_streaming("answer the question")
             .await
             .unwrap();

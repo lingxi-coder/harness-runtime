@@ -309,6 +309,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-compression"
+version = "0.4.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e79b3f8a79cccc2898f31920fc69f304859b3bd567490f75ebf51ae1c792a9ac"
+dependencies = [
+ "compression-codecs",
+ "compression-core",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "async-executor"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -742,6 +754,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "brotli"
+version = "8.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bd8b9603c7aa97359dbd97ecf258968c95f3adddd6db2f7e7a5bef101c84560"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+ "brotli-decompressor",
+]
+
+[[package]]
 name = "brotli-decompressor"
 version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1134,6 +1157,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "compression-codecs"
+version = "0.4.38"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce2548391e9c1929c21bf6aa2680af86fe4c1b33e6cea9ac1cfeec0bd11218cf"
+dependencies = [
+ "brotli",
+ "compression-core",
+ "flate2",
+ "memchr",
+ "zstd",
+ "zstd-safe",
+]
+
+[[package]]
+name = "compression-core"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc14f565cf027a105f7a44ccf9e5b424348421a1d8952a8fc9d499d313107789"
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1146,10 +1189,12 @@ dependencies = [
 name = "configuration-admin"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "branding",
  "chrono",
  "client",
  "core",
+ "flate2",
  "futures",
  "hooks",
  "mcp",
@@ -1159,8 +1204,11 @@ dependencies = [
  "regex",
  "reqwest",
  "secret",
+ "semver",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2 0.10.9",
  "skill-api",
  "telemetry",
  "tempfile",
@@ -1268,6 +1316,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "indexmap",
+ "json-projection",
  "jsonrpc",
  "libc",
  "mobile-linux-api",
@@ -2402,6 +2451,7 @@ dependencies = [
  "base64 0.22.1",
  "branding",
  "bridge",
+ "chrono",
  "client",
  "command-api",
  "compaction",
@@ -2664,7 +2714,6 @@ dependencies = [
  "pem",
  "pkcs8",
  "rcgen",
- "reqwest",
  "rustls",
  "rustls-native-certs",
  "serde",
@@ -3011,6 +3060,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-projection"
+version = "0.12.0"
+dependencies = [
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "jsonrpc"
 version = "0.12.0"
 dependencies = [
@@ -3018,6 +3077,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures",
+ "json-projection",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3229,6 +3289,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "lingxi-hyper"
+version = "1.9.0"
+dependencies = [
+ "atomic-waker",
+ "bytes",
+ "futures-channel",
+ "futures-core",
+ "http",
+ "http-body",
+ "httparse",
+ "itoa",
+ "pin-project-lite",
+ "smallvec",
+ "tokio",
+ "want",
+]
+
+[[package]]
+name = "lingxi-hyper-rustls"
+version = "0.27.5"
+dependencies = [
+ "futures-util",
+ "http",
+ "lingxi-hyper",
+ "lingxi-hyper-util",
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "lingxi-hyper-util"
+version = "0.1.20"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "http",
+ "http-body",
+ "ipnet",
+ "libc",
+ "lingxi-hyper",
+ "percent-encoding",
+ "pin-project-lite",
+ "socket2",
+ "tokio",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "lingxi-llm-client"
 version = "0.3.0"
 dependencies = [
@@ -3240,8 +3355,8 @@ dependencies = [
  "futures",
  "hmac",
  "jsonschema",
+ "lingxi-reqwest",
  "regex",
- "reqwest",
  "ring",
  "rustls",
  "ryu-js",
@@ -3253,6 +3368,45 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "toml 0.8.23",
  "url",
+]
+
+[[package]]
+name = "lingxi-reqwest"
+version = "0.12.28"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "js-sys",
+ "lingxi-hyper",
+ "lingxi-hyper-rustls",
+ "lingxi-hyper-util",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-streams",
+ "web-sys",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -3381,6 +3535,7 @@ name = "lsp"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "core",
  "futures",
  "jsonrpc",
@@ -4706,6 +4861,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "branding",
  "core",
  "eventsource-stream",
@@ -6974,6 +7130,7 @@ dependencies = [
  "nix 0.27.1",
  "once_cell",
  "permission",
+ "platform-macos-computer-control",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7346,12 +7503,17 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
+ "async-compression",
  "bitflags 2.13.2",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
@@ -8552,6 +8714,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "workflow"
 version = "0.12.0"
 dependencies = [
+ "branding",
  "core",
  "once_cell",
  "rquickjs",

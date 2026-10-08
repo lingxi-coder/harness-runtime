@@ -377,7 +377,7 @@ pub async fn resolve_subagent_tools(
     // [`AgentToolResolver::resolve`]'s `agent_mcp_tools` parameter. Empty for
     // every caller that has none (byte-identical legacy).
     agent_mcp_tools: &[Arc<dyn Tool>],
-) -> Result<(Vec<serde_json::Value>, Vec<String>), ToolResolutionError> {
+) -> Result<(Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>, Vec<String>), ToolResolutionError> {
     resolve_subagent_tools_with_handback(
         registry,
         agent_def,
@@ -413,7 +413,7 @@ pub async fn resolve_subagent_tools_with_handback(
     agent_mcp_tools: &[Arc<dyn Tool>],
     supplied: Option<&Arc<dyn Tool>>,
     handback_gates: HandbackToolGates,
-) -> Result<(Vec<serde_json::Value>, Vec<String>, bool), ToolResolutionError> {
+) -> Result<(Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>, Vec<String>, bool), ToolResolutionError> {
     use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 
     let parent_tools = registry.available_tools(&ToolStaticContext::default());
@@ -808,7 +808,7 @@ mod tests {
             }
         });
         let definition = agent_def(all_policy());
-        let description = |schemas: Vec<Value>| {
+        let description = |schemas: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>| {
             schemas
                 .into_iter()
                 .find(|tool| tool["name"] == "Bash")

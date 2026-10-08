@@ -288,7 +288,7 @@ fn make_orch(
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "done".to_string(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -310,6 +310,63 @@ fn make_orch(
     (Arc::new(orch), output)
 }
 
+async fn mod_host_registry(
+    source: &str,
+) -> (tempfile::TempDir, Arc<tokio::sync::RwLock<HookRegistry>>) {
+    let dir = tempfile::tempdir().expect("mod directory");
+    let module = dir.path().join("session-compact.js");
+    std::fs::write(&module, source).expect("mod source");
+    let host = hooks::mods::ModHost::start(None).await.expect("mod host");
+    host.load(
+        "session-compact-test",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("load session.compact mod");
+    let mut registry = HookRegistry::new();
+    registry.set_mod_host(host);
+    (dir, Arc::new(RwLock::new(registry)))
+}
+
+async fn make_mod_orch(
+    registry: Arc<tokio::sync::RwLock<HookRegistry>>,
+    compactor: Arc<compaction::CompactionOrchestrator>,
+    slot: Arc<sidequery::CacheSafeParamsSlot>,
+    analytics_bus: Option<Arc<telemetry::AnalyticsBus>>,
+) -> (Arc<ConversationOrchestrator>, Arc<MockOutputStream>) {
+    let hooks = hook_executor_with(Vec::new()).await;
+    let response = || {
+        mock_message_response(
+            vec![LlmContentBlock::Text {
+                text: "done".to_string(),
+                cache_control: None, citations: None,
+            }],
+            Some("end_turn"),
+        )
+    };
+    let api = Arc::new(MockApiClient::new(vec![response(), response()]));
+    let output = Arc::new(MockOutputStream::new());
+    let mut orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api,
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_cache_safe_slot(slot)
+    .with_compaction(compactor)
+    .with_hook_registry(registry);
+    if let Some(analytics_bus) = analytics_bus {
+        orch = orch.with_analytics_bus(analytics_bus);
+    }
+    (Arc::new(orch), output)
+}
+
 /// Seed `n` filler user messages so the token estimate clears a small threshold
 /// (matches `proactive_compaction_test.rs`).
 async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
@@ -322,10 +379,10 @@ async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
                 format!("turn-{i} body padded with filler text to push token count up beyond autocompact threshold"),
             ));
         } else {
-            s.history.push(ConversationMessage::Assistant {
+            s.history.push(ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: format!("reply-{i} with enough detail for compaction"),
+                    text: format!("reply-{i} with enough detail for compaction"), citations: None,
                 }],
                 stop_reason: Some("end_turn".into()),
             });
@@ -473,6 +530,8 @@ async fn manual_compact_runs_reload_session_start_then_post_compact() {
 
     let cwd = std::env::temp_dir();
     let memory = MemoryFile {
+        parent: None,
+        source_content: None,
         path: cwd.join("LINGXI.md"),
         body: "compact test instructions".into(),
         is_local_override: false,
@@ -574,6 +633,54 @@ impl sidequery::SideQueryClient for CaptureSummaryPrompt {
     }
 }
 
+#[derive(Default)]
+struct CompactRequestProbe {
+    calls: AtomicU32,
+    requests: Mutex<Vec<Vec<String>>>,
+}
+
+struct CaptureCompactRequest(Arc<CompactRequestProbe>);
+
+#[async_trait]
+impl sidequery::SideQueryClient for CaptureCompactRequest {
+    async fn query(
+        &self,
+        request: sidequery::SideQueryRequest,
+    ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+        self.0.calls.fetch_add(1, Ordering::SeqCst);
+        self.0.requests.lock().unwrap().push(
+            request
+                .messages
+                .iter()
+                .map(ConversationMessage::text_content)
+                .collect(),
+        );
+        Ok(sidequery::SideQueryResponse {
+            text: Some("<summary>core summary</summary>".into()),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: Some("end_turn".into()),
+            retry_count: 0,
+        })
+    }
+}
+
+fn compactor_with_probe(
+    probe: Arc<CompactRequestProbe>,
+    slot: Arc<sidequery::CacheSafeParamsSlot>,
+    threshold: u64,
+) -> Arc<compaction::CompactionOrchestrator> {
+    let runner = Arc::new(
+        sidequery::ForkedAgentRunner::new()
+            .with_side_query_client(Arc::new(CaptureCompactRequest(probe)), "test-model".into()),
+    );
+    Arc::new(compaction::CompactionOrchestrator::with_autocompactor(
+        compaction::Autocompactor::with_forked_runner(runner, slot),
+        threshold,
+    ))
+}
+
 #[tokio::test]
 async fn pre_compact_stdout_is_js_trimmed_and_joined_with_blank_lines() {
     let hooks = hook_executor_with(vec![
@@ -625,4 +732,239 @@ async fn pre_compact_stdout_is_js_trimmed_and_joined_with_blank_lines() {
         client.0.lock().unwrap().as_deref(),
         Some(compaction::prompt::get_compact_prompt(Some("focus\n\nfirst\n\nsecond")).as_str())
     );
+}
+
+#[tokio::test]
+async fn manual_session_compact_mod_rewrites_next_input_and_applies_replacement_rows() {
+    let (_mod_dir, registry) = mod_host_registry(
+        r#"export function register(on) {
+          on('session.compact', async ($, e, next) => {
+            await $.ui.log(`manual-input:${e.trigger}:${e.instructions ?? ''}`);
+            const core = await next({
+              ...e,
+              instructions: 'MOD_FOCUS_SENTINEL',
+              messages: e.messages.map((row, index) => index === 0
+                ? { ...row, text: 'MOD_INPUT_SENTINEL' }
+                : row),
+            });
+            await $.ui.log(`manual-core:${core.messages[0].handle}`);
+            return {
+              ...core,
+              messages: core.messages.map((row, index) => index === 0
+                ? { ...row, text: 'MOD_REPLACEMENT_SENTINEL' }
+                : row),
+            };
+          });
+        }"#,
+    )
+    .await;
+    let probe = Arc::new(CompactRequestProbe::default());
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let compactor = compactor_with_probe(probe.clone(), slot.clone(), u64::MAX);
+    let (orch, output) = make_mod_orch(registry, compactor, slot, None).await;
+    seed_history(&orch, 6).await;
+
+    orch.force_compact_with_instructions_and_cancel(
+        Some("original manual focus"),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("manual compact should apply the Mod replacement");
+
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    let requests = probe.requests.lock().unwrap();
+    let request_text = requests[0].join("\n");
+    assert!(request_text.contains("MOD_INPUT_SENTINEL"));
+    assert!(request_text.contains("MOD_FOCUS_SENTINEL"));
+    drop(requests);
+
+    let events = output.snapshot().await;
+    let core_handle = events
+        .iter()
+        .find_map(|event| match event {
+            OutputEvent::ModLog { text, .. } => {
+                text.strip_prefix("manual-core:").map(str::to_string)
+            }
+            _ => None,
+        })
+        .expect("the Mod must observe the actual result returned by next(e)");
+    let history = orch.session().lock().await.history.clone();
+    let replacement = history
+        .iter()
+        .find(|message| message.text_content() == "MOD_REPLACEMENT_SENTINEL")
+        .expect("the post-next replacement row must become session history");
+    assert_ne!(
+        replacement.id().as_uuid().to_string(),
+        core_handle,
+        "native replacement rows receive fresh UUIDs; the unchanged core result keeps its UUID"
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        OutputEvent::ModLog { text, .. } if text.starts_with("manual-input:manual:")
+    )));
+}
+
+#[tokio::test]
+async fn proactive_auto_session_compact_next_rewrites_and_replaces_core_rows() {
+    let (_mod_dir, registry) = mod_host_registry(
+        r#"export function register(on) {
+          on('session.compact', async ($, e, next) => {
+            await $.ui.log(`auto-input:${e.trigger}`);
+            const core = await next({
+              ...e,
+              instructions: 'AUTO_FOCUS_SENTINEL',
+              messages: e.messages.map((row, index) => index === 0
+                ? { ...row, text: 'AUTO_INPUT_SENTINEL' }
+                : row),
+            });
+            await $.ui.log(`auto-core:${core.messages[0].handle}`);
+            return {
+              ...core,
+              messages: core.messages.map((row, index) => index === 0
+                ? { ...row, text: 'AUTO_REPLACEMENT_SENTINEL' }
+                : row),
+            };
+          });
+        }"#,
+    )
+    .await;
+    let probe = Arc::new(CompactRequestProbe::default());
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let compactor = compactor_with_probe(probe.clone(), slot.clone(), 100);
+    let (orch, output) = make_mod_orch(registry, compactor, slot, None).await;
+    seed_history(&orch, 60).await;
+
+    orch.run_turn("hello")
+        .await
+        .expect("the turn should proceed after proactive compaction");
+
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    let request_text = probe.requests.lock().unwrap()[0].join("\n");
+    assert!(request_text.contains("AUTO_INPUT_SENTINEL"));
+    assert!(request_text.contains("AUTO_FOCUS_SENTINEL"));
+    let events = output.snapshot().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        OutputEvent::ModLog { text, .. } if text == "auto-input:auto"
+    )));
+    let core_handle = events
+        .iter()
+        .find_map(|event| match event {
+            OutputEvent::ModLog { text, .. } => text.strip_prefix("auto-core:").map(str::to_string),
+            _ => None,
+        })
+        .expect("the Mod must see the real auto compact result");
+    let history = orch.session().lock().await.history.clone();
+    let replacement = history
+        .iter()
+        .find(|message| message.text_content() == "AUTO_REPLACEMENT_SENTINEL")
+        .expect("the auto replacement row must be applied");
+    assert_ne!(replacement.id().as_uuid().to_string(), core_handle);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
+}
+
+#[tokio::test]
+async fn proactive_auto_session_compact_skip_avoids_core_and_boundary() {
+    let (_mod_dir, registry) = mod_host_registry(
+        r#"export function register(on) {
+          on('session.compact', async ($, e) => {
+            await $.ui.log(`auto-skip:${e.trigger}`);
+            return { skip: 'keep this conversation' };
+          });
+        }"#,
+    )
+    .await;
+    let probe = Arc::new(CompactRequestProbe::default());
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let compactor = compactor_with_probe(probe.clone(), slot.clone(), 100);
+    let (orch, output) = make_mod_orch(registry, compactor, slot, None).await;
+    seed_history(&orch, 60).await;
+
+    orch.run_turn("hello")
+        .await
+        .expect("a proactive skip is best-effort");
+
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    let events = output.snapshot().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        OutputEvent::ModLog { text, .. } if text == "auto-skip:auto"
+    )));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, OutputEvent::CompactionCompleted { .. })));
+    assert!(!output
+        .compaction_phase_snapshot()
+        .await
+        .iter()
+        .any(|phase| phase == "summarizing"));
+    let history = orch.session().lock().await.history.clone();
+    assert!(history.iter().all(|message| {
+        !matches!(message, ConversationMessage::System { subtype: Some(subtype), .. } if subtype == "compact_boundary")
+    }));
+}
+
+#[tokio::test]
+async fn proactive_auto_direct_session_compact_replacement_applies_without_running_core() {
+    let (_mod_dir, registry) = mod_host_registry(
+        r#"export function register(on) {
+          on('session.compact', async ($, e) => {
+            await $.ui.log(`auto-direct:${e.trigger}`);
+            return {
+              messages: [{ role: 'user', text: 'DIRECT_REPLACEMENT_SENTINEL', toolUses: [] }],
+              tokensBefore: 123,
+              tokensAfter: 7,
+              usage: {
+                input_tokens: 5,
+                output_tokens: 2,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+            };
+          });
+        }"#,
+    )
+    .await;
+    let probe = Arc::new(CompactRequestProbe::default());
+    let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
+    let compactor = compactor_with_probe(probe.clone(), slot.clone(), 100);
+    let sink = Arc::new(telemetry::InMemorySink::new());
+    let bus = Arc::new(telemetry::AnalyticsBus::new());
+    bus.attach_sink(sink.clone()).await;
+    let (orch, output) = make_mod_orch(registry, compactor, slot, Some(bus)).await;
+    seed_history(&orch, 60).await;
+
+    orch.run_turn("first")
+        .await
+        .expect("direct replacement should apply without a summary call");
+
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    let events = output.snapshot().await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        OutputEvent::ModLog { text, .. } if text == "auto-direct:auto"
+    )));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
+    assert!(!output
+        .compaction_phase_snapshot()
+        .await
+        .iter()
+        .any(|phase| phase == "summarizing"));
+    let history = orch.session().lock().await.history.clone();
+    assert!(history
+        .iter()
+        .any(|message| message.text_content() == "DIRECT_REPLACEMENT_SENTINEL"));
+
+    orch.run_turn("second")
+        .await
+        .expect("a second turn proves direct replacement did not set compact tracking");
+    assert!(sink
+        .events()
+        .await
+        .iter()
+        .all(|event| event.name != telemetry::tengu::orchestrator::POST_AUTOCOMPACT_TURN));
 }

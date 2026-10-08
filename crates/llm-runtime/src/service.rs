@@ -382,7 +382,7 @@ pub struct MessagesCreateRequest {
     pub profile: Option<String>,
     pub system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     pub messages: Vec<ConversationMessage>,
-    pub tools: Vec<serde_json::Value>,
+    pub tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     pub opts: MessagesCreateOptions,
 }
 
@@ -394,7 +394,7 @@ impl MessagesCreateRequest {
         profile: Option<&str>,
         system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Self {
         Self {
             model: model.to_owned(),
@@ -425,6 +425,8 @@ pub struct NonStreamingRetryOptions {
 
 /// State threaded through the `futures::stream::unfold` loop in `drive_stream`.
 struct StreamState {
+    per_turn_effort: Option<String>,
+    safety: crate::safety_observation::SafetyObservation,
     attempt: crate::model_attempt::WireAttempt,
     decoder: crate::history_projection::HistoryProjector,
     frames: lingxi_llm_client::ModelStream,
@@ -766,6 +768,11 @@ fn sdk_prompt_cache_ttl_settings(
     }
 }
 
+/// Admission-time fallback for a new unscoped request. A captured request or
+/// registered origin always takes precedence and retains its ID through retries.
+pub type RequestSessionIdSource =
+    Arc<dyn Fn() -> crate::BoxFuture<'static, Option<String>> + Send + Sync>;
+
 /// Production service: drives `ModelRuntime` with full retry/rate-limit/betas.
 pub struct ApiService {
     fast_policy: crate::model::fast_admission::PolicySource,
@@ -809,6 +816,7 @@ pub struct ApiService {
     /// Set via [`Self::with_request_metadata`]; the composition root supplies
     /// the composed identity string.
     request_metadata: Option<crate::RequestMetadata>,
+    request_session_id_source: RwLock<Option<RequestSessionIdSource>>,
     /// 1P experimental cache-editing inputs (claude.ts `addCacheBreakpoints`
     /// `newCacheEdits`/`pinnedEdits`, claude.ts:3068-3069). LingXi has no
     /// cached-microcompact scheduler to produce these, so the default is
@@ -821,6 +829,15 @@ pub struct ApiService {
     ua: UserAgentEnv,
     /// Build version string for the User-Agent header.
     version: String,
+    /// Explicit Anthropic compatibility version. Other providers retain the
+    /// product build version and their own User-Agent branding.
+    anthropic_compatible_version: Option<String>,
+    native_system_prefix:
+        Option<lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix>,
+    native_thinking_display:
+        Option<lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy>,
+    anthropic_client_metadata:
+        Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata>,
     /// Optional analytics bus for telemetry events.
     analytics: Option<Arc<::telemetry::AnalyticsBus>>,
     /// Optional UI retry-status sink. Set via [`Self::with_retry_reporter`];
@@ -1319,7 +1336,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
         max_tokens: Option<u32>,
@@ -1599,9 +1616,14 @@ impl ApiService {
             forced_tool_choice: None,
             thinking: RwLock::new(crate::model::thinking::ThinkingConfig::default()),
             request_metadata: None,
+            request_session_id_source: RwLock::new(None),
             cache_editing_inputs: CacheEditingInputs::default(),
             ua,
             version: version.into(),
+            anthropic_compatible_version: None,
+            anthropic_client_metadata: None,
+            native_thinking_display: None,
+            native_system_prefix: None,
             analytics,
             fallback_models,
             custom_cli_betas: Vec::new(),
@@ -1856,7 +1878,7 @@ impl ApiService {
                 .load_fast_account(model, profile)
                 .await
                 .unwrap_or(identity);
-            let ua = user_agent(&self.ua, &self.version);
+            let ua = self.anthropic_user_agent();
             self.fast_availability
                 .refresh(&account, &policy, self.transport.as_ref(), &ua, || {
                     self.client.refresh_fast_account(&account)
@@ -1943,6 +1965,121 @@ impl ApiService {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Choose an Anthropic compatibility version without changing product UA.
+    #[must_use]
+    pub fn with_anthropic_compatible_version(mut self, version: impl Into<String>) -> Self {
+        self.anthropic_compatible_version = Some(version.into());
+        self
+    }
+
+    /// Supply a versioned SDK client identity for Anthropic-family requests.
+    #[must_use]
+    pub fn with_native_thinking_display(
+        mut self,
+        policy: lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy,
+    ) -> Self {
+        self.native_thinking_display = Some(policy);
+        self
+    }
+
+    /// Explicit host policy for the system attribution envelope. Neutral
+    /// providers and ordinary service callers keep their original source.
+    pub fn with_native_system_prefix(
+        mut self,
+        prefix: lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix,
+    ) -> Self {
+        self.native_system_prefix = Some(prefix);
+        self
+    }
+
+    pub fn with_anthropic_client_metadata(
+        mut self,
+        metadata: lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata,
+    ) -> Self {
+        self.anthropic_client_metadata = Some(metadata);
+        self
+    }
+
+    /// Bind a live owner for admission of new unscoped requests, without
+    /// retaining that orchestrator or changing an already-captured origin.
+    pub fn set_request_session_id_source(&self, source: RequestSessionIdSource) {
+        *self
+            .request_session_id_source
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(source);
+    }
+
+    async fn capture_request_session_id(&self, request: &mut LlmRequest) {
+        if request.execution.request_session_id.is_none() {
+            let registered = request
+                .execution
+                .model_attempt
+                .as_ref()
+                .and_then(|context| {
+                    self.model_attempt_hooks
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .and_then(|hooks| hooks.request_session_id(context))
+                })
+                .map(|id| id.as_uuid().to_string());
+            request.execution.request_session_id = registered.or_else(|| {
+                if request.execution.model_attempt.is_some() {
+                    None
+                } else {
+                    lingxi_core::host::session_flags::current_request_session_id()
+                        .map(|id| id.as_uuid().to_string())
+                }
+            });
+            if request.execution.request_session_id.is_none()
+                && request.execution.model_attempt.is_none()
+            {
+                let source = self
+                    .request_session_id_source
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(source) = source {
+                    request.execution.request_session_id = source().await;
+                }
+            }
+        }
+        if let (Some(session_id), Some(metadata)) = (
+            &request.execution.request_session_id,
+            &self.request_metadata,
+        ) {
+            // Recompose only the service-owned canonical identity. A caller's
+            // explicit metadata override remains authoritative.
+            if request
+                .input
+                .metadata
+                .get("user_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(metadata.user_id.as_str())
+            {
+                if let Ok(mut identity) =
+                    serde_json::from_str::<serde_json::Value>(&metadata.user_id)
+                {
+                    if identity.is_object() {
+                        identity["session_id"] = serde_json::Value::String(session_id.clone());
+                        if let Ok(user_id) = serde_json::to_string(&identity) {
+                            request.input.metadata["user_id"] = serde_json::Value::String(user_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn anthropic_user_agent(&self) -> String {
+        user_agent(
+            &self.ua,
+            self.anthropic_compatible_version
+                .as_deref()
+                .unwrap_or(&self.version),
+        )
+    }
+
     /// Set the identity for the Anthropic `metadata.user_id` field. Builder-style;
     /// the default is `None` (no `metadata` object emitted).
     #[must_use]
@@ -1974,12 +2111,25 @@ impl ApiService {
         session_id: &str,
         parent_session_id: Option<&str>,
     ) -> String {
-        let mut obj = serde_json::Map::new();
-        if let Some(extra) = extra_metadata_object() {
-            for (k, v) in extra {
-                obj.insert(k, v);
-            }
-        }
+        Self::build_api_metadata_user_id_with_extra(
+            device_id,
+            account_uuid,
+            session_id,
+            parent_session_id,
+            extra_metadata_object(),
+        )
+    }
+
+    /// Compose an identity from an explicit host snapshot without reading env.
+    #[must_use]
+    pub fn build_api_metadata_user_id_with_extra(
+        device_id: &str,
+        account_uuid: &str,
+        session_id: &str,
+        parent_session_id: Option<&str>,
+        extra: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> String {
+        let mut obj = extra.unwrap_or_default();
         obj.insert(
             "device_id".to_string(),
             serde_json::Value::String(device_id.to_string()),
@@ -2111,7 +2261,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         stream: bool,
         max_tokens: Option<u32>,
         skip_global_cache_for_system_prompt: bool,
@@ -2140,7 +2290,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         msgs: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         stream: bool,
         max_tokens: Option<u32>,
         skip_global_cache_for_system_prompt: bool,
@@ -2160,6 +2310,47 @@ impl ApiService {
         // branch — emitting "[…tools no longer available]" rather than the
         // disabled branch's "[…tool search not enabled]". The request's `tools`
         // remain the availability set (`a`) below.
+        let native_system_prefix = self
+            .native_system_prefix
+            .as_ref()
+            .filter(|_| self.client.native_api_system_route(model, profile))
+            .map(|prefix| {
+                use lingxi_llm_client::providers::anthropic::system_prompt::{
+                    NativePromptAttribution, PromptText,
+                };
+                let first = msgs
+                    .iter()
+                    .find_map(|message| match message {
+                        ConversationMessage::User {
+                            content,
+                            is_meta: false,
+                            ..
+                        } => Some(content),
+                        _ => None,
+                    })
+                    .and_then(|content| {
+                        content.iter().find(|block| block.visible_text().is_some())
+                    });
+                let first_user_text = first
+                    .map(|block| match block.visible_text_utf16_units() {
+                        Some(units) => PromptText::from_utf16(units.to_vec()),
+                        None => PromptText::from_string(block.visible_text().unwrap_or_default()),
+                    })
+                    .unwrap_or_else(|| PromptText::from_string(""));
+                (
+                    prefix.clone(),
+                    NativePromptAttribution {
+                        first_user_text,
+                        is_subagent: lingxi_core::host::session_flags::current_request_is_subagent(
+                        ),
+                        workload: self.ua.workload.clone(),
+                        previous_request_id: None,
+                        prompt_id: None,
+                        turn_origin: None,
+                        turn_position: None,
+                    },
+                )
+            });
         let mut msgs = msgs;
         let thinking_source_message_ids: Vec<_> = msgs
             .iter()
@@ -2187,6 +2378,56 @@ impl ApiService {
                 &mut msgs,
                 &thinking_recovery_scope.messages(),
             );
+        }
+        if !self.client.native_api_system_route(model, profile) {
+            for message in &mut msgs {
+                if let ConversationMessage::User {
+                    api_message_override,
+                    ..
+                } = message
+                {
+                    *api_message_override = None;
+                }
+            }
+        }
+        let mut per_message_effort = false;
+        if self.anthropic_client_metadata.is_some() {
+            let mut admitted = LlmRequest::new(model);
+            admitted.profile = profile.map(str::to_owned);
+            admitted.execution.resolve_native_effort = true;
+            self.refresh_effort_settings(&mut admitted);
+            if let Ok(effort) = MOD_REQUEST_EFFORT.try_with(Clone::clone) {
+                admitted.set_effort(Some(effort))?;
+            }
+            if let Some(effort) = self
+                .client
+                .native_per_turn_effort_policy(&admitted)?
+                .and_then(|policy| policy.value)
+                .and_then(|value| value.as_str().map(str::to_owned))
+            {
+                per_message_effort = true;
+                msgs = lingxi_core::types::project_per_turn_effort(msgs, &effort);
+            }
+        }
+        if !per_message_effort {
+            msgs.retain_mut(|message| {
+                if let ConversationMessage::System {
+                    api_system: Some(payload),
+                    ..
+                } = message
+                {
+                    payload.output_config = None;
+                    return !payload.content.is_empty();
+                }
+                if let ConversationMessage::User {
+                    api_message_override: Some(payload),
+                    ..
+                } = message
+                {
+                    payload.output_config = None;
+                }
+                true
+            });
         }
         let tool_search_enabled = lingxi_core::host::session_flags::tool_search_enabled();
         let available_tool_names: std::collections::HashSet<String> = tools
@@ -2238,6 +2479,7 @@ impl ApiService {
         let prompt_cache_epoch = prompt_cache_overage.clone();
         req.execution.prompt_cache = Some(crate::PromptCacheRequestContext {
             system: system.cloned(),
+            native_system_prefix,
             policy: cache_policy,
             current_account_epoch: Arc::new(move || prompt_cache_epoch.account_epoch()),
             native_bare_mode: native_prompt_cache_bare_mode(),
@@ -2355,6 +2597,17 @@ impl ApiService {
             use crate::model::thinking::{model_sends_temperature, session_thinking_active};
 
             let thinking = self.thinking();
+            if self.anthropic_client_metadata.is_some() {
+                req.execution.resolve_native_effort = true;
+                req.execution.anthropic_context_management = Some(
+                    lingxi_llm_client::providers::anthropic::request_policy::AnthropicContextManagement {
+                        has_thinking: !matches!(thinking, crate::model::thinking::ThinkingConfig::Disabled)
+                            && !crate::model::thinking::is_thinking_env_disabled("LINGXI_DISABLE_THINKING"),
+                        tool_clearing:None,
+                    }
+                );
+                req.execution.native_thinking_display = self.native_thinking_display.clone();
+            }
             let has_thinking = session_thinking_active(thinking);
 
             // The claude/non-claude branch, the env kill switches and the
@@ -2679,7 +2932,7 @@ impl ApiService {
         };
         let anthropic = Self::is_anthropic_family_protocol(&prepared.route.protocol);
         let value = if anthropic {
-            user_agent(&self.ua, &self.version)
+            self.anthropic_user_agent()
         } else {
             format!("LingXi-Code/{}", self.version)
         };
@@ -2689,6 +2942,23 @@ impl ApiService {
             UserAgentPolicy::IfAbsent(&value)
         };
         apply_user_agent(&mut prepared.provider_request.headers, policy);
+        if anthropic {
+            if let Some(metadata) = &self.anthropic_client_metadata {
+                if let Some(draft) = prepared.wire_draft.as_mut() {
+                    draft.set_http1_header_layout(Some(
+                        lingxi_llm_client::Http1HeaderLayout::NativeFetch,
+                    ));
+                }
+                let mut metadata = metadata.clone();
+                // An admitted request owns its identity. Missing authority never
+                // falls back to a possibly stale boot session at dispatch.
+                metadata.session_id = prepared.request_session_id.clone();
+                lingxi_llm_client::providers::anthropic::request_policy::apply_client_metadata(
+                    &mut prepared.provider_request.headers,
+                    &metadata,
+                );
+            }
+        }
     }
 
     /// Port of claude-code's `B0t` (2.1.207): parse `CLAUDE_CODE_EXTRA_BODY` into a
@@ -2714,6 +2984,24 @@ impl ApiService {
                 .unwrap_or_default(),
             betas,
         )
+    }
+
+    fn prepared_per_turn_effort(prepared: &crate::PreparedLlmCall) -> Option<String> {
+        (prepared.anthropic_request_kind
+            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            && prepared.route.resolved_route.provider_id == crate::ProviderId::AnthropicFirstParty
+            && lingxi_llm_client::providers::anthropic::supports_per_message_effort(
+                &prepared.route.resolved_route.request_model,
+            ))
+        .then(|| {
+            prepared
+                .effort_policy
+                .as_ref()
+                .and_then(|policy| policy.value.as_ref())
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .flatten()
     }
 
     fn is_main_thinking_display_call(prepared: &crate::PreparedLlmCall) -> bool {
@@ -2982,6 +3270,19 @@ impl ApiService {
             &lingxi_llm_client::providers::anthropic::beta_repair::ModelBetaRejections::for_process(
             ),
         );
+        if let Some(policy) = &prepared.native_thinking_display {
+            if thinking_display::apply_display_policy(
+                &mut prepared.provider_request.body_json,
+                policy,
+            ) {
+                prepared
+                    .provider_request
+                    .json_string_overrides
+                    .retain(|path, _| {
+                        path != "/thinking/display" && !path.starts_with("/thinking/display/")
+                    });
+            }
+        }
         if crate::structured_output::experimental_betas_disabled() {
             return;
         }
@@ -2990,9 +3291,17 @@ impl ApiService {
         let updates = std::env::var(branding::THINKING_DISPLAY_UPDATES_ENV)
             .ok()
             .is_none_or(|value| crate::structured_output::bool_value(&value));
+        let display = prepared
+            .provider_request
+            .body_json
+            .pointer("/thinking/display")
+            .and_then(serde_json::Value::as_str);
         let mode = thinking_display::connector_mode(
-            None,
-            false,
+            display,
+            prepared
+                .native_thinking_display
+                .as_ref()
+                .is_some_and(|policy| policy.is_explicit()),
             lingxi_core::host::session_flags::show_thinking_summaries(),
             updates,
         );
@@ -3038,6 +3347,9 @@ impl ApiService {
             extra_body: prepared.extra_body.clone().unwrap_or_default(),
             body_betas,
             effort: prepared.effort_policy.clone(),
+            context_management: (prepared.anthropic_request_kind == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+                && matches!(prepared.route.resolved_route.provider_id, crate::ProviderId::AnthropicFirstParty | crate::ProviderId::FoundryClaude | crate::ProviderId::BedrockClaude | crate::ProviderId::VertexClaude))
+                .then(|| prepared.anthropic_context_management.clone()).flatten(),
             message_header_parameters: matches!(
                 prepared.route.protocol,
                 crate::ProtocolFamily::AnthropicMessages
@@ -4263,6 +4575,15 @@ impl ApiService {
         chain: &[String],
         mut dispatch: DispatchHeaderState,
     ) -> Result<HistoryResponse, LlmError> {
+        self.capture_request_session_id(&mut req).await;
+        if req.execution.request_credentials.is_none()
+            && self
+                .client
+                .native_api_system_route(&req.input.model, req.profile.as_deref())
+        {
+            req.execution.request_credentials = Some(crate::RequestCredentials::default());
+        }
+        let mut safety = crate::safety_observation::SafetyObservation::capture(&mut req);
         dispatch.context_hint_beta = req.execution.context_hint_beta;
         if req.execution.thinking_recovery_scope.is_none() {
             req.execution.thinking_recovery_scope = Some(self.thinking_recovery_scope());
@@ -4369,6 +4690,7 @@ impl ApiService {
             let prepare_elapsed = preparing.elapsed();
             let remaining = timeout.saturating_sub(prepare_elapsed);
             let mut attempt = self.begin_model_attempt(&req, &prepared).await?;
+            safety.inherit_if_missing(attempt.model_safety_observer());
             let dispatch_started = tokio::time::Instant::now();
             let admission = req.execution.request_dispatch_admission.clone();
             let mut admission_rejected = false;
@@ -4417,6 +4739,9 @@ impl ApiService {
                             return Err(crate::execution::wire_error(error));
                         }
                         any_dispatched = true;
+                        if let Some(admission) = &admission {
+                            admission.observe_dispatch();
+                        }
                         crate::prompt_cache::observe_snapshot(cache_snapshot.clone());
                         Ok(())
                     })
@@ -4434,6 +4759,7 @@ impl ApiService {
 
             match resp_result {
                 Err(transport_err) => {
+                    safety.error(&transport_err);
                     if admission_rejected {
                         attempt.finish().await?;
                         return Err(LlmError::RequestDispatchRejected {
@@ -4567,12 +4893,14 @@ impl ApiService {
                         attempt.observe(usage, *completeness);
                     }
                     let decoded = crate::execution::decode(&collected).and_then(|mut decoded| {
+                        safety.response(&decoded);
                         let server_event=prepared.server_fallback_lane.as_ref().and_then(|_|lingxi_llm_client::providers::anthropic::fallback_response::project_nonstream(&mut decoded,&prepared.route.resolved_route.request_model,provider_resp.request_id.clone()));
                         let mut response=crate::history_projection::project_response(
                             decoded,
                             provider_resp.clone(),
                             crate::upstream::family(&prepared.route.protocol),
                         )?;
+                        response.set_per_turn_effort(Self::prepared_per_turn_effort(&prepared).as_deref());
                         response.usage.cost_estimate = estimate.clone();
                         if let Some(quote) = &server_fallback_quote {
                             crate::history_projection::attach_server_fallback_cost_quote(
@@ -4656,6 +4984,7 @@ impl ApiService {
                             return Ok(response);
                         }
                         Err(decode_err) => {
+                            safety.error(&decode_err);
                             if Self::repair_server_fallback_beta_rejection(
                                 &prepared,
                                 provider_resp.status,
@@ -5112,7 +5441,7 @@ impl ApiService {
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         skip_global_cache_for_system_prompt: bool,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
@@ -5220,7 +5549,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
@@ -5274,7 +5603,7 @@ impl ApiService {
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         skip_global_cache_for_system_prompt: bool,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
@@ -5320,7 +5649,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
@@ -5357,7 +5686,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         max_tokens: Option<u32>,
         tool_choice: Option<crate::ToolChoice>,
         stop_sequences: Vec<String>,
@@ -5400,7 +5729,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<u64, LlmError> {
         let system = custom_system_prompt(system);
         let req = self.build_request(
@@ -5428,7 +5757,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<Option<u64>, LlmError> {
         let system = custom_system_prompt(system);
         let req = self.build_request(
@@ -5529,7 +5858,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&crate::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
         let mut req = self.build_request(
@@ -5593,6 +5922,15 @@ impl ApiService {
         &self,
         mut req: LlmRequest,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        self.capture_request_session_id(&mut req).await;
+        if req.execution.request_credentials.is_none()
+            && self
+                .client
+                .native_api_system_route(&req.input.model, req.profile.as_deref())
+        {
+            req.execution.request_credentials = Some(crate::RequestCredentials::default());
+        }
+        let mut safety = crate::safety_observation::SafetyObservation::capture(&mut req);
         if req.execution.input_protocol.is_none() {
             req.execution.input_protocol =
                 Some(self.protocol_for_model(&req.input.model, req.profile.as_deref())?);
@@ -5718,6 +6056,7 @@ impl ApiService {
                 // Budget/queue admission is host work, outside the network
                 // watchdog. Its wait must not masquerade as a provider timeout.
                 attempt = self.begin_model_attempt(&req, &prepared).await?;
+                safety.inherit_if_missing(attempt.model_safety_observer());
                 let cache_snapshot = crate::prompt_cache::snapshot_prepared(&prepared);
                 crate::execution::first_byte_bound(remaining, async {
                     if req.execution.computer_submission.is_some()
@@ -5743,6 +6082,9 @@ impl ApiService {
                             }
                             attempt.mark_dispatched()?;
                             any_dispatched = true;
+                            if let Some(admission) = &admission {
+                                admission.observe_dispatch();
+                            }
                             crate::prompt_cache::observe_snapshot(cache_snapshot.clone());
                             Ok(())
                         })
@@ -5753,6 +6095,7 @@ impl ApiService {
             .await;
             match opened {
                 Err(transport_err) => {
+                    safety.error(&transport_err);
                     if admission_rejected {
                         attempt.finish().await?;
                         return Err(LlmError::RequestDispatchRejected {
@@ -5857,6 +6200,7 @@ impl ApiService {
                         let collected = match result {
                             Ok(collected) => collected,
                             Err(error) => {
+                                safety.error(&error);
                                 attempt.finish().await?;
                                 return Err(error);
                             }
@@ -5882,6 +6226,7 @@ impl ApiService {
                             .err()
                             .map(crate::upstream::error)
                             .unwrap_or(LlmError::ProviderInternal);
+                        safety.error(&decode_err);
                         collected.finish().await;
                         attempt.finish().await?;
 
@@ -6270,6 +6615,8 @@ impl ApiService {
                     // Assemble events via a manual unfold that drives next_frame + decode.
                     // We keep a queue of pre-decoded events and drain them first.
                     let stream_state = StreamState {
+                        per_turn_effort: Self::prepared_per_turn_effort(&prepared),
+                        safety: safety.clone(),
                         attempt,
                         decoder,
                         frames,
@@ -6295,7 +6642,12 @@ impl ApiService {
                     let boxed: BoxStream<'static, Result<HistoryEvent, LlmError>> = Box::pin(
                         futures::stream::unfold(stream_state, |mut s| async move {
                             loop {
-                                if let Some(event) = s.queue.pop_front() {
+                                if let Some(mut event) = s.queue.pop_front() {
+                                    if let HistoryEvent::MessageStart { response }
+                                    | HistoryEvent::Completed { response } = &mut event
+                                    {
+                                        response.set_per_turn_effort(s.per_turn_effort.as_deref());
+                                    }
                                     // Emit succeed telemetry on the terminal event
                                     // (MessageStop or Completed) — once, guarded by `done`.
                                     let is_terminal = matches!(
@@ -6373,6 +6725,7 @@ impl ApiService {
                                 };
                                 match frame {
                                     Ok(Some(frame)) => {
+                                        s.safety.batch(&frame);
                                         let terminal_frame = frame.events.iter().any(|event| {
                                             matches!(event, Ok(lingxi_llm_client::protocol::StreamEvent::End { .. }))
                                         });
@@ -6587,6 +6940,7 @@ impl ApiService {
                                                 s.queue.extend(events);
                                             }
                                             Err(e) => {
+                                                s.safety.error(&e);
                                                 if let Some((mut usage, completeness)) =
                                                     s.decoder.observed_usage()
                                                 {
@@ -6669,6 +7023,7 @@ impl ApiService {
                                                 s.queue.extend(events);
                                             }
                                             Err(e) => {
+                                                s.safety.error(&e);
                                                 if let Some((mut usage, completeness)) =
                                                     s.decoder.observed_usage()
                                                 {
@@ -6700,6 +7055,7 @@ impl ApiService {
                                         }
                                     }
                                     Err(e) => {
+                                        s.safety.error(&e);
                                         if let Some((usage, completeness)) =
                                             s.decoder.observed_usage()
                                         {
@@ -6742,7 +7098,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         effort: Option<serde_json::Value>,
         speed: Option<String>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
@@ -6775,7 +7131,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         effort: Option<serde_json::Value>,
         speed: Option<String>,
         skip_global_cache_for_system_prompt: bool,
@@ -6810,7 +7166,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
@@ -6849,7 +7205,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         effort: Option<serde_json::Value>,
         max_tokens: Option<u32>,
         query_source_label: Option<&str>,
@@ -6880,7 +7236,7 @@ impl ApiService {
         profile: Option<&str>,
         system: Option<&str>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         forced_tool: Option<&str>,
         effort: Option<serde_json::Value>,
         max_tokens: Option<u32>,

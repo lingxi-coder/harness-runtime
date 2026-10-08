@@ -85,6 +85,7 @@ async fn init_refresh_driver_returns_state_and_spawns_proactive() {
         Secret::new("ACCESS".into()),
         Some(Secret::new("REFRESH".into())),
         now + Duration::from_secs(3600),
+        vec!["user:inference".into()],
         transport,
         clock,
         None,
@@ -96,6 +97,7 @@ async fn init_refresh_driver_returns_state_and_spawns_proactive() {
 
     // Proactive handle was stored.
     assert!(state.proactive_handle().await.is_some());
+    assert_eq!(state.token.read().await.scopes, ["user:inference"]);
 
     // Clean up: shutdown for a tidy test environment.
     state.shutdown(&*spawner).await;

@@ -71,6 +71,23 @@ pub struct HistoryResponse {
     pub provider_metadata: Value,
 }
 impl HistoryResponse {
+    /// Admitted host request effort, never decoded from provider output.
+    pub fn per_turn_effort(&self) -> Option<&str> {
+        self.provider_metadata
+            .pointer("/llm_client/per_turn_effort")
+            .and_then(Value::as_str)
+    }
+    pub(crate) fn set_per_turn_effort(&mut self, effort: Option<&str>) {
+        if let Some(effort) = effort {
+            if !self.provider_metadata.is_object() {
+                self.provider_metadata = serde_json::json!({});
+            }
+            if !self.provider_metadata["llm_client"].is_object() {
+                self.provider_metadata["llm_client"] = serde_json::json!({});
+            }
+            self.provider_metadata["llm_client"]["per_turn_effort"] = effort.into();
+        }
+    }
     /// Host-authored observations only. Wire projection clears this reserved
     /// key before installing events admitted by the execution context.
     pub fn server_fallback_events(&self) -> Vec<HistoryServerFallback> {
@@ -325,6 +342,9 @@ pub enum CacheControl {
 /// Application history message converted once at the SDK input boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
+    /// Host API-system controls; consumed once at the provider input boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_output_config: Option<lingxi_core::types::ApiSystemOutputConfig>,
     /// Message role.
     pub role: String,
     /// Ordered content blocks.
@@ -406,6 +426,10 @@ pub enum ContentBlock {
         name: String,
         /// Tool input JSON.
         input: Value,
+        /// Exact JavaScript input associated with this tool call. Only the SDK
+        /// request codec turns this carrier into provider-visible JSON bytes.
+        #[serde(skip)]
+        input_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     },
     /// Tool-result block.
     ToolResult {
@@ -413,6 +437,9 @@ pub enum ContentBlock {
         tool_call_id: String,
         /// Tool result JSON.
         output: Value,
+        /// Exact associated provider-visible result, retained until SDK encoding.
+        #[serde(skip)]
+        output_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         /// Whether the result reports a tool failure; `None` preserves omission.
         #[serde(
             default,
@@ -546,6 +573,9 @@ pub enum CacheEdit {
 /// hosted-tool passthrough (`provider/anthropic.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolDeclaration {
+    /// Exact schema at the host tool-admission boundary, never a wire field.
+    #[serde(skip)]
+    pub input_schema_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Tool name.
     pub name: String,
     /// Tool description.
@@ -640,6 +670,7 @@ mod wire_presence_tests {
 
         for is_error in [None, Some(false), Some(true)] {
             let result = ContentBlock::ToolResult {
+                output_projection: None,
                 tool_call_id: "toolu_1".into(),
                 output: json!("ok"),
                 is_error,

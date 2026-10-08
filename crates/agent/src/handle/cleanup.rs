@@ -117,6 +117,7 @@ pub(super) struct SpawnDeallocGuard {
     pub(super) observer_events: crate::api::ObserverEventSink,
     pub(super) armed: bool,
     pub(super) startup_error: Option<String>,
+    pub(super) agent_spawn_token: Option<lingxi_core::host::agent_statistics::AgentSpawnToken>,
     pub(super) mcp_cleanups: Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>,
     pub(super) agent_type: String,
 }
@@ -125,6 +126,10 @@ impl Drop for SpawnDeallocGuard {
     fn drop(&mut self) {
         if !self.armed {
             return;
+        }
+        if let Some(token) = &self.agent_spawn_token {
+            if self.startup_error.is_some() { token.failed(); }
+            else { token.killed(lingxi_core::host::agent_statistics::AgentKillReason::User); }
         }
         // The cleanup below is async; hand it to the current runtime
         // best-effort. If no runtime is active (shutdown) there is nothing

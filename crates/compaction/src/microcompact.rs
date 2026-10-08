@@ -453,7 +453,7 @@ impl Microcompactor {
                     is_meta,
                     is_compact_summary,
                     is_visible_in_transcript_only,
-                } = m
+                 .. } = m
                 {
                     let new_content: Vec<ContentBlock> = content
                         .into_iter()
@@ -477,7 +477,7 @@ impl Microcompactor {
                                                 || TIME_BASED_MC_CLEARED_MESSAGE.to_string(),
                                             )
                                         };
-                                    return ContentBlock::ToolResult {
+                                    return ContentBlock::ToolResult { content_projection: None,
                                         tool_use_id: tool_use_id.clone(),
                                         content: replacement,
                                         is_error: *is_error,
@@ -490,7 +490,7 @@ impl Microcompactor {
                             b
                         })
                         .collect();
-                    ConversationMessage::User {
+                    ConversationMessage::User { api_message_override: None,
                         id,
                         content: new_content,
                         is_meta,
@@ -527,9 +527,9 @@ mod tests {
     use serde_json::json;
 
     fn assistant_tool_use(name: &str, id: ToolUseId) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id,
                 name: name.into(),
                 input: json!({}),
@@ -540,12 +540,12 @@ mod tests {
     }
 
     fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id,
                 content: content.into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],

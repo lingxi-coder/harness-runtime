@@ -302,96 +302,13 @@ fn verify_sha_pin(expected: Option<&str>, actual_head: &str) -> Result<(), Strin
     }
 }
 
-fn npm_package_path(package: &str) -> Result<PathBuf, String> {
-    let (package_name, version) = if let Some(scoped) = package.strip_prefix('@') {
-        let (scope, rest) = scoped
-            .split_once('/')
-            .ok_or_else(|| format!("invalid npm plugin source: {package}"))?;
-        let (name, version) = rest
-            .split_once('@')
-            .map_or((rest, None), |(name, version)| (name, Some(version)));
-        if scope.is_empty() || name.is_empty() {
-            return Err(format!("invalid npm plugin source: {package}"));
-        }
-        (format!("@{scope}/{name}"), version)
-    } else {
-        let (name, version) = package
-            .split_once('@')
-            .map_or((package, None), |(name, version)| (name, Some(version)));
-        (name.to_string(), version)
-    };
-    if package_name.starts_with('-')
-        || package_name
-            .trim_start_matches('@')
-            .split('/')
-            .any(|segment| {
-                segment.is_empty()
-                    || segment == "."
-                    || segment == ".."
-                    || !segment
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-            })
-    {
-        return Err(format!("invalid npm plugin source: {package}"));
-    }
-    if version.is_some_and(|version| {
-        version.is_empty()
-            || !version.chars().all(|character| {
-                character.is_ascii_alphanumeric()
-                    || matches!(
-                        character,
-                        '.' | '-' | '_' | '+' | '*' | '^' | '~' | '<' | '>' | '=' | '|'
-                    )
-            })
-    }) {
-        return Err(format!("invalid npm plugin source: {package}"));
-    }
-    Ok(PathBuf::from(package_name))
-}
-
 fn materialize_npm_source(
     package: &str,
     version: Option<&str>,
     registry: Option<&str>,
     root: &Path,
 ) -> Result<PathBuf, String> {
-    // A separate `version` field (oracle: "Specific version or version range")
-    // combines with `package` the same way an inline `name@version` already
-    // does, reusing every existing validation / lookup path unchanged.
-    let spec = match version {
-        Some(version) if !version.is_empty() => format!("{package}@{version}"),
-        _ => package.to_string(),
-    };
-    let package_path = npm_package_path(&spec)?;
-    let mut command = std::process::Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" });
-    command
-        .arg("install")
-        .arg("--ignore-scripts")
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .arg("--package-lock=false")
-        .arg("--prefix")
-        .arg(root);
-    if let Some(registry) = registry {
-        command.arg("--registry").arg(registry);
-    }
-    let status = command
-        .arg("--")
-        .arg(&spec)
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|error| format!("failed to start npm for plugin source: {error}"))?;
-    if !status.status.success() {
-        return Err(format!(
-            "failed to install npm plugin source: {}",
-            String::from_utf8_lossy(&status.stderr).trim()
-        ));
-    }
-    confined_source_subdir(&root.join("node_modules"), package_path.to_str())
+    crate::plugin_npm::materialize(package, version, registry, root)
 }
 
 /// CLI `-y` (oracle `jl({yes})`) or an explicit env grant.
@@ -3391,24 +3308,6 @@ mod tests {
         // an ENTIRE segment equal to ".." is); its slash becomes "-" and its
         // dots are preserved (allow_dot=true), same as any other character map.
         assert_eq!(sanitize("../1.2.3", true), "..-1.2.3");
-    }
-
-    #[test]
-    fn npm_package_path_rejects_argument_and_path_injection() {
-        assert_eq!(
-            npm_package_path("@scope/plugin@1.2.3").unwrap(),
-            PathBuf::from("@scope/plugin")
-        );
-        for invalid in [
-            "--foreground-scripts",
-            "@scope/../escape",
-            "../escape",
-            "plugin@file:../../escape",
-            "plugin@https://example.com/archive.tgz",
-            "plugin@",
-        ] {
-            assert!(npm_package_path(invalid).is_err(), "accepted {invalid}");
-        }
     }
 
     #[cfg(unix)]

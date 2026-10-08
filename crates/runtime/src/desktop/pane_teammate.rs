@@ -931,13 +931,13 @@ mod tests {
     struct QuietOutput;
     #[async_trait]
     impl OutputStream for QuietOutput {
-        async fn emit_text(&self, _: &str) {}
+        async fn emit_text(&self, _: &str, _utf16_code_units: Option<&[u16]>) {}
         async fn emit_tool_call(
             &self,
             _: &lingxi_core::types::ToolUseId,
             _: &str,
             _: &serde_json::Value,
-        ) {
+         _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
         }
         async fn emit_tool_result(
             &self,
@@ -945,7 +945,7 @@ mod tests {
             _: &str,
             _: &str,
             _: &serde_json::Value,
-        ) {
+         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
     }
@@ -956,13 +956,13 @@ mod tests {
     }
     #[async_trait]
     impl OutputStream for InactiveBeforeFailureOutput {
-        async fn emit_text(&self, _: &str) {}
+        async fn emit_text(&self, _: &str, _utf16_code_units: Option<&[u16]>) {}
         async fn emit_tool_call(
             &self,
             _: &lingxi_core::types::ToolUseId,
             _: &str,
             _: &serde_json::Value,
-        ) {
+         _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
         }
         async fn emit_tool_result(
             &self,
@@ -970,7 +970,7 @@ mod tests {
             _: &str,
             _: &str,
             _: &serde_json::Value,
-        ) {
+         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
         async fn emit_coordinator_worker(

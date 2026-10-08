@@ -1,0 +1,2770 @@
+{
+  "version": "2.1.286",
+  "sha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+  "sourceByteRanges": [
+    {
+      "signature": "function zbe(e){return e.replace",
+      "start": 176137080,
+      "end": 176137601,
+      "sourceSha256": "df6739d7d826778e9ae1dd426a9b203b1699cec545d2b3f787d25e85aed4c2a5"
+    },
+    {
+      "signature": "function ud(t){let a=_(t,o);return u.test(t)?_(a,p):a}",
+      "start": 179601704,
+      "end": 179603877,
+      "sourceSha256": "7a6ba4d0a97afe019ae0fed3d47f46da3d17abf97350e98e1a7b0a8a97e01c68"
+    }
+  ],
+  "scope": "ud error-text surface only. Includes the complete ECMAScript whitespace table plus U+0085 across 11 forms (286 cases), invisible second-pass evidence, and documented stronger runtime cases. This is source evaluation, not a live CLI/model run; Rust execution is a separate test.",
+  "whitespaceCodePoints": [
+    "U+0009",
+    "U+000A",
+    "U+000B",
+    "U+000C",
+    "U+000D",
+    "U+0020",
+    "U+00A0",
+    "U+1680",
+    "U+2000",
+    "U+2001",
+    "U+2002",
+    "U+2003",
+    "U+2004",
+    "U+2005",
+    "U+2006",
+    "U+2007",
+    "U+2008",
+    "U+2009",
+    "U+200A",
+    "U+2028",
+    "U+2029",
+    "U+202F",
+    "U+205F",
+    "U+3000",
+    "U+FEFF"
+  ],
+  "exactCases": 290,
+  "strengthenedCases": 11,
+  "cases": [
+    {
+      "id": "U+0009/bearer_value",
+      "input": "Bearer one\ttwo",
+      "nativeExpected": "Bearer [REDACTED]\ttwo",
+      "firstPassExpected": "Bearer [REDACTED]\ttwo",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED]\ttwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/basic_value",
+      "input": "Authorization: Basic one\ttwo",
+      "nativeExpected": "Authorization: Basic [REDACTED]\ttwo",
+      "firstPassExpected": "Authorization: Basic [REDACTED]\ttwo",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]\ttwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/key_value",
+      "input": "password=one\ttwo",
+      "nativeExpected": "password=[REDACTED]\ttwo",
+      "firstPassExpected": "password=[REDACTED]\ttwo",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]\ttwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/bearer_separator",
+      "input": "Bearer\tsecret",
+      "nativeExpected": "Bearer\tsecret",
+      "firstPassExpected": "Bearer\tsecret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer\tsecret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/basic_separator",
+      "input": "Authorization: Basic\tsecret",
+      "nativeExpected": "Authorization: Basic\t[REDACTED]",
+      "firstPassExpected": "Authorization: Basic\t[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic\t[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/basic_colon",
+      "input": "Authorization:\tBasic secret",
+      "nativeExpected": "Authorization:\tBasic [REDACTED]",
+      "firstPassExpected": "Authorization:\tBasic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization:\tBasic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/key_separator",
+      "input": "password=\tsecret",
+      "nativeExpected": "password=\t[REDACTED]",
+      "firstPassExpected": "password=\t[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password=\t[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/key_colon",
+      "input": "password\t=secret",
+      "nativeExpected": "password\t=[REDACTED]",
+      "firstPassExpected": "password\t=[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password\t=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/url_password",
+      "input": "https://u:one\ttwo@host.example/path",
+      "nativeExpected": "https://u:one\ttwo@host.example/path",
+      "firstPassExpected": "https://u:one\ttwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one\ttwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/url_credential_after",
+      "input": "https://u:p@host.example/path\tother",
+      "nativeExpected": "https://***:***@host.example/path\tother",
+      "firstPassExpected": "https://***:***@host.example/path\tother",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path\tother",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0009/url_password_after_at",
+      "input": "https://u:p@ss\ttwo@host.example/path",
+      "nativeExpected": "https://***:***@ss\ttwo@host.example/path",
+      "firstPassExpected": "https://***:***@ss\ttwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss\ttwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/bearer_value",
+      "input": "Bearer one\ntwo",
+      "nativeExpected": "Bearer [REDACTED]\ntwo",
+      "firstPassExpected": "Bearer [REDACTED]\ntwo",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED]\ntwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/basic_value",
+      "input": "Authorization: Basic one\ntwo",
+      "nativeExpected": "Authorization: Basic [REDACTED]\ntwo",
+      "firstPassExpected": "Authorization: Basic [REDACTED]\ntwo",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]\ntwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/key_value",
+      "input": "password=one\ntwo",
+      "nativeExpected": "password=[REDACTED]\ntwo",
+      "firstPassExpected": "password=[REDACTED]\ntwo",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]\ntwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/bearer_separator",
+      "input": "Bearer\nsecret",
+      "nativeExpected": "Bearer\nsecret",
+      "firstPassExpected": "Bearer\nsecret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer\nsecret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/basic_separator",
+      "input": "Authorization: Basic\nsecret",
+      "nativeExpected": "Authorization: Basic\n[REDACTED]",
+      "firstPassExpected": "Authorization: Basic\n[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic\n[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/basic_colon",
+      "input": "Authorization:\nBasic secret",
+      "nativeExpected": "Authorization:\nBasic [REDACTED]",
+      "firstPassExpected": "Authorization:\nBasic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization:\nBasic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/key_separator",
+      "input": "password=\nsecret",
+      "nativeExpected": "password=\n[REDACTED]",
+      "firstPassExpected": "password=\n[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password=\n[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/key_colon",
+      "input": "password\n=secret",
+      "nativeExpected": "password\n=[REDACTED]",
+      "firstPassExpected": "password\n=[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password\n=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/url_password",
+      "input": "https://u:one\ntwo@host.example/path",
+      "nativeExpected": "https://u:one\ntwo@host.example/path",
+      "firstPassExpected": "https://u:one\ntwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one\ntwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/url_credential_after",
+      "input": "https://u:p@host.example/path\nother",
+      "nativeExpected": "https://***:***@host.example/path\nother",
+      "firstPassExpected": "https://***:***@host.example/path\nother",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path\nother",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000A/url_password_after_at",
+      "input": "https://u:p@ss\ntwo@host.example/path",
+      "nativeExpected": "https://***:***@ss\ntwo@host.example/path",
+      "firstPassExpected": "https://***:***@ss\ntwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss\ntwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/bearer_value",
+      "input": "Bearer one\u000btwo",
+      "nativeExpected": "Bearer [REDACTED]\u000btwo",
+      "firstPassExpected": "Bearer [REDACTED]\u000btwo",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED]\u000btwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/basic_value",
+      "input": "Authorization: Basic one\u000btwo",
+      "nativeExpected": "Authorization: Basic [REDACTED]\u000btwo",
+      "firstPassExpected": "Authorization: Basic [REDACTED]\u000btwo",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]\u000btwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/key_value",
+      "input": "password=one\u000btwo",
+      "nativeExpected": "password=[REDACTED]\u000btwo",
+      "firstPassExpected": "password=[REDACTED]\u000btwo",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]\u000btwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/bearer_separator",
+      "input": "Bearer\u000bsecret",
+      "nativeExpected": "Bearer\u000bsecret",
+      "firstPassExpected": "Bearer\u000bsecret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer\u000bsecret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/basic_separator",
+      "input": "Authorization: Basic\u000bsecret",
+      "nativeExpected": "Authorization: Basic\u000b[REDACTED]",
+      "firstPassExpected": "Authorization: Basic\u000b[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic\u000b[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/basic_colon",
+      "input": "Authorization:\u000bBasic secret",
+      "nativeExpected": "Authorization:\u000bBasic [REDACTED]",
+      "firstPassExpected": "Authorization:\u000bBasic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization:\u000bBasic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/key_separator",
+      "input": "password=\u000bsecret",
+      "nativeExpected": "password=\u000b[REDACTED]",
+      "firstPassExpected": "password=\u000b[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password=\u000b[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/key_colon",
+      "input": "password\u000b=secret",
+      "nativeExpected": "password\u000b=[REDACTED]",
+      "firstPassExpected": "password\u000b=[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password\u000b=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/url_password",
+      "input": "https://u:one\u000btwo@host.example/path",
+      "nativeExpected": "https://u:one\u000btwo@host.example/path",
+      "firstPassExpected": "https://u:one\u000btwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one\u000btwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/url_credential_after",
+      "input": "https://u:p@host.example/path\u000bother",
+      "nativeExpected": "https://***:***@host.example/path\u000bother",
+      "firstPassExpected": "https://***:***@host.example/path\u000bother",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path\u000bother",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000B/url_password_after_at",
+      "input": "https://u:p@ss\u000btwo@host.example/path",
+      "nativeExpected": "https://***:***@ss\u000btwo@host.example/path",
+      "firstPassExpected": "https://***:***@ss\u000btwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss\u000btwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/bearer_value",
+      "input": "Bearer one\ftwo",
+      "nativeExpected": "Bearer [REDACTED]\ftwo",
+      "firstPassExpected": "Bearer [REDACTED]\ftwo",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED]\ftwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/basic_value",
+      "input": "Authorization: Basic one\ftwo",
+      "nativeExpected": "Authorization: Basic [REDACTED]\ftwo",
+      "firstPassExpected": "Authorization: Basic [REDACTED]\ftwo",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]\ftwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/key_value",
+      "input": "password=one\ftwo",
+      "nativeExpected": "password=[REDACTED]\ftwo",
+      "firstPassExpected": "password=[REDACTED]\ftwo",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]\ftwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/bearer_separator",
+      "input": "Bearer\fsecret",
+      "nativeExpected": "Bearer\fsecret",
+      "firstPassExpected": "Bearer\fsecret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer\fsecret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/basic_separator",
+      "input": "Authorization: Basic\fsecret",
+      "nativeExpected": "Authorization: Basic\f[REDACTED]",
+      "firstPassExpected": "Authorization: Basic\f[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic\f[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/basic_colon",
+      "input": "Authorization:\fBasic secret",
+      "nativeExpected": "Authorization:\fBasic [REDACTED]",
+      "firstPassExpected": "Authorization:\fBasic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization:\fBasic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/key_separator",
+      "input": "password=\fsecret",
+      "nativeExpected": "password=\f[REDACTED]",
+      "firstPassExpected": "password=\f[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password=\f[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/key_colon",
+      "input": "password\f=secret",
+      "nativeExpected": "password\f=[REDACTED]",
+      "firstPassExpected": "password\f=[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password\f=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/url_password",
+      "input": "https://u:one\ftwo@host.example/path",
+      "nativeExpected": "https://u:one\ftwo@host.example/path",
+      "firstPassExpected": "https://u:one\ftwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one\ftwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/url_credential_after",
+      "input": "https://u:p@host.example/path\fother",
+      "nativeExpected": "https://***:***@host.example/path\fother",
+      "firstPassExpected": "https://***:***@host.example/path\fother",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path\fother",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000C/url_password_after_at",
+      "input": "https://u:p@ss\ftwo@host.example/path",
+      "nativeExpected": "https://***:***@ss\ftwo@host.example/path",
+      "firstPassExpected": "https://***:***@ss\ftwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss\ftwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/bearer_value",
+      "input": "Bearer one\rtwo",
+      "nativeExpected": "Bearer [REDACTED]\rtwo",
+      "firstPassExpected": "Bearer [REDACTED]\rtwo",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED]\rtwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/basic_value",
+      "input": "Authorization: Basic one\rtwo",
+      "nativeExpected": "Authorization: Basic [REDACTED]\rtwo",
+      "firstPassExpected": "Authorization: Basic [REDACTED]\rtwo",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]\rtwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/key_value",
+      "input": "password=one\rtwo",
+      "nativeExpected": "password=[REDACTED]\rtwo",
+      "firstPassExpected": "password=[REDACTED]\rtwo",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]\rtwo",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/bearer_separator",
+      "input": "Bearer\rsecret",
+      "nativeExpected": "Bearer\rsecret",
+      "firstPassExpected": "Bearer\rsecret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer\rsecret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/basic_separator",
+      "input": "Authorization: Basic\rsecret",
+      "nativeExpected": "Authorization: Basic\r[REDACTED]",
+      "firstPassExpected": "Authorization: Basic\r[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic\r[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/basic_colon",
+      "input": "Authorization:\rBasic secret",
+      "nativeExpected": "Authorization:\rBasic [REDACTED]",
+      "firstPassExpected": "Authorization:\rBasic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization:\rBasic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/key_separator",
+      "input": "password=\rsecret",
+      "nativeExpected": "password=\r[REDACTED]",
+      "firstPassExpected": "password=\r[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password=\r[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/key_colon",
+      "input": "password\r=secret",
+      "nativeExpected": "password\r=[REDACTED]",
+      "firstPassExpected": "password\r=[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password\r=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/url_password",
+      "input": "https://u:one\rtwo@host.example/path",
+      "nativeExpected": "https://u:one\rtwo@host.example/path",
+      "firstPassExpected": "https://u:one\rtwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one\rtwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/url_credential_after",
+      "input": "https://u:p@host.example/path\rother",
+      "nativeExpected": "https://***:***@host.example/path\rother",
+      "firstPassExpected": "https://***:***@host.example/path\rother",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path\rother",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+000D/url_password_after_at",
+      "input": "https://u:p@ss\rtwo@host.example/path",
+      "nativeExpected": "https://***:***@ss\rtwo@host.example/path",
+      "firstPassExpected": "https://***:***@ss\rtwo@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss\rtwo@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer [REDACTED]",
+      "firstPassExpected": "Bearer [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0020/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+00A0/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+1680/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2000/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2001/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2002/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2003/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2004/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2005/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2006/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2007/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2008/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2009/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+200A/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2028/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+2029/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+202F/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/bearer_value",
+      "input": "Bearer one two",
+      "nativeExpected": "Bearer [REDACTED] two",
+      "firstPassExpected": "Bearer [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/basic_value",
+      "input": "Authorization: Basic one two",
+      "nativeExpected": "Authorization: Basic [REDACTED] two",
+      "firstPassExpected": "Authorization: Basic [REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/key_value",
+      "input": "password=one two",
+      "nativeExpected": "password=[REDACTED] two",
+      "firstPassExpected": "password=[REDACTED] two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED] two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/bearer_separator",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer secret",
+      "firstPassExpected": "Bearer secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/basic_separator",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/basic_colon",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/key_separator",
+      "input": "password= secret",
+      "nativeExpected": "password= [REDACTED]",
+      "firstPassExpected": "password= [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password= [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/key_colon",
+      "input": "password =secret",
+      "nativeExpected": "password =[REDACTED]",
+      "firstPassExpected": "password =[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password =[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/url_password",
+      "input": "https://u:one two@host.example/path",
+      "nativeExpected": "https://u:one two@host.example/path",
+      "firstPassExpected": "https://u:one two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/url_credential_after",
+      "input": "https://u:p@host.example/path other",
+      "nativeExpected": "https://***:***@host.example/path other",
+      "firstPassExpected": "https://***:***@host.example/path other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+205F/url_password_after_at",
+      "input": "https://u:p@ss two@host.example/path",
+      "nativeExpected": "https://***:***@ss two@host.example/path",
+      "firstPassExpected": "https://***:***@ss two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/bearer_value",
+      "input": "Bearer one　two",
+      "nativeExpected": "Bearer [REDACTED]　two",
+      "firstPassExpected": "Bearer [REDACTED]　two",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED]　two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/basic_value",
+      "input": "Authorization: Basic one　two",
+      "nativeExpected": "Authorization: Basic [REDACTED]　two",
+      "firstPassExpected": "Authorization: Basic [REDACTED]　two",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]　two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/key_value",
+      "input": "password=one　two",
+      "nativeExpected": "password=[REDACTED]　two",
+      "firstPassExpected": "password=[REDACTED]　two",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]　two",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/bearer_separator",
+      "input": "Bearer　secret",
+      "nativeExpected": "Bearer　secret",
+      "firstPassExpected": "Bearer　secret",
+      "invisiblePass": false,
+      "rustExpected": "Bearer　secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/basic_separator",
+      "input": "Authorization: Basic　secret",
+      "nativeExpected": "Authorization: Basic　[REDACTED]",
+      "firstPassExpected": "Authorization: Basic　[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic　[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/basic_colon",
+      "input": "Authorization:　Basic secret",
+      "nativeExpected": "Authorization:　Basic [REDACTED]",
+      "firstPassExpected": "Authorization:　Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization:　Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/key_separator",
+      "input": "password=　secret",
+      "nativeExpected": "password=　[REDACTED]",
+      "firstPassExpected": "password=　[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password=　[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/key_colon",
+      "input": "password　=secret",
+      "nativeExpected": "password　=[REDACTED]",
+      "firstPassExpected": "password　=[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password　=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/url_password",
+      "input": "https://u:one　two@host.example/path",
+      "nativeExpected": "https://u:one　two@host.example/path",
+      "firstPassExpected": "https://u:one　two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://u:one　two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/url_credential_after",
+      "input": "https://u:p@host.example/path　other",
+      "nativeExpected": "https://***:***@host.example/path　other",
+      "firstPassExpected": "https://***:***@host.example/path　other",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path　other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+3000/url_password_after_at",
+      "input": "https://u:p@ss　two@host.example/path",
+      "nativeExpected": "https://***:***@ss　two@host.example/path",
+      "firstPassExpected": "https://***:***@ss　two@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@ss　two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/bearer_value",
+      "input": "Bearer one﻿two",
+      "nativeExpected": "Bearer [REDACTED]",
+      "firstPassExpected": "Bearer [REDACTED]﻿two",
+      "invisiblePass": true,
+      "rustExpected": "Bearer [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/basic_value",
+      "input": "Authorization: Basic one﻿two",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]﻿two",
+      "invisiblePass": true,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/key_value",
+      "input": "password=one﻿two",
+      "nativeExpected": "password=[REDACTED]",
+      "firstPassExpected": "password=[REDACTED]﻿two",
+      "invisiblePass": true,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/bearer_separator",
+      "input": "Bearer﻿secret",
+      "nativeExpected": "Bearer﻿secret",
+      "firstPassExpected": "Bearer﻿secret",
+      "invisiblePass": true,
+      "rustExpected": "Bearer﻿secret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/basic_separator",
+      "input": "Authorization: Basic﻿secret",
+      "nativeExpected": "Authorization: Basic﻿[REDACTED]",
+      "firstPassExpected": "Authorization: Basic﻿[REDACTED]",
+      "invisiblePass": true,
+      "rustExpected": "Authorization: Basic﻿[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/basic_colon",
+      "input": "Authorization:﻿Basic secret",
+      "nativeExpected": "Authorization:﻿Basic [REDACTED]",
+      "firstPassExpected": "Authorization:﻿Basic [REDACTED]",
+      "invisiblePass": true,
+      "rustExpected": "Authorization:﻿Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/key_separator",
+      "input": "password=﻿secret",
+      "nativeExpected": "password=﻿[REDACTED]",
+      "firstPassExpected": "password=﻿[REDACTED]",
+      "invisiblePass": true,
+      "rustExpected": "password=﻿[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/key_colon",
+      "input": "password﻿=secret",
+      "nativeExpected": "password﻿=[REDACTED]",
+      "firstPassExpected": "password﻿=[REDACTED]",
+      "invisiblePass": true,
+      "rustExpected": "password﻿=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/url_password",
+      "input": "https://u:one﻿two@host.example/path",
+      "nativeExpected": "https://u:one﻿two@host.example/path",
+      "firstPassExpected": "https://u:one﻿two@host.example/path",
+      "invisiblePass": true,
+      "rustExpected": "https://u:one﻿two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/url_credential_after",
+      "input": "https://u:p@host.example/path﻿other",
+      "nativeExpected": "https://***:***@host.example/path﻿other",
+      "firstPassExpected": "https://***:***@host.example/path﻿other",
+      "invisiblePass": true,
+      "rustExpected": "https://***:***@host.example/path﻿other",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+FEFF/url_password_after_at",
+      "input": "https://u:p@ss﻿two@host.example/path",
+      "nativeExpected": "https://***:***@ss﻿two@host.example/path",
+      "firstPassExpected": "https://***:***@ss﻿two@host.example/path",
+      "invisiblePass": true,
+      "rustExpected": "https://***:***@ss﻿two@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0085/bearer_value",
+      "input": "Bearer onetwo",
+      "nativeExpected": "Bearer [REDACTED]",
+      "firstPassExpected": "Bearer [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0085/basic_value",
+      "input": "Authorization: Basic onetwo",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0085/key_value",
+      "input": "password=onetwo",
+      "nativeExpected": "password=[REDACTED]",
+      "firstPassExpected": "password=[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0085/bearer_separator",
+      "input": "Bearersecret",
+      "nativeExpected": "Bearersecret",
+      "firstPassExpected": "Bearersecret",
+      "invisiblePass": false,
+      "rustExpected": "Bearersecret",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0085/basic_separator",
+      "input": "Authorization: Basicsecret",
+      "nativeExpected": "Authorization: Basicsecret",
+      "firstPassExpected": "Authorization: Basicsecret",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic[REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Existing runtime accepts U+0085 as a Basic separator and masks its credential; native ud leaves it visible."
+    },
+    {
+      "id": "U+0085/basic_colon",
+      "input": "Authorization:Basic secret",
+      "nativeExpected": "Authorization:Basic secret",
+      "firstPassExpected": "Authorization:Basic secret",
+      "invisiblePass": false,
+      "rustExpected": "Authorization:Basic [REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Existing runtime accepts U+0085 before Basic and masks its credential; native ud leaves it visible."
+    },
+    {
+      "id": "U+0085/key_separator",
+      "input": "password=secret",
+      "nativeExpected": "password=[REDACTED]",
+      "firstPassExpected": "password=[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0085/key_colon",
+      "input": "password=secret",
+      "nativeExpected": "password=[REDACTED]",
+      "firstPassExpected": "password=[REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0085/url_password",
+      "input": "https://u:onetwo@host.example/path",
+      "nativeExpected": "https://***:***@host.example/path",
+      "firstPassExpected": "https://***:***@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0085/url_credential_after",
+      "input": "https://u:p@host.example/pathother",
+      "nativeExpected": "https://***:***@host.example/pathother",
+      "firstPassExpected": "https://***:***@host.example/pathother",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/pathother",
+      "alignment": "exact"
+    },
+    {
+      "id": "U+0085/url_password_after_at",
+      "input": "https://u:p@sstwo@host.example/path",
+      "nativeExpected": "https://***:***@host.example/path",
+      "firstPassExpected": "https://***:***@host.example/path",
+      "invisiblePass": false,
+      "rustExpected": "https://***:***@host.example/path",
+      "alignment": "exact"
+    },
+    {
+      "id": "leading-nel-basic",
+      "input": "Authorization: Basic secret",
+      "nativeExpected": "Authorization: Basic [REDACTED]",
+      "firstPassExpected": "Authorization: Basic [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Authorization: Basic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "leading-nel-bearer",
+      "input": "Bearer secret",
+      "nativeExpected": "Bearer [REDACTED]",
+      "firstPassExpected": "Bearer [REDACTED]",
+      "invisiblePass": false,
+      "rustExpected": "Bearer [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "invisible-basic-bom",
+      "input": "Authorization: B​asic﻿secret",
+      "nativeExpected": "Authorization: B​asic﻿[REDACTED]",
+      "firstPassExpected": "Authorization: B​asic﻿secret",
+      "invisiblePass": true,
+      "rustExpected": "Authorization: B​asic﻿[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "invisible-bearer-nel",
+      "input": "B​earer onetwo",
+      "nativeExpected": "B​earer [REDACTED]",
+      "firstPassExpected": "B​earer onetwo",
+      "invisiblePass": true,
+      "rustExpected": "B​earer [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "invisible-basic-nel",
+      "input": "Authorization: B​asic onetwo",
+      "nativeExpected": "Authorization: B​asic [REDACTED]",
+      "firstPassExpected": "Authorization: B​asic onetwo",
+      "invisiblePass": true,
+      "rustExpected": "Authorization: B​asic [REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "leading-nel-bom-key",
+      "input": "password=﻿secret",
+      "nativeExpected": "password=[REDACTED]",
+      "firstPassExpected": "password=[REDACTED]﻿secret",
+      "invisiblePass": true,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "exact"
+    },
+    {
+      "id": "quoted-key",
+      "input": "password=\"hello world\"",
+      "nativeExpected": "password=[REDACTED] world\"",
+      "firstPassExpected": "password=[REDACTED] world\"",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Preserve existing runtime security strengthening: consume a complete quoted/scheme-prefixed assignment or slash-bearing SSH credentials rather than expose the remainder."
+    },
+    {
+      "id": "bearer-key",
+      "input": "password=Bearer secret",
+      "nativeExpected": "password=[REDACTED] secret",
+      "firstPassExpected": "password=[REDACTED] secret",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Preserve existing runtime security strengthening: consume a complete quoted/scheme-prefixed assignment or slash-bearing SSH credentials rather than expose the remainder."
+    },
+    {
+      "id": "basic-key",
+      "input": "password=Basic secret",
+      "nativeExpected": "password=[REDACTED] secret",
+      "firstPassExpected": "password=[REDACTED] secret",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Preserve existing runtime security strengthening: consume a complete quoted/scheme-prefixed assignment or slash-bearing SSH credentials rather than expose the remainder."
+    },
+    {
+      "id": "bearer-key-nel",
+      "input": "password=Bearer onetwo",
+      "nativeExpected": "password=[REDACTED] onetwo",
+      "firstPassExpected": "password=[REDACTED] onetwo",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Preserve existing runtime security strengthening: consume a complete quoted/scheme-prefixed assignment or slash-bearing SSH credentials rather than expose the remainder."
+    },
+    {
+      "id": "basic-key-nel",
+      "input": "password=Basic onetwo",
+      "nativeExpected": "password=[REDACTED] onetwo",
+      "firstPassExpected": "password=[REDACTED] onetwo",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Preserve existing runtime security strengthening: consume a complete quoted/scheme-prefixed assignment or slash-bearing SSH credentials rather than expose the remainder."
+    },
+    {
+      "id": "leading-nel-bearer-key",
+      "input": "password=Bearer secret",
+      "nativeExpected": "password=[REDACTED] secret",
+      "firstPassExpected": "password=[REDACTED] secret",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Preserve existing runtime security strengthening: consume a complete quoted/scheme-prefixed assignment or slash-bearing SSH credentials rather than expose the remainder."
+    },
+    {
+      "id": "leading-nel-quoted-key",
+      "input": "password=\"hello world\"",
+      "nativeExpected": "password=[REDACTED] world\"",
+      "firstPassExpected": "password=[REDACTED] world\"",
+      "invisiblePass": false,
+      "rustExpected": "password=[REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Preserve existing runtime security strengthening: consume a complete quoted/scheme-prefixed assignment or slash-bearing SSH credentials rather than expose the remainder."
+    },
+    {
+      "id": "leading-bom-bearer-key",
+      "input": "password=﻿Bearer secret",
+      "nativeExpected": "password=﻿[REDACTED] secret",
+      "firstPassExpected": "password=﻿[REDACTED] secret",
+      "invisiblePass": true,
+      "rustExpected": "password=﻿[REDACTED]",
+      "alignment": "strengthened",
+      "reason": "Preserve existing runtime security strengthening: consume a complete quoted/scheme-prefixed assignment or slash-bearing SSH credentials rather than expose the remainder."
+    },
+    {
+      "id": "ssh-slash-password",
+      "input": "ssh://user:p/ss@[::1]/path",
+      "nativeExpected": "ssh://user:p/ss@[::1]/path",
+      "firstPassExpected": "ssh://user:p/ss@[::1]/path",
+      "invisiblePass": false,
+      "rustExpected": "ssh://***:***@[::1]/path",
+      "alignment": "strengthened",
+      "reason": "Preserve existing runtime security strengthening: consume a complete quoted/scheme-prefixed assignment or slash-bearing SSH credentials rather than expose the remainder."
+    }
+  ]
+}

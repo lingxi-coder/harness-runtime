@@ -705,19 +705,29 @@ async fn execute_one_turn_with_recovery_tracked_impl(
             // message stays `e.to_string()` (`createAssistantAPIErrorMessage`
             // renders content verbatim); the envelope adds `error`/`apiErrorStatus`.
             let env = classify_api_error(&e);
-            // Content is rendered verbatim (`e.to_string()`) EXCEPT a 413
-            // `request_too_large` (accumulated images/attachments), which the
-            // 2.1.212 handler renders with the byte-exact `$Vi()` notice.
-            let content = match &e {
+            // Preserve existing local/error-family copy. Provider InvalidRequest
+            // uses canonical APIError copy; a 413 keeps its native `$Vi()` notice.
+            let (content, provider_status) = match &e {
                 OrchestratorError::ApiCall(LlmError::RequestTooLarge)
-                | OrchestratorError::Streaming(LlmError::RequestTooLarge) => {
-                    crate::conversation::request_too_large_notice(orch.prompt_is_interactive())
+                | OrchestratorError::Streaming(LlmError::RequestTooLarge) => (
+                    crate::conversation::request_too_large_notice(orch.prompt_is_interactive()),
+                    None,
+                ),
+                OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => {
+                    let content = if matches!(inner, LlmError::InvalidRequest { .. })
+                        && inner.http_status().is_some()
+                    {
+                        orch.model_error_text(inner).await
+                    } else {
+                        e.to_string()
+                    };
+                    (content, inner.http_status())
                 }
-                _ => e.to_string(),
+                _ => (e.to_string(), None),
             };
             let error_kind = env.error;
             crate::server_fallback::flush_pending_notice(orch).await;
-            let assistant_id = surface_model_error(orch, &content, env).await;
+            let assistant_id = surface_model_error(orch, &content, env, provider_status).await;
             orch.mark_mod_turn_error();
             // SLASH-04: this arm is the oracle's `api_error` reason (see the
             // NAMING NOTE on `GoalClearBucket`), so it is classified by

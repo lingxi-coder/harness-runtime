@@ -39,13 +39,13 @@ mod tests {
 
         #[async_trait]
         impl OutputStream for BareSink {
-            async fn emit_text(&self, _text: &str) {}
+            async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
             async fn emit_tool_call(
                 &self,
                 _id: &crate::types::ToolUseId,
                 _tool: &str,
                 _input: &serde_json::Value,
-            ) {
+             _input_projection: Option<&crate::types::utf16_json::Utf16JsonProjection>) {
             }
             async fn emit_tool_result(
                 &self,
@@ -53,7 +53,7 @@ mod tests {
                 _tool: &str,
                 _model_text: &str,
                 _result: &serde_json::Value,
-            ) {
+             _projection: Option<&crate::host::ToolResultProjection>) {
             }
             async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
         }
@@ -363,13 +363,13 @@ mod tests {
 
         #[async_trait]
         impl OutputStream for BareSink {
-            async fn emit_text(&self, _text: &str) {}
+            async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
             async fn emit_tool_call(
                 &self,
                 _id: &crate::types::ToolUseId,
                 _tool: &str,
                 _input: &serde_json::Value,
-            ) {
+             _input_projection: Option<&crate::types::utf16_json::Utf16JsonProjection>) {
             }
             async fn emit_tool_result(
                 &self,
@@ -377,7 +377,7 @@ mod tests {
                 _tool: &str,
                 _model_text: &str,
                 _result: &serde_json::Value,
-            ) {
+             _projection: Option<&crate::host::ToolResultProjection>) {
             }
             async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
         }
@@ -444,13 +444,13 @@ mod tests {
 
         #[async_trait]
         impl OutputStream for BareSink {
-            async fn emit_text(&self, _text: &str) {}
+            async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
             async fn emit_tool_call(
                 &self,
                 _id: &crate::types::ToolUseId,
                 _tool: &str,
                 _input: &serde_json::Value,
-            ) {
+             _input_projection: Option<&crate::types::utf16_json::Utf16JsonProjection>) {
             }
             async fn emit_tool_result(
                 &self,
@@ -458,7 +458,7 @@ mod tests {
                 _tool: &str,
                 _model_text: &str,
                 _result: &serde_json::Value,
-            ) {
+             _projection: Option<&crate::host::ToolResultProjection>) {
             }
             async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
         }
@@ -978,5 +978,29 @@ mod curated_model_tests {
         let refs = curated_model_refs(&listings, &[], "deepseek-flash", None);
 
         assert_eq!(refs[0], "deepseek/deepseek-flash");
+    }
+}
+
+#[test]
+fn prompt_snapshot_invalid_rendering_hint_keeps_static_context() {
+    for hint in [
+        serde_json::json!(42),
+        serde_json::json!("unknown"),
+        serde_json::json!({}),
+        serde_json::Value::Null,
+    ] {
+        let snapshot: PromptSnapshot = serde_json::from_value(serde_json::json!({
+            "systemPrompt": ["current static prompt"],
+            "contextRendering": hint,
+            "tools": [{"name":"Read", "description":"current Read"}]
+        }))
+        .expect("native fmn catches the hint independently");
+        assert_eq!(snapshot.system_prompt, ["current static prompt"]);
+        assert_eq!(snapshot.tools[0].description, "current Read");
+        assert_eq!(snapshot.context_rendering, None);
+        assert!(serde_json::to_value(snapshot)
+            .unwrap()
+            .get("contextRendering")
+            .is_none());
     }
 }

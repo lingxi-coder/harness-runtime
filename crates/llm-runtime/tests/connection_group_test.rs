@@ -526,9 +526,9 @@ fn failover_never_crosses_billing_modes() {
     use llm_runtime::ModelBillingMode;
 
     let mut subscription = connection("plan", "https://plan.example.com", 0, false);
-    subscription.pricing.billing_mode = ModelBillingMode::Subscription;
+    subscription.pricing.billing_mode = Some(ModelBillingMode::Subscription);
     let mut metered = connection("api", "https://api.example.com", 1, false);
-    metered.pricing.billing_mode = ModelBillingMode::PerToken;
+    metered.pricing.billing_mode = Some(ModelBillingMode::PerToken);
 
     let registry = ModelRegistry::from_config(ClientConfig {
         providers: vec![subscription, metered],

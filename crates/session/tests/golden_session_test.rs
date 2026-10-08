@@ -51,7 +51,7 @@ async fn writer_output_equals_single_turn_fixture() {
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
     let writer = JsonlWriter::new(path.clone(), fs);
 
-    let user = JsonlMessage {
+    let user = JsonlMessage { json_projection: None,
         message_type: "user".into(),
         uuid: UUID1.into(),
         parent_uuid: None,
@@ -69,7 +69,7 @@ async fn writer_output_equals_single_turn_fixture() {
         logical_parent_uuid: None,
         extra: Map::new(),
     };
-    let assistant = JsonlMessage {
+    let assistant = JsonlMessage { json_projection: None,
         message_type: "assistant".into(),
         uuid: UUID2.into(),
         parent_uuid: Some(UUID1.into()),
@@ -142,7 +142,7 @@ async fn writer_output_equals_multi_turn_fixture() {
     let writer = JsonlWriter::new(path.clone(), fs);
 
     let messages: Vec<JsonlMessage> = vec![
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "user".into(),
             uuid: UUID1.into(),
             parent_uuid: None,
@@ -160,7 +160,7 @@ async fn writer_output_equals_multi_turn_fixture() {
             logical_parent_uuid: None,
             extra: Map::new(),
         },
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "assistant".into(),
             uuid: UUID2.into(),
             parent_uuid: Some(UUID1.into()),
@@ -184,7 +184,7 @@ async fn writer_output_equals_multi_turn_fixture() {
             logical_parent_uuid: None,
             extra: Map::new(),
         },
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "user".into(),
             uuid: UUID3.into(),
             parent_uuid: Some(UUID2.into()),
@@ -202,7 +202,7 @@ async fn writer_output_equals_multi_turn_fixture() {
             logical_parent_uuid: None,
             extra: Map::new(),
         },
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "assistant".into(),
             uuid: UUID4.into(),
             parent_uuid: Some(UUID3.into()),
@@ -226,7 +226,7 @@ async fn writer_output_equals_multi_turn_fixture() {
             logical_parent_uuid: None,
             extra: Map::new(),
         },
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "user".into(),
             uuid: UUID5.into(),
             parent_uuid: Some(UUID4.into()),
@@ -303,7 +303,7 @@ async fn writer_output_equals_compacted_fixture() {
     summary_extra.insert("isCompactSummary".into(), Value::Bool(true));
 
     let messages: Vec<JsonlMessage> = vec![
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "user".into(),
             uuid: UUID1.into(),
             parent_uuid: None,
@@ -321,7 +321,7 @@ async fn writer_output_equals_compacted_fixture() {
             logical_parent_uuid: None,
             extra: Map::new(),
         },
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "assistant".into(),
             uuid: UUID2.into(),
             parent_uuid: Some(UUID1.into()),
@@ -345,7 +345,7 @@ async fn writer_output_equals_compacted_fixture() {
             logical_parent_uuid: None,
             extra: Map::new(),
         },
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "system".into(),
             uuid: UUID3.into(),
             // Chain reset: `parentUuid: null`, real parent in logicalParentUuid.
@@ -365,7 +365,7 @@ async fn writer_output_equals_compacted_fixture() {
             logical_parent_uuid: Some(UUID2.into()),
             extra: boundary_extra,
         },
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "user".into(),
             uuid: UUID4.into(),
             parent_uuid: Some(UUID3.into()),

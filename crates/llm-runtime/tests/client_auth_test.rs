@@ -637,12 +637,16 @@ async fn prepare_count_tokens_is_authenticated_for_anthropic_routes() {
         .await
         .expect("prepared");
 
-    assert!(prepared.url.ends_with("/v1/messages/count_tokens"));
+    assert!(prepared
+        .url
+        .ends_with("/v1/messages/count_tokens?beta=true"));
     assert_eq!(
         prepared.headers.get("x-api-key").map(String::as_str),
         Some("ct-key")
     );
     assert!(prepared.body_json.get("max_tokens").is_none());
+    assert!(prepared.headers["anthropic-beta"].ends_with("token-counting-2024-11-01"));
+    assert!(prepared.body_json.get("betas").is_none());
 }
 
 #[tokio::test]

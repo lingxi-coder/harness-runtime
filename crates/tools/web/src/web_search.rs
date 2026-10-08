@@ -159,6 +159,24 @@ pub fn build_model_content(query: &str, results: &[SearchResultEntry]) -> String
     out.trim().to_string()
 }
 
+fn map_web_search_result_text(data: &Value) -> Option<String> {
+    let query = data.get("query")?.as_str()?;
+    let entries = match data.get("results") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(entries)) => entries.as_slice(),
+        _ => return None,
+    };
+    let results = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Value::Null => None,
+            Value::String(text) => Some(SearchResultEntry::Text(text.clone())),
+            _ => Some(SearchResultEntry::Hit(entry.clone())),
+        })
+        .collect::<Vec<_>>();
+    Some(build_model_content(query, &results))
+}
+
 /// Build the budget-capped [`ToolCallResult`] returned WITHOUT searching once the
 /// session WebSearch budget is exhausted — 1:1 with the binary's
 /// `{data:{query,results:[<notice>],durationSeconds:0,searchCount:0}}` return.
@@ -170,7 +188,7 @@ pub fn build_model_content(query: &str, results: &[SearchResultEntry]) -> String
 fn budget_capped_result(query: &str, used: u32, max: u32) -> ToolCallResult {
     let notice = web_search_budget_notice(used, max);
     let model_content = build_model_content(query, &[SearchResultEntry::Text(notice.clone())]);
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data: json!({
             "query": query,
             "results": [notice],
@@ -387,7 +405,7 @@ impl WebSearchTool {
                 self.emit_completed(&invocation_id, hits.len() as u64, 0, 0, elapsed_ms)
                     .await;
                 let model_content = format_results_for_model(&input.query, &hits, provider.label());
-                Ok(ToolCallResult {
+                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     data: serde_json::json!({
                         "query": input.query,
                         "provider": provider.label(),
@@ -407,7 +425,7 @@ impl WebSearchTool {
                 });
                 self.emit_failed(&invocation_id, "client_search", None, elapsed_ms)
                     .await;
-                Ok(ToolCallResult {
+                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     data: serde_json::json!({ "query": input.query, "error": msg }),
                     model_content: Some(msg),
                     new_messages: vec![],
@@ -429,6 +447,29 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "query": { "type": "string", "minLength": 2, "description": "The search query to use" },
             "allowed_domains": { "type": "array", "items": { "type": "string" }, "description": "Only include search results from these domains" },
             "blocked_domains": { "type": "array", "items": { "type": "string" }, "description": "Never include search results from these domains" }
+        }
+    })
+});
+
+/// Claude Code 2.1.287 WebSearch output union: commentary text or a search
+/// result with a tool-use id and title/URL hits.
+static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    json!({
+        "type":"object",
+        "required":["query","results","durationSeconds"],
+        "properties":{
+            "query":{"type":"string"},
+            "results":{"type":"array","items":{"oneOf":[
+                {"type":"string"},
+                {"type":"object","required":["tool_use_id","content"],"properties":{
+                    "tool_use_id":{"type":"string"},
+                    "content":{"type":"array","items":{"type":"object","required":["title","url"],"properties":{
+                        "title":{"type":"string"},"url":{"type":"string"}
+                    }}}
+                }}
+            ]}},
+            "durationSeconds":{"type":"number"},
+            "searchCount":{"type":"number"}
         }
     })
 });
@@ -532,6 +573,12 @@ impl Tool for WebSearchTool {
     }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
+    }
+    fn output_schema(&self) -> Option<&Value> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    fn map_result_text(&self, result: &Value) -> Option<String> {
+        map_web_search_result_text(result)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         // Always offered: on Anthropic first-party (and Vertex/Foundry per
@@ -803,7 +850,7 @@ impl WebSearchTool {
         // `durationSeconds = (performance.now()-s)/1000` (binary @148664): the
         // f64-seconds elapsed, not the integer millisecond `duration_ms`.
         let duration_seconds = elapsed_ms as f64 / 1000.0;
-        ToolCallResult {
+        ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "query": query,
                 "results": results,
@@ -1172,6 +1219,46 @@ mod tests {
             ),
             "model_content must end with the REMINDER footer, got: {mc}"
         );
+    }
+
+    #[test]
+    fn mod_replacement_uses_web_search_model_text_mapper() {
+        let data = json!({
+            "query":"rust async",
+            "results":[null, "First summary.", {"content":[{"title":"Docs.rs","url":"https://docs.rs"}]}, 42]
+        });
+        let expected = build_model_content(
+            "rust async",
+            &[
+                SearchResultEntry::Text("First summary.".into()),
+                SearchResultEntry::Hit(
+                    json!({"content":[{"title":"Docs.rs","url":"https://docs.rs"}]}),
+                ),
+                SearchResultEntry::Hit(json!(42)),
+            ],
+        );
+        assert_eq!(map_web_search_result_text(&data), Some(expected));
+        assert_eq!(
+            map_web_search_result_text(&json!({"query":"q"})),
+            Some(build_model_content("q", &[]))
+        );
+    }
+
+    #[test]
+    fn mod_replacement_validates_web_search_output_shape() {
+        let valid = json!({
+            "query":"rust async", "durationSeconds":0.5, "searchCount":1,
+            "results":["Summary",{"tool_use_id":"stu_1","content":[
+                {"title":"Docs.rs","url":"https://docs.rs"}
+            ]}]
+        });
+        assert!(tool_api::output_schema::validate(&OUTPUT_SCHEMA, &valid).is_ok());
+        let mut invalid = valid;
+        invalid["results"][1]["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("url");
+        assert!(tool_api::output_schema::validate(&OUTPUT_SCHEMA, &invalid).is_err());
     }
     #[test]
     fn model_content_trims_and_keeps_footer_when_no_results() {

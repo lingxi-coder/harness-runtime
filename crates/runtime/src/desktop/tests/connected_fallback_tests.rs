@@ -1,4 +1,4 @@
-use super::{connected_provider_fallback, RecentModelRef};
+use super::{RecentModelRef, connected_provider_fallback};
 use std::collections::BTreeMap;
 
 fn listing(provider_id: &str, request_model: &str) -> lingxi_core::host::ModelListing {

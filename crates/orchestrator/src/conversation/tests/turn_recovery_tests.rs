@@ -1,8 +1,8 @@
 use super::*;
 use crate::test_support::{
-    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
-    mock_message_response, noop_hook_executor, text_delta, MockApiClient, MockOutputStream,
-    MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
+    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
+    message_start, message_stop, mock_message_response, noop_hook_executor, text_delta,
 };
 
 #[test]
@@ -33,18 +33,382 @@ fn sdk_compact_metadata_keys_are_camelized_recursively() {
     assert_eq!(metadata["preCompactDiscoveredTools"][0], "Read");
 }
 use crate::OrchestratorConfig;
+
+#[tokio::test]
+async fn partial_message_stop_is_emitted_once_when_visible_text_is_finalized() {
+    let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![vec![
+        Ok(message_start("truncated-text", "claude-sonnet-4-6")),
+        Ok(content_block_start_text(3)),
+        Ok(text_delta(3, "visible answer")),
+        Err(LlmError::Transport {
+            message: "connection closed".into(),
+        }),
+    ]]));
+    let output = Arc::new(MockOutputStream::new().with_partial_stream_events());
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig {
+            interactive_session: true,
+            ..OrchestratorConfig::default()
+        },
+        Arc::new(MockApiClient::new(Vec::new())),
+        streaming.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+    orch.run_turn_streaming("hello").await.unwrap();
+    assert_eq!(
+        streaming.captured_calls().await.len(),
+        1,
+        "calls={:?}; raw={:?}; output={:?}",
+        streaming.captured_calls().await,
+        output.partial_stream_event_snapshot().await,
+        output.snapshot().await
+    );
+    let frames = output.partial_stream_event_snapshot().await;
+    assert_eq!(
+        &frames[frames.len() - 2..],
+        &[
+            "{\"type\":\"content_block_stop\",\"index\":3}".to_string(),
+            "{\"type\":\"message_stop\"}".to_string(),
+        ]
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.as_str() == "{\"type\":\"message_stop\"}")
+            .count(),
+        1
+    );
+    assert!(
+        output
+            .text_events()
+            .await
+            .iter()
+            .any(|text| text == "visible answer")
+    );
+}
+
+#[tokio::test]
+async fn thinking_only_retry_closes_partial_message_before_replacement_starts() {
+    let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![
+        vec![
+            Ok(message_start("retry-thinking", "claude-sonnet-4-6")),
+            Ok(crate::test_support_stream::content_block_start_thinking(2)),
+            Ok(crate::test_support_stream::thinking_delta(
+                2,
+                "unfinished reasoning",
+            )),
+            Err(LlmError::Transport {
+                message: "connection reset".into(),
+            }),
+        ],
+        vec![
+            Ok(message_start("replacement", "claude-sonnet-4-6")),
+            Ok(content_block_start_text(0)),
+            Ok(text_delta(0, "replacement answer")),
+            Ok(content_block_stop(0)),
+            Ok(message_delta_stop("end_turn")),
+            Ok(message_stop()),
+        ],
+    ]));
+    let output = Arc::new(MockOutputStream::new().with_partial_stream_events());
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(Vec::new())),
+        streaming.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+    orch.run_turn_streaming("hello").await.unwrap();
+    assert_eq!(streaming.captured_calls().await.len(), 2);
+    let frames = output.partial_stream_event_snapshot().await;
+    let second_start = frames
+        .iter()
+        .position(|frame| {
+            let value: serde_json::Value = serde_json::from_str(frame).unwrap();
+            value["type"] == "message_start" && value["message"]["id"] == "replacement"
+        })
+        .expect("replacement start was forwarded");
+    assert_eq!(
+        &frames[second_start - 2..second_start],
+        &[
+            "{\"type\":\"content_block_stop\",\"index\":2}".to_string(),
+            "{\"type\":\"message_stop\"}".to_string(),
+        ]
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.as_str() == "{\"type\":\"message_stop\"}")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn terminal_delta_close_keeps_complete_response_without_retry_or_partial_notice() {
+    for error in [
+        None,
+        Some(LlmError::Transport {
+            message: "connection closed after final delta".into(),
+        }),
+        Some(LlmError::ProviderInternal),
+        Some(LlmError::ProviderTimeout {
+            message: "deadline".into(),
+            status: None,
+        }),
+        Some(LlmError::TransportTimeout {
+            message: "local timer".into(),
+        }),
+        Some(llm_runtime::model::stream_watchdog::idle_timeout_error(
+            std::time::Duration::from_millis(1),
+        )),
+    ] {
+        let mut usage = llm_runtime::ExecutionUsage::default();
+        usage.counts_mut().input_tokens = 100;
+        usage.counts_mut().output_tokens = 17;
+        let mut frames = vec![
+            Ok(message_start("complete", "claude-sonnet-4-6")),
+            Ok(content_block_start_text(3)),
+            Ok(text_delta(3, "complete answer")),
+            Ok(content_block_stop(3)),
+            Ok(crate::test_support_stream::message_delta_stop_with_usage(
+                "end_turn", usage,
+            )),
+        ];
+        if let Some(error) = error {
+            frames.push(Err(error));
+        }
+        let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![frames]));
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        let output = Arc::new(MockOutputStream::new().with_partial_stream_events());
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                api.clone(),
+                streaming.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            ));
+
+        let outcome = orch.run_turn_streaming("hello").await.unwrap();
+        assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+        assert_eq!(
+            streaming.captured_calls().await.len(),
+            1,
+            "calls={:?}; raw={:?}; output={:?}",
+            streaming.captured_calls().await,
+            output.partial_stream_event_snapshot().await,
+            output.snapshot().await
+        );
+        assert!(api.captured_requests().await.is_empty());
+        let session = orch.session();
+        let session = session.lock().await;
+        let assistants: Vec<_> = session
+            .history
+            .iter()
+            .filter_map(|message| match message {
+                lingxi_core::types::ConversationMessage::Assistant {
+                    content,
+                    stop_reason,
+                    ..
+                } => Some((content, stop_reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(assistants.len(), 1, "no incomplete-response assistant");
+        assert_eq!(assistants[0].1.as_deref(), Some("end_turn"));
+        assert!(matches!(assistants[0].0.as_slice(),
+            [lingxi_core::types::ContentBlock::Text { text, .. }] if text == "complete answer"));
+        drop(session);
+        let frames = output.partial_stream_event_snapshot().await;
+        assert_eq!(frames.last().unwrap(), "{\"type\":\"message_stop\"}");
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame.as_str() == "{\"type\":\"message_stop\"}")
+                .count(),
+            1,
+        );
+        assert!(output.snapshot().await.iter().any(|event| matches!(
+            event,
+            lingxi_core::host::OutputEvent::Usage {
+                input_tokens: 100,
+                output_tokens: 17,
+                ..
+            }
+        )));
+        assert_eq!(output.text_events().await, vec!["complete answer"]);
+    }
+}
+
+#[tokio::test]
+async fn empty_response_with_terminal_delta_completes_when_message_stop_is_lost() {
+    for error in [
+        None,
+        Some(LlmError::Transport {
+            message: "connection closed after empty final delta".into(),
+        }),
+    ] {
+        let mut frames = vec![
+            Ok(message_start("empty-complete", "claude-sonnet-4-6")),
+            Ok(message_delta_stop("end_turn")),
+        ];
+        if let Some(error) = error {
+            frames.push(Err(error));
+        }
+        let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![
+            frames,
+            vec![
+                Ok(message_start("visible-continuation", "claude-sonnet-4-6")),
+                Ok(content_block_start_text(0)),
+                Ok(text_delta(0, "visible continuation")),
+                Ok(content_block_stop(0)),
+                Ok(message_delta_stop("end_turn")),
+                Ok(message_stop()),
+            ],
+        ]));
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        let output = Arc::new(MockOutputStream::new().with_partial_stream_events());
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                api.clone(),
+                streaming.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            ));
+        assert!(matches!(
+            orch.run_turn_streaming("hello").await.unwrap(),
+            ConversationOutcome::EndTurn { .. }
+        ));
+        assert_eq!(
+            streaming.captured_calls().await.len(),
+            2,
+            "calls={:?}; raw={:?}; output={:?}",
+            streaming.captured_calls().await,
+            output.partial_stream_event_snapshot().await,
+            output.snapshot().await
+        );
+        assert!(api.captured_requests().await.is_empty());
+        assert_eq!(output.text_events().await, vec!["visible continuation"]);
+        let session = orch.session();
+        let session = session.lock().await;
+        let assistants: Vec<_> = session
+            .history
+            .iter()
+            .filter_map(|message| match message {
+                lingxi_core::types::ConversationMessage::Assistant {
+                    content,
+                    stop_reason,
+                    ..
+                } => Some((content, stop_reason)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(assistants.len(), 1);
+        assert!(
+            matches!(assistants[0].0.as_slice(), [lingxi_core::types::ContentBlock::Text { text, .. }] if text == "visible continuation")
+        );
+        assert_eq!(assistants[0].1.as_deref(), Some("end_turn"));
+        let frames = output.partial_stream_event_snapshot().await;
+        assert_eq!(frames[2], "{\"type\":\"message_stop\"}");
+        assert!(
+            frames[3].contains("visible-continuation"),
+            "native empty-response nudge starts only after the first frame stream closed"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame.as_str() == "{\"type\":\"message_stop\"}")
+                .count(),
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn block_after_terminal_delta_still_finalizes_as_incomplete() {
+    let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![vec![
+        Ok(message_start("terminal-invalidated", "claude-sonnet-4-6")),
+        Ok(content_block_start_text(0)),
+        Ok(text_delta(0, "first answer")),
+        Ok(content_block_stop(0)),
+        Ok(message_delta_stop("end_turn")),
+        Ok(content_block_start_text(1)),
+        Ok(text_delta(1, " later answer")),
+        Ok(content_block_stop(1)),
+        Err(LlmError::Transport {
+            message: "connection closed after more content".into(),
+        }),
+    ]]));
+    let api = Arc::new(MockApiClient::new(Vec::new()));
+    let output = Arc::new(MockOutputStream::new().with_partial_stream_events());
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig {
+            interactive_session: true,
+            ..OrchestratorConfig::default()
+        },
+        api.clone(),
+        streaming.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+    orch.run_turn_streaming("hello").await.unwrap();
+    assert_eq!(
+        streaming.captured_calls().await.len(),
+        1,
+        "calls={:?}; raw={:?}; output={:?}",
+        streaming.captured_calls().await,
+        output.partial_stream_event_snapshot().await,
+        output.snapshot().await
+    );
+    assert!(api.captured_requests().await.is_empty());
+    assert!(output.text_events().await.iter().any(|text| text
+        == "API Error: Connection lost mid-response. The response above may be incomplete."));
+    let frames = output.partial_stream_event_snapshot().await;
+    assert_eq!(frames.last().unwrap(), "{\"type\":\"message_stop\"}");
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame.as_str() == "{\"type\":\"message_stop\"}")
+            .count(),
+        1
+    );
+}
+
+use hooks::HookExecutorImpl;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::HookEventType;
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::HookRegistry;
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
-use hooks::HookExecutorImpl;
 use lingxi_core::host::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 use lingxi_core::types::{HookId, HttpRequest, HttpResponse};
 use llm_runtime::ContentBlock as LlmContentBlock;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 
@@ -109,12 +473,28 @@ impl Drop for ActivePrewarmGuard {
 impl OrchestratorApiClient for BlockingPrewarmApiClient {
     async fn messages_create(
         &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        _msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        request: crate::OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
+        let (request_model, request_profile, request_system, _msgs, _tools) = match request {
+            crate::OrchestratorApiRequest::Main(request) => (
+                request.model,
+                request.profile,
+                request.system.map(|system| system.display_text()),
+                request.messages,
+                request.tools,
+            ),
+            crate::OrchestratorApiRequest::HookPrompt(request) => (
+                request.model,
+                request.profile,
+                Some(request.system),
+                request.messages,
+                Vec::new(),
+            ),
+        };
+        let _model = request_model.as_str();
+        let _profile = request_profile.as_deref();
+        let _system = request_system.as_deref();
+
         Err(LlmError::Transport {
             message: "blocking prewarm api does not serve messages_create".into(),
         })
@@ -124,9 +504,10 @@ impl OrchestratorApiClient for BlockingPrewarmApiClient {
         &self,
         _model: &str,
         _profile: Option<&str>,
-        _system: Option<&str>,
+        _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        _tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        _skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
         self.active.store(true, Ordering::SeqCst);
         self.started.notify_waiters();
@@ -257,7 +638,7 @@ impl BuiltinHookHandler for SessionStartCtxHandler {
     }
     async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
         let response = matches!(event, HookEvent::SessionStart { .. }).then(|| HookResponse {
-            additional_context: self.ctx.clone(),
+            additional_context: self.ctx.clone().map(hooks::ExactHookText::from_text),
             ..Default::default()
         });
         HookResult {
@@ -485,8 +866,134 @@ struct RewakeResponses(std::sync::Mutex<Vec<String>>);
 
 #[async_trait]
 impl crate::prompt::async_hook_response::AsyncHookResponseProvider for RewakeResponses {
-    async fn take_pending_responses(&self) -> Vec<String> {
+    async fn take_pending_responses(&self) -> Vec<hooks::ExactHookText> {
         std::mem::take(&mut *self.0.lock().unwrap())
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+}
+
+struct GuardedRewakeResponses {
+    guard: Arc<dyn hooks::attachment::HookPublicationGuard>,
+    delivered: std::sync::Mutex<bool>,
+}
+
+#[async_trait]
+impl crate::prompt::async_hook_response::AsyncHookResponseProvider for GuardedRewakeResponses {
+    async fn take_pending_responses(&self) -> Vec<hooks::ExactHookText> {
+        Vec::new()
+    }
+
+    async fn take_pending_with_events(
+        &self,
+    ) -> Vec<crate::prompt::async_hook_response::AsyncHookResponse> {
+        let mut delivered = self.delivered.lock().unwrap();
+        if std::mem::replace(&mut *delivered, true) {
+            return Vec::new();
+        }
+        vec![crate::prompt::async_hook_response::AsyncHookResponse {
+            text: "generation-scoped hook result".into(),
+            hook_event: Some("PostToolUse".into()),
+            publication_guard: Some(Arc::clone(&self.guard)),
+        }]
+    }
+}
+
+struct ResetAtStreamAdmission {
+    generation: lingxi_core::host::CancellationToken,
+    admission_received: std::sync::atomic::AtomicBool,
+    guarded_reminder_received: std::sync::atomic::AtomicBool,
+    dispatched: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl crate::conversation::StreamingApiClient for ResetAtStreamAdmission {
+    async fn stream(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+        _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+        messages: Vec<ConversationMessage>,
+        _tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        _query_source: &str,
+        _skip_global_cache_for_system_prompt: bool,
+        request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+    ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+        // Deterministic reset at the API seam, after prompt preparation but
+        // before the SDK logical transport-admission callback is evaluated.
+        self.guarded_reminder_received.store(
+            messages.iter().any(|message| {
+                message
+                    .text_content()
+                    .contains("generation-scoped hook result")
+            }),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        self.generation.cancel();
+        self.admission_received.store(
+            request_dispatch_admission.is_some(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        if request_dispatch_admission
+            .as_ref()
+            .is_some_and(|admission| !admission.is_admitted())
+        {
+            return Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: false,
+            });
+        }
+        self.dispatched
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Err(LlmError::Transport {
+            message: "test stream reached provider dispatch".into(),
+        })
+    }
+}
+
+struct ResetAtMainRequestAdmission {
+    generation: lingxi_core::host::CancellationToken,
+    admission_received: std::sync::atomic::AtomicBool,
+    guarded_reminder_received: std::sync::atomic::AtomicBool,
+    dispatched: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl crate::conversation::OrchestratorApiClient for ResetAtMainRequestAdmission {
+    async fn messages_create(
+        &self,
+        request: crate::conversation::OrchestratorApiRequest,
+    ) -> Result<llm_runtime::HistoryResponse, LlmError> {
+        let crate::conversation::OrchestratorApiRequest::Main(request) = request else {
+            return Err(LlmError::InvalidRequest {
+                message: "test expected a main request".into(),
+            });
+        };
+        self.guarded_reminder_received.store(
+            request.messages.iter().any(|message| {
+                message
+                    .text_content()
+                    .contains("generation-scoped hook result")
+            }),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        self.generation.cancel();
+        let admission = request.opts.request_dispatch_admission;
+        self.admission_received
+            .store(admission.is_some(), std::sync::atomic::Ordering::SeqCst);
+        if admission
+            .as_ref()
+            .is_some_and(|admission| !admission.is_admitted())
+        {
+            return Err(LlmError::RequestDispatchRejected {
+                prior_dispatch: false,
+            });
+        }
+        self.dispatched
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Err(LlmError::Transport {
+            message: "test main request reached provider dispatch".into(),
+        })
     }
 }
 
@@ -500,22 +1007,24 @@ async fn async_hook_rewake_runs_without_persisting_a_synthetic_user_prompt() {
         message_delta_stop("end_turn"),
         message_stop(),
     ]]));
-    let orch = ConversationOrchestrator::new_with_streaming(
-        OrchestratorConfig::default(),
-        Arc::new(MockApiClient::new(vec![])),
-        streaming.clone(),
-        Arc::new(ToolRegistry::new()),
-        noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        Arc::new(MockOutputStream::new()),
-        Arc::new(StaticMemoryProvider::empty()),
-        std::env::temp_dir(),
-    )
-    .with_async_hook_responses(Arc::new(RewakeResponses(std::sync::Mutex::new(vec![
-        "background verification finished".into(),
-    ]))));
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_async_hook_responses(Arc::new(RewakeResponses(std::sync::Mutex::new(vec![
+            "background verification finished".into(),
+        ])))),
+    );
 
-    let outcome = orch.run_async_hook_rewake().await.expect("rewake turn");
+    let outcome = orch.run_async_hook_rewake(None).await.expect("rewake turn");
     assert_eq!(outcome, TurnOutcome::EndTurn);
 
     let calls = streaming.captured_calls().await;
@@ -527,22 +1036,205 @@ async fn async_hook_rewake_runs_without_persisting_a_synthetic_user_prompt() {
                 .contains("background verification finished")
     }));
     assert!(
-        calls[0]
-            .messages
-            .iter()
-            .all(|message| message.is_meta() || !message.text_content().is_empty()),
+        calls[0].messages.iter().all(|message| !matches!(
+            message,
+            ConversationMessage::User { is_meta: false, .. }
+        ) || !message.text_content().is_empty()),
         "the provider request must not contain a synthetic empty human prompt"
+    );
+    let normalized = llm_runtime::convert::normalize_messages_for_api(calls[0].messages.clone());
+    let wire = serde_json::to_value(
+        llm_runtime::convert::to_llm_messages(normalized).expect("rewake request converts"),
+    )
+    .unwrap();
+    assert!(
+        wire.as_array().unwrap().iter().all(|message| {
+            message["role"] != "user"
+                || message["content"].as_array().is_some_and(|blocks| {
+                    blocks.iter().any(|block| {
+                        block["text"].as_str().is_some_and(|text| !text.is_empty())
+                            || block["type"] != "text"
+                    })
+                })
+        }),
+        "the converted request must not contain an empty User message"
+    );
+    assert!(
+        wire.to_string()
+            .contains("background verification finished")
     );
 
     let history = orch.session.lock().await.history.clone();
-    assert_eq!(history.len(), 1, "only the assistant response is durable");
-    assert!(matches!(history[0], ConversationMessage::Assistant { .. }));
+    let date = crate::prompt::env_meta::current_date_string();
+    let native_context = orch.context_attachment_history(&history);
+    assert_eq!(
+        native_context,
+        vec![
+            serde_json::json!({"type":"session_context","context":{}}),
+            serde_json::json!({"type":"date","date":date}),
+            serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+        ]
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|message| { matches!(message, ConversationMessage::Assistant { .. }) })
+            .count(),
+        1,
+        "the assistant response is durable exactly once"
+    );
+    for message in &history {
+        if matches!(message, ConversationMessage::Assistant { .. }) {
+            continue;
+        }
+        let attachments = orch.context_attachment_history(std::slice::from_ref(message));
+        assert_eq!(
+            attachments.len(),
+            1,
+            "only typed native announcements may accompany the assistant"
+        );
+        let attachment = &attachments[0];
+        match attachment["type"].as_str() {
+            Some("session_context") => assert!(matches!(message,
+                ConversationMessage::System { content, subtype, .. }
+                    if content.is_empty() && subtype.as_deref() == Some("model_reminder_attachment")
+            )),
+            Some("date") => assert_eq!(
+                message.text_content(),
+                format!("<system-reminder>\nToday's date is {date}.\n</system-reminder>")
+            ),
+            Some("total_tokens_reminder") => assert_eq!(
+                message.text_content(),
+                "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+            ),
+            other => panic!("unexpected durable rewake attachment: {other:?}"),
+        }
+    }
+    assert!(
+        history.iter().all(|message| {
+            !message
+                .text_content()
+                .contains("background verification finished")
+        }),
+        "the async hook response remains transient"
+    );
+}
+
+#[tokio::test]
+async fn reset_after_async_hook_prompt_preparation_blocks_stream_dispatch() {
+    let generation = lingxi_core::host::CancellationToken::new();
+    let guard: Arc<dyn hooks::attachment::HookPublicationGuard> =
+        Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+            generation.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+        ));
+    let streaming = Arc::new(ResetAtStreamAdmission {
+        generation,
+        admission_received: std::sync::atomic::AtomicBool::new(false),
+        guarded_reminder_received: std::sync::atomic::AtomicBool::new(false),
+        dispatched: std::sync::atomic::AtomicBool::new(false),
+    });
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            streaming.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_async_hook_responses(Arc::new(GuardedRewakeResponses {
+            guard,
+            delivered: std::sync::Mutex::new(false),
+        })),
+    );
+
+    let result = orch.run_async_hook_rewake(None).await;
+    assert!(
+        matches!(result, Ok(crate::conversation::TurnOutcome::EndTurn)),
+        "a connect-phase admission rejection is surfaced as model_error and completes the rewake turn"
+    );
+    assert!(
+        streaming
+            .admission_received
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the prepared async-hook generation must reach the streaming API"
+    );
+    assert!(
+        streaming
+            .guarded_reminder_received
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the guarded reminder must contribute to the actual stream prompt"
+    );
+    assert!(
+        !streaming
+            .dispatched
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "a reset after preparation must be rejected before logical dispatch"
+    );
+}
+
+#[tokio::test]
+async fn reset_after_async_hook_prompt_preparation_blocks_main_request_dispatch() {
+    let generation = lingxi_core::host::CancellationToken::new();
+    let guard: Arc<dyn hooks::attachment::HookPublicationGuard> =
+        Arc::new(crate::autonomous_tool_scheduler::ToolDispatchPublicationFence::new(
+            generation.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+        ));
+    let api = Arc::new(ResetAtMainRequestAdmission {
+        generation,
+        admission_received: std::sync::atomic::AtomicBool::new(false),
+        guarded_reminder_received: std::sync::atomic::AtomicBool::new(false),
+        dispatched: std::sync::atomic::AtomicBool::new(false),
+    });
+    let orch = ConversationOrchestrator::into_shared(
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+        .with_async_hook_responses(Arc::new(GuardedRewakeResponses {
+            guard,
+            delivered: std::sync::Mutex::new(false),
+        })),
+    );
+
+    let result = orch.run_turn("continue").await;
+    assert!(result.is_err(), "reset admission must stop this request");
+    assert!(
+        api.guarded_reminder_received
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the hook reminder should be present in the prepared main request"
+    );
+    assert!(
+        api.admission_received
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the main request must carry its prompt-generation guard"
+    );
+    assert!(
+        !api.dispatched.load(std::sync::atomic::Ordering::SeqCst),
+        "a reset after preparation must be rejected before logical dispatch"
+    );
 }
 
 // -------- RECOV.1 — streaming blocking-limit preempt --------
 
 #[tokio::test]
 async fn recov1_streaming_blocking_limit_preempts_before_opening_stream() {
+    // The collapse projection test temporarily changes this process-wide gate.
+    // Hold the same lock while asserting the disabled-gate recovery path.
+    let _env_guard = crate::conversation::model_call_prepare_test::CONTEXT_COLLAPSE_ENV_LOCK
+        .lock()
+        .await;
     // One valid end_turn turn is scripted; if the preempt regresses the
     // stream opens (captured_calls == 1) and the prompt-too-long text is
     // absent — both asserted against below.
@@ -555,7 +1247,7 @@ async fn recov1_streaming_blocking_limit_preempts_before_opening_stream() {
         message_stop(),
     ]]));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
@@ -565,7 +1257,7 @@ async fn recov1_streaming_blocking_limit_preempts_before_opening_stream() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     seed_over_blocking_limit(&orch).await;
 
     let outcome = orch
@@ -605,6 +1297,11 @@ async fn recov1_streaming_blocking_limit_preempts_before_opening_stream() {
 
 #[tokio::test]
 async fn recov1_streaming_blocking_limit_does_not_trigger_budget_continuation() {
+    // The collapse projection test temporarily changes this process-wide gate.
+    // Hold the same lock while asserting the disabled-gate recovery path.
+    let _env_guard = crate::conversation::model_call_prepare_test::CONTEXT_COLLAPSE_ENV_LOCK
+        .lock()
+        .await;
     let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
         message_start("m", "claude-opus-4-7"),
         content_block_start_text(0),
@@ -614,7 +1311,7 @@ async fn recov1_streaming_blocking_limit_does_not_trigger_budget_continuation() 
         message_stop(),
     ]]));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig {
             enable_token_budget: true,
             token_budget: Some(500_000),
@@ -628,7 +1325,7 @@ async fn recov1_streaming_blocking_limit_does_not_trigger_budget_continuation() 
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     seed_over_blocking_limit(&orch).await;
 
     let outcome = orch
@@ -650,7 +1347,7 @@ async fn recov1_streaming_blocking_limit_does_not_trigger_budget_continuation() 
             lingxi_core::types::ConversationMessage::User { content, .. }
                 if matches!(
                     content.first(),
-                    Some(lingxi_core::types::ContentBlock::Text { text }) if text.starts_with("Stopped at ")
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) if text.starts_with("Stopped at ")
                 )
         )),
         "terminal API-error ends must not inject a budget-continuation nudge"
@@ -679,7 +1376,7 @@ async fn terminal_model_context_window_exceeded_surfaces_api_error() {
         message_stop(),
     ]]));
     let output = Arc::new(MockOutputStream::new());
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
@@ -689,7 +1386,7 @@ async fn terminal_model_context_window_exceeded_surfaces_api_error() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     orch.run_turn_streaming("go").await.expect("turn ends");
 
     let events = output.snapshot().await;
@@ -729,7 +1426,7 @@ async fn terminal_refusal_without_fallback_surfaces_safety_message() {
         cfg.refusal_fallback_model.is_none(),
         "default config must have no refusal fallback (else the swap arm runs)"
     );
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         cfg,
         Arc::new(MockApiClient::new(vec![])),
         streaming.clone(),
@@ -739,7 +1436,7 @@ async fn terminal_refusal_without_fallback_surfaces_safety_message() {
         output.clone(),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     orch.run_turn_streaming("go").await.expect("turn ends");
 
     let events = output.snapshot().await;
@@ -763,6 +1460,11 @@ async fn terminal_refusal_without_fallback_surfaces_safety_message() {
 
 #[tokio::test]
 async fn recov2_stop_failure_fires_on_api_error_end_and_stop_does_not() {
+    // The collapse projection test temporarily changes this process-wide gate.
+    // Hold the same lock while asserting the disabled-gate recovery path.
+    let _env_guard = crate::conversation::model_call_prepare_test::CONTEXT_COLLAPSE_ENV_LOCK
+        .lock()
+        .await;
     // A history over the blocking limit ⇒ the batched proactive preempt ends
     // with terminal reason `blocking_limit`, which is an api-error end (the
     // surfaced message's api-error field is `invalid_request`). `StopFailure`
@@ -803,6 +1505,11 @@ async fn recov2_stop_failure_fires_on_api_error_end_and_stop_does_not() {
 
 #[tokio::test]
 async fn recov2_batched_blocking_limit_does_not_trigger_budget_continuation() {
+    // The collapse projection test temporarily changes this process-wide gate.
+    // Hold the same lock while asserting the disabled-gate recovery path.
+    let _env_guard = crate::conversation::model_call_prepare_test::CONTEXT_COLLAPSE_ENV_LOCK
+        .lock()
+        .await;
     let api = Arc::new(MockApiClient::new(vec![]));
     let output = Arc::new(MockOutputStream::new());
     let orch = ConversationOrchestrator::new(
@@ -837,7 +1544,7 @@ async fn recov2_batched_blocking_limit_does_not_trigger_budget_continuation() {
             lingxi_core::types::ConversationMessage::User { content, .. }
                 if matches!(
                     content.first(),
-                    Some(lingxi_core::types::ContentBlock::Text { text }) if text.starts_with("Stopped at ")
+                    Some(lingxi_core::types::ContentBlock::Text { text, .. }) if text.starts_with("Stopped at ")
                 )
         )),
         "terminal API-error ends must not inject a budget-continuation nudge"
@@ -1097,14 +1804,32 @@ async fn git_status_stays_frozen_after_session_cwd_swap() {
     )
     .with_session_cwd(session_cwd.clone());
 
-    let before = orch.build_system_prompt().await;
-    assert!(before.contains("boot-only.txt"), "before:\n{before}");
+    let before = orch.context_announcement_messages().await;
+    let before_context = orch
+        .context_attachment_history(&before)
+        .into_iter()
+        .find(|attachment| attachment["type"] == "session_context")
+        .unwrap();
+    assert!(
+        before_context["context"]["gitStatus"]
+            .as_str()
+            .unwrap()
+            .contains("boot-only.txt"),
+        "before: {before_context}"
+    );
 
     session_cwd.swap(worktree.path().to_path_buf(), Vec::new());
     assert_eq!(session_cwd.cwd(), worktree.path());
-    let after = orch.build_system_prompt().await;
-    assert!(after.contains("boot-only.txt"), "after:\n{after}");
-    assert!(!after.contains("worktree-only.txt"), "after:\n{after}");
+    assert!(
+        orch.context_announcement_messages().await.is_empty(),
+        "the original session_context must not change when cwd swaps"
+    );
+    let after = orch.instruction_context_snapshot().await;
+    assert_eq!(
+        after.user_context["gitStatus"],
+        before_context["context"]["gitStatus"].as_str().unwrap()
+    );
+    assert!(!after.user_context["gitStatus"].contains("worktree-only.txt"));
 }
 
 /// The PROMPT half of the interactive-session wiring.
@@ -1156,7 +1881,7 @@ async fn streaming_turn_aborts_pending_startup_prewarm_before_opening_stream() {
         message_stop(),
     ]]));
     let output = Arc::new(MockOutputStream::new());
-    let orch = Arc::new(ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         api.clone(),
         streaming.clone(),
@@ -1251,12 +1976,13 @@ async fn clear_session_aborts_startup_prewarm_and_closes_responses_websocket_ses
     assert_eq!(api.close_responses_ws_count().await, 1);
     assert!(orch.tools.deferral().loaded_tool_names().is_empty());
     assert!(orch.prompt_runtime.sent_skill_names.lock().await.is_empty());
-    assert!(orch
-        .prompt_runtime
-        .read_state_map
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .is_empty());
+    assert!(
+        orch.prompt_runtime
+            .read_state_map
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    );
     assert_eq!(
         orch.compaction_runtime
             .last_response_input_tokens
@@ -1317,7 +2043,7 @@ async fn session_start_additional_context_becomes_persistent_meta_history_messag
         ConversationMessage::User { content, .. } => content
             .iter()
             .filter_map(|b| match b {
-                lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
+                lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -1328,6 +2054,65 @@ async fn session_start_additional_context_becomes_persistent_meta_history_messag
         body,
         "<system-reminder>\nSessionStart hook additional context: Project: lingxi\nBranch: main\n</system-reminder>",
         "exact hook_additional_context bytes (hookName=SessionStart, content joined by \\n)"
+    );
+}
+
+#[tokio::test]
+async fn mod_can_omit_session_start_attachment_without_erasing_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let module = dir.path().join("session-start-attachment.js");
+    std::fs::write(
+        &module,
+        r#"export function register(on) {
+          on('prompt.attachment', { type: 'hook_additional_context' }, ($, e, next) => {
+            if (e.origin.kind === 'hook' && e.origin.event === 'SessionStart') {
+              return { text: null };
+            }
+            return next(e);
+          });
+        }"#,
+    )
+    .unwrap();
+    let host = hooks::mods::ModHost::start(None).await.unwrap();
+    host.load(
+        "session-start-attachment",
+        dir.path(),
+        &module,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    let mut registry = HookRegistry::new();
+    registry.set_mod_host(host);
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        exec_session_start_ctx(Some("PRIVATE CONTEXT".into())).await,
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        dir.path().to_path_buf(),
+    )
+    .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
+    orch.fire_session_start("startup").await;
+    assert!(
+        orch.session
+            .lock()
+            .await
+            .history
+            .iter()
+            .any(|message| message.text_content().contains("PRIVATE CONTEXT"))
+    );
+    let prepared = orch
+        .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
+        .await
+        .unwrap();
+    assert!(
+        prepared
+            .snapshot
+            .iter()
+            .all(|message| !message.text_content().contains("PRIVATE CONTEXT"))
     );
 }
 
@@ -1368,6 +2153,7 @@ async fn recov4_stop_hook_continuation_resets_max_output_tokens_recovery() {
             vec![LlmContentBlock::Text {
                 text: "partial".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("max_tokens"),
         )
@@ -1377,6 +2163,7 @@ async fn recov4_stop_hook_continuation_resets_max_output_tokens_recovery() {
             vec![LlmContentBlock::Text {
                 text: "done".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         )
@@ -1445,6 +2232,7 @@ async fn fix_c_stop_prevent_continuation_persists_stopped_message() {
         vec![LlmContentBlock::Text {
             text: "done".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -1495,6 +2283,7 @@ async fn stop_prevent_continuation_persists_a_stopped_continuation_attachment() 
         vec![LlmContentBlock::Text {
             text: "done".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -1563,6 +2352,7 @@ async fn fix_c_stop_prevent_continuation_default_reason() {
         vec![LlmContentBlock::Text {
             text: "done".into(),
             cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -1745,5 +2535,188 @@ async fn the_task_notification_rewake_precheck_emits_its_end_turn() {
         rewake_end_events(&output).await,
         vec!["end_turn".to_string()],
         "a rewake whose completion was already consumed at the turn gate closes the same way"
+    );
+}
+
+#[tokio::test]
+async fn completed_tool_partial_does_not_use_the_text_only_truncation_nudge() {
+    let frames = vec![
+        Ok(message_start("tool-partial", "claude-sonnet-4-6")),
+        Ok(crate::test_support_stream::content_block_start_tool_use(
+            0,
+            "tool-1".into(),
+            "fixture-tool",
+        )),
+        Ok(crate::test_support_stream::input_json_delta(0, "{}")),
+        Ok(content_block_stop(0)),
+        Err(LlmError::TransportTimeout {
+            message: "after completed tool".into(),
+        }),
+    ];
+    let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![frames]));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(Vec::new())),
+        streaming.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        output,
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+    orch.run_turn_streaming("run tool").await.unwrap();
+    assert_eq!(streaming.captured_calls().await.len(), 1);
+    let session = orch.session.lock().await;
+    assert!(session.history.iter().any(|m|matches!(m,ConversationMessage::User{content,..} if content.iter().any(|b|matches!(b,lingxi_core::types::ContentBlock::ToolResult{..})))));
+    assert!(
+        !session
+            .history
+            .iter()
+            .any(|m| m.text_content() == crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn completed_thinking_stream_failures_follow_current_cause_counters() {
+    for (error, attempts, no_output_notice) in [
+        (
+            LlmError::ProviderTimeout {
+                message: "provider deadline".into(),
+                status: None,
+            },
+            2,
+            false,
+        ),
+        (LlmError::ProviderInternal, 3, false),
+        (
+            LlmError::TransportTimeout {
+                message: "local timer".into(),
+            },
+            3,
+            true,
+        ),
+        (
+            llm_runtime::model::stream_watchdog::idle_timeout_error(
+                std::time::Duration::from_millis(1),
+            ),
+            2,
+            true,
+        ),
+    ] {
+        let turns = (0..attempts)
+            .map(|i| {
+                vec![
+                    Ok(message_start(&format!("thinking-{i}"), "claude-sonnet-4-6")),
+                    Ok(crate::test_support_stream::content_block_start_thinking(0)),
+                    Ok(crate::test_support_stream::thinking_delta(
+                        0,
+                        "completed reasoning",
+                    )),
+                    Ok(content_block_stop(0)),
+                    Err(error.clone()),
+                ]
+            })
+            .collect();
+        let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(turns));
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        let output = Arc::new(MockOutputStream::new().with_partial_stream_events());
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig {
+                    interactive_session: true,
+                    ..Default::default()
+                },
+                api.clone(),
+                streaming.clone(),
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                output.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                std::env::temp_dir(),
+            ));
+        orch.run_turn_streaming("finish thinking").await.unwrap();
+        assert_eq!(
+            streaming.captured_calls().await.len(),
+            attempts,
+            "{error:?}"
+        );
+        assert!(
+            api.captured_msgs().await.is_empty(),
+            "thinking-only errors must stay streaming: {error:?}"
+        );
+        let session = orch.session.lock().await;
+        assert!(
+            !session
+                .history
+                .iter()
+                .any(|m| m.text_content()
+                    == crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN)
+        );
+        assert_eq!(
+            output
+                .text_events()
+                .await
+                .iter()
+                .any(|text| text.contains("before a response was produced. Try again.")),
+            no_output_notice,
+            "{error:?}"
+        );
+        if no_output_notice {
+            assert_eq!(session.history.iter().filter(|m|matches!(m,ConversationMessage::Assistant{content,..} if content.iter().any(|b|matches!(b,lingxi_core::types::ContentBlock::Thinking{..})))).count(),1,"only the kept attempt belongs to history");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn thinking_retry_decision_is_cleared_when_reopened_stream_reaches_real_output() {
+    let streaming = Arc::new(MockStreamingApiClient::with_fallible_turns(vec![
+        vec![
+            Ok(message_start("thinking", "claude-sonnet-4-6")),
+            Ok(crate::test_support_stream::content_block_start_thinking(0)),
+            Ok(crate::test_support_stream::thinking_delta(0, "reason")),
+            Ok(content_block_stop(0)),
+            Err(LlmError::ProviderTimeout {
+                message: "deadline".into(),
+                status: None,
+            }),
+        ],
+        vec![
+            Ok(message_start("visible", "claude-sonnet-4-6")),
+            Ok(content_block_start_text(0)),
+            Ok(text_delta(0, "already visible")),
+            Ok(content_block_stop(0)),
+            Err(LlmError::ProviderInternal),
+        ],
+    ]));
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+        OrchestratorConfig {
+            interactive_session: true,
+            ..Default::default()
+        },
+        Arc::new(MockApiClient::new(Vec::new())),
+        streaming.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    ));
+    orch.run_turn_streaming("continue").await.unwrap();
+    assert_eq!(
+        streaming.captured_calls().await.len(),
+        2,
+        "a prior thinking retry must not reopen completed output"
+    );
+    assert!(
+        orch.session
+            .lock()
+            .await
+            .history
+            .iter()
+            .any(|m| m.text_content() == "already visible")
     );
 }

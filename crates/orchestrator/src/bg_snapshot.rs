@@ -214,7 +214,7 @@ pub fn history_to_jsonl_lines(
         } else {
             parent_uuid.take()
         };
-        let line = JsonlMessage {
+        let line = JsonlMessage { json_projection: None,
             message_type: kind.to_string(),
             uuid: uuid.clone(),
             parent_uuid: line_parent_uuid,
@@ -258,7 +258,7 @@ mod tests {
     }
 
     fn user(text: &str) -> ConversationMessage {
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(), citations: None,
@@ -270,7 +270,7 @@ mod tests {
     }
 
     fn assistant(text: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(), citations: None,
@@ -409,7 +409,7 @@ mod tests {
             original_model: "claude-opus-4-8".into(),
             fallback_model: "claude-sonnet-5".into(),
         };
-        let fallback_message = ConversationMessage::System {
+        let fallback_message = ConversationMessage::System { api_system: None,
             id: fallback_id,
             content: fallback_content.into(),
             subtype: Some("model_fallback".into()),
@@ -505,7 +505,7 @@ mod tests {
     fn model_fallback_metadata_is_not_promoted_for_other_system_subtypes() {
         use lingxi_core::types::{MessageId, ModelFallbackMetadata};
 
-        let message = ConversationMessage::System {
+        let message = ConversationMessage::System { api_system: None,
             id: MessageId::new(),
             content: "ordinary system notice".into(),
             subtype: Some("other_notice".into()),

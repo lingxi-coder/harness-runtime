@@ -33,6 +33,8 @@ pub struct HookModelSelection {
 /// having to populate everything.
 #[derive(Clone, Default)]
 pub struct HookContext {
+    /// Captured originating cost authority, never part of hook command input.
+    pub model_safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
     /// Current logical route of the immediate agent, independent of serving
     /// refusal fallbacks or a separately bound root session.
     pub model_selection: Option<HookModelSelection>,

@@ -1,0 +1,292 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "start": 189915132,
+      "end": 189915421,
+      "sha256": "7aca14849e79f2eb99182646db1adb69c158e994b1d0702615fa62b4d3801c40"
+    }
+  ],
+  "scope": "Unchanged actual native Bi/Pye/hdt/ai bodies, with controlled message records. No subtype or body compatibility substitution. This is Node helper execution, not native CLI, full message-schema validation or Bun acceptance.",
+  "cases": [
+    {
+      "name": "ordinary-system-same-body",
+      "input": {
+        "messages": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "system",
+            "content": "Conversation compacted"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      },
+      "expected": {
+        "boundaries": [
+          false,
+          false,
+          false
+        ],
+        "artifacts": [
+          false,
+          false,
+          false
+        ],
+        "boundaryIndex": -1,
+        "visible": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "system",
+            "content": "Conversation compacted"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ordinary-system-null-subtype",
+      "input": {
+        "messages": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "system",
+            "subtype": null,
+            "content": "Conversation compacted"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      },
+      "expected": {
+        "boundaries": [
+          false,
+          false,
+          false
+        ],
+        "artifacts": [
+          false,
+          false,
+          false
+        ],
+        "boundaryIndex": -1,
+        "visible": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "system",
+            "subtype": null,
+            "content": "Conversation compacted"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      }
+    },
+    {
+      "name": "other-system-subtype-same-body",
+      "input": {
+        "messages": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "system",
+            "subtype": "note",
+            "content": "Conversation compacted"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      },
+      "expected": {
+        "boundaries": [
+          false,
+          false,
+          false
+        ],
+        "artifacts": [
+          false,
+          false,
+          false
+        ],
+        "boundaryIndex": -1,
+        "visible": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "system",
+            "subtype": "note",
+            "content": "Conversation compacted"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      }
+    },
+    {
+      "name": "typed-boundary-arbitrary-body",
+      "input": {
+        "messages": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "arbitrary body"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      },
+      "expected": {
+        "boundaries": [
+          false,
+          true,
+          false
+        ],
+        "artifacts": [
+          false,
+          true,
+          false
+        ],
+        "boundaryIndex": 1,
+        "visible": [
+          {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "arbitrary body"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      }
+    },
+    {
+      "name": "typed-boundary-standard-body",
+      "input": {
+        "messages": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      },
+      "expected": {
+        "boundaries": [
+          false,
+          true,
+          false
+        ],
+        "artifacts": [
+          false,
+          true,
+          false
+        ],
+        "boundaryIndex": 1,
+        "visible": [
+          {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "content": "Conversation compacted"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      }
+    },
+    {
+      "name": "user-compact-summary",
+      "input": {
+        "messages": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "user",
+            "isCompactSummary": true,
+            "content": "summary"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      },
+      "expected": {
+        "boundaries": [
+          false,
+          false,
+          false
+        ],
+        "artifacts": [
+          false,
+          true,
+          false
+        ],
+        "boundaryIndex": -1,
+        "visible": [
+          {
+            "type": "user",
+            "content": "before"
+          },
+          {
+            "type": "user",
+            "isCompactSummary": true,
+            "content": "summary"
+          },
+          {
+            "type": "user",
+            "content": "after"
+          }
+        ]
+      }
+    }
+  ]
+}

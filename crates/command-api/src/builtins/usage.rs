@@ -73,6 +73,8 @@ mod tests {
             output_tokens: 2_000,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            reasoning_tokens: 0,
+            web_search_requests: 0,
         }];
         let snap = CostSnapshot {
             total_usd: 0.1234,

@@ -7,7 +7,7 @@
 //! fsyncs before acknowledging success.
 
 use crate::jsonl::exact_json::{
-    parse_exact_json, to_vec_with_overrides, ExactJsonError, ExactJsonValue, Utf16Overrides,
+    ExactJsonError, ExactJsonValue, Utf16Overrides,
 };
 use crate::jsonl::journal::{SESSION_STATE_DIR_MODE, SESSION_STATE_FILE_MODE};
 use crate::jsonl::message_identity::{self, IdentityLogStore};
@@ -119,6 +119,7 @@ struct TranscriptIdentity {
 
 struct TranscriptExpectation {
     exact: ExactJsonValue,
+    keys: Vec<lingxi_core::types::utf16_json::Utf16JsonKey>,
     delivery_id: Option<String>,
 }
 
@@ -429,6 +430,7 @@ impl DurableTranscriptWriter {
         utf16_overrides: &Utf16Overrides,
         stamp_delivery_id: bool,
         identity_registration: Option<(&IdentityLogStore, &Path)>,
+        projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         if !matches!(payload, Value::Object(_)) {
             return Err(TranscriptWriterError::PayloadNotObject);
@@ -464,6 +466,7 @@ impl DurableTranscriptWriter {
                         &message_uuid,
                         &payload,
                         utf16_overrides,
+                        projection,
                     )?;
                     (true, missing_delimiter, matching, last_uuid)
                 }
@@ -501,7 +504,7 @@ impl DurableTranscriptWriter {
                 );
             }
         }
-        let mut line = to_vec_with_overrides(&payload, utf16_overrides)?;
+        let mut line = crate::jsonl::exact_json::native_projection_bytes(&payload, utf16_overrides, projection)?;
         line.push(b'\n');
         if line.len() > self.max_record_bytes {
             return Err(TranscriptWriterError::ScanTooLarge {
@@ -606,6 +609,7 @@ impl DurableTranscriptWriter {
         message_uuid: &str,
         payload: &Value,
         utf16_overrides: &Utf16Overrides,
+        projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<
         (
             bool,
@@ -617,10 +621,10 @@ impl DurableTranscriptWriter {
         #[cfg(test)]
         self.duplicate_scans
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let encoded = to_vec_with_overrides(payload, utf16_overrides)?;
-        let mut expected = parse_exact_json(
-            std::str::from_utf8(&encoded).expect("exact JSON encoder emits UTF-8"),
-        )?;
+        let encoded = crate::jsonl::exact_json::native_projection_bytes(payload, utf16_overrides, projection)?;
+        let projected = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(std::str::from_utf8(&encoded).expect("exact JSON encoder emits UTF-8"))
+            .map_err(|error| ExactJsonError::InvalidOverride(error.to_string()))?;
+        let mut expected = ExactJsonValue { value: projected.value.clone(), utf16_overrides: projected.string_overrides() };
         let expected_delivery_id = expected
             .value
             .get("deliveryId")
@@ -630,6 +634,7 @@ impl DurableTranscriptWriter {
         expected.utf16_overrides.remove("/deliveryId");
         let expected = TranscriptExpectation {
             exact: expected,
+            keys: projected.keys,
             delivery_id: expected_delivery_id,
         };
         let mut reader = BufReader::with_capacity(16 * 1024, file);
@@ -739,10 +744,11 @@ impl DurableTranscriptWriter {
         if line.is_empty() {
             return Ok(None);
         }
-        let mut exact = std::str::from_utf8(line)
+        let projected = std::str::from_utf8(line)
             .ok()
-            .and_then(|line| parse_exact_json(line).ok())
+            .and_then(|line| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line).ok())
             .ok_or(TranscriptWriterError::CorruptLine { offset })?;
+        let mut exact = ExactJsonValue { value: projected.value.clone(), utf16_overrides: projected.string_overrides() };
         let value = exact.value;
         let stored_uuid = value.get("uuid").and_then(Value::as_str);
         let last_uuid = stored_uuid
@@ -784,6 +790,7 @@ impl DurableTranscriptWriter {
             let outcome = if identities_agree
                 && actual == comparable_expected
                 && exact.utf16_overrides == expected_units
+                && projected.keys == expected.keys
             {
                 Ok(TranscriptAppendOutcome::AlreadyPresent)
             } else {
@@ -874,6 +881,7 @@ impl DurableTranscriptTransaction<'_> {
             transcript_relative,
             payload,
             &Utf16Overrides::new(),
+            None,
         )
     }
 
@@ -886,8 +894,9 @@ impl DurableTranscriptTransaction<'_> {
         transcript_relative: &Path,
         payload: Value,
         utf16_overrides: &Utf16Overrides,
+        projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<(), TranscriptWriterError> {
-        let mut line = to_vec_with_overrides(&payload, utf16_overrides)?;
+        let mut line = crate::jsonl::exact_json::native_projection_bytes(&payload, utf16_overrides, projection)?;
         line.push(b'\n');
         // Ordinary transcript rows do not buy durability, and never did: the
         // non-durable writer this path replaced only flushed. They travel
@@ -1134,6 +1143,7 @@ impl DurableTranscriptTransaction<'_> {
             &Utf16Overrides::new(),
             true,
             None,
+            None,
         )
     }
 
@@ -1159,6 +1169,7 @@ impl DurableTranscriptTransaction<'_> {
             &Utf16Overrides::new(),
             true,
             Some((identity_store, transcript_path)),
+            None,
         )
     }
 
@@ -1182,6 +1193,7 @@ impl DurableTranscriptTransaction<'_> {
             utf16_overrides,
             false,
             None,
+            None,
         )
     }
 
@@ -1198,6 +1210,7 @@ impl DurableTranscriptTransaction<'_> {
         utf16_overrides: &Utf16Overrides,
         identity_store: &IdentityLogStore,
         transcript_path: &Path,
+        projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         self.writer.append_json_once_at_locked(
             transcript_root,
@@ -1208,6 +1221,7 @@ impl DurableTranscriptTransaction<'_> {
             utf16_overrides,
             false,
             Some((identity_store, transcript_path)),
+            projection,
         )
     }
 }
@@ -1217,7 +1231,7 @@ fn transcript_line_has_uuid(line: &[u8], expected_uuid: &str) -> bool {
     let Ok(line) = std::str::from_utf8(line) else {
         return false;
     };
-    parse_exact_json(line)
+    lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
         .ok()
         .and_then(|exact| {
             exact

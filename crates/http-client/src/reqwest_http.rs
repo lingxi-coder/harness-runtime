@@ -18,6 +18,7 @@ use lingxi_core::host::http::{
 };
 use lingxi_core::host::{HttpError, HttpTransport};
 use lingxi_core::types::{HttpRequest, HttpResponse, SseEvent};
+use lingxi_llm_client::transport::http_backend as reqwest;
 use std::error::Error as StdError;
 use std::sync::Arc;
 
@@ -87,13 +88,22 @@ impl ReqwestHttp {
         Self {
             client: tls
                 .apply_to_builder(
-                    reqwest::Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT),
+                    reqwest::Client::builder()
+                        .no_gzip()
+                        .no_brotli()
+                        .no_zstd()
+                        .no_deflate()
+                        .connect_timeout(DEFAULT_CONNECT_TIMEOUT),
                 )
                 .build()
                 .expect("reqwest client init"),
             no_redirect_client: tls
                 .apply_to_builder(
                     reqwest::Client::builder()
+                        .no_gzip()
+                        .no_brotli()
+                        .no_zstd()
+                        .no_deflate()
                         .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
                         .redirect(reqwest::redirect::Policy::none()),
                 )
@@ -121,7 +131,12 @@ impl ReqwestHttp {
         resolved: &ResolvedAddressOverride,
         no_redirect: bool,
     ) -> Result<reqwest::Client, HttpError> {
-        let mut builder = reqwest::Client::builder().connect_timeout(DEFAULT_CONNECT_TIMEOUT);
+        let mut builder = reqwest::Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_zstd()
+            .no_deflate()
+            .connect_timeout(DEFAULT_CONNECT_TIMEOUT);
         if no_redirect {
             builder = builder.redirect(reqwest::redirect::Policy::none());
         }

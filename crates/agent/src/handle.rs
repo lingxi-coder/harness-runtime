@@ -1625,6 +1625,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
             observer_events: observer_events.clone(),
             armed: true,
             startup_error: None,
+            agent_spawn_token: request.agent_spawn_token.clone(),
             // Ownership moves out of `mcp_guard` synchronously here — no
             // await separates the take from the guard that receives them.
             mcp_cleanups: mcp_guard.take(),
@@ -1642,7 +1643,11 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 .on_model_selected(&allocation_event, display_effort.as_deref())
                 .await;
         }
-        if start.send(()).is_ok() {
+        let started = match &request.agent_spawn_token {
+            Some(token) => token.release_start(|| start.send(()).is_ok()),
+            None => start.send(()).is_ok(),
+        };
+        if started {
             for observer in &observers {
                 observer.on_started(&allocation_event);
             }
@@ -1856,6 +1861,15 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // either one produced no terminal event from either producer (a
         // Fusion panel's `panel_total_timeout`, or the panel-bar
         // `join_set.abort_all()`, racing a subagent that already finished).
+        if let Some(token) = &request.agent_spawn_token {
+            match &result {
+                SubagentResult::Completed { .. } => token.completed(),
+                SubagentResult::Failed { .. } => token.failed(),
+                SubagentResult::Killed { .. } => {
+                    token.killed(lingxi_core::host::agent_statistics::AgentKillReason::User)
+                }
+            }
+        }
         match &result {
             SubagentResult::Completed {
                 content,
@@ -2244,6 +2258,11 @@ impl PoolSubagentSpawner {
                 .join(format!("agent-{agent_id}.jsonl"))
         });
         let origin_session_id = ctx.origin_session_id;
+        let safety_observer = ctx
+            .budget
+            .as_ref()
+            .and_then(|budget| budget.model_safety_observer())
+            .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
         let allocation_receipt = (!observers.is_empty() || transcript_path.is_some()).then(|| {
             let allocated_transcript_paths = self.allocated_transcript_paths.clone();
             let allocation_event = allocation_event.clone();
@@ -2292,6 +2311,7 @@ impl PoolSubagentSpawner {
             observer_events: crate::api::ObserverEventSink::new(observers.clone()),
             armed: true,
             startup_error: None,
+            agent_spawn_token: request.agent_spawn_token.clone(),
             mcp_cleanups: mcp_guard.take(),
             agent_type: resolved_agent_type.clone(),
         };
@@ -2316,7 +2336,11 @@ impl PoolSubagentSpawner {
         // From here the task handler owns stop/deallocation, including any
         // terminal events produced immediately when this gate opens.
         dealloc_guard.armed = false;
-        if start.send(()).is_ok() {
+        let started = match &request.agent_spawn_token {
+            Some(token) => token.release_start(|| start.send(()).is_ok()),
+            None => start.send(()).is_ok(),
+        };
+        if started {
             for observer in &observers {
                 observer.on_started(&allocation_event);
             }
@@ -2330,7 +2354,12 @@ impl PoolSubagentSpawner {
         let query_source_label = request.query_source_label.clone();
         let should_record_usage = usage_recorder.is_some()
             && query_source_label.as_deref() != Some(FUSION_PANEL_QUERY_SOURCE);
-        if observers.is_empty() && !should_record_usage && stop_firer.is_none() {
+        let agent_spawn_token = request.agent_spawn_token.clone();
+        if observers.is_empty()
+            && !should_record_usage
+            && stop_firer.is_none()
+            && agent_spawn_token.is_none()
+        {
             return Ok((agent_id, rx));
         }
         let observer_events =
@@ -2343,12 +2372,22 @@ impl PoolSubagentSpawner {
         if let Some(observer_events) = observer_events.as_ref() {
             observer_events.try_emit(allocation_event);
         }
-        tokio::spawn(async move {
+        let forwarding = async move {
             let mut forwarding = true;
             let mut terminal_death_seen = false;
             let mut recorded_cumulative = SubagentUsage::default();
             let mut recorded_duration_ms = 0_u64;
             while let Some(event) = rx.recv().await {
+                if let Some(token) = &agent_spawn_token {
+                    match &event {
+                        SubagentEvent::Completed { .. } => token.completed(),
+                        SubagentEvent::Failed { .. } => token.failed(),
+                        SubagentEvent::Killed { .. } => {
+                            token.killed(lingxi_core::host::agent_statistics::AgentKillReason::User)
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(firer) = stop_firer.as_ref() {
                     let status = match &event {
                         SubagentEvent::Completed { .. } => {
@@ -2526,12 +2565,22 @@ impl PoolSubagentSpawner {
                 }
             }
             if !terminal_death_seen {
+                if let Some(token) = &agent_spawn_token {
+                    token.failed();
+                }
                 if let Some(observer_events) = observer_events.as_ref() {
                     observer_events.emit_terminal(SubagentObservation::Failed {
                         agent_id: forward_agent_id,
                         error: "persistent subagent channel closed unexpectedly".to_string(),
                     });
                 }
+            }
+        };
+        tokio::spawn(async move {
+            if let Some(observer) = safety_observer {
+                lingxi_core::host::model_safety::scope_model_safety(observer, forwarding).await;
+            } else {
+                forwarding.await;
             }
         });
         Ok((agent_id, forwarded_rx))

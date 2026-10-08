@@ -321,7 +321,7 @@ pub(crate) struct HostAuthenticator {
     client: crate::ModelRuntime,
     now: Option<std::time::SystemTime>,
     failure: HostFailure,
-    snapshot: Option<RequestCredentialSnapshot>,
+    snapshot: Option<Arc<RequestCredentialSnapshot>>,
 }
 
 impl HostAuthenticator {
@@ -344,11 +344,30 @@ impl HostAuthenticator {
             client,
             now,
             failure,
-            snapshot: Some(RequestCredentialSnapshot {
+            snapshot: Some(Arc::new(RequestCredentialSnapshot {
                 profile,
                 credential: tokio::sync::OnceCell::new(),
-            }),
+            })),
         }
+    }
+
+    pub(crate) fn with_request_credentials(
+        mut self,
+        shared: Option<&crate::RequestCredentials>,
+    ) -> Self {
+        if let (Some(shared), Some(snapshot)) = (shared, self.snapshot.as_ref()) {
+            let mut snapshots = shared
+                .snapshots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.snapshot = Some(
+                snapshots
+                    .entry(snapshot.profile.clone())
+                    .or_insert_with(|| snapshot.clone())
+                    .clone(),
+            );
+        }
+        self
     }
 
     /// A file service may perform multiple operations and refresh credentials
@@ -375,8 +394,18 @@ impl HostAuthenticator {
         now: std::time::SystemTime,
     ) -> Result<(), LlmError> {
         self.client
-            .authenticate_wire(profile_name, request, now, self.snapshot.as_ref())
-            .await
+            .authenticate_wire(profile_name, request, now, self.snapshot.as_deref())
+            .await?;
+        if request.http1_header_layout == Some(sdk::Http1HeaderLayout::NativeFetch) {
+            for (name, _) in &mut request.headers {
+                let canonical =
+                    sdk::providers::anthropic::request_policy::native_fetch_header_name(name);
+                if canonical != name {
+                    *name = canonical.to_owned();
+                }
+            }
+        }
+        Ok(())
     }
 }
 #[async_trait::async_trait]

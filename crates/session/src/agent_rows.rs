@@ -373,6 +373,7 @@ mod tests {
 
     fn request(subagent_type: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            agent_spawn_token: None,
             stop_hook_scope: Default::default(),
             agent_spawn_provenance: Default::default(),
             teammate_color: None,

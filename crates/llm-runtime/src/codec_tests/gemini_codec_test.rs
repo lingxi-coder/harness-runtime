@@ -12,7 +12,7 @@ use llm_runtime::{
 fn encode_image_bytes_as_inline_data() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let mut request = HistoryFixture::new("gemini-2.0-flash");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::Image {
             media_type: "image/png".to_string(),
@@ -30,7 +30,7 @@ fn encode_image_bytes_as_inline_data() {
 fn encode_document_bytes_as_inline_data() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let mut request = HistoryFixture::new("gemini-2.0-flash");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::Document {
             media_type: "application/pdf".to_string(),
@@ -49,7 +49,7 @@ fn encode_image_url_produces_file_data_part() {
     // because Gemini v1beta infers it from the Content-Type served at that URL.
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let mut request = HistoryFixture::new("gemini-2.0-flash");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
             url: "https://example.com/img.png".to_string(),
@@ -239,20 +239,20 @@ fn encode_generation_config_from_sampling_controls() {
 fn encode_tool_result_error_uses_error_response_shape() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let mut request = HistoryFixture::new("gemini-2.0-flash");
-    request.messages.push(llm_runtime::Message {
+    request.messages.push(llm_runtime::Message { api_output_config: None,
         role: "assistant".to_string(),
-        content: vec![ContentBlock::ToolCall {
+        content: vec![ContentBlock::ToolCall { input_projection: None,
             id: "call_0".to_string(),
             name: "Bash".to_string(),
             input: serde_json::json!({"command":"ls"}),
         }],
     });
-    request.messages.push(llm_runtime::Message {
+    request.messages.push(llm_runtime::Message { api_output_config: None,
         role: "user".to_string(),
-        content: vec![ContentBlock::ToolResult {
+        content: vec![ContentBlock::ToolResult { output_projection: None,
             tool_call_id: "call_0".to_string(),
             output: serde_json::json!("command failed"),
-            is_error: true,
+            is_error: Some(true),
             cache_control: None,
             cache_reference: None,
         }],
@@ -270,20 +270,20 @@ fn encode_tool_result_error_uses_error_response_shape() {
 fn encode_tool_result_uses_prior_tool_call_name() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let mut request = HistoryFixture::new("gemini-2.0-flash");
-    request.messages.push(llm_runtime::Message {
+    request.messages.push(llm_runtime::Message { api_output_config: None,
         role: "assistant".to_string(),
-        content: vec![ContentBlock::ToolCall {
+        content: vec![ContentBlock::ToolCall { input_projection: None,
             id: "call_1".to_string(),
             name: "Bash".to_string(),
             input: serde_json::json!({"command":"ls"}),
         }],
     });
-    request.messages.push(llm_runtime::Message {
+    request.messages.push(llm_runtime::Message { api_output_config: None,
         role: "user".to_string(),
-        content: vec![ContentBlock::ToolResult {
+        content: vec![ContentBlock::ToolResult { output_projection: None,
             tool_call_id: "call_1".to_string(),
             output: serde_json::json!("done"),
-            is_error: false,
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
@@ -483,12 +483,12 @@ fn stream_synthesizes_unique_tool_call_ids() {
 fn encode_tool_result_with_unknown_call_id_is_rejected() {
     let codec = GeminiCodec::new("https://generativelanguage.googleapis.com/v1beta");
     let mut request = HistoryFixture::new("gemini-2.0-flash");
-    request.messages.push(llm_runtime::Message {
+    request.messages.push(llm_runtime::Message { api_output_config: None,
         role: "user".to_string(),
-        content: vec![ContentBlock::ToolResult {
+        content: vec![ContentBlock::ToolResult { output_projection: None,
             tool_call_id: "call_unseen".to_string(),
             output: serde_json::json!("done"),
-            is_error: false,
+            is_error: Some(false),
             cache_control: None,
             cache_reference: None,
         }],
@@ -619,16 +619,16 @@ async fn signed_text_and_tools_survive_both_response_paths_and_replay_once() {
             "metadata must not become a second executable call"
         );
         let mut request = HistoryFixture::new("gemini-3.1-pro-preview");
-        request.messages.push(Message {
+        request.messages.push(Message { api_output_config: None,
             role: "assistant".into(),
             content: response.content,
         });
-        request.messages.push(Message {
+        request.messages.push(Message { api_output_config: None,
             role: "user".into(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { output_projection: None,
                 tool_call_id: calls[0].clone(),
                 output: serde_json::json!({"ok":true}),
-                is_error: false,
+                is_error: Some(false),
                 cache_control: None,
                 cache_reference: None,
             }],

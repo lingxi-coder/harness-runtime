@@ -271,6 +271,7 @@ async fn modern_probe_falls_back_and_redials_stdio_legacy() {
                 expected_era: Some(McpProtocolEra::Modern),
                 deadline_ms: 5_000,
                 probe_timeout_ms: Some(3_000),
+                elicitation: lingxi_core::host::McpElicitationCapabilities::default(),
             },
         )
         .await

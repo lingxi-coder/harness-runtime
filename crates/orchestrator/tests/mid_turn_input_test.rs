@@ -104,7 +104,7 @@ impl Tool for CancelBlockingTool {
                 t.cancelled().await;
                 Err(ToolError::Aborted)
             }
-            None => Ok(ToolCallResult {
+            None => Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "ran-to-end" }),
                 model_content: None,
                 new_messages: vec![],
@@ -144,7 +144,7 @@ async fn history_has_interrupt(orch: &ConversationOrchestrator) -> bool {
     let s = session.lock().await;
     s.history.iter().any(|m| match m {
         ConversationMessage::User { content, .. } => content.iter().any(
-            |b| matches!(b, ContentBlock::Text { text } if text.contains("interrupted by user")),
+            |b| matches!(b, ContentBlock::Text { text, .. } if text.contains("interrupted by user")),
         ),
         _ => false,
     })
@@ -234,7 +234,7 @@ async fn first_request_user_texts(api: &MockStreamingApiClient) -> Vec<String> {
                 let joined: String = content
                     .iter()
                     .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.clone()),
+                        ContentBlock::Text { text, .. } => Some(text.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -334,7 +334,7 @@ async fn mid_turn_input_arriving_during_final_response_continues_the_turn() {
                 content
                     .iter()
                     .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -431,7 +431,7 @@ async fn mid_turn_input_is_preserved_when_max_turns_ends_streaming_loop() {
             ConversationMessage::User { content, .. }
                 if content.iter().any(|block| matches!(
                     block,
-                    ContentBlock::Text { text }
+                    ContentBlock::Text { text, .. }
                         if text.contains("please preserve this message")
                 ))
         )),
@@ -616,7 +616,7 @@ impl Tool for EndTurnTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "content": "done" }),
             model_content: None,
             new_messages: vec![],
@@ -670,17 +670,18 @@ async fn a_tool_requested_end_does_not_take_the_late_drain() {
         ]));
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(EndTurnTool));
-        let orch = ConversationOrchestrator::new_with_streaming(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(Vec::new())),
-            api.clone(),
-            Arc::new(registry),
-            orchestrator::test_support::noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            PathBuf::from("/tmp"),
-        );
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                api.clone(),
+                Arc::new(registry),
+                orchestrator::test_support::noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ));
         orch.set_mid_turn_input(forced.clone());
         orch.run_turn_streaming("seed").await.expect("streaming");
         assert_eq!(
@@ -729,6 +730,7 @@ async fn the_batched_path_has_no_late_drain() {
             vec![llm_runtime::ContentBlock::Text {
                 text: "first answer".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -736,6 +738,7 @@ async fn the_batched_path_has_no_late_drain() {
             vec![llm_runtime::ContentBlock::Text {
                 text: "should never be requested".into(),
                 cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -810,6 +813,7 @@ async fn only_the_non_cancelable_batched_entry_drains_at_the_top_of_its_loop() {
                     vec![llm_runtime::ContentBlock::Text {
                         text: "done".into(),
                         cache_control: None,
+                        citations: None,
                     }],
                     Some("end_turn"),
                 ),

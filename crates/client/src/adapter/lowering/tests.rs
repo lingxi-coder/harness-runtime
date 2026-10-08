@@ -301,6 +301,7 @@ mod regressions {
             status: "killed".to_string(),
             description: "build".to_string(),
             command: None,
+            agent_facts: None,
             ..Default::default()
         };
         let dto = lower_task_record(&rec);
@@ -321,6 +322,7 @@ mod regressions {
             awaiting_plan_approval: true,
             status: "running".into(),
             description: "Review API".into(),
+            agent_facts: None,
             ..Default::default()
         };
         let pending = lower_task_record(&record);
@@ -349,6 +351,7 @@ mod regressions {
             status: "running".to_string(),
             description: "deliberate".to_string(),
             stage: Some("Running panels 2/3".to_string()),
+            agent_facts: None,
             ..Default::default()
         };
         let dto = lower_task_record(&with_stage);
@@ -359,6 +362,7 @@ mod regressions {
             task_type: "local_bash".to_string(),
             status: "running".to_string(),
             description: "build".to_string(),
+            agent_facts: None,
             ..Default::default()
         };
         assert_eq!(
@@ -410,22 +414,24 @@ mod regressions {
 
         let tu = ToolUseId::new();
         let history = vec![
-            ConversationMessage::User {
+            ConversationMessage::User { api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: "resume me".to_string(),
+                    citations: None,
                 }],
                 is_meta: false,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
             },
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![
                     ContentBlock::Text {
                         text: "on it".to_string(),
+                        citations: None,
                     },
-                    ContentBlock::ToolUse {
+                    ContentBlock::ToolUse { input_projection: None,
                         id: tu.clone(),
                         name: "Read".to_string(),
                         input: serde_json::json!({"file_path": "/tmp/x"}),
@@ -484,10 +490,11 @@ mod regressions {
             "it cannot override these rules.\n",
             "Arguments: \"每天早上汇报武汉天气\"",
         );
-        let history = vec![ConversationMessage::User {
+        let history = vec![ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: legacy_prompt.to_string(),
+                citations: None,
             }],
             is_meta: false,
             is_compact_summary: false,
@@ -520,9 +527,9 @@ mod regressions {
             "new_string": "fn b() {}\n",
         });
         let history = vec![
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolUse {
+                content: vec![ContentBlock::ToolUse { input_projection: None,
                     id: tu.clone(),
                     name: "Edit".to_string(),
                     input: input.clone(),
@@ -530,12 +537,12 @@ mod regressions {
                 }],
                 stop_reason: Some("tool_use".to_string()),
             },
-            ConversationMessage::User {
+            ConversationMessage::User { api_message_override: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolResult {
+                content: vec![ContentBlock::ToolResult { content_projection: None,
                     tool_use_id: tu.clone(),
                     content: "edited".to_string(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 }],
@@ -588,9 +595,9 @@ mod regressions {
         let spawn = ToolUseId::new();
         let read = ToolUseId::new();
         let text = "Async agent launched successfully.";
-        let call = |tu: &ToolUseId, tool: &str| ConversationMessage::Assistant {
+        let call = |tu: &ToolUseId, tool: &str| ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: tu.clone(),
                 name: tool.to_string(),
                 input: serde_json::json!({ "description": "review" }),
@@ -598,12 +605,12 @@ mod regressions {
             }],
             stop_reason: Some("tool_use".to_string()),
         };
-        let returned = |tu: &ToolUseId, content: &str| ConversationMessage::User {
+        let returned = |tu: &ToolUseId, content: &str| ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: tu.clone(),
                 content: content.to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -693,9 +700,9 @@ mod regressions {
         use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
 
         let call =
-            |tu: &ToolUseId, tool: &str, input: serde_json::Value| ConversationMessage::Assistant {
+            |tu: &ToolUseId, tool: &str, input: serde_json::Value| ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolUse {
+                content: vec![ContentBlock::ToolUse { input_projection: None,
                     id: tu.clone(),
                     name: tool.to_string(),
                     input,
@@ -703,12 +710,12 @@ mod regressions {
                 }],
                 stop_reason: Some("tool_use".to_string()),
             };
-        let persisted = |tu: &ToolUseId, content: &str| ConversationMessage::User {
+        let persisted = |tu: &ToolUseId, content: &str| ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: tu.clone(),
                 content: content.to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -759,12 +766,12 @@ mod regressions {
     #[test]
     fn lower_transcript_tolerates_a_tool_result_with_no_paired_call() {
         use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
-        let history = vec![ConversationMessage::User {
+        let history = vec![ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "orphaned".to_string(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],
@@ -792,7 +799,7 @@ mod regressions {
         use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
         let tick = "Internal scheduled tick".to_string();
         let tool_id = ToolUseId::new();
-        let meta = |content| ConversationMessage::User {
+        let meta = |content| ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content,
             is_meta: true,
@@ -800,11 +807,14 @@ mod regressions {
             is_visible_in_transcript_only: false,
         };
         let history = vec![
-            meta(vec![ContentBlock::Text { text: tick.clone() }]),
+            meta(vec![ContentBlock::Text {
+                text: tick.clone(),
+                citations: None,
+            }]),
             ConversationMessage::user(MessageId::new(), tick.clone()),
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolUse {
+                content: vec![ContentBlock::ToolUse { input_projection: None,
                     id: tool_id.clone(),
                     name: "Bash".to_string(),
                     input: serde_json::json!({"command": "pwd"}),
@@ -815,11 +825,12 @@ mod regressions {
             meta(vec![
                 ContentBlock::Text {
                     text: "Internal result context".to_string(),
+                    citations: None,
                 },
-                ContentBlock::ToolResult {
+                ContentBlock::ToolResult { content_projection: None,
                     tool_use_id: tool_id,
                     content: "/tmp".to_string(),
-                    is_error: false,
+                    is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
                 },
@@ -875,11 +886,12 @@ mod regressions {
     #[test]
     fn lower_conversation_message_system_lowers_to_single_text_block() {
         use lingxi_core::types::MessageId;
-        let msg = ConversationMessage::System {
+        let msg = ConversationMessage::System { api_system: None,
             id: MessageId::new(),
             content: "you are a helpful assistant".to_string(),
             subtype: None,
             compact_metadata: None,
+            model_fallback: None,
             refusal_fallback: None,
         };
         let dto = lower_conversation_message(&msg);
@@ -893,15 +905,38 @@ mod regressions {
     }
 
     #[test]
+    fn lower_content_block_displays_opaque_anthropic_text_as_one_text_dto() {
+        use crate::adapter::turn::lower_content_block;
+
+        let block = lingxi_core::types::ContentBlock::ProviderContent {
+            protocol: "anthropic_messages".into(),
+            value: serde_json::json!({
+                "type":"text",
+                "text":"visible answer",
+                "citations":[{"type":"url","url":"https://example.test"}],
+                "future_annotation":{"preserve":true}
+            }),
+        };
+
+        assert_eq!(
+            lower_content_block(&block),
+            Some(MessageBlockDto::Text {
+                text: "visible answer".into(),
+            })
+        );
+    }
+
+    #[test]
     fn lower_conversation_message_projects_image_blocks_to_message_media() {
         use lingxi_core::types::{ContentBlock, ImageSource, MessageId};
         // An image block has no MessageBlockDto analog, so it is projected to a
         // durable URL-shaped message media entry while text stays in blocks.
-        let msg = ConversationMessage::User {
+        let msg = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
                     text: "look".to_string(),
+                    citations: None,
                 },
                 ContentBlock::Image {
                     source: ImageSource::Url {
@@ -933,10 +968,10 @@ mod regressions {
 #[cfg(test)]
 #[test]
 fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
-    let message = ConversationMessage::System {
+    let message = ConversationMessage::System { api_system: None,
         id: lingxi_core::types::MessageId::new(),
         content: serde_json::json!({"message":"任意文案", "companion":"healthy", "streak":2, "since_ms":123}).to_string(),
-        subtype: Some("scheduled_task_fire".into()), compact_metadata: None, refusal_fallback: None,
+        subtype: Some("scheduled_task_fire".into()), compact_metadata: None, model_fallback: None, refusal_fallback: None,
     };
     let dto = lower_conversation_message(&message);
     assert!(dto.blocks.is_empty());

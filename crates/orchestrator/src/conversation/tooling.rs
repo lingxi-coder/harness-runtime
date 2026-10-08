@@ -315,17 +315,22 @@ impl ConversationOrchestrator {
 
         // Extract the matching `tool_use` block (queryHelpers.ts:238-251). The
         // lookup guarantees one exists; bail defensively otherwise.
-        let Some((name, input, provider_id)) = (match &assistant_msg {
+        let Some((name, input, original_projection, provider_id)) = (match &assistant_msg {
             ConversationMessage::Assistant { content, .. } => {
                 content.iter().find_map(|b| match b {
                     ContentBlock::ToolUse {
                         id,
                         name,
                         input,
+                        input_projection,
                         provider_id,
-                    } if id == tool_use_id => {
-                        Some((name.clone(), input.clone(), provider_id.clone()))
-                    }
+                        ..
+                    } if id == tool_use_id => Some((
+                        name.clone(),
+                        input.clone(),
+                        input_projection.clone(),
+                        provider_id.clone(),
+                    )),
                     _ => None,
                 })
             }
@@ -360,13 +365,21 @@ impl ConversationOrchestrator {
             if let ConversationMessage::Assistant { content, .. } = &assistant_msg {
                 for b in content {
                     if let Some(text) = b.visible_text() {
-                        self.output.emit_text(text).await;
+                        self.output.emit_text(text, b.visible_text_utf16_units()).await;
                         continue;
                     }
                     match b {
                         ContentBlock::ToolUse {
-                            id, name, input, ..
-                        } => self.output.emit_tool_call(id, name, input).await,
+                            id,
+                            name,
+                            input,
+                            input_projection,
+                            ..
+                        } => {
+                            self.output
+                                .emit_tool_call(id, name, input, input_projection.as_ref())
+                                .await
+                        }
                         ContentBlock::Thinking {
                             thinking,
                             signature,
@@ -397,7 +410,11 @@ impl ConversationOrchestrator {
                 decision_classification: _,
             } => (
                 crate::test_support::PermissionDecision::Allow,
-                updated_input.unwrap_or_else(|| Utf16JsonProjection::plain(input.clone())),
+                updated_input.unwrap_or_else(|| {
+                    original_projection
+                        .clone()
+                        .unwrap_or_else(|| Utf16JsonProjection::plain(input.clone()))
+                }),
                 permission_updates,
             ),
             lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
@@ -412,13 +429,17 @@ impl ConversationOrchestrator {
                 }
                 (
                     crate::test_support::PermissionDecision::Allow,
-                    updated_input.unwrap_or_else(|| Utf16JsonProjection::plain(input.clone())),
+                    updated_input.unwrap_or_else(|| {
+                        original_projection
+                            .clone()
+                            .unwrap_or_else(|| Utf16JsonProjection::plain(input.clone()))
+                    }),
                     Vec::new(),
                 )
             }
             lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => (
                 crate::test_support::PermissionDecision::Deny { reason },
-                Utf16JsonProjection::plain(input),
+                original_projection.unwrap_or_else(|| Utf16JsonProjection::plain(input)),
                 Vec::new(),
             ),
         };
@@ -472,7 +493,7 @@ impl ConversationOrchestrator {
         //    tool-injected follow-ups — mirroring the batched turn loop's
         //    post-dispatch block (`execute_one_turn`), the `recordTranscript`
         //    per-result twin (queryHelpers.ts:328-332).
-        let tool_results_msg = ConversationMessage::User {
+        let tool_results_msg = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: tool_results,
             is_meta: false,
@@ -588,7 +609,12 @@ impl ConversationOrchestrator {
     /// order. A session-level cache is a recommended follow-up.
     ///
     /// [`execute_one_turn`]: crate::turn_loop::execute_one_turn
-    pub(crate) async fn build_wire_tools(&self) -> (Vec<serde_json::Value>, bool) {
+    pub(crate) async fn build_wire_tools(
+        &self,
+    ) -> (
+        Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        bool,
+    ) {
         use tool_api::tool_trait::PromptOptions;
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
@@ -634,6 +660,19 @@ impl ConversationOrchestrator {
             };
         let bash_precommit_session_generation = self.tools.bash_precommit_session_generation();
         let cache_key = WireToolSchemaCacheKey {
+            exact_schema_identities: tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.input_schema_projection().map(|projection| {
+                        (
+                            tool.name().to_owned(),
+                            projection
+                                .to_json_string()
+                                .unwrap_or_else(|error| format!("invalid:{error}")),
+                        )
+                    })
+                })
+                .collect(),
             tool_names: tools.iter().map(|t| t.name().to_string()).collect(),
             dynamic_schema_revisions: tools
                 .iter()
@@ -691,7 +730,7 @@ impl ConversationOrchestrator {
                 if t.get("name").and_then(serde_json::Value::as_str)
                     == Some(crate::structured_output::STRUCTURED_OUTPUT_TOOL_NAME)
                 {
-                    if let Some(obj) = t.as_object_mut() {
+                    if let Some(obj) = t.value.as_object_mut() {
                         obj.insert("strict".to_string(), serde_json::Value::Bool(true));
                     }
                 }
@@ -764,15 +803,16 @@ impl ConversationOrchestrator {
                     })
                     .map(|tool| tool.name())
                     .collect();
-                let deferred_wire: Vec<serde_json::Value> = complete_wire
-                    .iter()
-                    .filter(|tool| {
-                        tool.get("name")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|name| deferred_names.contains(name))
-                    })
-                    .cloned()
-                    .collect();
+                let deferred_wire: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+                    complete_wire
+                        .iter()
+                        .filter(|tool| {
+                            tool.get("name")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|name| deferred_names.contains(name))
+                        })
+                        .cloned()
+                        .collect();
                 // Claude subtracts the fixed request/tool envelope from the
                 // exact count. A zero response means the endpoint is
                 // unavailable and selects the character fallback.
@@ -887,7 +927,7 @@ impl ConversationOrchestrator {
         &self,
         host: Option<&std::sync::Arc<hooks::mods::ModHost>>,
         tools: &[std::sync::Arc<dyn tool_api::tool_trait::Tool>],
-        wire: &mut [serde_json::Value],
+        wire: &mut [lingxi_core::types::utf16_json::Utf16JsonProjection],
     ) {
         let Some(host) = host.filter(|host| host.has_event("tool.describe")) else {
             self.tools
@@ -1011,7 +1051,7 @@ impl ConversationOrchestrator {
                 .get("description")
                 .and_then(serde_json::Value::as_str)
             {
-                entry["description"] = serde_json::Value::String(description.to_owned());
+                entry.value["description"] = serde_json::Value::String(description.to_owned());
             }
             let deferred = answer
                 .get("isDeferred")
@@ -1022,7 +1062,10 @@ impl ConversationOrchestrator {
         self.tools.deferral().set_mod_overrides(overrides);
     }
 
-    async fn apply_prompt_snapshot_tool_descriptions(&self, wire: &mut [serde_json::Value]) {
+    async fn apply_prompt_snapshot_tool_descriptions(
+        &self,
+        wire: &mut [lingxi_core::types::utf16_json::Utf16JsonProjection],
+    ) {
         if !self.prompt_snapshot_eligible() {
             return;
         }
@@ -1062,7 +1105,7 @@ impl ConversationOrchestrator {
             let Some(description) = recorded.get(name) else {
                 continue;
             };
-            if let Some(object) = tool.as_object_mut() {
+            if let Some(object) = tool.value.as_object_mut() {
                 object.insert(
                     "description".to_string(),
                     serde_json::Value::String(description.clone()),
@@ -1201,7 +1244,9 @@ impl ConversationOrchestrator {
     /// `tools/list` shape. This deliberately reuses the normal model-facing
     /// schema builder so tool enablement, permission-wide denies, active-agent
     /// restrictions, descriptions, and ordering cannot drift between hosts.
-    pub async fn mcp_tool_definitions(&self) -> Vec<serde_json::Value> {
+    pub async fn mcp_tool_definitions(
+        &self,
+    ) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         self.build_wire_tools()
             .await
             .0
@@ -1220,7 +1265,13 @@ impl ConversationOrchestrator {
                         .cloned()
                         .unwrap_or_else(|| serde_json::json!({ "type": "object" })),
                 );
-                Some(serde_json::Value::Object(tool))
+                let mut projected = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    serde_json::Value::Object(tool),
+                );
+                if let Ok(schema) = wire.subprojection("/input_schema") {
+                    projected.set_field("inputSchema", schema).ok()?;
+                }
+                Some(projected)
             })
             .collect()
     }

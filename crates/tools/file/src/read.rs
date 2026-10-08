@@ -31,7 +31,7 @@ use tool_api::tool_trait::{
 };
 use tool_api::util::ids::ulid_or_uuid;
 use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd, translate_model_path,
+    canonicalize_and_validate, emit_blocked_event, translate_model_path,
 };
 use tool_api::BuiltinToolContext;
 
@@ -748,7 +748,7 @@ pub(crate) const FILE_NOT_FOUND_CWD_NOTE: &str = "Note: your current working dir
 /// [`suggest_path_under_cwd`] prefix comparison both use the same resolved form.
 #[must_use]
 pub(crate) fn file_not_found_message(
-    canon: &std::path::Path,
+    requested_path: &std::path::Path,
     live_cwd: &std::path::Path,
 ) -> String {
     let cwd = std::fs::canonicalize(live_cwd).unwrap_or_else(|_| live_cwd.to_path_buf());
@@ -758,9 +758,9 @@ pub(crate) fn file_not_found_message(
     );
     // The cwd "dropped repo folder" suggestion takes PRECEDENCE over the
     // same-stem sibling. Both suffixes are the VERBATIM `" Did you mean {x}?"`.
-    if let Some(cwd_suggestion) = suggest_path_under_cwd(canon, &cwd) {
+    if let Some(cwd_suggestion) = suggest_path_under_cwd(requested_path, &cwd) {
         message.push_str(&format!(" Did you mean {cwd_suggestion}?"));
-    } else if let Some(similar) = find_similar_file(canon) {
+    } else if let Some(similar) = find_similar_file(requested_path) {
         message.push_str(&format!(" Did you mean {similar}?"));
     }
     message
@@ -1038,7 +1038,7 @@ Usage:\n\
 - By default, it reads up to 2000 lines starting from the beginning of the file\n\
 - You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n\
 - Results are returned using cat -n format, with line numbers starting at 1\n\
-- This tool allows Claude Code to read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually as Claude Code is a multimodal LLM.\n\
+- This tool reads images (eg PNG, JPG, etc). When reading an image file, the contents are presented visually to the selected model.\n\
 - This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), you MUST provide the pages parameter to read specific page ranges (e.g., pages: \"1-5\"). Reading a large PDF without the pages parameter will fail. Maximum 20 pages per request.\n\
 - This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.\n\
 - This tool can only read files, not directories. To list files in a directory, use the registered shell tool.\n\
@@ -1096,6 +1096,54 @@ pub fn add_line_numbers(content: &str, start_line: u64) -> String {
         .join("\n")
 }
 
+/// Re-run Read's model-text mapper for a result supplied by a Mod. The result
+/// is already structured; this path must not read the file or update read state.
+fn map_read_result_text(data: &Value) -> Option<String> {
+    let file = data.get("file")?;
+    match data.get("type")?.as_str()? {
+        "text" => {
+            let content = file.get("content")?.as_str()?;
+            let start = file.get("startLine")?.as_u64()?;
+            let total = file.get("totalLines")?.as_u64()?;
+            let count = file.get("numLines")?.as_u64()?;
+            Some(if content.is_empty() {
+                if count >= 1 && total > 1 {
+                    format!("{start}\t")
+                } else if count >= 1 || total == 0 {
+                    EMPTY_FILE_WARNING.to_string()
+                } else {
+                    format_offset_beyond_eof(start, total)
+                }
+            } else {
+                add_line_numbers(content, start)
+            })
+        }
+        "file_unchanged" => Some(
+            if data.get("source").and_then(Value::as_str) == Some("seeded") {
+                format_file_unchanged_seeded(std::path::Path::new(file.get("filePath")?.as_str()?))
+            } else {
+                FILE_UNCHANGED_SHORT.to_string()
+            },
+        ),
+        "notebook" => Some(crate::notebook_read::render_cells_model_text(
+            file.get("cells")?.as_array()?,
+        )),
+        "image" => Some("[Image content provided in tool result.]".to_string()),
+        "pdf" => Some(format!(
+            "PDF file read: {} ({})",
+            file.get("filePath")?.as_str()?,
+            format_file_size(file.get("originalSize")?.as_u64()?)
+        )),
+        "parts" => Some(format!(
+            "PDF pages extracted: {} page(s) from {} ({})",
+            file.get("count")?.as_u64()?,
+            file.get("filePath")?.as_str()?,
+            format_file_size(file.get("originalSize")?.as_u64()?)
+        )),
+        _ => None,
+    }
+}
+
 /// `FileReadTool` — reads a UTF-8 file inside the trusted-dirs whitelist.
 pub struct FileReadTool {
     ctx: BuiltinToolContext,
@@ -1134,6 +1182,18 @@ fn open_rooted_file(
         ));
     };
     lingxi_core::host::rooted_fs::open_file_after_permission(&root, &relative, requested, approved)
+}
+
+fn check_read_cancelled(ctx: &ToolUseContext) -> Result<(), ToolError> {
+    if ctx
+        .cancel
+        .as_ref()
+        .is_some_and(|cancel| cancel.is_cancelled())
+    {
+        Err(ToolError::Aborted)
+    } else {
+        Ok(())
+    }
 }
 
 fn symlink_resolution_changed_message(path: &str) -> String {
@@ -1374,7 +1434,7 @@ impl FileReadTool {
     async fn file_not_found(
         &self,
         invocation_id: &str,
-        canon: &std::path::Path,
+        requested_path: &std::path::Path,
         err: &std::io::Error,
     ) -> Result<ToolCallResult, ToolError> {
         // Faithful NotFound gate: only ENOENT gets the cwd-note message (TS
@@ -1388,7 +1448,10 @@ impl FileReadTool {
         // `getCwd()` analog: the LIVE cwd (`Ct()`), realpath-resolved (matching
         // TS's already-resolved cwd) with a fallback to the unresolved path.
         let live_cwd = self.cwd_now();
-        Err(ToolError::Io(file_not_found_message(canon, &live_cwd)))
+        Err(ToolError::Io(file_not_found_message(
+            requested_path,
+            &live_cwd,
+        )))
     }
 
     /// Process an image file and return it as multimodal content. The pixels
@@ -1477,7 +1540,7 @@ impl FileReadTool {
                 "displayHeight": dh,
             });
         }
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: serde_json::json!({ "type": "image", "file": file }),
             // The image reaches the model INSIDE the tool_result content array
             // (the dispatch loop derives `content_blocks` from `data` — the port
@@ -1530,7 +1593,7 @@ impl FileReadTool {
             started.elapsed().as_millis() as u64,
         )
         .await;
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content: Some(model_content),
             new_messages: vec![msg],
@@ -1704,7 +1767,7 @@ impl FileReadTool {
             canon.display(),
             format_file_size(original_size)
         );
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             // binary `{type:"pdf", file:{filePath, base64, originalSize}}`; the
             // model receives the PDF as a document block via `new_messages`.
             data: serde_json::json!({
@@ -1751,6 +1814,9 @@ impl Tool for FileReadTool {
     }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
+    }
+    fn map_result_text(&self, result: &Value) -> Option<String> {
+        map_read_result_text(result)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -1809,18 +1875,12 @@ impl Tool for FileReadTool {
         ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        // `ctx` is consumed only by the PDF dispatch (model id for PDF support
-        // gating), which is `pdf-read`-feature-gated. Without that feature the
-        // text/image paths never read `ctx`; discard it so the default build does
-        // not warn. (The former cyber-risk reminder used to read it here; that was
-        // removed per parity verdict 12/14.)
-        #[cfg(not(feature = "pdf-read"))]
-        let _ = &ctx;
         let invocation_id = ulid_or_uuid();
         let file_path = input
             .get("file_path")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidInput("file_path is required".into()))?;
+        check_read_cancelled(&ctx)?;
         // Raw input values, preserved verbatim for the read-state registry
         // (TS `readFileState.set` stores the `offset`/`limit` as provided —
         // `undefined` when absent). `offset` below defaults to `1` only for
@@ -1844,19 +1904,23 @@ impl Tool for FileReadTool {
         } else {
             None
         };
-        let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+        // Native `VE(file_path)` resolves against the current session cwd and
+        // normalizes dot segments without following symlinks. Use that lexical
+        // route as the read-state key and capture it beside any translated host
+        // spelling. `canon` below remains the permission/I/O identity.
+        let requested_path = crate::normalize_model_file_path(file_path, &self.ctx.cwd());
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
         // Desktop filesystems translate nothing and this is a no-op.
-        let path = match translate_model_path(&self.ctx.fs, path, false) {
+        let path = match translate_model_path(&self.ctx.fs, requested_path.clone(), false) {
             Ok(path) => path,
             Err(message) => {
                 self.emit_failed(&invocation_id, "path_blocked").await;
                 return Err(ToolError::InvalidInput(message));
             }
         };
-        self.emit_started(&invocation_id, &path).await;
+        self.emit_started(&invocation_id, &requested_path).await;
 
         // #11: refuse blocking device/special files (claude-code `$3p` in
         // validateInput, BEFORE symlink resolution). Checked on the supplied
@@ -1944,7 +2008,7 @@ impl Tool for FileReadTool {
                     // tries the macOS-screenshot AM/PM space variant (regular space ⇄
                     // thin space, U+202F), then reports the friendly message if that
                     // variant is also absent.
-                    if let Some(alt) = get_alternate_screenshot_path(&canon) {
+                    if let Some(alt) = get_alternate_screenshot_path(&requested_path) {
                         if let Ok(alt_canon) = canonicalize_and_validate(&alt, &trusted_dirs) {
                             match read_rooted_snapshot(&alt, &alt_canon, &trusted_dirs) {
                                 Ok(snapshot) => {
@@ -1957,7 +2021,7 @@ impl Tool for FileReadTool {
                                     let not_found =
                                         std::io::Error::from(std::io::ErrorKind::NotFound);
                                     return self
-                                        .file_not_found(&invocation_id, &canon, &not_found)
+                                        .file_not_found(&invocation_id, &requested_path, &not_found)
                                         .await;
                                 }
                                 Err(error) => {
@@ -1968,13 +2032,13 @@ impl Tool for FileReadTool {
                         } else {
                             let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
                             return self
-                                .file_not_found(&invocation_id, &canon, &not_found)
+                                .file_not_found(&invocation_id, &requested_path, &not_found)
                                 .await;
                         }
                     } else {
                         let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
                         return self
-                            .file_not_found(&invocation_id, &canon, &not_found)
+                            .file_not_found(&invocation_id, &requested_path, &not_found)
                             .await;
                     }
                 }
@@ -2006,6 +2070,10 @@ impl Tool for FileReadTool {
                 }
             }
         };
+        // Rooted filesystem operations are synchronous in this implementation.
+        // Observe cancellation immediately after they return, before parsing or
+        // writing the result into shared Read state.
+        check_read_cancelled(&ctx)?;
         let size = snapshot.size;
         // Floor-truncated mtime in ms, matching TS `Math.floor(mtimeMs)` for
         // the read-state registry (`readFileState.set`). A missing mtime
@@ -2051,7 +2119,9 @@ impl Tool for FileReadTool {
         //   * it gates on the DEFAULTED `offset` (`t===1`), not the raw
         //     `input_offset`, so an explicit `offset: 1` still dedups — whereas
         //     the non-seeded `range_match` below would refuse it.
-        if let Some(entry) = tool_api::read_file_state::get(&self.ctx.read_file_state, &canon) {
+        if let Some(entry) =
+            tool_api::read_file_state::get(&self.ctx.read_file_state, &requested_path)
+        {
             // #13: `tengu_file_read_reread` fires whenever the file ALREADY has a
             // read-state entry (the `if(m)` in claude-code), BEFORE the dedup
             // short-circuit. `priorOp` is a THREE-way (@235740900:
@@ -2073,16 +2143,17 @@ impl Tool for FileReadTool {
                 && input_limit.is_none()
                 && mtime_ms == entry.mtime_ms
             {
-                self.emit_file_read_dedup(&canon, Some("seeded")).await;
+                self.emit_file_read_dedup(&requested_path, Some("seeded"))
+                    .await;
                 self.emit_completed(&invocation_id, 0, started.elapsed().as_millis() as u64)
                     .await;
-                return Ok(ToolCallResult {
+                return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     // binary `{type:"file_unchanged", file:{filePath:f},
                     // source:"seeded"}` (@235741583) — `f` is `fullFilePath`,
-                    // the canonicalized path on the Rust side.
+                    // the normalized session-cwd route on the Rust side.
                     data: json!({
                         "type": "file_unchanged",
-                        "file": { "filePath": canon.display().to_string() },
+                        "file": { "filePath": requested_path.display().to_string() },
                         "source": "seeded",
                     }),
                     // Renderer @235742950:
@@ -2096,7 +2167,7 @@ impl Tool for FileReadTool {
                     // this stub points at printed `/var/...`. Since the whole
                     // point of the stub is "see the block above", it has to name
                     // the path the block used.
-                    model_content: Some(format_file_unchanged_seeded(&path)),
+                    model_content: Some(format_file_unchanged_seeded(&requested_path)),
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
@@ -2110,15 +2181,15 @@ impl Tool for FileReadTool {
                 // the dedup short-circuit, before returning the `file_unchanged`
                 // stub. Metadata: `ext` only when present (the analytics ext of
                 // the resolved path). TS uses `fullFilePath` (`expandPath`); the
-                // Rust analog is the canonicalized path.
-                self.emit_file_read_dedup(&canon, None).await;
+                // Rust analog is the normalized session-cwd route.
+                self.emit_file_read_dedup(&requested_path, None).await;
                 // Behaves like the TS early return: the model sees the stub via
                 // `model_content`; the TUI payload `content` mirrors it (there
                 // is no fresh file body to render). `total_lines`/`line_range`
                 // are omitted — this is the `file_unchanged` result variant.
                 self.emit_completed(&invocation_id, 0, started.elapsed().as_millis() as u64)
                     .await;
-                return Ok(ToolCallResult {
+                return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     // binary `{type:"file_unchanged", file:{filePath}}` (@235741168);
                     // the stub rides on `model_content`, not inside `data`. The
                     // oracle's third field `source:"seeded"` is set ONLY by the
@@ -2126,7 +2197,7 @@ impl Tool for FileReadTool {
                     // oracle's non-seeded return exactly.
                     data: json!({
                         "type": "file_unchanged",
-                        "file": { "filePath": canon.display().to_string() },
+                        "file": { "filePath": file_path },
                     }),
                     // Renderer @235742950 picks `Eou()` = `Sou` for a non-seeded
                     // `file_unchanged`. The long form `FOg` has no producer in
@@ -2268,9 +2339,10 @@ impl Tool for FileReadTool {
 
             let duration_ms = started.elapsed().as_millis() as u64;
             self.emit_completed(&invocation_id, size, duration_ms).await;
-            tool_api::read_file_state::set(
+            check_read_cancelled(&ctx)?;
+            tool_api::read_file_state::set_with_requested_aliases(
                 &self.ctx.read_file_state,
-                canon.clone(),
+                requested_path.clone(),
                 tool_api::read_file_state::ReadFileEntry {
                     content: slice.clone(),
                     mtime_ms,
@@ -2280,9 +2352,11 @@ impl Tool for FileReadTool {
                     seeded_from_context: false,
                     is_partial_view: false,
                 },
+                true,
+                vec![requested_path.clone(), path.clone()],
             );
             self.emit_session_file_read(
-                &canon,
+                &requested_path,
                 total_lines,
                 read_lines,
                 size,
@@ -2302,7 +2376,7 @@ impl Tool for FileReadTool {
                 add_line_numbers(&slice, offset)
             };
             let mut file = json!({
-                "filePath": canon.display().to_string(),
+                "filePath": file_path,
                 "content": std::mem::take(&mut slice),
                 "numLines": read_lines,
                 "startLine": line_range_start,
@@ -2311,7 +2385,7 @@ impl Tool for FileReadTool {
             if let Some(id) = &task_output_id {
                 file["taskId"] = json!(id);
             }
-            return Ok(ToolCallResult {
+            return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "type": "text", "file": file }),
                 model_content: Some(model_content),
                 new_messages: vec![],
@@ -2325,9 +2399,14 @@ impl Tool for FileReadTool {
 
         #[cfg(feature = "image-read")]
         if is_image {
-            return self
+            let result = self
                 .read_image_result(&invocation_id, &canon, bytes, size, started)
                 .await;
+            check_read_cancelled(&ctx)?;
+            if result.is_ok() {
+                ctx.nested_memory_triggers.enqueue(requested_path.clone());
+            }
+            return result;
         }
 
         #[cfg(feature = "pdf-read")]
@@ -2336,7 +2415,7 @@ impl Tool for FileReadTool {
                 .get("pages")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
-            return self
+            let result = self
                 .read_pdf_result(
                     &invocation_id,
                     &canon,
@@ -2347,6 +2426,8 @@ impl Tool for FileReadTool {
                     started,
                 )
                 .await;
+            check_read_cancelled(&ctx)?;
+            return result;
         }
 
         let head = &bytes[..bytes.len().min(NUL_SCAN_WINDOW)];
@@ -2442,9 +2523,10 @@ impl Tool for FileReadTool {
             // as the verbatim (un-defaulted) input — `None` for a full read —
             // matching `read.rs`'s text path. The stored `content` is the
             // cells JSON (so a same-range re-read dedups byte-for-byte).
-            tool_api::read_file_state::set(
+            check_read_cancelled(&ctx)?;
+            tool_api::read_file_state::set_with_requested_aliases(
                 &self.ctx.read_file_state,
-                canon.clone(),
+                requested_path.clone(),
                 tool_api::read_file_state::ReadFileEntry {
                     content: cells_json,
                     mtime_ms,
@@ -2454,14 +2536,18 @@ impl Tool for FileReadTool {
                     seeded_from_context: false,
                     is_partial_view: false,
                 },
+                true,
+                vec![requested_path.clone(), path.clone()],
             );
 
-            return Ok(ToolCallResult {
+            ctx.nested_memory_triggers.enqueue(requested_path.clone());
+
+            return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 // binary `{type:"notebook", file:{filePath, cells}}`; the rendered
                 // cells text rides on `model_content`.
                 data: json!({
                     "type": "notebook",
-                    "file": { "filePath": canon.display().to_string(), "cells": cells },
+                    "file": { "filePath": file_path, "cells": cells },
                 }),
                 model_content: Some(model_content),
                 new_messages: vec![],
@@ -2531,7 +2617,7 @@ impl Tool for FileReadTool {
                     token_estimate,
                     max_output_tokens,
                     total_lines,
-                    &canon.display().to_string(),
+                    &requested_path.display().to_string(),
                 );
                 slice = trunc.content;
                 read_lines = trunc.line_count;
@@ -2555,12 +2641,13 @@ impl Tool for FileReadTool {
         // limit})` (`FileReadTool.ts:1032`). `content` is the range-limited
         // slice TS stores (from `readFileInRange`), `mtime_ms` is floored, and
         // `offset`/`limit` are the verbatim (un-defaulted) input values. The
-        // key is the canonicalized absolute path. Behavior-neutral side-effect:
-        // nothing reads this map yet (staleness guards + Read dedup are later
-        // batches), so the tool's result shape is unchanged.
-        tool_api::read_file_state::set(
+        // key is Native's normalized absolute model route (`fullFilePath`).
+        // Canonical identity remains for permission and rooted I/O; the source
+        // route and translated host spelling are captured together.
+        check_read_cancelled(&ctx)?;
+        tool_api::read_file_state::set_with_requested_aliases(
             &self.ctx.read_file_state,
-            canon.clone(),
+            requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: slice.clone(),
                 mtime_ms,
@@ -2587,7 +2674,11 @@ impl Tool for FileReadTool {
                 // full one.
                 is_partial_view: partial_note.is_some(),
             },
+            true,
+            vec![requested_path.clone(), path.clone()],
         );
+
+        ctx.nested_memory_triggers.enqueue(requested_path.clone());
 
         // `tengu_session_file_read` (`FileReadTool.ts:1069-1083`) — fired after a
         // successful TEXT read, mirroring TS's site (after `readFileState.set`,
@@ -2601,7 +2692,7 @@ impl Tool for FileReadTool {
         // [`emit_session_file_read`] for the `ext` / `messageID` (omitted) /
         // session-flag handling.
         self.emit_session_file_read(
-            &canon,
+            &requested_path,
             total_lines,
             read_lines,
             content.len() as u64,
@@ -2655,7 +2746,7 @@ impl Tool for FileReadTool {
         // truncatedByTokenCap?}` — `truncatedByTokenCap` is added only on a
         // token-cap-shrunk read (binary spreads `{truncatedByTokenCap:!0}` last).
         let mut file = json!({
-            "filePath": canon.display().to_string(),
+            "filePath": file_path,
             "content": slice,
             "numLines": read_lines,
             "startLine": line_range_start,
@@ -2683,7 +2774,7 @@ impl Tool for FileReadTool {
             None => vec![],
         };
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "type": "text", "file": file }),
             model_content: Some(model_content),
             new_messages,
@@ -2735,6 +2826,73 @@ mod tests {
     use tempfile::TempDir;
     use tool_api::test_support::{fresh_ctx, fresh_tx, make_dummy_fs};
 
+    #[tokio::test]
+    async fn native_text_and_notebook_reads_enqueue_the_invocation_context() {
+        let tmp = TempDir::new().unwrap();
+        let text = tmp.path().join("source.rs");
+        let notebook = tmp.path().join("source.ipynb");
+        std::fs::write(&text, "fn source() {}\n").unwrap();
+        std::fs::write(&notebook, serde_json::to_vec(&json!({"cells":[{"cell_type":"code","source":["1+1"],"outputs":[],"metadata":{},"execution_count":null}],"metadata":{},"nbformat":4,"nbformat_minor":5})).unwrap()).unwrap();
+        let (builtin, _) = make_ctx(&tmp);
+        let cwd = builtin.cwd();
+        let tool = FileReadTool::new(builtin);
+        for (path, kind) in [(text, "text"), (notebook, "notebook")] {
+            let context = fresh_ctx();
+            let queue = context.nested_memory_triggers.clone();
+            let result = tool
+                .call(json!({"file_path":path}), context, fresh_tx())
+                .await
+                .unwrap();
+            assert_eq!(result.data["type"], kind);
+            assert_eq!(
+                queue.queued(),
+                vec![crate::normalize_model_file_path(
+                    path.to_str().unwrap(),
+                    &cwd
+                )]
+            );
+        }
+    }
+
+    #[cfg(feature = "image-read")]
+    #[tokio::test]
+    async fn native_image_enqueue_follows_successful_decode() {
+        let tmp = TempDir::new().unwrap();
+        let good = tmp.path().join("good.png");
+        let bad = tmp.path().join("bad.png");
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8))
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        std::fs::write(&good, bytes).unwrap();
+        std::fs::write(&bad, b"not an image").unwrap();
+        let (builtin, _) = make_ctx(&tmp);
+        let cwd = builtin.cwd();
+        let tool = FileReadTool::new(builtin);
+        for (path, success) in [(good, true), (bad, false)] {
+            let context = fresh_ctx();
+            let queue = context.nested_memory_triggers.clone();
+            let result = tool
+                .call(json!({"file_path":path}), context, fresh_tx())
+                .await;
+            assert_eq!(result.is_ok(), success);
+            if success {
+                assert_eq!(
+                    queue.queued(),
+                    vec![crate::normalize_model_file_path(
+                        path.to_str().unwrap(),
+                        &cwd
+                    )]
+                );
+            } else {
+                assert!(queue.queued().is_empty());
+            }
+        }
+    }
+
     static READ_LIMIT_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
@@ -2781,6 +2939,9 @@ mod tests {
         std::fs::write(&target, "approved").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
+        let map = ctx.read_file_state.clone();
+        let route = crate::normalize_model_file_path(link.to_str().unwrap(), &ctx.cwd());
+        let target_identity = std::fs::canonicalize(&target).unwrap();
         let tool = FileReadTool::new(ctx);
 
         let result = tool
@@ -2792,6 +2953,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data["file"]["content"], "approved");
+        assert_eq!(
+            result.data["file"]["filePath"],
+            link.to_string_lossy().as_ref()
+        );
+        assert!(tool_api::read_file_state::get(&map, &route).is_some());
+        assert!(
+            tool_api::read_file_state::get(&map, &target_identity).is_none(),
+            "a direct Read records the observed lexical route, not the target realpath"
+        );
+    }
+
+    #[tokio::test]
+    async fn relative_read_uses_session_cwd_and_normalized_lexical_state_key() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("nested")).unwrap();
+        let target = tmp.path().join("source.txt");
+        std::fs::write(&target, "relative route\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let map = ctx.read_file_state.clone();
+        let normalized = crate::normalize_model_file_path("nested/../source.txt", &ctx.cwd());
+        assert_eq!(normalized, target);
+        let tool = FileReadTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "file_path": "nested/../source.txt" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["file"]["filePath"], "nested/../source.txt");
+        assert_eq!(
+            tool_api::read_file_state::get(&map, &normalized)
+                .unwrap()
+                .content,
+            "relative route\n"
+        );
     }
 
     #[test]
@@ -2815,6 +3013,38 @@ mod tests {
     #[test]
     fn max_size_byte_locked() {
         assert_eq!(MAX_FILE_READ_SIZE, 262_144);
+    }
+
+    #[test]
+    fn mod_replacement_uses_reads_model_text_mapper() {
+        let text = serde_json::json!({
+            "type": "text",
+            "file": {"filePath":"/tmp/a.txt","content":"one\ntwo","numLines":2,"startLine":4,"totalLines":9}
+        });
+        assert_eq!(
+            map_read_result_text(&text).as_deref(),
+            Some("4\tone\n5\ttwo")
+        );
+        let empty = serde_json::json!({
+            "type": "text",
+            "file": {"filePath":"/tmp/empty.txt","content":"","numLines":0,"startLine":1,"totalLines":0}
+        });
+        assert_eq!(
+            map_read_result_text(&empty).as_deref(),
+            Some(EMPTY_FILE_WARNING)
+        );
+        let blank_line = serde_json::json!({
+            "type": "text",
+            "file": {"filePath":"/tmp/a.txt","content":"","numLines":1,"startLine":3,"totalLines":9}
+        });
+        assert_eq!(map_read_result_text(&blank_line).as_deref(), Some("3\t"));
+        let unchanged = serde_json::json!({
+            "type": "file_unchanged", "file":{"filePath":"/tmp/a.txt"}
+        });
+        assert_eq!(
+            map_read_result_text(&unchanged).as_deref(),
+            Some(FILE_UNCHANGED_SHORT)
+        );
     }
 
     #[tokio::test]
@@ -3356,6 +3586,7 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         // model:None ⇒ Dh(undefined)=false ⇒ LONG prompt.
@@ -3395,6 +3626,7 @@ mod tests {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert_eq!(prompt, READ_PROMPT_SHORT);
@@ -3496,9 +3728,8 @@ mod tests {
         // Hold a handle to the shared registry BEFORE the ctx is moved into the
         // tool — the tool's `readFileState.set` mutates this same `Arc`.
         let map = ctx.read_file_state.clone();
+        let key = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let tool = FileReadTool::new(ctx);
-        // canonicalize the target the same way the tool keys the entry.
-        let canon = std::fs::canonicalize(&target).unwrap();
         tool.call(
             json!({ "file_path": target.to_str().unwrap(), "offset": 2, "limit": 1 }),
             fresh_ctx(),
@@ -3507,7 +3738,7 @@ mod tests {
         .await
         .unwrap();
         let entry =
-            tool_api::read_file_state::get(&map, &canon).expect("registry entry recorded on read");
+            tool_api::read_file_state::get(&map, &key).expect("registry entry recorded on read");
         // Content is the range-limited slice (TS stores `readFileInRange`'s
         // output), and offset/limit are the verbatim input values.
         assert_eq!(entry.content, "line2\n");
@@ -3524,8 +3755,8 @@ mod tests {
         std::fs::write(&target, "alpha\nbeta\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let map = ctx.read_file_state.clone();
+        let key = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let tool = FileReadTool::new(ctx);
-        let canon = std::fs::canonicalize(&target).unwrap();
         tool.call(
             json!({ "file_path": target.to_str().unwrap() }),
             fresh_ctx(),
@@ -3533,7 +3764,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let entry = tool_api::read_file_state::get(&map, &canon).unwrap();
+        let entry = tool_api::read_file_state::get(&map, &key).unwrap();
         assert_eq!(entry.content, "alpha\nbeta\n");
         assert_eq!(entry.offset, None);
         assert_eq!(entry.limit, None);
@@ -3853,8 +4084,8 @@ mod tests {
         std::fs::write(&target, sample_ipynb()).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
         let map = ctx.read_file_state.clone();
+        let key = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let tool = FileReadTool::new(ctx);
-        let canon = std::fs::canonicalize(&target).unwrap();
         tool.call(
             json!({ "file_path": target.to_str().unwrap() }),
             fresh_ctx(),
@@ -3862,7 +4093,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let entry = tool_api::read_file_state::get(&map, &canon).expect("notebook read recorded");
+        let entry = tool_api::read_file_state::get(&map, &key).expect("notebook read recorded");
         // A no-range notebook read is a full view (offset/limit None) and is
         // flagged as Read-sourced so the staleness guard accepts a follow-up
         // NotebookEdit and the dedup gate sees a Read entry.
@@ -4114,6 +4345,7 @@ mod tests {
         let target = tmp.path().join("wr.txt");
         let (ctx, _sink) = make_ctx(&tmp);
         let map = ctx.read_file_state.clone();
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = {
             std::fs::write(&target, "seed\n").unwrap();
             std::fs::canonicalize(&target).unwrap()
@@ -4125,7 +4357,7 @@ mod tests {
         // Simulate a Write's post-write entry: full view, but NOT from a Read.
         tool_api::read_file_state::set(
             &map,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content: "seed\n".into(),
                 mtime_ms,
@@ -4241,9 +4473,8 @@ mod tests {
             "fixture must actually trigger the truncation branch"
         );
 
-        let canon = std::fs::canonicalize(&target).unwrap();
-        let entry =
-            tool_api::read_file_state::get(&map, &canon).expect("the read recorded an entry");
+        let key = crate::normalize_model_file_path(target.to_str().unwrap(), tmp.path());
+        let entry = tool_api::read_file_state::get(&map, &key).expect("the read recorded an entry");
         assert!(
             entry.is_partial_view,
             "a token-truncated read is a PARTIAL view, not a full read"
@@ -4290,7 +4521,7 @@ mod tests {
             .await
             .expect("over-budget full read must gracefully truncate, not error");
         let mc = result.model_content.as_deref().unwrap();
-        let canon = std::fs::canonicalize(&target).unwrap();
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), tmp.path());
         // FT-08 (delivery): the banner is NOT inside the tool_result. Upstream
         // `Sgm` returns `{data:L}` and stashes the banner via `daf(L,R)`; the
         // dispatcher republishes it as a `read_truncation_notice` attachment.
@@ -4315,7 +4546,7 @@ mod tests {
                 content
                     .iter()
                     .find_map(|b| match b {
-                        lingxi_core::types::ContentBlock::Text { text } => Some(text.clone()),
+                        lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.clone()),
                         _ => None,
                     })
                     .expect("truncation notice text block")
@@ -4327,7 +4558,7 @@ mod tests {
         assert!(
             banner.starts_with(&format!(
                 "[Truncated: PARTIAL view \u{2014} {}: showing lines 1-",
-                canon.display()
+                route.display()
             )),
             "the notice must carry the partial-view banner WITH the full path: {banner}"
         );
@@ -4614,8 +4845,8 @@ mod tests {
         let target = tmp.path().join("LINGXI.md");
         std::fs::write(&target, "# rules\nbe good\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "# rules\nbe good\n", false);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "# rules\nbe good\n", false);
         let tool = FileReadTool::new(ctx);
 
         let r = tool
@@ -4655,8 +4886,8 @@ mod tests {
         let target = tmp.path().join("LINGXI.md");
         std::fs::write(&target, "# rules\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "# rules\n", false);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "# rules\n", false);
         let tool = FileReadTool::new(ctx);
 
         let r = tool
@@ -4678,14 +4909,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("LINGXI.md");
         std::fs::write(&target, "a\nb\nc\n").unwrap();
-        let canon = std::fs::canonicalize(&target).unwrap();
 
         for input in [
             json!({ "file_path": target.to_str().unwrap(), "offset": 2 }),
             json!({ "file_path": target.to_str().unwrap(), "limit": 2 }),
         ] {
             let (ctx, _sink) = make_ctx(&tmp);
-            seed_entry(&ctx, &canon, "a\nb\nc\n", false);
+            let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+            seed_entry(&ctx, &route, "a\nb\nc\n", false);
             let tool = FileReadTool::new(ctx);
             let r = tool
                 .call(input.clone(), fresh_ctx(), fresh_tx())
@@ -4708,8 +4939,8 @@ mod tests {
         let target = tmp.path().join("cond.md");
         std::fs::write(&target, "---\npaths: src/**\n---\nbody\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "---\npaths: src/**\n---\nbody\n", true);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "---\npaths: src/**\n---\nbody\n", true);
         let tool = FileReadTool::new(ctx);
 
         let r = tool
@@ -4731,8 +4962,8 @@ mod tests {
         let target = tmp.path().join("LINGXI.md");
         std::fs::write(&target, "v1\n").unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "v1\n", false);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "v1\n", false);
         // Rewrite with a clearly-advanced mtime.
         std::fs::write(&target, "v2\n").unwrap();
         filetime::set_file_mtime(
@@ -4764,8 +4995,8 @@ mod tests {
         std::fs::write(&target, "# rules\n").unwrap();
         let (ctx, sink) = make_ctx(&tmp);
         ctx.bus.attach_sink(sink.clone()).await;
-        let canon = std::fs::canonicalize(&target).unwrap();
-        seed_entry(&ctx, &canon, "# rules\n", false);
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
+        seed_entry(&ctx, &route, "# rules\n", false);
         let tool = FileReadTool::new(ctx);
 
         tool.call(
@@ -5062,7 +5293,7 @@ mod tests {
                 let text = content
                     .iter()
                     .find_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
+                        ContentBlock::Text { text, .. } => Some(text.as_str()),
                         _ => None,
                     })
                     .expect("note text");

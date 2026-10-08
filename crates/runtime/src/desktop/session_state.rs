@@ -20,16 +20,25 @@ use lingxi_core::host::{FusionPublicationReceipt, FusionPublicationStatus, Fusio
 use lingxi_core::types::SessionId;
 use session::jsonl::{DurableJournal, JournalError};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 #[cfg(test)]
 use std::sync::Condvar;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
 
 const COST_QUEUE_CAPACITY: usize = 64;
 
 mod attempts;
 mod retention;
+mod resume;
+pub(crate) use resume::capture_resume_cost;
+mod tool_execution;
 use attempts::AttemptProjection;
+use lingxi_core::host::{
+    DurableToolOutput, NativeReceiptRecord, NativeReceiptStage, ToolExecutionJournal,
+    ToolExecutionRecord, ToolExecutionStage, ToolJournalAck, ToolJournalError, ToolJournalRecovery,
+};
+use tool_execution::ToolProjection;
 
 #[derive(Debug, Clone, Default)]
 struct CoordinatorProjection {
@@ -1972,7 +1981,8 @@ impl CoordinatorState {
             };
             if !matches!(
                 record.source,
-                CostMutationSource::LegacyOpeningBalance
+                CostMutationSource::SessionOpeningState
+                    | CostMutationSource::LegacyOpeningBalance
                     | CostMutationSource::LegacyImportEvaluated
             ) {
                 continue;
@@ -2686,6 +2696,35 @@ mod tests {
         ));
     }
 
+    /// A damaged mixed ledger cannot prove that no side effect was started.
+    #[test]
+    fn corrupt_ledger_is_preserved_and_blocks_automatic_rebuild() {
+        let (_directory, coordinator, session_id) = coordinator();
+        let mutation_id = CostMutationId::new("cost-1");
+        coordinator
+            .journal()
+            .append_once(
+                mutation_id.as_str(),
+                &encode_session_event(&SessionEvent::Cost(CostMutationRecord {
+                    cost_revision: 1,
+                    mutation_id: mutation_id.clone(),
+                    source: CostMutationSource::ModelResponse,
+                    state: CostStateVector::from(&state(session_id, 1, 99)),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let wal = coordinator.journal().root().join("ledger.v1.jsonl");
+        let original = std::fs::read(&wal).unwrap();
+        let mut damaged = b"{not json\n".to_vec();
+        damaged.extend_from_slice(&original);
+        std::fs::write(&wal, &damaged).unwrap();
+        assert!(matches!(coordinator.hydrate_blocking(),
+            Err(CostPersistError::Storage(message)) if message.contains("tool execution outcomes may be unknown")));
+        assert_eq!(std::fs::read(&wal).unwrap(), damaged);
+        assert!(!coordinator.journal().root().join("quarantine").exists());
+    }
+
     /// A write that never reached the file is survivable: the journal only
     /// advances its revision after the write, its fsync and its fingerprint
     /// check all pass, so nothing was left behind and the session continues.
@@ -2781,6 +2820,19 @@ mod tests {
             !coordinator.journal().root().join("quarantine").exists(),
             "a frozen gate must not move the ledger aside"
         );
+    }
+
+    #[test]
+    fn snapshot_without_authoritative_wal_blocks_automatic_rebuild() {
+        let (_directory, coordinator, session_id) = coordinator();
+        coordinator
+            .journal()
+            .write_snapshot(1, &CostStateVector::from(&state(session_id, 1, 99)))
+            .unwrap();
+
+        // Missing WAL records could contain Started; retain evidence and fail closed.
+        assert!(coordinator.hydrate_blocking().is_err());
+        assert!(!coordinator.journal().root().join("quarantine").exists());
     }
 
     /// The projection snapshot has exactly one production reader: hydration
@@ -3784,11 +3836,13 @@ mod tests {
             .expect("retirement should unblock a fresh B mount")
             .unwrap()
             .unwrap();
-        assert!(coordinator_b.shares_authority(
-            &manager
-                .coordinator(session_b)
-                .expect("only retry publishes B")
-        ));
+        assert!(
+            coordinator_b.shares_authority(
+                &manager
+                    .coordinator(session_b)
+                    .expect("only retry publishes B")
+            )
+        );
         assert!(
             coordinator_a.shares_authority(&manager.ensure_coordinator(session_a).await.unwrap())
         );
@@ -3904,10 +3958,12 @@ mod tests {
             .import_legacy_opening_balance(None)
             .await
             .unwrap();
-        assert!(coordinator
-            .import_legacy_opening_balance(Some(99))
-            .await
-            .is_ok());
+        assert!(
+            coordinator
+                .import_legacy_opening_balance(Some(99))
+                .await
+                .is_ok()
+        );
         let hydration = coordinator.hydrate(session_id).await.unwrap();
         assert_eq!(hydration.state.total_nano_usd, 0);
         assert_eq!(hydration.state.legacy_opening_balance_nano_usd, 0);
@@ -3916,53 +3972,4 @@ mod tests {
         drop(coordinator);
         writer.await.unwrap();
     }
-
-    /// A damaged mixed ledger cannot prove that no side effect was started.
-    #[test]
-    fn corrupt_ledger_is_preserved_and_blocks_automatic_rebuild() {
-        let (_directory, coordinator, session_id) = coordinator();
-        let mutation_id = CostMutationId::new("cost-1");
-        coordinator
-            .journal()
-            .append_once(
-                mutation_id.as_str(),
-                &encode_session_event(&SessionEvent::Cost(CostMutationRecord {
-                    cost_revision: 1,
-                    mutation_id: mutation_id.clone(),
-                    source: CostMutationSource::ModelResponse,
-                    state: CostStateVector::from(&state(session_id, 1, 99)),
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        let wal = coordinator.journal().root().join("ledger.v1.jsonl");
-        let original = std::fs::read(&wal).unwrap();
-        let mut damaged = b"{not json\n".to_vec();
-        damaged.extend_from_slice(&original);
-        std::fs::write(&wal, &damaged).unwrap();
-        assert!(matches!(coordinator.hydrate_blocking(),
-            Err(CostPersistError::Storage(message)) if message.contains("tool execution outcomes may be unknown")));
-        assert_eq!(std::fs::read(&wal).unwrap(), damaged);
-        assert!(!coordinator.journal().root().join("quarantine").exists());
-    }
-
-    #[test]
-    fn snapshot_without_authoritative_wal_blocks_automatic_rebuild() {
-        let (_directory, coordinator, session_id) = coordinator();
-        coordinator
-            .journal()
-            .write_snapshot(1, &CostStateVector::from(&state(session_id, 1, 99)))
-            .unwrap();
-
-        // Missing WAL records could contain Started; retain evidence and fail closed.
-        assert!(coordinator.hydrate_blocking().is_err());
-        assert!(!coordinator.journal().root().join("quarantine").exists());
-    }
 }
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
-mod tool_execution;
-use lingxi_core::host::{
-    DurableToolOutput, NativeReceiptRecord, NativeReceiptStage, ToolExecutionJournal,
-    ToolExecutionRecord, ToolExecutionStage, ToolJournalAck, ToolJournalError, ToolJournalRecovery,
-};
-use tool_execution::ToolProjection;

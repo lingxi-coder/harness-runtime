@@ -123,7 +123,7 @@ impl Tool for ShareTool {
         };
         let outcome = share.share(payload).await.map_err(|e| map_share_err(&e))?;
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "shared": matches!(outcome, ShareResult::Success) }),
             model_content: None,
             new_messages: vec![],

@@ -11,15 +11,15 @@
 //!   reaches stop) and `EndOfStream` (when `message_stop` arrives).
 #![forbid(unsafe_code)]
 
-use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use super::StreamingError;
+use super::accumulator::{BlockAccumulator, BlockKind, CompletedBlock};
 use lingxi_core::host::OutputStream;
 use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonString};
 use lingxi_core::types::{ContentBlock, ToolUseId};
 use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryContentDelta, HistoryEvent,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Result of routing one `StreamEvent`. The streaming loop acts on each.
@@ -31,6 +31,7 @@ pub enum RouterAction {
     /// A `tool_use` block just completed at `content_block_stop`. The
     /// streaming loop spawns a dispatch IMMEDIATELY.
     DispatchToolUse {
+        input_projection: Option<Utf16JsonProjection>,
         /// Tool use identifier.
         id: ToolUseId,
         /// Tool name.
@@ -102,6 +103,11 @@ pub async fn dispatch_event(
         | HistoryEvent::ResponseObserved { .. }
         | HistoryEvent::CostQuoteObserved { .. } => Ok(RouterAction::Continue),
         HistoryEvent::MessageStart { response } => {
+            output.note_first_request_input_tokens(response.usage.counts().input_tokens);
+            output.note_response_timing(
+                lingxi_core::host::orchestrator::ResponseTimingEvent::MessageStart,
+                std::time::Instant::now(),
+            );
             // No-op for state; the loop already knows the model + id from
             // the turn invocation. claude-code captures `partialMessage`
             // and `ttftMs` here; we don't need those at the M5-04 wire.
@@ -150,6 +156,10 @@ pub async fn dispatch_event(
             index,
             content_block,
         } => {
+            output.note_response_timing(
+                lingxi_core::host::orchestrator::ResponseTimingEvent::ContentFrame,
+                std::time::Instant::now(),
+            );
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if output.wants_partial_stream_events() {
                 let event_json = reconstruct_content_block_event_json(index, &content_block);
@@ -187,7 +197,7 @@ pub async fn dispatch_event(
                     utf16_code_units: Some(utf16_code_units.clone()),
                     initial_text: text.clone(),
                 },
-                LlmContentBlock::ToolCall { id, name, .. } => BlockKind::ToolUse {
+                LlmContentBlock::ToolCall { id, name, input_projection, .. } => BlockKind::ToolUse { input_projection: input_projection.clone(),
                     // The provider-issued id IS the canonical ToolUseId (byte
                     // parity with claude-code). The provider_id sidecar is left
                     // None — the id already carries the canonical value.
@@ -232,9 +242,33 @@ pub async fn dispatch_event(
                 | LlmContentBlock::CacheEdits { .. } => BlockKind::Other,
             };
             acc.start_block(index, kind)?;
+            if !suppress_live_text {
+                match &content_block {
+                    LlmContentBlock::Text { text, .. } if !text.is_empty() => {
+                        output.emit_text(text, None).await;
+                    }
+                    LlmContentBlock::TextJsUtf16 { text, utf16_code_units, .. }
+                        if !text.is_empty() =>
+                    {
+                        output.emit_text(text, Some(utf16_code_units)).await;
+                    }
+                    LlmContentBlock::ProviderContent { protocol, value }
+                        if protocol == "anthropic_messages" && value["type"] == "text" =>
+                    {
+                        if let Some(text) = value.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) {
+                            output.emit_text(text, None).await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Ok(RouterAction::Continue)
         }
         HistoryEvent::ContentBlockDelta { index, delta } => {
+            output.note_response_timing(
+                lingxi_core::host::orchestrator::ResponseTimingEvent::ContentFrame,
+                std::time::Instant::now(),
+            );
             // stream-json P4: reconstruct SSE event for --include-partial-messages.
             if output.wants_partial_stream_events() {
                 if let Some(event_json) = reconstruct_delta_event_json(index, &delta) {
@@ -251,7 +285,7 @@ pub async fn dispatch_event(
                     // completed-message pass renders the full (possibly
                     // substituted) text once (see the `suppress_live_text` doc).
                     if !suppress_live_text {
-                        output.emit_text(&text).await;
+                        output.emit_text(&text, None).await;
                     }
                 }
                 HistoryContentDelta::TextJsUtf16Delta {
@@ -260,7 +294,7 @@ pub async fn dispatch_event(
                 } => {
                     acc.append_text_utf16(index, &utf16_code_units)?;
                     if !suppress_live_text {
-                        output.emit_text(&text).await;
+                        output.emit_text(&text, Some(&utf16_code_units)).await;
                     }
                 }
                 HistoryContentDelta::InputJsonDelta { partial_json } => {
@@ -307,6 +341,12 @@ pub async fn dispatch_event(
                 output.emit_stream_event(&event_json, false).await;
             }
             let completed = acc.stop_block(index)?;
+            if !matches!(&completed, CompletedBlock::Skipped) {
+                output.note_response_timing(
+                    lingxi_core::host::orchestrator::ResponseTimingEvent::AssistantMessage,
+                    std::time::Instant::now(),
+                );
+            }
             match completed {
                 CompletedBlock::Text {
                     text,
@@ -334,7 +374,9 @@ pub async fn dispatch_event(
                     id,
                     name,
                     input,
+                    mut input_projection,
                     provider_id,
+                    ..
                 } => {
                     // (cc 2.1.218 `jYd`) The STREAMING tool_use assembly must get
                     // the same literal-`\uXXXX` repair as the batched
@@ -345,7 +387,17 @@ pub async fn dispatch_event(
                     // before the block is pushed into the assistant message/JSONL.
                     let (input, _stats) =
                         llm_runtime::unicode_repair::repair_tool_input(&name, &input);
+                    if let Some(projection) = &mut input_projection {
+                        projection
+                            .rebase_display_value(input.clone())
+                            .map_err(|error| StreamingError::ToolUseJsonParse {
+                                index,
+                                reason: error.to_string(),
+                                buffer: input.to_string(),
+                            })?;
+                    }
                     Ok(RouterAction::DispatchToolUse {
+                        input_projection,
                         id,
                         name,
                         input,
@@ -572,6 +624,86 @@ mod tests {
     use super::*;
     use crate::test_support::MockOutputStream;
     use llm_runtime::HistoryMessageDelta;
+
+    #[derive(Default)]
+    struct ExactTextOutput {
+        chunks: tokio::sync::Mutex<Vec<(String, Option<Vec<u16>>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OutputStream for ExactTextOutput {
+        async fn emit_text(&self, text: &str, units: Option<&[u16]>) {
+            self.chunks.lock().await.push((text.to_owned(), units.map(<[u16]>::to_vec)));
+        }
+
+        async fn emit_tool_call(&self, _: &ToolUseId, _: &str, _: &Value, _: Option<&Utf16JsonProjection>) {}
+
+        async fn emit_tool_result(&self, _: &ToolUseId, _: &str, _: &str, _: &Value, _: Option<&lingxi_core::host::ToolResultProjection>) {}
+
+        async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
+    }
+
+    #[tokio::test]
+    async fn utf16_start_and_delta_keep_exact_units_without_duplicate_start_text() {
+        let mut acc = BlockAccumulator::new();
+        let capture = Arc::new(ExactTextOutput::default());
+        let output: Arc<dyn OutputStream> = capture.clone();
+        dispatch_event(
+            HistoryEvent::ContentBlockStart {
+                index: 0,
+                content_block: LlmContentBlock::TextJsUtf16 {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xd800],
+                    cache_control: None,
+                    citations: None,
+                },
+            },
+            &mut acc, &output, false, false,
+        ).await.unwrap();
+        dispatch_event(
+            HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: HistoryContentDelta::TextJsUtf16Delta {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xdc00],
+                },
+            },
+            &mut acc, &output, false, false,
+        ).await.unwrap();
+        let action = dispatch_event(
+            HistoryEvent::ContentBlockStop { index: 0 },
+            &mut acc, &output, false, false,
+        ).await.unwrap();
+        assert_eq!(*capture.chunks.lock().await, vec![("�".into(), Some(vec![0xd800])), ("�".into(), Some(vec![0xdc00]))]);
+        assert!(matches!(action, RouterAction::AppendAssistantBlock(ContentBlock::TextJsUtf16 { utf16_code_units, .. }) if utf16_code_units == [0xd800, 0xdc00]));
+    }
+
+    #[tokio::test]
+    async fn nonempty_plain_start_emits_once_and_display_hook_suppresses_rich_start() {
+        let mut acc = BlockAccumulator::new();
+        let capture = Arc::new(ExactTextOutput::default());
+        let output: Arc<dyn OutputStream> = capture.clone();
+        dispatch_event(
+            HistoryEvent::ContentBlockStart {
+                index: 0,
+                content_block: LlmContentBlock::Text { text: "seed".into(), cache_control: None, citations: None },
+            },
+            &mut acc, &output, false, false,
+        ).await.unwrap();
+        dispatch_event(
+            HistoryEvent::ContentBlockStart {
+                index: 1,
+                content_block: LlmContentBlock::TextJsUtf16 { text: "�".into(), utf16_code_units: vec![0xdfff], cache_control: None, citations: None },
+            },
+            &mut acc, &output, true, false,
+        ).await.unwrap();
+        let action = dispatch_event(
+            HistoryEvent::ContentBlockStop { index: 1 },
+            &mut acc, &output, true, false,
+        ).await.unwrap();
+        assert_eq!(*capture.chunks.lock().await, vec![("seed".into(), None)]);
+        assert!(matches!(action, RouterAction::AppendAssistantBlock(ContentBlock::TextJsUtf16 { utf16_code_units, .. }) if utf16_code_units == [0xdfff]));
+    }
 
     #[test]
     fn utf16_partial_delta_keeps_native_json_text_without_private_fields() {

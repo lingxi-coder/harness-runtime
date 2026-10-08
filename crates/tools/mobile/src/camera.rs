@@ -185,7 +185,7 @@ impl Tool for CameraTool {
             });
         }
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "type": "image",
                 "file": file,

@@ -93,7 +93,7 @@ impl Tool for AlwaysOkTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({"ok": true}),
             model_content: None,
             new_messages: vec![],
@@ -140,7 +140,7 @@ async fn tool_use_dispatched_before_message_stop() {
     let perms = Arc::new(NoOpPermissionGate);
     let memory = Arc::new(StaticMemoryProvider::empty());
 
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
         batched,
         api.clone(),
@@ -150,7 +150,7 @@ async fn tool_use_dispatched_before_message_stop() {
         output.clone(),
         memory,
         PathBuf::from("/tmp"),
-    );
+    ));
 
     let _outcome = orch.run_turn_streaming("call a tool").await.expect("ok");
 

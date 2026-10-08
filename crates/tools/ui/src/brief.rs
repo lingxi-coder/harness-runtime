@@ -393,7 +393,7 @@ impl Tool for BriefTool {
         md.insert("proactive".into(), AnalyticsValue::Bool(proactive));
         bus.log_event(BRIEF_COMPLETED, md).await;
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content: None,
             new_messages: vec![],

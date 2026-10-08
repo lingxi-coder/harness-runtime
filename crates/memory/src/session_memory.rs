@@ -645,14 +645,14 @@ mod tests {
     /// An assistant message requesting `n` tool calls.
     fn assistant_tools(n: usize) -> ConversationMessage {
         let content = (0..n)
-            .map(|i| ContentBlock::ToolUse {
+            .map(|i| ContentBlock::ToolUse { input_projection: None,
                 id: ToolUseId::new(),
                 provider_id: None,
                 name: format!("Tool{i}"),
                 input: serde_json::json!({}),
             })
             .collect();
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content,
             stop_reason: Some("tool_use".into()),
@@ -730,7 +730,7 @@ mod tests {
         let tool_turn = assistant_tools(1);
         assert!(!ex.should_extract(std::slice::from_ref(&tool_turn)));
 
-        let natural_turn = ConversationMessage::Assistant {
+        let natural_turn = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "done".to_string(),
@@ -806,7 +806,7 @@ mod tests {
             watermark,
             assistant_tools(1),
             user(&large_text),
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: "done".to_string(),

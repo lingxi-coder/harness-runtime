@@ -1,0 +1,658 @@
+{
+  "researchOnly": true,
+  "parityEstablished": false,
+  "fixture": "print-text",
+  "captureRoot": "/tmp/headless-baseline-293-harness-first-print-text",
+  "nativeVersion": "2.1.293",
+  "nativeBinarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "harnessBinarySha256": "0c115f0376081057c3003fea6d337b5b02c4a93196de9a0eb096644b6c660b4a",
+  "buildProvenance": {
+    "privateRuntimeSha": "857d4e991a413e26510707375d26bd2c3d64a639",
+    "privateSdkSha": "1b439995dda86b8155f250cae365ead361b0da55",
+    "privateBuild": "validation/run-002",
+    "productOverlays": "validation/run-002/product-overlays.jsonl",
+    "scope": "Explicit bounded v2 private CLI proof; does not validate later/current product UI changes."
+  },
+  "rules": "Exact frozen nativeNative.print-text rule copy registered for nativeHarness.print-text; no new normalization exemptions.",
+  "verdict": {
+    "nativeCapturesComplete": true,
+    "nativeStable": true,
+    "harnessInvoked": true,
+    "fullMatrixSelected": false,
+    "parityEstablished": false
+  },
+  "nativeNative": {
+    "equal": true,
+    "artifacts": 11
+  },
+  "captures": {
+    "print-text/native-a": {
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "timedOut": false,
+      "stdout": {
+        "bytes": 24,
+        "sha256": "4605a4223dd7f4d3fcc62f19200672ae830df3fa140fa179cd0eadd5ae203ab6"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "provider": {
+        "requestCount": 1,
+        "messageCount": 1,
+        "unexpected": [],
+        "socketErrors": []
+      },
+      "validation": true
+    },
+    "print-text/native-b": {
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "timedOut": false,
+      "stdout": {
+        "bytes": 24,
+        "sha256": "4605a4223dd7f4d3fcc62f19200672ae830df3fa140fa179cd0eadd5ae203ab6"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "provider": {
+        "requestCount": 1,
+        "messageCount": 1,
+        "unexpected": [],
+        "socketErrors": []
+      },
+      "validation": true
+    },
+    "print-text/harness": {
+      "exit": {
+        "code": null,
+        "signal": "SIGKILL"
+      },
+      "timedOut": true,
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "provider": {
+        "requestCount": 6,
+        "messageCount": 6,
+        "unexpected": [
+          "fixture-response-limit",
+          "fixture-response-limit",
+          "fixture-response-limit",
+          "fixture-response-limit",
+          "fixture-response-limit"
+        ],
+        "socketErrors": []
+      },
+      "validation": false
+    }
+  },
+  "firstProviderRequests": {
+    "nativeBytes": 978,
+    "harnessBytes": 45621,
+    "nativeTools": [],
+    "harnessTools": [
+      "Agent",
+      "Bash",
+      "computer",
+      "Edit",
+      "EnterPlanMode",
+      "ExitPlanMode",
+      "Glob",
+      "Grep",
+      "McpAuth",
+      "NotebookEdit",
+      "ObserverReport",
+      "PowerShell",
+      "Read",
+      "ReportFindings",
+      "Skill",
+      "Sleep",
+      "StructuredOutput",
+      "ToolSearch",
+      "WebFetch",
+      "WebSearch",
+      "Workflow",
+      "Write"
+    ],
+    "nativeFieldOrder": [
+      "model",
+      "messages",
+      "system",
+      "tools",
+      "metadata",
+      "max_tokens",
+      "thinking",
+      "context_management",
+      "output_config",
+      "stream"
+    ],
+    "harnessFieldOrder": [
+      "model",
+      "messages",
+      "system",
+      "tools",
+      "metadata",
+      "max_tokens",
+      "thinking",
+      "stream"
+    ],
+    "harnessUnrequestedSchemaTool": {
+      "name": "StructuredOutput",
+      "description": "Use this tool to return your final response in the requested structured format. You MUST call this tool exactly once at the end of your response to provide the structured output.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "harnessUnexpectedRetryLastUser": {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now.\n"
+        },
+        {
+          "type": "text",
+          "text": "<system-reminder>\n<total_tokens>14999997 tokens left</total_tokens>\n</system-reminder>",
+          "cache_control": {
+            "type": "ephemeral"
+          }
+        }
+      ]
+    }
+  },
+  "differences": [
+    {
+      "artifact": "processes/0/exit.json",
+      "equal": false,
+      "rawEqual": false,
+      "normalizedEqual": false,
+      "transformations": {
+        "left": [],
+        "right": []
+      },
+      "difference": {
+        "offset": 8,
+        "left": {
+          "length": 25,
+          "byte": 48,
+          "contextStart": 0,
+          "contextEnd": 25,
+          "hex": "7b22636f6465223a302c227369676e616c223a6e756c6c7d0a",
+          "text": "{\"code\":0,\"signal\":null}\n"
+        },
+        "right": {
+          "length": 33,
+          "byte": 110,
+          "contextStart": 0,
+          "contextEnd": 33,
+          "hex": "7b22636f6465223a6e756c6c2c227369676e616c223a225349474b494c4c227d0a",
+          "text": "{\"code\":null,\"signal\":\"SIGKILL\"}\n"
+        }
+      },
+      "left": {
+        "bytes": 25,
+        "sha256": "bcebd13d238a77ac126cc4e2019b18ca63df4a97ac56ee163379a4c768d3acd3"
+      },
+      "right": {
+        "bytes": 33,
+        "sha256": "dc50ed7c1b080220794b875b36cb61077e484756062017d39ef0a26e25dc21a4"
+      }
+    },
+    {
+      "artifact": "processes/0/sessions/projects/-private-tmp-headless-baseline-293-harness-first-print-text-print-text-workspace/6b7ff52d-e492-4084-88e2-5ad153e3c053.jsonl",
+      "equal": false,
+      "kind": "comparison-rejected",
+      "error": "NormalizationError: Replacement hit count mismatch",
+      "details": {
+        "rule": "dynamic-0-leafUuid-last-prompt",
+        "side": "right",
+        "expected": 2,
+        "actual": 0,
+        "path": "/leafUuid"
+      }
+    },
+    {
+      "artifact": "processes/0/stdout.bin",
+      "equal": false,
+      "rawEqual": false,
+      "normalizedEqual": false,
+      "transformations": {
+        "left": [],
+        "right": []
+      },
+      "difference": {
+        "offset": 0,
+        "left": {
+          "length": 24,
+          "byte": 72,
+          "contextStart": 0,
+          "contextEnd": 24,
+          "hex": "484541444c4553535f4c4f43414c5f524553504f4e53450a",
+          "text": "HEADLESS_LOCAL_RESPONSE\n"
+        },
+        "right": {
+          "length": 0,
+          "byte": null,
+          "contextStart": 0,
+          "contextEnd": 0,
+          "hex": "",
+          "text": ""
+        }
+      },
+      "left": {
+        "bytes": 24,
+        "sha256": "4605a4223dd7f4d3fcc62f19200672ae830df3fa140fa179cd0eadd5ae203ab6"
+      },
+      "right": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "artifact": "provider/000.request-body.bin",
+      "equal": false,
+      "rawEqual": false,
+      "normalizedEqual": false,
+      "transformations": {
+        "left": [
+          {
+            "rule": "metadata-device",
+            "kind": "inner-string-scalar",
+            "path": "/metadata/user_id::/device_id",
+            "start": 626,
+            "end": 694,
+            "originalHex": "5c22306335643637366430366166343461613865366533306138386131373237373234333638373330393333376239326339306533653836376532316535663135635c22",
+            "replacementHex": "5c22406964656e746974793a6465766963653a305c22"
+          }
+        ],
+        "right": [
+          {
+            "rule": "metadata-device",
+            "kind": "inner-string-scalar",
+            "path": "/metadata/user_id::/device_id",
+            "start": 45386,
+            "end": 45454,
+            "originalHex": "5c22313539643635336331643234343763653938376136303635346462343133636564653133626563623034356334633962386336643337323137666238343466305c22",
+            "replacementHex": "5c22406964656e746974793a6465766963653a305c22"
+          }
+        ]
+      },
+      "difference": {
+        "offset": 90,
+        "left": {
+          "length": 932,
+          "byte": 82,
+          "contextStart": 66,
+          "contextEnd": 115,
+          "hex": "5b7b2274797065223a2274657874222c2274657874223a2252657475726e20484541444c4553535f4c4f43414c5f524553",
+          "text": "[{\"type\":\"text\",\"text\":\"Return HEADLESS_LOCAL_RES"
+        },
+        "right": {
+          "length": 45575,
+          "byte": 60,
+          "contextStart": 66,
+          "contextEnd": 115,
+          "hex": "5b7b2274797065223a2274657874222c2274657874223a223c73797374656d2d72656d696e6465723e5c6e54686520666f",
+          "text": "[{\"type\":\"text\",\"text\":\"<system-reminder>\\nThe fo"
+        }
+      },
+      "left": {
+        "bytes": 978,
+        "sha256": "f9311f5ef73cc9c4b834bf9d9794b4f195eaafea9af7a7158b56ec8db277ee14"
+      },
+      "right": {
+        "bytes": 45621,
+        "sha256": "a45a61fd6b3718c3f8a11fe2db5ce7618817dbe62cbaea37a14ceae45fe409a1"
+      }
+    },
+    {
+      "artifact": "provider/000.request-headers.bin",
+      "equal": false,
+      "rawEqual": false,
+      "normalizedEqual": false,
+      "transformations": {
+        "left": [],
+        "right": []
+      },
+      "difference": {
+        "offset": 38,
+        "left": {
+          "length": 935,
+          "byte": 65,
+          "contextStart": 14,
+          "contextEnd": 63,
+          "hex": "6765733f626574613d7472756520485454502f312e310d0a4163636570743a206170706c69636174696f6e2f6a736f6e0d",
+          "text": "ges?beta=true HTTP/1.1\r\nAccept: application/json\r"
+        },
+        "right": {
+          "length": 908,
+          "byte": 97,
+          "contextStart": 14,
+          "contextEnd": 63,
+          "hex": "6765733f626574613d7472756520485454502f312e310d0a6163636570743a206170706c69636174696f6e2f6a736f6e0d",
+          "text": "ges?beta=true HTTP/1.1\r\naccept: application/json\r"
+        }
+      },
+      "left": {
+        "bytes": 935,
+        "sha256": "1c8e9e2215487fd26eb6b759719af3da8c195cf2bdf430268abcc1003e0e61a8"
+      },
+      "right": {
+        "bytes": 908,
+        "sha256": "d99af0b4aec324e58462fdebcedea9a311efb5e06e8a9109c6711421195106d2"
+      }
+    },
+    {
+      "artifact": "provider/000.request.bin",
+      "equal": false,
+      "rawEqual": false,
+      "normalizedEqual": false,
+      "transformations": {
+        "left": [
+          {
+            "rule": "metadata-device",
+            "kind": "inner-string-scalar",
+            "path": "/metadata/user_id::/device_id",
+            "start": 1561,
+            "end": 1629,
+            "originalHex": "5c22306335643637366430366166343461613865366533306138386131373237373234333638373330393333376239326339306533653836376532316535663135635c22",
+            "replacementHex": "5c22406964656e746974793a6465766963653a305c22"
+          }
+        ],
+        "right": [
+          {
+            "rule": "metadata-device",
+            "kind": "inner-string-scalar",
+            "path": "/metadata/user_id::/device_id",
+            "start": 46294,
+            "end": 46362,
+            "originalHex": "5c22313539643635336331643234343763653938376136303635346462343133636564653133626563623034356334633962386336643337323137666238343466305c22",
+            "replacementHex": "5c22406964656e746974793a6465766963653a305c22"
+          }
+        ]
+      },
+      "difference": {
+        "offset": 38,
+        "left": {
+          "length": 1867,
+          "byte": 65,
+          "contextStart": 14,
+          "contextEnd": 63,
+          "hex": "6765733f626574613d7472756520485454502f312e310d0a4163636570743a206170706c69636174696f6e2f6a736f6e0d",
+          "text": "ges?beta=true HTTP/1.1\r\nAccept: application/json\r"
+        },
+        "right": {
+          "length": 46483,
+          "byte": 97,
+          "contextStart": 14,
+          "contextEnd": 63,
+          "hex": "6765733f626574613d7472756520485454502f312e310d0a6163636570743a206170706c69636174696f6e2f6a736f6e0d",
+          "text": "ges?beta=true HTTP/1.1\r\naccept: application/json\r"
+        }
+      },
+      "left": {
+        "bytes": 1913,
+        "sha256": "55336a95c828d6c3fab924d9c15ebf9e90ba8070ff6cf04a2aca492891b3fc24"
+      },
+      "right": {
+        "bytes": 46529,
+        "sha256": "d7e00965a9c9aad1ab2f7d6fff88e4c9fa7e39db2899236cf2bc181cf82143ab"
+      }
+    },
+    {
+      "artifact": "processes/0/sessions/session-state/6b7ff52d-e492-4084-88e2-5ad153e3c053/ledger.v1.jsonl",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/001.offered-response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/001.request-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/001.request-headers.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/001.request.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/001.response-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/001.response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/002.offered-response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/002.request-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/002.request-headers.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/002.request.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/002.response-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/002.response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/003.offered-response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/003.request-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/003.request-headers.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/003.request.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/003.response-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/003.response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/004.offered-response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/004.request-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/004.request-headers.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/004.request.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/004.response-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/004.response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/005.offered-response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/005.request-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/005.request-headers.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/005.request.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/005.response-body.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    },
+    {
+      "artifact": "provider/005.response.bin",
+      "equal": false,
+      "kind": "missing-artifact",
+      "leftPresent": false,
+      "rightPresent": true
+    }
+  ],
+  "normalizationsExpanded": false,
+  "fixtureSymmetryAudit": {
+    "argvExact": true,
+    "cwdExact": true,
+    "stdinExact": true,
+    "stdinBytes": 0,
+    "environmentDifferences": {
+      "LINGXI_API_BASE_URL": {
+        "native": null,
+        "harness": "http://127.0.0.1:52679"
+      },
+      "LINGXI_CONFIG_DIR": {
+        "native": null,
+        "harness": "/tmp/headless-baseline-293-harness-first-print-text/print-text/state"
+      }
+    },
+    "environmentDifferencesMeaning": "Only explicit Harness aliases for same controlled provider/state; HOME and all common settings identical.",
+    "firstResponseWireExact": true,
+    "firstResponseBytes": 862,
+    "firstResponseSha256": "8e9582eda0a4500172c5ca9d692add80c01a11efbaf4b075d2247d8ef2a79389",
+    "nativePromptText": "Return HEADLESS_LOCAL_RESPONSE.",
+    "harnessPromptText": "Return HEADLESS_LOCAL_RESPONSE.\n",
+    "conclusion": "No recorded runner argument/stdin/context asymmetry explains the appended LF, tool expansion, schema enforcement or request-policy differences. Genuine observed runtime differences remain; exact production causes are under owner triage. No adapter or golden correction applied."
+  }
+}

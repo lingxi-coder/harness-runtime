@@ -53,7 +53,7 @@ impl ConversationOrchestrator {
             format!("<system-reminder>Warning: the file exists but is shorter than the provided offset ({start}). The file has {total} lines.</system-reminder>")
         };
         let input = serde_json::json!({"file_path": filename});
-        Some(ConversationMessage::User {
+        Some(ConversationMessage::User { api_message_override: None,
             id,
             content: vec![
                 ContentBlock::Text {
@@ -426,7 +426,7 @@ mod tests {
                 &attachment,
             )
             .unwrap();
-            let system = ConversationMessage::System {
+            let system = ConversationMessage::System { api_system: None,
                 id: MessageId::new(),
                 content: if typed {
                     "arbitrary typed boundary body".into()

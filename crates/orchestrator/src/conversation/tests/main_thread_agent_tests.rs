@@ -118,6 +118,9 @@ impl Tool for NamedTool {
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             data: json!({ "content": "ok" }),
             model_content: None,
             new_messages: vec![],
@@ -149,7 +152,8 @@ fn orch_with_tools(names: &[&'static str]) -> ConversationOrchestrator {
 /// The set of `name` fields the wire tool array advertises.
 async fn wire_tool_names(orch: &ConversationOrchestrator) -> Vec<String> {
     orch.build_wire_tools()
-        .await.0
+        .await
+        .0
         .into_iter()
         .filter_map(|t| {
             t.get("name")
@@ -490,18 +494,20 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
             ));
         session
             .history
-            .push(lingxi_core::types::ConversationMessage::Assistant {
+            .push(lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![
                     lingxi_core::types::ContentBlock::Text {
-                        text: " first line ".to_string(), citations: None,
+                        text: " first line ".to_string(),
+                        citations: None,
                     },
                     lingxi_core::types::ContentBlock::Thinking {
                         thinking: "hidden".to_string(),
                         signature: None,
                     },
                     lingxi_core::types::ContentBlock::Text {
-                        text: "second line ".to_string(), citations: None,
+                        text: "second line ".to_string(),
+                        citations: None,
                     },
                 ],
                 stop_reason: Some("end_turn".to_string()),
@@ -530,10 +536,11 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
         .lock()
         .await
         .history
-        .push(lingxi_core::types::ConversationMessage::Assistant {
+        .push(lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
-                text: "   ".to_string(), citations: None,
+                text: "   ".to_string(),
+                citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         });
@@ -962,4 +969,76 @@ async fn main_thread_agent_no_model_override_leaves_session_model() {
     )
     .await;
     assert_eq!(orch.session().lock().await.model, "base-model");
+}
+
+/// Native 2.1.293 surfaces a provider APIError without the taxonomy's
+/// `invalid request:` prefix. Local validator failures have no provider status.
+#[tokio::test]
+async fn provider_invalid_request_uses_native_api_error_copy() {
+    let orch = orch_with_config(OrchestratorConfig::default());
+    for (message, expected) in [
+        (
+            "400 HEADLESS_LOCAL_PROVIDER_ERROR",
+            "API Error: 400 HEADLESS_LOCAL_PROVIDER_ERROR",
+        ),
+        (
+            r#"400 {"type":"error","error":{"message":"bad request"}}"#,
+            "API Error: 400 bad request",
+        ),
+        (
+            r#"422 {"error":{"message":"unsupported field"}}"#,
+            "API Error: 422 unsupported field",
+        ),
+        (
+            "invalid model configuration",
+            "invalid request: invalid model configuration",
+        ),
+    ] {
+        assert_eq!(
+            orch.model_error_text(&LlmError::InvalidRequest {
+                message: message.into()
+            })
+            .await,
+            expected,
+        );
+    }
+}
+
+/// The result status comes from the typed provider error, not the legacy
+/// envelope fallback which categorizes local InvalidRequest errors as 400.
+#[tokio::test]
+async fn graceful_provider_error_metrics_preserve_actual_status_without_guessing() {
+    use crate::test_support::MockStreamingApiClient;
+    for (message, expected_status) in [
+        ("400 HEADLESS_LOCAL_PROVIDER_ERROR", Some(400)),
+        ("422 unsupported field", Some(422)),
+        ("invalid model configuration", None),
+    ] {
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(MockStreamingApiClient::with_open_error(
+                LlmError::InvalidRequest {
+                    message: message.into(),
+                },
+                vec![],
+            )),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/work/repo"),
+        );
+        orch.run_turn_streaming_with_cancel("hi", tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("APIError remains a graceful assistant result");
+        let metrics = orch.completed_turn_metrics().unwrap();
+        assert_eq!(metrics.stop_reason.as_deref(), Some("model_error"));
+        assert_eq!(metrics.api_error_status, expected_status);
+        assert_eq!(
+            metrics.api_error_stop_reason.as_deref(),
+            Some("stop_sequence")
+        );
+    }
 }

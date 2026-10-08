@@ -979,7 +979,7 @@ mod tests {
         content
             .iter()
             .find_map(|block| match block {
-                lingxi_core::types::ContentBlock::Text { text } => Some(text.as_str()),
+                lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .expect("user text")

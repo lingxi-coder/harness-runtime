@@ -129,7 +129,7 @@ async fn wire_tools_contain_per_server_fqn_entries_with_server_schema() {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "done".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -213,7 +213,7 @@ async fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn_inner() {
 
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![LlmContentBlock::ToolCall {
+            vec![LlmContentBlock::ToolCall { input_projection: None,
                 id: ToolUseId::new().to_string(),
                 // The model addresses the tool by its NORMALIZED model-facing FQN.
                 name: "mcp__mock__a_b".into(),
@@ -224,7 +224,7 @@ async fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn_inner() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -270,7 +270,7 @@ async fn dispatch_routes_fqn_tool_use_to_server_call_tool_inner() {
     // Turn 1: model invokes mcp__mock__a. Turn 2: model ends.
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![LlmContentBlock::ToolCall {
+            vec![LlmContentBlock::ToolCall { input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: "mcp__mock__a".into(),
                 input: serde_json::json!({ "x": 1 }),
@@ -280,7 +280,7 @@ async fn dispatch_routes_fqn_tool_use_to_server_call_tool_inner() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "all done".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),
@@ -343,7 +343,7 @@ async fn dispatch_unknown_mcp_tool_hits_tool_not_found() {
 
     let api = Arc::new(MockApiClient::new(vec![
         mock_message_response(
-            vec![LlmContentBlock::ToolCall {
+            vec![LlmContentBlock::ToolCall { input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: "mcp__unknown__x".into(),
                 input: serde_json::json!({}),
@@ -353,7 +353,7 @@ async fn dispatch_unknown_mcp_tool_hits_tool_not_found() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "recovered".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("end_turn"),
         ),

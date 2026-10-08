@@ -2,6 +2,7 @@
 
 use super::*;
 use hooks::attachment::HookPublicationGuard;
+use lingxi_core::types::ContentBlock;
 
 fn erase_tool_dispatch_fence(
     fence: crate::autonomous_tool_scheduler::ToolDispatchPublicationFence,
@@ -64,15 +65,44 @@ pub(crate) struct ModResultStage {
     /// permissioned dispatcher, but must not publish the virtual tool row or
     /// persist frame-only side channels into the outer conversation.
     virtual_tool_call: bool,
-    pub(crate) tool_use_result: Option<serde_json::Value>,
+    pub(crate) tool_use_result: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     frame: Option<PendingToolFrame>,
-    mcp_meta: Option<serde_json::Value>,
+    mcp_meta: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     turn_end: Option<tool_api::tool_trait::ToolResultTurnEnd>,
     denial_kind: Option<String>,
-    permission_denial: Option<(String, serde_json::Value)>,
+    permission_denial: Option<(String, lingxi_core::types::utf16_json::Utf16JsonProjection)>,
 }
 
 impl ModResultStage {
+    pub(crate) fn mod_answer_projection(
+        &self,
+        display: &str,
+    ) -> Result<
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::types::utf16_json::Utf16JsonProjectionError,
+    > {
+        use lingxi_core::types::utf16_json::{Utf16JsonProjection, Utf16JsonProjectionError};
+        let data = self
+            .tool_use_result
+            .clone()
+            .unwrap_or_else(|| serde_json::Value::String(display.to_owned()).into());
+        let text = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.projection.as_ref())
+            .and_then(|projection| projection.model_text.clone())
+            .unwrap_or_else(|| serde_json::Value::String(display.to_owned()).into());
+        if text.value.as_str() != Some(display) {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "Mod result text association changed",
+            ));
+        }
+        let mut answer =
+            Utf16JsonProjection::plain(serde_json::json!({"result":data.value,"text":text.value}));
+        answer.set_pointer("/result", data)?;
+        answer.set_pointer("/text", text)?;
+        Ok(answer)
+    }
     pub(crate) fn denial_kind(&self) -> Option<&str> {
         self.denial_kind.as_deref()
     }
@@ -81,9 +111,11 @@ impl ModResultStage {
         self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        replacement: Option<(serde_json::Value, String)>,
+        replacement: Option<(lingxi_core::host::ToolResultProjection, String)>,
     ) -> crate::turn_loop::ToolResultPublication {
-        if let Some((raw, model_text)) = replacement {
+        if let Some((mut projection, model_text)) = replacement {
+            projection.mcp_meta = self.mcp_meta.clone();
+            let raw = projection.data.clone();
             return crate::turn_loop::ToolResultPublication {
                 tool_use_id: id.clone(),
                 tool_use_result: Some(raw.clone()),
@@ -92,9 +124,10 @@ impl ModResultStage {
                 denial_kind: self.denial_kind,
                 permission_denial: self.permission_denial,
                 frame: Some(crate::turn_loop::ToolResultFramePublication {
+                    projection: Some(projection),
                     tool: tool.to_owned(),
                     model_text,
-                    result: raw,
+                    result: raw.value,
                     denial_kind: None,
                 }),
             };
@@ -109,6 +142,7 @@ impl ModResultStage {
             frame: self
                 .frame
                 .map(|frame| crate::turn_loop::ToolResultFramePublication {
+                    projection: frame.projection,
                     tool: frame.tool,
                     model_text: frame.model_text,
                     result: frame.result,
@@ -203,6 +237,7 @@ fn mod_append_content_block(block: &lingxi_core::types::ContentBlock) -> serde_j
             name,
             input,
             provider_id,
+            ..
         } => serde_json::json!({
             "type":"tool_use",
             "id":provider_id.as_deref().unwrap_or_else(|| id.as_str()),
@@ -215,6 +250,7 @@ fn mod_append_content_block(block: &lingxi_core::types::ContentBlock) -> serde_j
             is_error,
             provider_tool_use_id,
             content_blocks,
+            ..
         } => {
             let mut value = serde_json::json!({
                 "type":"tool_result",
@@ -283,36 +319,6 @@ fn mod_append_message(message: &ConversationMessage) -> serde_json::Value {
         result["isMeta"] = serde_json::Value::Bool(true);
     }
     result
-}
-
-fn mod_append_content_utf16_sidecars(
-    message: &ConversationMessage,
-    pointer_prefix: &str,
-) -> Vec<hooks::mods::ModUtf16StringSidecar> {
-    use lingxi_core::types::ContentBlock;
-
-    let content = match message {
-        ConversationMessage::User { content, .. }
-        | ConversationMessage::Assistant { content, .. } => content,
-        ConversationMessage::System { .. } => return Vec::new(),
-    };
-    content
-        .iter()
-        .enumerate()
-        .filter_map(|(index, block)| {
-            let ContentBlock::TextJsUtf16 {
-                utf16_code_units, ..
-            } = block
-            else {
-                return None;
-            };
-            String::from_utf16(utf16_code_units).err()?;
-            Some(hooks::mods::ModUtf16StringSidecar {
-                pointer: format!("{pointer_prefix}/content/{index}/text"),
-                code_units: utf16_code_units.clone(),
-            })
-        })
-        .collect()
 }
 
 fn mod_append_text_parts(
@@ -411,35 +417,78 @@ fn mod_append_new_text_block(
     })
 }
 
+fn mod_append_exact_message(
+    message: &ConversationMessage,
+) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String> {
+    message
+        .project_native_content(mod_append_message(message), "/content")
+        .map_err(|error| error.to_string())
+}
+
 fn mod_append_projection_matches(
     expected: &ConversationMessage,
     actual: &serde_json::Value,
     actual_strings: &[hooks::mods::ModUtf16StringSidecar],
+    actual_keys: &[hooks::mods::ModUtf16KeySidecar],
 ) -> bool {
-    let expected_strings = mod_append_content_utf16_sidecars(expected, "/message");
-    let mut actual_strings = actual_strings.to_vec();
-    actual_strings.sort_by(|left, right| left.pointer.cmp(&right.pointer));
-    let mut expected_strings = expected_strings;
-    expected_strings.sort_by(|left, right| left.pointer.cmp(&right.pointer));
-    actual == &mod_append_message(expected) && actual_strings == expected_strings
+    let actual = hooks::mods::ModUtf16ValueProjection {
+        value: serde_json::json!({"message":actual}),
+        strings: actual_strings.to_vec(),
+        keys: actual_keys.to_vec(),
+    }
+    .into_core_projection()
+    .and_then(|projection| {
+        projection
+            .subprojection("/message")
+            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
+    })
+    .and_then(|projection| {
+        projection
+            .to_json_string()
+            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
+    });
+    let expected = mod_append_exact_message(expected).and_then(|projection| {
+        projection
+            .to_json_string()
+            .map_err(|error| error.to_string())
+    });
+    matches!((actual, expected), (Ok(actual), Ok(expected)) if actual == expected)
 }
 
 fn rewrite_mod_append_tool_result_blocks(
     original: Option<&Vec<serde_json::Value>>,
     incoming: &[serde_json::Value],
+    original_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    incoming_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> Vec<serde_json::Value> {
     let original = original.map_or(&[][..], Vec::as_slice);
     let mut used = vec![false; original.len()];
     incoming
         .iter()
-        .filter_map(|block| {
-            if let Some((index, old)) = original
-                .iter()
-                .enumerate()
-                .find(|(index, old)| !used[*index] && *old == block)
-            {
+        .enumerate()
+        .filter_map(|(incoming_index, block)| {
+            if let Some((index, old)) = original.iter().enumerate().find(|(index, old)| {
+                if used[*index] {
+                    return false;
+                }
+                if let (Some(original), Some(incoming)) = (original_projection, incoming_projection)
+                {
+                    let old = original
+                        .subprojection(&format!("/{index}"))
+                        .and_then(|p| p.to_json_string());
+                    let new = incoming
+                        .subprojection(&format!("/{incoming_index}"))
+                        .and_then(|p| p.to_json_string());
+                    return matches!((old, new), (Ok(old), Ok(new)) if old == new);
+                }
+                *old == block
+            }) {
                 used[index] = true;
-                return Some(old.clone());
+                return Some(if incoming_projection.is_some() {
+                    block.clone()
+                } else {
+                    old.clone()
+                });
             }
             if block.get("type").and_then(serde_json::Value::as_str) == Some("text")
                 && block
@@ -461,6 +510,7 @@ fn rewrite_mod_append_tool_result_blocks(
 fn rewrite_mod_append_tool_result(
     original: &lingxi_core::types::ContentBlock,
     incoming: &serde_json::Value,
+    source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> lingxi_core::types::ContentBlock {
     use lingxi_core::types::ContentBlock;
 
@@ -470,6 +520,8 @@ fn rewrite_mod_append_tool_result(
         is_error: _,
         provider_tool_use_id,
         content_blocks,
+        content_projection,
+        ..
     } = original
     else {
         return original.clone();
@@ -503,8 +555,12 @@ fn rewrite_mod_append_tool_result(
                 if content_blocks.as_ref().is_some_and(|old| old == blocks) {
                     next_content_blocks = Some(blocks.clone());
                 } else {
-                    let blocks =
-                        rewrite_mod_append_tool_result_blocks(content_blocks.as_ref(), blocks);
+                    let blocks = rewrite_mod_append_tool_result_blocks(
+                        content_blocks.as_ref(),
+                        blocks,
+                        content_projection.as_ref(),
+                        source,
+                    );
                     next_content = blocks
                         .iter()
                         .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
@@ -516,7 +572,15 @@ fn rewrite_mod_append_tool_result(
             _ => {}
         }
     }
+    let projected = content_projection.as_ref().and_then(|projection| {
+        let value = next_content_blocks
+            .as_ref()
+            .map(|blocks| serde_json::Value::Array(blocks.clone()))
+            .unwrap_or_else(|| serde_json::Value::String(next_content.clone()));
+        (incoming.get("content").is_none() && projection.value == value).then(|| projection.clone())
+    });
     ContentBlock::ToolResult {
+        content_projection: projected,
         tool_use_id: tool_use_id.clone(),
         content: next_content,
         // Native treats a missing is_error as false; the rewritten row should
@@ -556,6 +620,7 @@ fn rewrite_mod_append_blocks(
     original: &[lingxi_core::types::ContentBlock],
     incoming: &[serde_json::Value],
     strings: &[hooks::mods::ModUtf16StringSidecar],
+    source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> Vec<lingxi_core::types::ContentBlock> {
     use lingxi_core::types::ContentBlock;
 
@@ -611,7 +676,8 @@ fn rewrite_mod_append_blocks(
     let mut raised_source_blocks = vec![false; original.len()];
     let mut active_anchor = None::<String>;
     let mut overlays = std::collections::HashMap::<Option<String>, Vec<ContentBlock>>::new();
-    let mut tool_result_overlays = std::collections::HashMap::<String, serde_json::Value>::new();
+    let mut tool_result_overlays =
+        std::collections::HashMap::<String, (usize, serde_json::Value)>::new();
 
     for (incoming_index, block) in incoming.iter().enumerate() {
         let text_pointer = format!("/message/content/{incoming_index}/text");
@@ -672,7 +738,7 @@ fn rewrite_mod_append_blocks(
         };
         active_anchor = Some(identity_key.clone());
         if kind == "tool_result" {
-            tool_result_overlays.insert(identity_key, block.clone());
+            tool_result_overlays.insert(identity_key, (incoming_index, block.clone()));
         }
     }
 
@@ -698,8 +764,30 @@ fn rewrite_mod_append_blocks(
         }
         if let Some(identity_key) = &source_keys[index] {
             let block = match (&original[index], tool_result_overlays.get(identity_key)) {
-                (ContentBlock::ToolResult { .. }, Some(incoming)) => {
-                    rewrite_mod_append_tool_result(&original[index], incoming)
+                (ContentBlock::ToolResult { .. }, Some((incoming_index, incoming))) => {
+                    let content_source = source.and_then(|source| {
+                        source
+                            .subprojection(&format!("/message/content/{incoming_index}/content"))
+                            .ok()
+                    });
+                    let mut result = rewrite_mod_append_tool_result(
+                        &original[index],
+                        incoming,
+                        content_source.as_ref(),
+                    );
+                    if incoming
+                        .get("is_error")
+                        .is_none_or(serde_json::Value::is_boolean)
+                    {
+                        if let Some(exact) = content_source
+                            .filter(|exact| exact.value.is_string() || exact.value.is_array())
+                        {
+                            result
+                                .rebase_tool_result_projection(exact)
+                                .expect("validated result content rewrite");
+                        }
+                    }
+                    result
                 }
                 _ => original[index].clone(),
             };
@@ -723,6 +811,7 @@ fn rewrite_mod_append_message(
     original: &ConversationMessage,
     incoming: &serde_json::Value,
     strings: &[hooks::mods::ModUtf16StringSidecar],
+    source: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> Result<ConversationMessage, String> {
     let Some(content) = incoming
         .get("content")
@@ -737,25 +826,38 @@ fn rewrite_mod_append_message(
             is_meta,
             is_compact_summary,
             is_visible_in_transcript_only,
-        } => ConversationMessage::User {
-            id: *id,
-            content: rewrite_mod_append_blocks(old_content, content, strings),
-            is_meta: *is_meta,
-            is_compact_summary: *is_compact_summary,
-            is_visible_in_transcript_only: *is_visible_in_transcript_only,
-        },
+            api_message_override,
+        } => {
+            let content = rewrite_mod_append_blocks(old_content, content, strings, source);
+            ConversationMessage::User {
+                api_message_override: api_message_override.as_ref().map(|override_message| {
+                    lingxi_core::types::messages::ApiSystemMessage {
+                        content: content.clone(),
+                        output_config: override_message.output_config.clone(),
+                    }
+                }),
+                id: *id,
+                content,
+                is_meta: *is_meta,
+                is_compact_summary: *is_compact_summary,
+                is_visible_in_transcript_only: *is_visible_in_transcript_only,
+            }
+        }
         ConversationMessage::Assistant {
             id,
             content: old_content,
             stop_reason,
+            per_turn_effort,
         } => ConversationMessage::Assistant {
+            per_turn_effort: per_turn_effort.clone(),
             id: *id,
-            content: rewrite_mod_append_blocks(old_content, content, strings),
+            content: rewrite_mod_append_blocks(old_content, content, strings, source),
             stop_reason: stop_reason.clone(),
         },
         ConversationMessage::System {
             id,
             subtype,
+            api_system,
             compact_metadata,
             model_fallback,
             refusal_fallback,
@@ -770,6 +872,17 @@ fn rewrite_mod_append_message(
                 .collect::<Vec<_>>()
                 .join("\n");
             ConversationMessage::System {
+                api_system: api_system.as_ref().map(|payload| {
+                    lingxi_core::types::ApiSystemMessage {
+                        content: rewrite_mod_append_blocks(
+                            &payload.content,
+                            &content,
+                            strings,
+                            source,
+                        ),
+                        output_config: payload.output_config.clone(),
+                    }
+                }),
                 id: *id,
                 content: replacement,
                 subtype: subtype.clone(),
@@ -906,13 +1019,23 @@ impl ConversationOrchestrator {
             .map(str::to_owned)
             .unwrap_or_else(|| original.id().as_uuid().to_string());
         let (door, origin) = self.mod_append_door_origin(&original).await;
-        let input_utf16_strings = mod_append_content_utf16_sidecars(&original, "/message");
         let input = serde_json::json!({
             "message":mod_append_message(&original),
             "door":door,
             "origin":origin,
             "uuid":uuid.clone(),
         });
+        let input_projection = match original
+            .project_native_content(input.clone(), "/message/content")
+            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
+            .and_then(hooks::mods::ModUtf16ValueProjection::from_core_projection)
+        {
+            Ok(projection) => projection,
+            Err(error) => {
+                tracing::warn!(%uuid, %error, "invalid session.append source projection");
+                return original;
+            }
+        };
         let core_input = input.clone();
         let core_uuid = uuid.clone();
         let core_original = original.clone();
@@ -941,11 +1064,7 @@ impl ConversationOrchestrator {
         let dispatched = host
             .dispatch_with_utf16_at_context(
                 "session.append",
-                hooks::mods::ModUtf16ValueProjection {
-                    value: input,
-                    strings: input_utf16_strings,
-                    keys: Vec::new(),
-                },
+                input_projection,
                 &cwd,
                 Some(session),
                 None,
@@ -957,9 +1076,10 @@ impl ConversationOrchestrator {
                     let core_uuid = core_uuid.clone();
                     let core_original = core_original.clone();
                     let applied = applied_by_core.clone();
-                    let forwarded = forwarded_projection.value;
-                    let input_utf16_strings = forwarded_projection.strings;
                     async move {
+                        let input_utf16_strings = forwarded_projection.strings.clone();
+                        let source = forwarded_projection.into_core_projection()?;
+                        let forwarded = &source.value;
                         for key in ["door", "origin", "uuid", "agentId"] {
                             if forwarded
                                 .get(key)
@@ -990,20 +1110,22 @@ impl ConversationOrchestrator {
                             &core_original,
                             incoming,
                             &input_utf16_strings,
+                            Some(&source),
                         )
                         .map_err(hooks::mods::ModError::Hook)?;
-                        let projected = mod_append_message(&rewritten);
-                        let result_utf16_strings =
-                            mod_append_content_utf16_sidecars(&rewritten, "/message");
+                        let projected = mod_append_exact_message(&rewritten)
+                            .map_err(hooks::mods::ModError::Hook)?;
                         *applied
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some((rewritten, projected.clone()));
-                        Ok(hooks::mods::ModUtf16ValueProjection {
-                            value: serde_json::json!({"message":projected,"uuid":core_uuid}),
-                            strings: result_utf16_strings,
-                            keys: Vec::new(),
-                        })
+                            Some((rewritten, projected.value.clone()));
+                        let mut result = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                            serde_json::json!({"message":projected.value,"uuid":core_uuid}),
+                        );
+                        result
+                            .set_pointer("/message", projected)
+                            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+                        hooks::mods::ModUtf16ValueProjection::from_core_projection(result)
                     }
                 },
                 move |plugin, text| {
@@ -1060,6 +1182,7 @@ impl ConversationOrchestrator {
             Ok(outcome) => {
                 let result = outcome.result;
                 let result_utf16_strings = outcome.result_utf16_strings;
+                let result_utf16_keys = outcome.result_utf16_keys;
                 let accepted = applied
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1071,6 +1194,7 @@ impl ConversationOrchestrator {
                                 &rewritten,
                                 &result["message"],
                                 &result_utf16_strings,
+                                &result_utf16_keys,
                             ) =>
                     {
                         rewritten
@@ -1103,9 +1227,11 @@ impl ConversationOrchestrator {
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
         stage: ModResultStage,
-        replacement: Option<(serde_json::Value, String)>,
+        replacement: Option<(lingxi_core::host::ToolResultProjection, String)>,
     ) {
-        if let Some((raw, text)) = replacement {
+        if let Some((mut projection, text)) = replacement {
+            projection.mcp_meta = stage.mcp_meta.clone();
+            let raw = projection.data.clone();
             // Native's ref-backed result rewrite reconstructs the selected
             // result row while retaining the selected run's MCP metadata and
             // turn-end marker. The direct `$.tool.call()` virtual-frame path
@@ -1122,7 +1248,7 @@ impl ConversationOrchestrator {
                 self.record_pending_tool_result_turn_end(id, turn_end).await;
             }
             self.record_tool_use_result(id, raw.clone()).await;
-            self.emit_tool_result_frame(id, tool, &text, &raw, None)
+            self.emit_tool_result_frame(id, tool, &text, &raw.value, None, Some(&projection))
                 .await;
             return;
         }
@@ -1149,6 +1275,7 @@ impl ConversationOrchestrator {
                 &frame.model_text,
                 &frame.result,
                 frame.denial_kind.as_deref(),
+                frame.projection.as_ref(),
             )
             .await;
         }
@@ -1196,6 +1323,7 @@ impl ConversationOrchestrator {
             payload["foldedUuids"] = serde_json::json!(uuids);
         }
         let record = ConversationMessage::System {
+            api_system: None,
             id: fire.fire_id,
             content: payload.to_string(),
             subtype: Some("scheduled_task_fire".into()),
@@ -1354,11 +1482,13 @@ impl ConversationOrchestrator {
         model_text: &str,
         result: &serde_json::Value,
         denial_kind: Option<&str>,
+        projection: Option<&lingxi_core::host::ToolResultProjection>,
     ) {
         if let Some(stage) = active_mod_result_stage() {
             let mut stage = stage.lock().await;
             if stage.tool_use_id == id.as_str() {
                 stage.frame = Some(PendingToolFrame {
+                    projection: projection.cloned(),
                     tool: tool.to_string(),
                     model_text: model_text.to_string(),
                     result: result.clone(),
@@ -1371,6 +1501,7 @@ impl ConversationOrchestrator {
             buf.insert(
                 id.to_string(),
                 PendingToolFrame {
+                    projection: projection.cloned(),
                     tool: tool.to_string(),
                     model_text: model_text.to_string(),
                     result: result.clone(),
@@ -1382,12 +1513,12 @@ impl ConversationOrchestrator {
         match denial_kind {
             Some(kind) => {
                 self.output
-                    .emit_tool_result_denied(id, tool, model_text, result, kind)
+                    .emit_tool_result_denied(id, tool, model_text, result, kind, projection)
                     .await;
             }
             None => {
                 self.output
-                    .emit_tool_result(id, tool, model_text, result)
+                    .emit_tool_result(id, tool, model_text, result, projection)
                     .await
             }
         }
@@ -1471,39 +1602,72 @@ impl ConversationOrchestrator {
             .get(&id_key)
             .cloned();
         let substituted = pending.as_ref().is_some_and(|p| p.model_text != content);
-        let (tool, pending_result, pending_denial_kind) = match pending {
+        let (tool, pending_result, pending_denial_kind, pending_projection) = match pending {
             // A substitution replaced the model-facing text, so the buffered
             // payload describes an outcome that was DISCARDED. claude-code's
             // synthetic carries a synthetic `toolUseResult` too, so the real
             // one must not reach the SDK.
-            Some(p) => (p.tool, Some(p.result), p.denial_kind),
+            Some(p) => (p.tool, Some(p.result), p.denial_kind, p.projection),
             // Actor-backed dispatches carry their frame only when Tn accepts
             // the completed row; it was deliberately not emitted from W1.
             None => match publication {
-                Some(frame) => (frame.tool, Some(frame.result), frame.denial_kind),
+                Some(frame) => (
+                    frame.tool,
+                    Some(frame.result),
+                    frame.denial_kind,
+                    frame.projection,
+                ),
                 // Never dispatched: synthesize the payload the dispatch would
                 // have carried, matching every other error result.
-                None => (tool.to_string(), None, None),
+                None => (tool.to_string(), None, None, None),
             },
         };
-        let result = result_from_side_table
-            .or_else(|| if substituted { None } else { pending_result })
-            .unwrap_or_else(|| serde_json::json!({ "error": content }));
+        let result_projection = result_from_side_table
+            .or_else(|| {
+                if substituted {
+                    None
+                } else {
+                    pending_result.map(Into::into)
+                }
+            })
+            .unwrap_or_else(|| serde_json::json!({ "error": content }).into());
+        let result = result_projection.value.clone();
         let result = if is_error && !result.is_object() {
             serde_json::json!({ "error": content })
         } else {
             result
         };
+        let projection = pending_projection.filter(|p| !substituted && p.data.value == result);
+        let projection = projection.map(|mut p| {
+            p.data = result_projection;
+            if p.model_text
+                .as_ref()
+                .is_some_and(|text| text.value.as_str() != Some(content))
+            {
+                p.model_text = Some(serde_json::Value::String(content.to_owned()).into());
+            }
+            if p.content.value.is_string() && p.content.value.as_str() != Some(content) {
+                p.content = serde_json::Value::String(content.to_owned()).into();
+            }
+            p
+        });
         let denial_kind = denial_kind_from_side_table.or(pending_denial_kind);
         match denial_kind {
             Some(kind) => {
                 self.output
-                    .emit_tool_result_denied(id, &tool, content, &result, &kind)
+                    .emit_tool_result_denied(
+                        id,
+                        &tool,
+                        content,
+                        &result,
+                        &kind,
+                        projection.as_ref(),
+                    )
                     .await;
             }
             None => {
                 self.output
-                    .emit_tool_result(id, &tool, content, &result)
+                    .emit_tool_result(id, &tool, content, &result, projection.as_ref())
                     .await
             }
         }
@@ -1553,7 +1717,7 @@ impl ConversationOrchestrator {
         &self,
         tool_name: &str,
         id: &lingxi_core::types::ToolUseId,
-        tool_input: &serde_json::Value,
+        tool_input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
         if let Some(stage) = active_mod_result_stage() {
             let mut stage = stage.lock().await;
@@ -1571,7 +1735,8 @@ impl ConversationOrchestrator {
             .push(lingxi_core::host::PermissionDenial {
                 tool_name: tool_name.to_string(),
                 tool_use_id: id.to_string(),
-                tool_input: tool_input.clone(),
+                tool_input: tool_input.value.clone(),
+                tool_input_projection: Some(tool_input.clone()),
             });
     }
 
@@ -1628,8 +1793,9 @@ impl ConversationOrchestrator {
     pub(crate) async fn record_tool_use_result(
         &self,
         id: &lingxi_core::types::ToolUseId,
-        data: serde_json::Value,
+        data: impl Into<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
+        let data = data.into();
         if let Some(stage) = active_mod_result_stage() {
             let mut stage = stage.lock().await;
             if stage.tool_use_id == id.as_str() {
@@ -1649,8 +1815,9 @@ impl ConversationOrchestrator {
     pub(crate) async fn record_tool_use_mcp_meta(
         &self,
         id: &lingxi_core::types::ToolUseId,
-        meta: serde_json::Value,
+        meta: impl Into<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
+        let meta = meta.into();
         if let Some(stage) = active_mod_result_stage() {
             let mut stage = stage.lock().await;
             if stage.tool_use_id == id.as_str() {
@@ -1777,13 +1944,19 @@ impl ConversationOrchestrator {
     }
 
     /// Take the recorded `toolUseResult` under the same single-block guard.
-    pub(crate) async fn take_tool_use_result(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
+    pub(crate) async fn take_tool_use_result(
+        &self,
+        msg: &ConversationMessage,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         let only = Self::sole_tool_result_id(msg)?;
         self.transcript.tool_use_results.lock().await.remove(&only)
     }
 
     /// Take the recorded `mcpMeta` under the same single-block guard.
-    pub(crate) async fn take_tool_use_mcp_meta(&self, msg: &ConversationMessage) -> Option<serde_json::Value> {
+    pub(crate) async fn take_tool_use_mcp_meta(
+        &self,
+        msg: &ConversationMessage,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         let only = Self::sole_tool_result_id(msg)?;
         self.transcript.tool_use_mcp_meta.lock().await.remove(&only)
     }
@@ -2057,10 +2230,26 @@ impl ConversationOrchestrator {
                 };
                 ("assistant", inner)
             }
+            ConversationMessage::System {
+                api_system: Some(message),
+                ..
+            } => (
+                "system",
+                serde_json::json!({"role":"system","content":message.content}),
+            ),
             ConversationMessage::System { content, .. } => (
                 "system",
                 serde_json::json!({ "role": "system", "content": content }),
             ),
+        };
+        let api_output_config = if let ConversationMessage::System {
+            api_system: Some(message),
+            ..
+        } = msg
+        {
+            message.output_config.as_ref()
+        } else {
+            None
         };
         // Stamp the shared inner Anthropic `message.id` on assistant lines so the
         // loader's sibling-grouping (by inner `message.id`) reconstructs the DAG.
@@ -2082,6 +2271,30 @@ impl ConversationOrchestrator {
         // meta user message (default-`false` is omitted), so normal lines — and
         // every existing golden fixture — keep their exact byte shape.
         let mut extra = serde_json::Map::new();
+        if matches!(
+            msg,
+            ConversationMessage::System {
+                api_system: Some(_),
+                ..
+            }
+        ) {
+            extra.insert("subtype".into(), "api_system".into());
+        }
+        if let Some(config) = api_output_config {
+            extra.insert(
+                "outputConfig".into(),
+                serde_json::to_value(config).expect("API output config has only typed effort"),
+            );
+        }
+        if let ConversationMessage::Assistant {
+            per_turn_effort: Some(effort),
+            ..
+        } = msg
+        {
+            extra.insert("effort".into(), effort.clone().into());
+            extra.insert("perTurnEffort".into(), effort.clone().into());
+        }
+
         if msg.is_meta() {
             extra.insert("isMeta".to_string(), serde_json::Value::Bool(true));
         }
@@ -2321,6 +2534,7 @@ impl ConversationOrchestrator {
             }
         }
         let mut jsonl_message = session::JsonlMessage {
+            json_projection: None,
             message_type: kind.to_string(),
             uuid: msg.id().as_uuid().to_string(),
             parent_uuid,
@@ -2361,6 +2575,51 @@ impl ConversationOrchestrator {
             extra,
         };
         session::jsonl::exact_json::set_message_utf16_overrides(&mut jsonl_message, exact_strings);
+        if let ConversationMessage::User { content, .. }
+        | ConversationMessage::Assistant { content, .. } = msg
+        {
+            let mut projection = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                serde_json::to_value(&jsonl_message).expect("native row is JSON"),
+            );
+            let mut exact_tool_input = false;
+            for (index, block) in content.iter().enumerate() {
+                if matches!(
+                    block,
+                    ContentBlock::ToolUse {
+                        input_projection: Some(_),
+                        ..
+                    }
+                ) {
+                    let input = block
+                        .projected_tool_input()
+                        .expect("typed tool input projection is valid")
+                        .expect("tool use owns input");
+                    projection
+                        .set_pointer(&format!("/message/content/{index}/input"), input)
+                        .expect("native tool row owns matching input");
+                    exact_tool_input = true;
+                }
+                if matches!(
+                    block,
+                    ContentBlock::ToolResult {
+                        content_projection: Some(_),
+                        ..
+                    }
+                ) {
+                    let output = block
+                        .projected_tool_result()
+                        .expect("typed tool result projection is valid")
+                        .expect("tool result owns output");
+                    projection
+                        .set_pointer(&format!("/message/content/{index}/content"), output)
+                        .expect("native result row owns matching content");
+                    exact_tool_input = true;
+                }
+            }
+            if exact_tool_input {
+                jsonl_message.json_projection = Some(projection);
+            }
+        }
         jsonl_message
     }
 
@@ -2384,6 +2643,17 @@ impl ConversationOrchestrator {
         let resolved = git_branch_for_cwd(&self.cwd);
         *self.transcript.git_branch_cache.lock().await = Some(resolved.clone());
         resolved
+    }
+
+    /// Reserve the identity shared by inherited fork rows and the next real
+    /// user prompt. Repeated calls before that prompt reuse the same value.
+    pub async fn reserve_next_prompt_id(&self) -> String {
+        self.prompt_runtime
+            .pending_prompt_id
+            .lock()
+            .await
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone()
     }
 
     /// The stable per-turn `promptId` for `msg` — the parity analog of
@@ -2424,7 +2694,14 @@ impl ConversationOrchestrator {
             }
         } else {
             // Genuine new user prompt — start a fresh prompt id for this turn.
-            *slot = Some(uuid::Uuid::new_v4().to_string());
+            *slot = Some(
+                self.prompt_runtime
+                    .pending_prompt_id
+                    .lock()
+                    .await
+                    .take()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            );
         }
         slot.clone()
     }
@@ -2766,6 +3043,7 @@ impl ConversationOrchestrator {
         extra.insert("attachment".to_string(), payload);
 
         let mut jmsg = session::JsonlMessage {
+            json_projection: None,
             message_type: "attachment".to_string(),
             uuid: uuid::Uuid::new_v4().to_string(),
             parent_uuid,
@@ -2800,6 +3078,129 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// A host-queued human persists as a rendered attachment, independently
+    /// of its transient model/history projection. No synthetic USER row is written.
+    pub(super) async fn persist_queued_input_to_jsonl(
+        &self,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        source_uuid: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        delivery: &crate::prompt::mid_turn_input::MidTurnInputDelivery,
+        rendered: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        if active_mod_result_stage_is_virtual().await {
+            return;
+        }
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            return;
+        };
+        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
+        let mut attachment =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({
+                "type":"queued_command","prompt":prompt.value
+            }));
+        attachment
+            .set_pointer("/prompt", prompt.clone())
+            .expect("validated queued prompt");
+        if let Some(source_uuid) = source_uuid {
+            attachment
+                .set_field("source_uuid", source_uuid.clone())
+                .expect("validated source UUID");
+        }
+        attachment
+            .set_field(
+                "delivery_id",
+                serde_json::json!(delivery.delivery_id).into(),
+            )
+            .expect("delivery identity");
+        attachment
+            .set_field("commandMode", serde_json::json!("prompt").into())
+            .expect("prompt mode");
+        attachment
+            .set_field("timestamp", serde_json::json!(delivery.timestamp).into())
+            .expect("admission timestamp");
+        let mut extra = serde_json::Map::new();
+        extra.insert("attachment".into(), attachment.value.clone());
+        extra.insert("rendered".into(), rendered.value.clone());
+        extra.insert("renderedRole".into(), serde_json::json!("system"));
+        let mut row = session::JsonlMessage {
+            json_projection: None,
+            message_type: "attachment".into(),
+            uuid: uuid::Uuid::new_v4().to_string(),
+            parent_uuid: self.transcript.last_jsonl_uuid.lock().await.clone(),
+            session_id: session_id.clone(),
+            timestamp: delivery.timestamp.clone(),
+            cwd: self.current_cwd().to_string_lossy().into_owned(),
+            version: delivery.reference_version.clone(),
+            message: serde_json::Value::Null,
+            is_sidechain: false,
+            user_type: Some("external".into()),
+            git_branch: self.resolve_git_branch().await,
+            entrypoint: Some("sdk-cli".into()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+        let mut projection = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+            serde_json::to_value(&row).expect("attachment envelope"),
+        );
+        projection
+            .set_pointer("/attachment", attachment)
+            .expect("attachment projection");
+        projection
+            .set_pointer("/rendered", rendered.clone())
+            .expect("rendered projection");
+        row.json_projection = Some(projection);
+        match writer.append(&row).await {
+            Ok(()) => {
+                *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
+                telemetry::emit_session_appended(&session_id, &row.uuid);
+            }
+            Err(error) => {
+                self.record_transcript_append_failure(&session_id, "queued_command", &error)
+                    .await
+            }
+        }
+    }
+
+    pub(super) async fn persist_absorbed_queue_input(
+        &self,
+        input: &crate::prompt::mid_turn_input::MidTurnInput,
+    ) {
+        let (Some(writer), Some(delivery)) = (
+            self.transcript.jsonl_writer.as_ref(),
+            input.queue_delivery.as_ref(),
+        ) else {
+            return;
+        };
+        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
+        let prompt = input
+            .projected_content
+            .clone()
+            .unwrap_or_else(|| serde_json::json!(input.text).into());
+        let mut record =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({
+                "type":"queue-operation","operation":"remove",
+                "timestamp":chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+                "sessionId":session_id,"content":prompt.value,"reason":"absorbed_mid_turn"
+            }));
+        record
+            .set_pointer("/content", prompt)
+            .expect("queue content projection");
+        if let Some(uuid) = &input.source_message_uuid {
+            record
+                .set_field("commandUuid", uuid.clone())
+                .expect("source UUID");
+        }
+        record
+            .set_field("deliveryId", serde_json::json!(delivery.delivery_id).into())
+            .expect("delivery identity");
+        if let Err(error) = writer.append_queue_operation(&record).await {
+            self.record_transcript_append_failure(&session_id, "queue-operation", &error)
+                .await;
+        }
+    }
+
     /// Persist before retry, while the rejected snapshot is still the transcript
     /// tail. The scope owns these handles so lazy streams can await durability
     /// after the caller's task-local scope has ended.
@@ -2831,6 +3232,7 @@ impl ConversationOrchestrator {
         let mut parent = last_uuid.lock().await;
         let session_id = expected_session.to_string();
         let row = session::JsonlMessage {
+            json_projection: None,
             message_type: "attachment".into(),
             uuid: uuid::Uuid::new_v4().to_string(),
             parent_uuid: parent.clone(),
@@ -3082,6 +3484,21 @@ impl ConversationOrchestrator {
         };
         let msg = &rewritten;
         self.note_assistant_commit(msg).await;
+        if matches!(msg, ConversationMessage::Assistant { .. }) {
+            // Native's final isApiErrorMessage flag belongs to the accepted
+            // assistant row, including writer-less embedded sessions.
+            let error_stop_reason = api_error
+                .as_ref()
+                .map(|env| env.inner_stop_reason.unwrap_or("stop_sequence"))
+                .or_else(|| {
+                    preappended
+                        .as_ref()
+                        .and_then(|metadata| metadata.api_error)
+                        .filter(|row| row.is_api_error_message)
+                        .map(|row| row.message.stop_reason.as_str())
+                });
+            self.note_turn_api_error_stop_reason(error_stop_reason);
+        }
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             // These side tables live only until the corresponding tool-result
             // line is persisted. In in-memory/no-writer sessions there is no
@@ -3194,7 +3611,19 @@ impl ConversationOrchestrator {
         // are emitted in `TOOL_RESULT_HEAD_EXTRA` order regardless of the
         // order they are inserted here.
         if let Some(result) = self.take_tool_use_result(msg).await {
-            jmsg.extra.insert("toolUseResult".to_string(), result);
+            jmsg.extra
+                .insert("toolUseResult".to_string(), result.value.clone());
+            let mut projected = jmsg
+                .json_projection
+                .take()
+                .unwrap_or_else(|| serde_json::to_value(&jmsg).expect("native row").into());
+            projected
+                .rebase_display_value(serde_json::to_value(&jmsg).expect("native row"))
+                .expect("native row metadata rewrite");
+            projected
+                .set_pointer("/toolUseResult", result)
+                .expect("accepted raw tool result");
+            jmsg.json_projection = Some(projected);
         }
         if let Some(kind) = self.take_tool_denial_kind(msg).await {
             jmsg.extra.insert(
@@ -3203,7 +3632,18 @@ impl ConversationOrchestrator {
             );
         }
         if let Some(meta) = self.take_tool_use_mcp_meta(msg).await {
-            jmsg.extra.insert("mcpMeta".to_string(), meta);
+            jmsg.extra.insert("mcpMeta".to_string(), meta.value.clone());
+            let mut projected = jmsg
+                .json_projection
+                .take()
+                .unwrap_or_else(|| serde_json::to_value(&jmsg).expect("native row").into());
+            projected
+                .rebase_display_value(serde_json::to_value(&jmsg).expect("native row"))
+                .expect("native row metadata rewrite");
+            projected
+                .set_pointer("/mcpMeta", meta)
+                .expect("accepted exact MCP metadata");
+            jmsg.json_projection = Some(projected);
         }
         if self.tool_result_message_ends_turn(msg).await {
             jmsg.extra
@@ -3496,6 +3936,7 @@ impl ConversationOrchestrator {
             id: turn_id,
             content,
             stop_reason,
+            per_turn_effort,
         } = msg
         else {
             // Defensive: non-assistant messages fall back to the normal single
@@ -3538,6 +3979,7 @@ impl ConversationOrchestrator {
             // The fallback identity is fixed before append-through. The current
             // parent is selected later, inside the short durable commit lease.
             let original_single = ConversationMessage::Assistant {
+                per_turn_effort: per_turn_effort.clone(),
                 id: MessageId::new(),
                 content: vec![block.clone()],
                 stop_reason: stop_reason.clone(),
@@ -3565,6 +4007,7 @@ impl ConversationOrchestrator {
             let mut next_block_groups = block_groups.clone();
             next_block_groups[block_index] = rewritten_blocks.clone();
             let rewritten_merged = ConversationMessage::Assistant {
+                per_turn_effort: per_turn_effort.clone(),
                 id: *turn_id,
                 content: next_block_groups.iter().flatten().cloned().collect(),
                 stop_reason: stop_reason.clone(),
@@ -3667,6 +4110,7 @@ impl ConversationOrchestrator {
             }
         }
         let rewritten_merged = ConversationMessage::Assistant {
+            per_turn_effort: per_turn_effort.clone(),
             id: *turn_id,
             content: block_groups.into_iter().flatten().collect(),
             stop_reason: stop_reason.clone(),
@@ -3711,17 +4155,15 @@ impl ConversationOrchestrator {
         }
         let row_uuid = row.row_id.as_uuid().to_string();
         let message = ConversationMessage::Assistant {
+            per_turn_effort: (!row.is_api_error)
+                .then(|| row.per_turn_effort.clone())
+                .flatten(),
             id: row.row_id,
             content: row.content.clone(),
             stop_reason: row.stop_reason.clone(),
         };
         if let ConversationMessage::Assistant { content, .. } = self
-            .mod_session_append_row(
-                &message,
-                Some(&row_uuid),
-                false,
-                publication_guard.clone(),
-            )
+            .mod_session_append_row(&message, Some(&row_uuid), false, publication_guard.clone())
             .await
         {
             // Native's append-through yields the same row object that the
@@ -3774,6 +4216,9 @@ impl ConversationOrchestrator {
         let writer = self.transcript.jsonl_writer.as_ref()?;
 
         let single = ConversationMessage::Assistant {
+            per_turn_effort: (!row.is_api_error)
+                .then(|| row.per_turn_effort.clone())
+                .flatten(),
             id: row.row_id,
             content: row.content.clone(),
             stop_reason: row.stop_reason.clone(),
@@ -4060,7 +4505,8 @@ impl ConversationOrchestrator {
         if admitted && result_rx.await.unwrap_or(false) {
             let output = self.output.clone();
             let published_uuids = [Some(line_uuid)];
-            let publish = output.emit_assistant_transcript_row_uuids(&assistant_id, &published_uuids);
+            let publish =
+                output.emit_assistant_transcript_row_uuids(&assistant_id, &published_uuids);
             if let Some(fence) = publication_fence.as_ref() {
                 fence.publish_if_current(Box::pin(publish)).await;
             } else {
@@ -4075,6 +4521,9 @@ impl ConversationOrchestrator {
     /// persistence seams, including writer-less runtimes.
     pub(crate) async fn note_assistant_commit(&self, msg: &ConversationMessage) {
         if matches!(msg, ConversationMessage::Assistant { .. }) {
+            // An ordinary later assistant replaces a recoverable API-error row.
+            // API persistence stamps its explicit marker after this common seam.
+            self.note_turn_api_error_stop_reason(None);
             self.session.lock().await.message_timing.last_assistant_at =
                 Some(std::time::SystemTime::now());
         }
@@ -4156,6 +4605,7 @@ fn mod_append_content_block_preserves_optional_wire_presence() {
     assert_eq!(projected_text["citations"], serde_json::Value::Null);
 
     let omitted = ContentBlock::ToolResult {
+        content_projection: None,
         tool_use_id: ToolUseId::from("toolu_1"),
         content: "ok".into(),
         is_error: None,
@@ -4165,6 +4615,7 @@ fn mod_append_content_block_preserves_optional_wire_presence() {
     assert!(mod_append_content_block(&omitted).get("is_error").is_none());
 
     let explicit_false = ContentBlock::ToolResult {
+        content_projection: None,
         tool_use_id: ToolUseId::from("toolu_1"),
         content: "ok".into(),
         is_error: Some(false),
@@ -4177,6 +4628,7 @@ fn mod_append_content_block_preserves_optional_wire_presence() {
         &[],
         &[serde_json::json!({"type":"text","text":"new answer","citations":null})],
         &[],
+        None,
     );
     assert!(matches!(
         accepted_text.as_slice(),
@@ -4193,6 +4645,7 @@ fn mod_append_content_block_preserves_optional_wire_presence() {
     );
 
     let old_error = ContentBlock::ToolResult {
+        content_projection: None,
         tool_use_id: ToolUseId::from("toolu_1"),
         content: "failed".into(),
         is_error: Some(true),
@@ -4202,6 +4655,7 @@ fn mod_append_content_block_preserves_optional_wire_presence() {
     let omitted_error = rewrite_mod_append_tool_result(
         &old_error,
         &serde_json::json!({"type":"tool_result","content":"accepted"}),
+        None,
     );
     assert!(matches!(
         omitted_error,
@@ -4226,6 +4680,7 @@ fn opaque_text_append_echo_preserves_source_but_replacement_drops_metadata() {
             std::slice::from_ref(&source),
             std::slice::from_ref(&projected),
             &[],
+            None
         ),
         vec![source.clone()]
     );
@@ -4234,7 +4689,7 @@ fn opaque_text_append_echo_preserves_source_but_replacement_drops_metadata() {
     // Native q/D and the enabled-Mod loopback both replace modified text with
     // one canonical Text:null, rather than retaining the old source metadata.
     assert_eq!(
-        rewrite_mod_append_blocks(&[source], &[changed], &[]),
+        rewrite_mod_append_blocks(&[source], &[changed], &[], None),
         vec![ContentBlock::Text {
             text: "after".into(),
             citations: Some(None)
@@ -4407,6 +4862,7 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         .expect("decoded ToolUse has a paired result");
     let tool_use_wire_id = tool_use_id.to_string();
     let mut assistant_row = crate::streaming_loop::CompletedAssistantRow {
+        per_turn_effort: None,
         stream_order: 0,
         row_id: MessageId::new(),
         provider_message_id: "assistant-presence-row".into(),
@@ -4450,8 +4906,10 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
     );
 
     let tool_result = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
+            content_projection: None,
             tool_use_id,
             content: "original tool result".into(),
             is_error: Some(true),
@@ -4491,11 +4949,9 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         accepted_assistant["content"][1]["citations"],
         serde_json::Value::Null
     );
-    assert!(
-        accepted_assistant["content"][1]
-            .get("provider_metadata")
-            .is_none()
-    );
+    assert!(accepted_assistant["content"][1]
+        .get("provider_metadata")
+        .is_none());
     assert_eq!(accepted_assistant["content"][2]["id"], tool_use_wire_id);
     assert!(loaded[2].message["content"][0].get("is_error").is_none());
     assert_eq!(
@@ -4577,7 +5033,7 @@ async fn mod_utf16_text_is_exact_live_raw_and_after_cold_resume() {
     use hooks::mods::ModHost;
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId};
     use llm_runtime::services::sdk::{self, WireCodec};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::sync::Arc;
 
     let root = tempfile::tempdir().expect("temporary session root");
@@ -4694,6 +5150,7 @@ export function register(on) {
         .push(prompt.clone());
     orchestrator.persist_message_to_jsonl(&prompt).await;
     let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::TextJsUtf16 {
             text: source_text.clone(),
@@ -4766,11 +5223,9 @@ export function register(on) {
         sdk::protocol::ProtocolFamily::AnthropicMessages,
     )
     .expect("project exact live history");
-    assert!(
-        live_overrides
-            .values()
-            .any(|units| units == &accepted_units)
-    );
+    assert!(live_overrides
+        .values()
+        .any(|units| units == &accepted_units));
     let profile: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
         "provider_id":"anthropic", "profile_name":"test", "base_url":"https://api.anthropic.com",
         "protocol":"anthropic_messages", "auth":"none", "models":[]
@@ -4819,7 +5274,8 @@ export function register(on) {
     .expect("load durable UTF-16 transcript");
     let assistant_row = loaded.last().expect("loaded assistant row");
     assert_eq!(
-        session::jsonl::exact_json::message_utf16_overrides(assistant_row)["/message/content/0/text"],
+        session::jsonl::exact_json::message_utf16_overrides(assistant_row)
+            ["/message/content/0/text"],
         accepted_units
     );
     let resumed = crate::resume::state_from_messages(session_id.as_uuid(), &loaded);
@@ -4880,4 +5336,141 @@ export function register(on) {
         resumed_wire.contains(r#""citations":null"#),
         "{resumed_wire}"
     );
+}
+
+#[cfg(test)]
+mod rich_append_projection_tests {
+    use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+
+    fn worker_frame(message: &ConversationMessage) -> hooks::mods::ModUtf16ValueProjection {
+        let message = mod_append_exact_message(message).unwrap();
+        let mut frame = Utf16JsonProjection::plain(serde_json::json!({"message":message.value}));
+        frame.set_pointer("/message", message).unwrap();
+        hooks::mods::ModUtf16ValueProjection::from_core_projection(frame).unwrap()
+    }
+
+    #[test]
+    fn source_tool_input_survives_worker_key_namespace_and_detects_key_unit_change() {
+        let input = Utf16JsonProjection::parse(r#"{"\ud800":"\udfff"}"#).unwrap();
+        let original = ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            stop_reason: Some("tool_use".into()),
+            content: vec![ContentBlock::ToolUse {
+                id: ToolUseId::from("toolu_exact"),
+                name: "Echo".into(),
+                input: input.value.clone(),
+                input_projection: Some(input.clone()),
+                provider_id: None,
+            }],
+        };
+        let forwarded = worker_frame(&original);
+        let source = forwarded.clone().into_core_projection().unwrap();
+        let rewritten = rewrite_mod_append_message(
+            &original,
+            &source.value["message"],
+            &forwarded.strings,
+            Some(&source),
+        )
+        .unwrap();
+        assert!(mod_append_projection_matches(
+            &rewritten,
+            &forwarded.value["message"],
+            &forwarded.strings,
+            &forwarded.keys
+        ));
+        assert_eq!(
+            mod_append_exact_message(&rewritten)
+                .unwrap()
+                .subprojection("/content/0/input")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            input.to_json_string().unwrap()
+        );
+        let mut tampered = forwarded;
+        tampered.keys[0].code_units = vec![0xd801];
+        assert!(!mod_append_projection_matches(
+            &rewritten,
+            &tampered.value["message"],
+            &tampered.strings,
+            &tampered.keys
+        ));
+    }
+
+    #[test]
+    fn accepted_result_retains_exact_source_keys_when_append_repositions_blocks() {
+        let data =
+            Utf16JsonProjection::parse(r#"[{"type":"text","text":"\udc00","\udfff":"\ud800"}]"#)
+                .unwrap();
+        let original = ConversationMessage::User {
+            api_message_override: None,
+            id: MessageId::new(),
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::from("toolu_exact"),
+                content: "\u{fffd}".into(),
+                is_error: Some(false),
+                provider_tool_use_id: None,
+                content_blocks: Some(data.value.as_array().unwrap().clone()),
+                content_projection: Some(data.clone()),
+            }],
+        };
+        let mut omitted = mod_append_message(&original);
+        omitted["content"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("content");
+        let retained = rewrite_mod_append_message(&original, &omitted, &[], None).unwrap();
+        assert_eq!(
+            mod_append_exact_message(&retained)
+                .unwrap()
+                .subprojection("/content/0/content")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            data.to_json_string().unwrap()
+        );
+        let mut incoming = mod_append_message(&original);
+        incoming["content"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, serde_json::json!({"type":"text","text":"added"}));
+        let mut frame = Utf16JsonProjection::plain(serde_json::json!({"message":incoming}));
+        frame
+            .set_pointer("/message/content/1/content", data.clone())
+            .unwrap();
+        let forwarded = hooks::mods::ModUtf16ValueProjection::from_core_projection(frame).unwrap();
+        let source = forwarded.clone().into_core_projection().unwrap();
+        let rewritten = rewrite_mod_append_message(
+            &original,
+            &source.value["message"],
+            &forwarded.strings,
+            Some(&source),
+        )
+        .unwrap();
+        let result = mod_append_exact_message(&rewritten)
+            .unwrap()
+            .subprojection("/content/0/content")
+            .unwrap();
+        assert_eq!(
+            result.to_json_string().unwrap(),
+            data.to_json_string().unwrap()
+        );
+        assert_eq!(
+            mod_append_message(&rewritten)["content"][1]["text"],
+            "added"
+        );
+        let accepted = worker_frame(&rewritten);
+        assert!(mod_append_projection_matches(
+            &rewritten,
+            &accepted.value["message"],
+            &accepted.strings,
+            &accepted.keys
+        ));
+    }
 }

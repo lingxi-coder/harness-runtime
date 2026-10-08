@@ -111,7 +111,7 @@ fn synthetic_error_block_for_tool(
         AbortReason::UserInterrupted if is_mcp => format!("Error: {MCP_INTERRUPTED_MESSAGE}"),
         AbortReason::UserInterrupted => REJECT_MESSAGE.to_string(),
     };
-    ContentBlock::ToolResult {
+    ContentBlock::ToolResult { content_projection: None,
         tool_use_id,
         content,
         is_error: Some(true),
@@ -506,9 +506,9 @@ impl<'a> StreamingToolExecutor<'a> {
     ) {
         let facts = crate::turn_loop::ToolUseDispatchFacts {
             query_history: Vec::new(),
-            assistant_message: ConversationMessage::Assistant {
+            assistant_message: ConversationMessage::Assistant { per_turn_effort: None,
                 id: assistant_id,
-                content: vec![ContentBlock::ToolUse {
+                content: vec![ContentBlock::ToolUse { input_projection: None,
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
@@ -833,7 +833,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 &content,
                 serde_json::json!({ "error": content }),
             );
-            publication.tool_use_result = Some(tool_use_result);
+            publication.tool_use_result = Some((tool_use_result).into());
             publication.denial_kind = denial_kind;
             self.tools[i].publications = vec![publication];
             let post_tool_batch_call = post_tool_batch_call_for_result(
@@ -867,7 +867,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 // (toolExecution.ts:471-480): `Error calling tool (<name>): <msg>`
                 // wrapped in `<tool_use_error>`.
                 let name = &self.tools[i].name;
-                let block = ContentBlock::ToolResult {
+                let block = ContentBlock::ToolResult { content_projection: None,
                     tool_use_id: self.tools[i].id.clone(),
                     content: format!(
                         "<tool_use_error>Error calling tool ({name}): {e}</tool_use_error>"
@@ -951,7 +951,7 @@ impl<'a> StreamingToolExecutor<'a> {
         for (id, provider_id, assistant_id, name) in unmatched_facts {
             self.orch.clear_discarded_tool_result_metadata(&id).await;
             let result_text = terminal_error_tool_result(error);
-            let block = ContentBlock::ToolResult {
+            let block = ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: id,
                 content: result_text.clone(),
                 is_error: Some(true),
@@ -968,7 +968,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 modifiers: Vec::new(),
                 post_tool_batch_calls: Vec::new(),
                 publications: Vec::new(),
-                tool_use_result: Some(serde_json::Value::String(result_text)),
+                tool_use_result: Some(serde_json::Value::String(result_text).into()),
             });
         }
 
@@ -1154,9 +1154,9 @@ fn unknown_tool_publication(
         &model_text,
         serde_json::json!({ "error": format!("tool not found: {name}") }),
     );
-    publication.tool_use_result = Some(serde_json::Value::String(format!(
+    publication.tool_use_result = Some((serde_json::Value::String(format!(
         "Error: No such tool available: {name}{suffix}"
-    )));
+    ))).into());
     publication
 }
 
@@ -1291,7 +1291,7 @@ pub(crate) fn synthetic_unknown_tool(
     provider_id: Option<String>,
     suffix: &str,
 ) -> ContentBlock {
-    ContentBlock::ToolResult {
+    ContentBlock::ToolResult { content_projection: None,
         tool_use_id: id,
         content: format!(
             "<tool_use_error>Error: No such tool available: {name}{suffix}</tool_use_error>"

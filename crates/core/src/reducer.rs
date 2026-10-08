@@ -75,7 +75,7 @@ pub fn reduce(state: ConversationState, event: Event) -> (ConversationState, Vec
                 Ok(body) => body,
                 Err(_) => return reject_user_projection(session, "UserMessageJsUtf16"),
             };
-            session.history.push(ConversationMessage::User {
+            session.history.push(ConversationMessage::User { api_message_override: None,
                 id: message_id,
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: content,

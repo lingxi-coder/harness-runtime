@@ -39,19 +39,24 @@ pub trait AgentNameRegistry: Send + Sync {
     /// reused; claude rebuilds the Map without the entry).
     async fn unregister(&self, name: &str);
 
-    /// Enumerate the current `name -> agent_id` mappings. Default empty so
-    /// older hosts remain source-compatible until they opt into listing.
-    async fn list(&self) -> Vec<(String, AgentId)> {
-        Vec::new()
-    }
+    /// Enumerate current `name -> agent_id` mappings in insertion order.
+    /// Re-registering a name replaces its value without changing its position,
+    /// matching JavaScript `Map` semantics used by `$.agent.list`.
+    async fn list(&self) -> Vec<(String, AgentId)>;
 }
 
-/// In-memory [`AgentNameRegistry`] backed by an `RwLock<HashMap>`. The faithful
-/// analog of claude's `AppState.agentNameRegistry` Map; the live wiring (who
-/// holds the `Arc`, who reads it for `SendMessage`) is threaded by the host.
+#[derive(Default)]
+struct AgentNameRegistryState {
+    by_name: HashMap<String, AgentId>,
+    insertion_order: Vec<String>,
+}
+
+/// In-memory [`AgentNameRegistry`] backed by an insertion-ordered map. The
+/// live wiring (who holds the `Arc`, who reads it for `SendMessage`) is
+/// threaded by the host.
 #[derive(Default)]
 pub struct InMemoryAgentNameRegistry {
-    map: RwLock<HashMap<String, AgentId>>,
+    map: RwLock<AgentNameRegistryState>,
 }
 
 impl InMemoryAgentNameRegistry {
@@ -65,33 +70,43 @@ impl InMemoryAgentNameRegistry {
 #[async_trait]
 impl AgentNameRegistry for InMemoryAgentNameRegistry {
     async fn register(&self, name: &str, agent_id: AgentId) {
-        self.map
+        let mut map = self
+            .map
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(name.to_string(), agent_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !map.by_name.contains_key(name) {
+            map.insertion_order.push(name.to_string());
+        }
+        map.by_name.insert(name.to_string(), agent_id);
     }
 
     async fn resolve(&self, name: &str) -> Option<AgentId> {
         self.map
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .by_name
             .get(name)
             .copied()
     }
 
     async fn unregister(&self, name: &str) {
-        self.map
+        let mut map = self
+            .map
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(name);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if map.by_name.remove(name).is_some() {
+            map.insertion_order.retain(|candidate| candidate != name);
+        }
     }
 
     async fn list(&self) -> Vec<(String, AgentId)> {
-        self.map
+        let map = self
+            .map
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        map.insertion_order
             .iter()
-            .map(|(name, id)| (name.clone(), *id))
+            .filter_map(|name| map.by_name.get(name).map(|id| (name.clone(), *id)))
             .collect()
     }
 }
@@ -131,11 +146,33 @@ mod tests {
         let b = AgentId::new();
         reg.register("worker-a", a).await;
         reg.register("worker-b", b).await;
-        let mut entries = reg.list().await;
-        entries.sort_by(|l, r| l.0.cmp(&r.0));
+        let entries = reg.list().await;
         assert_eq!(
             entries,
             vec![("worker-a".to_string(), a), ("worker-b".to_string(), b)]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_preserves_map_order_when_replacing_and_reinserting_names() {
+        let reg = InMemoryAgentNameRegistry::new();
+        let first = AgentId::new();
+        let second = AgentId::new();
+        let replacement = AgentId::new();
+        let reinserted = AgentId::new();
+        reg.register("first", first).await;
+        reg.register("second", second).await;
+        reg.register("first", replacement).await;
+        assert_eq!(
+            reg.list().await,
+            vec![("first".into(), replacement), ("second".into(), second)]
+        );
+
+        reg.unregister("first").await;
+        reg.register("first", reinserted).await;
+        assert_eq!(
+            reg.list().await,
+            vec![("second".into(), second), ("first".into(), reinserted)]
         );
     }
 }

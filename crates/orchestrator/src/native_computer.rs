@@ -291,7 +291,7 @@ pub(crate) async fn prepare_projection(
     orch: &ConversationOrchestrator,
     model: &str,
     profile: Option<&str>,
-    tools: &[Value],
+    tools: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
 ) -> Result<Option<llm_runtime::computer::ComputerRequestProjection>, OrchestratorError> {
     let available = tools
         .iter()
@@ -577,7 +577,7 @@ pub(crate) async fn bind_response(
                         .trim_start_matches("tool-execution:")
                 ));
                 ids.push(id.to_string());
-                replacement.push(ContentBlock::ToolUse {
+                replacement.push(ContentBlock::ToolUse { input_projection: None,
                     id: id.clone(),
                     name: binding.tool.name().into(),
                     input,
@@ -889,7 +889,7 @@ pub(crate) fn after_execution<'a>(
 }
 
 fn result_error(id: &ToolUseId, message: &str) -> ContentBlock {
-    ContentBlock::ToolResult {
+    ContentBlock::ToolResult { content_projection: None,
         tool_use_id: id.clone(),
         content: message.into(),
         is_error: Some(true),
@@ -1250,13 +1250,21 @@ async fn prepare_stored_row(
         None,
     );
     if let Some(result) = orch.take_tool_use_result(message).await {
-        row.extra.insert("toolUseResult".into(), result);
+        row.extra.insert("toolUseResult".into(), result.value.clone());
+        let mut projected = row.json_projection.take().unwrap_or_else(|| serde_json::to_value(&row).expect("native row").into());
+        projected.rebase_display_value(serde_json::to_value(&row).expect("native row")).expect("native row metadata");
+        projected.set_pointer("/toolUseResult", result).expect("accepted raw tool result");
+        row.json_projection = Some(projected);
     }
     if let Some(kind) = orch.take_tool_denial_kind(message).await {
         row.extra.insert("toolDenialKind".into(), json!(kind));
     }
     if let Some(meta) = orch.take_tool_use_mcp_meta(message).await {
-        row.extra.insert("mcpMeta".into(), meta);
+        row.extra.insert("mcpMeta".into(), meta.value.clone());
+        let mut projected = row.json_projection.take().unwrap_or_else(|| serde_json::to_value(&row).expect("native row").into());
+        projected.rebase_display_value(serde_json::to_value(&row).expect("native row")).expect("native row metadata");
+        projected.set_pointer("/mcpMeta", meta).expect("accepted exact MCP metadata");
+        row.json_projection = Some(projected);
     }
     if let Some(source) = orch.take_source_tool_assistant_uuid(message).await {
         row.extra
@@ -1736,7 +1744,7 @@ pub(crate) async fn prepare_receipts(
                 return Err(internal(error));
             }
         };
-        let message = ConversationMessage::User {
+        let message = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ProviderContent {
                 protocol: protocol_name(call.context.provider),

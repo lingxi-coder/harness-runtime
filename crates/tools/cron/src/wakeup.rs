@@ -903,7 +903,7 @@ async fn emit_completed(bus: &Arc<AnalyticsBus>, duration_ms: u64, scheduled: bo
 }
 
 fn result(data: Value) -> ToolCallResult {
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data,
         model_content: None,
         new_messages: vec![],
@@ -1462,9 +1462,13 @@ mod tests {
         };
         fn invocation_context() -> SubagentInvocationContext {
             SubagentInvocationContext {
+                input_projection: None,
+                cancellation_token: lingxi_core::host::CancellationToken::new(),
                 permission_pause_observer: None,
                 parent_agent_id: None,
                 origin_session_id: None,
+                instruction_context: None,
+                fork_context: None,
                 tool_execution_policy: ToolExecutionPolicy::Ordinary,
                 agent_name: None,
                 team_name: None,
@@ -1478,6 +1482,11 @@ mod tests {
                 observer: None,
                 parent_model: None,
                 parent_model_profile: None,
+                agent_spawn_provenance: Default::default(),
+                tool_context_state: None,
+                assistant_message: None,
+                same_turn_tool_uses: Vec::new(),
+                current_history: Vec::new(),
                 mode_override: None,
                 request_source: None,
                 frozen_command_denies: Vec::new(),

@@ -1,0 +1,230 @@
+{
+  "version": "2.1.286",
+  "binarySha256": "75e3016e9d2570767b08e43a7467d4817a4f149232c169ca295f2c95fef21433",
+  "sources": {
+    "src_181936610.js": "a23028f785147254448c89f41f342b10aa015c075547ddadae28801b5be5d9dd",
+    "src_182118681.js": "9c1e53986aa126f85e625401314cc5e1ef9e3250f7f7067894f2cb662cc9a069",
+    "src_183356562.js": "35fe9702e4e193edc5e43a2c016717650e663c4b3a4a77df28306d37bec09bba",
+    "src_183727495.js": "5f2e79dc208fa1829ae1b7e8862ea500c7b40b8a9bb26b51b9706852f7f79f92"
+  },
+  "timeoutDescription": "Optional timeout in milliseconds (max 600000 for a foreground command)",
+  "commandDescription": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nSay what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
+  "parameterDescription": "Set to true to run this command in the background. With it, `timeout` limits how long the command may run in the background before it is stopped (default 1800000 ms, max 7200000 ms).",
+  "verboseTimeoutSuffix": " With `run_in_background` the timeout is instead how long the command may run in the background (default 1800000ms / 30 minutes, max 7200000ms / 2 hours); at that limit it is stopped and you are notified.",
+  "deadlineSummary": "Background command \"watch build\" was stopped after reaching its background time limit",
+  "monitorDefault": true,
+  "monitorCap": 1800000,
+  "singlePromptMonitorCap": 600000,
+  "cases": [
+    {
+      "env": {},
+      "requested": null,
+      "max": 7200000,
+      "background": 1800000
+    },
+    {
+      "env": {},
+      "requested": 1,
+      "max": 7200000,
+      "background": 1
+    },
+    {
+      "env": {},
+      "requested": 2000,
+      "max": 7200000,
+      "background": 2000
+    },
+    {
+      "env": {},
+      "requested": 600000,
+      "max": 7200000,
+      "background": 600000
+    },
+    {
+      "env": {},
+      "requested": 1800000,
+      "max": 7200000,
+      "background": 1800000
+    },
+    {
+      "env": {},
+      "requested": 7200000,
+      "max": 7200000,
+      "background": 7200000
+    },
+    {
+      "env": {},
+      "requested": 9999999999,
+      "max": 7200000,
+      "background": 7200000
+    },
+    {
+      "env": {
+        "BASH_DEFAULT_TIMEOUT_MS": "3600000"
+      },
+      "requested": null,
+      "max": 7200000,
+      "background": 3600000
+    },
+    {
+      "env": {
+        "BASH_DEFAULT_TIMEOUT_MS": "3600000"
+      },
+      "requested": 1,
+      "max": 7200000,
+      "background": 1
+    },
+    {
+      "env": {
+        "BASH_DEFAULT_TIMEOUT_MS": "3600000"
+      },
+      "requested": 2000,
+      "max": 7200000,
+      "background": 2000
+    },
+    {
+      "env": {
+        "BASH_DEFAULT_TIMEOUT_MS": "3600000"
+      },
+      "requested": 600000,
+      "max": 7200000,
+      "background": 600000
+    },
+    {
+      "env": {
+        "BASH_DEFAULT_TIMEOUT_MS": "3600000"
+      },
+      "requested": 1800000,
+      "max": 7200000,
+      "background": 1800000
+    },
+    {
+      "env": {
+        "BASH_DEFAULT_TIMEOUT_MS": "3600000"
+      },
+      "requested": 7200000,
+      "max": 7200000,
+      "background": 7200000
+    },
+    {
+      "env": {
+        "BASH_DEFAULT_TIMEOUT_MS": "3600000"
+      },
+      "requested": 9999999999,
+      "max": 7200000,
+      "background": 7200000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9000000"
+      },
+      "requested": null,
+      "max": 9000000,
+      "background": 1800000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9000000"
+      },
+      "requested": 1,
+      "max": 9000000,
+      "background": 1
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9000000"
+      },
+      "requested": 2000,
+      "max": 9000000,
+      "background": 2000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9000000"
+      },
+      "requested": 600000,
+      "max": 9000000,
+      "background": 600000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9000000"
+      },
+      "requested": 1800000,
+      "max": 9000000,
+      "background": 1800000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9000000"
+      },
+      "requested": 7200000,
+      "max": 9000000,
+      "background": 7200000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9000000"
+      },
+      "requested": 9999999999,
+      "max": 9000000,
+      "background": 9000000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9999999999"
+      },
+      "requested": null,
+      "max": 2147483647,
+      "background": 1800000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9999999999"
+      },
+      "requested": 1,
+      "max": 2147483647,
+      "background": 1
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9999999999"
+      },
+      "requested": 2000,
+      "max": 2147483647,
+      "background": 2000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9999999999"
+      },
+      "requested": 600000,
+      "max": 2147483647,
+      "background": 600000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9999999999"
+      },
+      "requested": 1800000,
+      "max": 2147483647,
+      "background": 1800000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9999999999"
+      },
+      "requested": 7200000,
+      "max": 2147483647,
+      "background": 7200000
+    },
+    {
+      "env": {
+        "BASH_MAX_TIMEOUT_MS": "9999999999"
+      },
+      "requested": 9999999999,
+      "max": 2147483647,
+      "background": 2147483647
+    }
+  ]
+}

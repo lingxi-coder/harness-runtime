@@ -195,10 +195,10 @@ mod tests {
     }
 
     fn assistant_text(text: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
-                text: text.to_string(),
+                text: text.to_string(), citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         }

@@ -37,12 +37,13 @@ impl PtlMockApi {
 impl OrchestratorApiClient for PtlMockApi {
     async fn messages_create(
         &self,
-        _model: &str,
-        _profile: Option<&str>,
-        _system: Option<&str>,
-        msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        request: orchestrator::OrchestratorApiRequest,
     ) -> Result<HistoryResponse, LlmError> {
+        let msgs = match request {
+            orchestrator::OrchestratorApiRequest::Main(request) => request.messages,
+            orchestrator::OrchestratorApiRequest::HookPrompt(request) => request.messages,
+        };
+
         self.captured_lens.lock().await.push(msgs.len());
         let mut q = self.queue.lock().await;
         q.pop_front().unwrap_or_else(|| {
@@ -64,7 +65,7 @@ fn ok_text(text: &str) -> Result<HistoryResponse, LlmError> {
     Ok(mock_message_response(
         vec![LlmContentBlock::Text {
             text: text.to_string(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     ))
@@ -142,12 +143,12 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
                 "round-{i} user message with filler text to give the round a real token estimate"
             ),
         ));
-        s.history.push(ConversationMessage::Assistant {
+        s.history.push(ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: format!(
                     "round-{i} assistant reply with filler text to give the round weight"
-                ),
+                ), citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         });

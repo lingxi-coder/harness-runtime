@@ -322,6 +322,7 @@ mod tests {
             task_type: "local_agent".into(),
             status: status.into(),
             forked_skill_name: forked.map(str::to_string),
+            agent_facts: None,
             ..Default::default()
         }
     }

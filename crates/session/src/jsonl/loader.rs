@@ -19,14 +19,20 @@
 //! sibling assistant blocks + orphaned `tool_result`s produced by PARALLEL tool
 //! calls (N `tool_use`s → N one-block assistant messages sharing `message.id`)
 //! now runs as an additive post-pass
-//! ([`recover_orphaned_parallel_tool_results`]) at the tail of
+//! ([`recover_parallel_results`]) at the tail of
 //! [`build_conversation_chain`]. The single-parent walk still keeps one branch;
-//! the post-pass then splices each group's off-chain siblings + `tool_results` in
-//! right after their on-chain anchor, never reordering the main chain.
+//! the post-pass merges recovered siblings, tool results, and unambiguous
+//! metadata tails in transcript insertion order, preserving the main chain.
+//! A stale checkpoint on another result in the same parallel batch follows
+//! the durable continuation, including when the process exited before updating
+//! `last-prompt` (Claude Code 2.1.286).
 
 use crate::jsonl::path::{project_dir_name, session_path};
 use crate::jsonl::re_append::{find_last_typed_field, read_tail};
 use crate::jsonl::reader::{extract_json_string_field, JsonlReader, LoadedTranscript};
+use crate::jsonl::recovery::{
+    append_metadata_descendants, follows_checkpoint, ordered_messages, recover_parallel_results,
+};
 use crate::jsonl::schema::{JsonlMessage, SESSION_KIND_KEY};
 use crate::jsonl::title::{
     extract_title, has_autonomous_tick_prompt, truncate_title, EMPTY_TITLE_FALLBACK,
@@ -850,12 +856,12 @@ fn persisted_model_ref(
     let mut model = None;
     let mut profile = None;
     let mut profile_seen = false;
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
     let preserved = preserved_tail_state(loaded);
     let reparent = &preserved.parents;
     let mut current = tip;
     while let Some(message) = current {
-        if !seen.insert(message.uuid.as_str()) {
+        if !seen.insert(message.uuid.clone()) {
             break;
         }
         if message.message_type == "assistant" {
@@ -889,7 +895,14 @@ fn persisted_model_ref(
             .get(message.uuid.as_str())
             .map(String::as_str)
             .or(message.parent_uuid.as_deref());
-        current = parent.and_then(|parent| loaded.by_uuid.get(parent));
+        current = match parent {
+            Some(parent_uuid) => loaded
+                .by_uuid
+                .get(parent_uuid)
+                .filter(|parent| !seen.contains(&parent.uuid))
+                .or_else(|| timestamp_parent_fallback(loaded, message, &seen)),
+            None => None,
+        };
     }
     (model, profile)
 }
@@ -1296,8 +1309,9 @@ async fn list_recent_sessions_inner_with_diagnostics(
 /// sessions (whose root row keeps the SOURCE session's id) load cleanly.
 ///
 /// Returns the main thread only; sidechain branches are ignored. The
-/// `parentUuid` walk is cycle-guarded (breaks, never loops) and stops at a
-/// missing parent (returns the partial chain) — it does NOT error on either.
+/// `parentUuid` walk is cycle-guarded and uses Native's same-sidechain,
+/// nearest-preceding-row fallback for a missing/repeated parent within 5 s;
+/// it does not error or rewrite persisted links.
 ///
 /// Errors:
 /// - [`LoaderError::SessionNotFound`] if the file doesn't exist.
@@ -1614,8 +1628,6 @@ pub async fn read_agent_resume_state(
     fs: Arc<dyn FileSystem>,
     session_id: &str,
 ) -> (Option<String>, Option<Value>) {
-    use sha2::{Digest, Sha256};
-
     if !tokio::fs::try_exists(transcript_path)
         .await
         .unwrap_or(false)
@@ -1626,6 +1638,19 @@ pub async fn read_agent_resume_state(
     let Ok(loaded) = reader.read_routed().await else {
         return (None, None);
     };
+    agent_resume_state_from_loaded(&loaded, session_id)
+}
+
+/// Read the same verified agent metadata from an already captured transcript.
+/// Cold-resume hosts use this to keep history and startup configuration on one
+/// writer-leased snapshot rather than reopening the source during assembly.
+#[must_use]
+pub fn agent_resume_state_from_loaded(
+    loaded: &LoadedTranscript,
+    session_id: &str,
+) -> (Option<String>, Option<Value>) {
+    use sha2::{Digest, Sha256};
+
     let setting = loaded
         .agent_settings
         .get(session_id)
@@ -1924,44 +1949,63 @@ fn timestamp_millis(ts: &str) -> i64 {
         .unwrap_or(i64::MIN)
 }
 
-/// Select a transcript's chain TIP — the newest non-sidechain `user`/`assistant`
-/// leaf — by the structural equivalent of `claude-code`'s leaf computation
-/// (`sessionStorage.ts:3716`, original/non-pebble branch) + newest-non-sidechain
-/// leaf selection, as composed by `loadMessagesFromJsonlPath`
-/// (`conversationRecovery.ts:416`).
-///
-/// **Gap #1 fix — `last-prompt` explicit tip override:**
-/// Before running the normal timestamp-based leaf selection, we check whether
-/// the transcript carries an *explicit* `last-prompt` entry (written by
-/// claude-code on every prompt submit with `policy:"always"`). Binary `Yle`
-/// (@ 206473264):
-/// ```text
-/// else if(N.type==="last-prompt"){if(N.leafUuid)
-///   L=N.explicit===true||L&&N.leafUuid===O, O=N.leafUuid}
-/// …
-/// V = L&&O&&n.has(O)&&!n.get(O)?.isSidechain
-/// ```
-/// where `L` = explicit flag and `O` = forced tip uuid. When `V` is true the
-/// binary sets the tip directly to the `last-prompt` `leafUuid`, bypassing the
-/// timestamp race. We mirror that: if `loaded.last_prompt_explicit` is `true`,
-/// `loaded.last_prompt_leaf_uuid` names a real non-sidechain participant, and
-/// that participant is a `user`/`assistant` message → return it immediately,
-/// skipping steps (1)–(4). This guarantees the correct branch is resumed even
-/// when two branches share the same newest timestamp.
-///
-/// Algorithm:
-///  0. (NEW) Explicit `last-prompt` override check — return early when applicable.
-///  1. `parent_uuids` = every `parentUuid` present among the chain participants.
-///  2. `terminals` = participants whose `uuid` is NOT in `parent_uuids` (no
-///     children) — these are the graph tips, including sidechain/orphan tips.
-///  3. For each terminal, walk parents (cycle-guarded) to the nearest
-///     `user`/`assistant` ancestor → that ancestor's uuid joins `leaf_uuids`.
-///  4. `tip` = the `leaf_uuids` member that is a NON-sidechain `user`/`assistant`
-///     message with the MAX timestamp (`>`, not `>=`, so the FIRST-seen leaf wins
-///     an exact-timestamp tie — TS `if (ts > tipTs)`).
-///
-/// Returns `None` when there is no non-sidechain user/assistant leaf (an empty
-/// graph, or a file whose only messages are sidechains).
+/// Find Native's nearest preceding resume candidate when a chain edge was
+/// removed (for example, by a server-fallback tombstone) or points into an
+/// already-visited cycle. This is a read-time recovery only: the JSONL row's
+/// `parentUuid` is never repaired or rewritten.
+fn timestamp_parent_fallback<'a>(
+    loaded: &'a LoadedTranscript,
+    current: &JsonlMessage,
+    visited: &HashSet<String>,
+) -> Option<&'a JsonlMessage> {
+    const MAX_PARENT_GAP_MS: i64 = 5_000;
+
+    let current_ms = chrono::DateTime::parse_from_rfc3339(&current.timestamp)
+        .ok()?
+        .timestamp_millis();
+    let mut seen_ids = HashSet::new();
+    let mut nearest: Option<(i64, &JsonlMessage)> = None;
+
+    // `Map#set` updates a duplicate UUID in place without changing its
+    // insertion position. `messages_in_order` carries that first-seen order;
+    // `by_uuid` supplies the last value for each ID.
+    for row in &loaded.messages_in_order {
+        if !seen_ids.insert(row.uuid.as_str()) {
+            continue;
+        }
+        let Some(candidate) = loaded.by_uuid.get(row.uuid.as_str()) else {
+            continue;
+        };
+        if visited.contains(&candidate.uuid)
+            || candidate.uuid == current.uuid
+            || candidate.is_sidechain != current.is_sidechain
+        {
+            continue;
+        }
+        let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(&candidate.timestamp) else {
+            continue;
+        };
+        let candidate_ms = timestamp.timestamp_millis();
+        let Some(gap_ms) = current_ms.checked_sub(candidate_ms) else {
+            continue;
+        };
+        if !(0..=MAX_PARENT_GAP_MS).contains(&gap_ms) {
+            continue;
+        }
+        if nearest.is_none_or(|(nearest_gap, _)| gap_ms < nearest_gap) {
+            nearest = Some((gap_ms, candidate));
+        }
+    }
+
+    nearest.map(|(_, candidate)| candidate)
+}
+
+/// Select a resumable main-thread user/assistant tip. Claude Code 2.1.286
+/// prefers the durable tail or a saved checkpoint, promoting a stale checkpoint
+/// when that tail follows it directly or through a parallel tool batch. An
+/// explicit branch checkpoint permits only direct continuation. Preserved-tail
+/// compactions use the effective reparented graph, and transcripts constructed
+/// without write-order metadata retain newest-leaf selection with stable ties.
 #[must_use]
 pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a JsonlMessage> {
     let by_uuid = &loaded.by_uuid;
@@ -1970,6 +2014,90 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     }
 
     let preserved = preserved_tail_state(loaded);
+
+    if loaded.cleared_to_empty {
+        return None;
+    }
+    let ordered = ordered_messages(loaded, by_uuid);
+    // 2.1.286 jln/yan: an ordinary checkpoint can be a completed sibling
+    // tool result. Prefer the durable continuation of that same batch even
+    // when the process died before writing its next last-prompt record.
+    // Preserved-tail compactions retain their existing reparent-aware walk.
+    if preserved.parents.is_empty() {
+        if let Some(last) = loaded
+            .last_transcript_uuid
+            .as_deref()
+            .filter(|id| by_uuid.contains_key(*id))
+        {
+            let checkpoint = loaded
+                .last_prompt_leaf_uuid
+                .as_deref()
+                .filter(|id| by_uuid.get(*id).is_some_and(|row| !row.is_sidechain));
+            let mut selected = checkpoint.unwrap_or(last);
+            if !loaded.last_prompt_explicit
+                && selected != last
+                && follows_checkpoint(
+                    by_uuid,
+                    last,
+                    selected,
+                    true,
+                    !loaded.last_prompt_was_explicit,
+                )
+            {
+                selected = last;
+            }
+            let newest_written = ordered.iter().filter(|row| !row.is_sidechain).fold(
+                None::<&&JsonlMessage>,
+                |newest, row| match newest {
+                    Some(prior) if prior.timestamp >= row.timestamp => Some(prior),
+                    _ => Some(row),
+                },
+            );
+            if checkpoint.is_none()
+                && !loaded.last_prompt_seen
+                && newest_written.is_some_and(|row| row.uuid != last)
+            {
+                // Delayed writes can put an ancestor at the file's tail.
+                // Index descendants once; repeated parent walks are quadratic
+                // on long transcripts.
+                let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+                for row in &ordered {
+                    if let Some(parent) = row.parent_uuid.as_deref() {
+                        children.entry(parent).or_default().push(&row.uuid);
+                    }
+                }
+                let mut descendants = HashSet::new();
+                let mut pending = vec![last];
+                while let Some(uuid) = pending.pop() {
+                    if descendants.insert(uuid) {
+                        pending.extend(children.get(uuid).into_iter().flatten().copied());
+                    }
+                }
+                let mut newest = "";
+                for row in &ordered {
+                    if !row.is_sidechain
+                        && row.uuid != last
+                        && row.timestamp.as_str() >= newest
+                        && descendants.contains(row.uuid.as_str())
+                    {
+                        selected = &row.uuid;
+                        newest = &row.timestamp;
+                    }
+                }
+            }
+            let mut cursor = by_uuid.get(selected);
+            let mut seen = HashSet::new();
+            while let Some(row) = cursor {
+                if !seen.insert(row.uuid.as_str()) {
+                    break;
+                }
+                if !row.is_sidechain && matches!(row.message_type.as_str(), "user" | "assistant") {
+                    return Some(row);
+                }
+                cursor = row.parent_uuid.as_deref().and_then(|id| by_uuid.get(id));
+            }
+        }
+    }
 
     // (0) Gap #1 fix: explicit last-prompt override.
     // Binary: `V = L&&O&&n.has(O)&&!n.get(O)?.isSidechain`
@@ -2010,8 +2138,9 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     // (1) Every EFFECTIVE parentUuid that is actually referenced (overlay first,
     // else the on-disk parent).
     let mut parent_uuids: HashSet<&str> = HashSet::new();
-    for m in by_uuid
-        .values()
+    for m in ordered
+        .iter()
+        .copied()
         .filter(|m| !preserved.pruned.contains(&m.uuid))
     {
         if let Some(p) = reparent
@@ -2026,8 +2155,9 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     // (2) Terminals = messages no other message points at.
     // (3) From each terminal, walk up to the nearest user/assistant leaf.
     let mut leaf_uuids: HashSet<String> = HashSet::new();
-    for m in by_uuid
-        .values()
+    for m in ordered
+        .iter()
+        .copied()
         .filter(|m| !preserved.pruned.contains(&m.uuid))
     {
         if parent_uuids.contains(m.uuid.as_str()) {
@@ -2061,8 +2191,11 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     // (4) tip = newest non-sidechain user/assistant leaf.
     let mut tip: Option<&JsonlMessage> = None;
     let mut tip_ts: i64 = i64::MIN;
-    for uuid in &leaf_uuids {
-        let Some(m) = by_uuid.get(uuid) else { continue };
+    for m in ordered
+        .iter()
+        .copied()
+        .filter(|m| leaf_uuids.contains(&m.uuid))
+    {
         if m.is_sidechain {
             continue;
         }
@@ -2090,22 +2223,23 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
 ///  1.–4. Pick the chain TIP via [`find_tip`] (newest non-sidechain
 ///     `user`/`assistant` leaf). The tip — not the file's first row — supplies
 ///     the returned session id (forked sessions copy `chain[0]` from the source).
-///  5. Walk `tip → root` via `parentUuid` + `by_uuid.get`, STOP on a missing
-///     parent (partial chain, no error), BREAK on a cycle (no loop), then
-///     reverse to root → tip order.
+///  5. Walk `tip → root` via `parentUuid` + `by_uuid.get`; when an edge is
+///     missing or cycles, use Native's nearest preceding same-sidechain row
+///     within five seconds as a read-time fallback. Then reverse to root → tip
+///     order. The persisted parent links are not mutated.
 ///
 /// Returns `(main_thread, tip_session_id)`. When no non-sidechain
 /// user/assistant leaf exists the chain is empty and the session id is the
 /// requested `arg` (the caller maps the empty chain to "nothing to resume").
 ///
-///  6. Run [`recover_orphaned_parallel_tool_results`]
+///  6. Run [`recover_parallel_results`]
 ///     (`recoverOrphanedParallelToolResults`, `sessionStorage.ts:2096`): the
 ///     single-parent walk keeps one branch, so PARALLEL tool calls (N
 ///     `tool_use`s → N one-block assistant siblings sharing `message.id`) leave
 ///     off-chain siblings + their `tool_result`s orphaned. The post-pass splices
-///     each group's genuine orphans back in right after their on-chain anchor,
-///     never reordering the main chain. A transcript with no parallel tool calls
-///     is returned unchanged.
+///     each group's recovered records into its batch in transcript insertion
+///     order, including unambiguous metadata tails and result identities whose
+///     original parent was missing or pointed outside the batch.
 #[must_use]
 pub fn build_conversation_chain(
     loaded: &LoadedTranscript,
@@ -2133,9 +2267,10 @@ pub fn build_conversation_chain(
     let preserved = preserved_tail_state(loaded);
     let reparent = &preserved.parents;
 
-    // (5) Walk tip → root, cycle-guarded, stop on missing parent; reverse.
-    // Boundary lines carry `parentUuid: null` (the claude chain reset), so the
-    // walk stops there naturally and the summarized prefix never re-enters.
+    // (5) Walk tip → root, cycle-guarded. A null parent is a real root and
+    // stops the walk; a non-null missing/repeated parent gets Native's nearest
+    // preceding timestamp fallback. Boundary lines carry `parentUuid: null`
+    // (the claude chain reset), so the summarized prefix never re-enters.
     let mut chain: Vec<JsonlMessage> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut current: Option<&JsonlMessage> = Some(tip);
@@ -2158,10 +2293,14 @@ pub fn build_conversation_chain(
         let parent = entry.parent_uuid.clone();
         chain.push(entry);
         current = match parent.as_deref() {
-            Some(p) => by_uuid
-                .get(p)
-                .filter(|m| !preserved.pruned.contains(&m.uuid)), // None here ⇒ missing parent ⇒ loop ends
-            None => None, // reached the root
+            Some(parent_uuid) => {
+                let parent = by_uuid
+                    .get(parent_uuid)
+                    .filter(|message| !preserved.pruned.contains(&message.uuid))
+                    .filter(|message| !seen.contains(&message.uuid));
+                parent.or_else(|| timestamp_parent_fallback(loaded, node, &seen))
+            }
+            None => None, // reached a root or an intentional compact boundary
         };
     }
     chain.reverse();
@@ -2181,8 +2320,9 @@ pub fn build_conversation_chain(
             .collect();
         &filtered
     };
-    let mut chain =
-        recover_orphaned_parallel_tool_results(recovery_messages, chain, &mut seen, arg);
+    let ordered = ordered_messages(loaded, recovery_messages);
+    let mut chain = recover_parallel_results(recovery_messages, &ordered, chain, &mut seen);
+    append_metadata_descendants(&ordered, &tip.uuid, &mut chain, &mut seen);
 
     // Preserved assistant records still carry pre-compaction usage on disk.
     // Claude's applyPreservedSegmentRelinks clears these counters on resume,
@@ -2444,170 +2584,6 @@ fn legacy_preserved_tail_reparents(loaded: &LoadedTranscript) -> HashMap<String,
     reparent
 }
 
-/// True when `m` is a `user` line whose inner `message.content` is an array
-/// containing at least one `tool_result` block — 1:1 with the TS predicate
-/// `m.type === 'user' && Array.isArray(m.message.content) &&
-/// m.message.content.some(b => b.type === 'tool_result')`
-/// (`sessionStorage.ts:2147-2151`).
-fn carries_tool_result(m: &JsonlMessage) -> bool {
-    if m.message_type != "user" {
-        return false;
-    }
-    m.message
-        .get("content")
-        .and_then(Value::as_array)
-        .is_some_and(|blocks| {
-            blocks
-                .iter()
-                .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-        })
-}
-
-/// Post-pass for [`build_conversation_chain`] — recover sibling assistant blocks
-/// and `tool_result`s that the single-parent walk orphaned. 1:1 port of
-/// `claude-code`'s `recoverOrphanedParallelToolResults`
-/// (`sessionStorage.ts:2096-2206`).
-///
-/// Streaming emits one assistant message per `content_block_stop` — N parallel
-/// `tool_use`s → N assistant messages with DISTINCT `uuid` but the SAME
-/// `message.id`. Each `tool_result`'s `parentUuid` points at its OWN one-block
-/// assistant (the write-time `sourceToolAssistantUUID` override), so the topology
-/// is a DAG; the tip→root walk is a linked-list traversal that keeps only one
-/// branch and drops the off-chain siblings + their `tool_results`. This pass
-/// re-attaches them.
-///
-/// Conservative by construction: it only ever ADDS genuine orphans (members not
-/// already in `seen`), splices each group's recovered entries immediately AFTER
-/// the group's last on-chain anchor, and never moves an existing chain member —
-/// so a transcript without parallel tool calls is returned byte-identical.
-fn recover_orphaned_parallel_tool_results(
-    by_uuid: &HashMap<String, JsonlMessage>,
-    chain: Vec<JsonlMessage>,
-    seen: &mut HashSet<String>,
-    arg: &str,
-) -> Vec<JsonlMessage> {
-    // chainAssistants — on-chain `assistant` lines, in chain order.
-    let chain_assistants: Vec<&JsonlMessage> = chain
-        .iter()
-        .filter(|m| m.message_type == "assistant")
-        .collect();
-    if chain_assistants.is_empty() {
-        return chain;
-    }
-
-    // anchorByMsgId — last on-chain member of each sibling group (chain order →
-    // later iterations overwrite, last wins). Stores the anchor's uuid.
-    let mut anchor_by_msg_id: HashMap<&str, String> = HashMap::new();
-    for a in &chain_assistants {
-        if let Some(id) = message_id(a) {
-            anchor_by_msg_id.insert(id, a.uuid.clone());
-        }
-    }
-
-    // O(n) precompute over ALL messages:
-    //  - siblingsByMsgId: assistant lines grouped by `message.id`.
-    //  - toolResultsByAsst: `user` tool_result carriers indexed by `parentUuid`
-    //    (the write-time srcUUID; --fork-session strips srcUUID but keeps it).
-    let mut siblings_by_msg_id: HashMap<&str, Vec<&JsonlMessage>> = HashMap::new();
-    let mut tool_results_by_asst: HashMap<&str, Vec<&JsonlMessage>> = HashMap::new();
-    for m in by_uuid.values() {
-        if m.message_type == "assistant" {
-            if let Some(id) = message_id(m) {
-                siblings_by_msg_id.entry(id).or_default().push(m);
-            }
-        } else if carries_tool_result(m) {
-            if let Some(parent) = m.parent_uuid.as_deref() {
-                tool_results_by_asst.entry(parent).or_default().push(m);
-            }
-        }
-    }
-
-    // For each message.id group touching the chain: collect off-chain siblings +
-    // off-chain TRs for ALL members, splice right after the group's anchor.
-    let mut processed_groups: HashSet<&str> = HashSet::new();
-    let mut inserts: HashMap<String, Vec<JsonlMessage>> = HashMap::new();
-    let mut recovered_count: usize = 0;
-    for asst in &chain_assistants {
-        let Some(msg_id) = message_id(asst) else {
-            continue;
-        };
-        if !processed_groups.insert(msg_id) {
-            continue; // already handled this group
-        }
-
-        // group = siblingsByMsgId.get(msgId) ?? [asst]
-        let group: Vec<&JsonlMessage> = siblings_by_msg_id
-            .get(msg_id)
-            .cloned()
-            .unwrap_or_else(|| vec![*asst]);
-
-        let mut orphaned_siblings: Vec<&JsonlMessage> = group
-            .iter()
-            .filter(|s| !seen.contains(&s.uuid))
-            .copied()
-            .collect();
-        let mut orphaned_trs: Vec<&JsonlMessage> = Vec::new();
-        for member in &group {
-            if let Some(trs) = tool_results_by_asst.get(member.uuid.as_str()) {
-                for tr in trs {
-                    if !seen.contains(&tr.uuid) {
-                        orphaned_trs.push(tr);
-                    }
-                }
-            }
-        }
-        if orphaned_siblings.is_empty() && orphaned_trs.is_empty() {
-            continue;
-        }
-
-        // Timestamp sort keeps content-block / completion order; the sort is
-        // STABLE (`sort_by`) so JSONL read order survives ties — matching TS's
-        // `localeCompare` stable sort.
-        orphaned_siblings.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-        orphaned_trs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-
-        // anchor = anchorByMsgId.get(msgId)!  — guaranteed present: this group is
-        // anchored by `asst`, an on-chain assistant whose id we inserted above.
-        let Some(anchor_uuid) = anchor_by_msg_id.get(msg_id) else {
-            continue;
-        };
-
-        let mut recovered: Vec<JsonlMessage> =
-            Vec::with_capacity(orphaned_siblings.len() + orphaned_trs.len());
-        for s in orphaned_siblings {
-            seen.insert(s.uuid.clone());
-            recovered.push(s.clone());
-        }
-        for tr in orphaned_trs {
-            seen.insert(tr.uuid.clone());
-            recovered.push(tr.clone());
-        }
-        recovered_count += recovered.len();
-        inserts.insert(anchor_uuid.clone(), recovered);
-    }
-
-    if recovered_count == 0 {
-        return chain;
-    }
-    tracing::debug!(
-        session = arg,
-        recovered = recovered_count,
-        "recovered orphaned parallel tool_result blocks",
-    );
-
-    // Splice: walk the chain, append each anchor's recovered entries right after
-    // it so the group stays contiguous (every TR lands after its tool_use).
-    let mut result: Vec<JsonlMessage> = Vec::with_capacity(chain.len() + recovered_count);
-    for m in chain {
-        let recovered = inserts.remove(&m.uuid);
-        result.push(m);
-        if let Some(recovered) = recovered {
-            result.extend(recovered);
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     //! SESSION.1 coverage — `list_recent_sessions` HIDES sub-agent / sidechain
@@ -2685,7 +2661,7 @@ mod tests {
             "compactMetadata".to_string(),
             Value::Object(compact_metadata),
         );
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "system".to_string(),
             uuid: uuid.to_string(),
             parent_uuid: None,
@@ -2706,7 +2682,7 @@ mod tests {
     }
 
     fn user_line(uuid: &str) -> JsonlMessage {
-        JsonlMessage {
+        JsonlMessage { json_projection: None,
             message_type: "user".to_string(),
             uuid: uuid.to_string(),
             parent_uuid: None,
@@ -2724,6 +2700,36 @@ mod tests {
             logical_parent_uuid: None,
             extra: serde_json::Map::new(),
         }
+    }
+
+    fn assistant_line(
+        uuid: &str,
+        parent_uuid: Option<&str>,
+        timestamp: &str,
+        is_sidechain: bool,
+    ) -> JsonlMessage {
+        let mut message = user_line(uuid);
+        message.message_type = "assistant".to_string();
+        message.parent_uuid = parent_uuid.map(str::to_owned);
+        message.timestamp = timestamp.to_string();
+        message.is_sidechain = is_sidechain;
+        message.message = json!({
+            "id": format!("provider-{uuid}"),
+            "role": "assistant",
+            "content": [{"type":"text", "text":uuid}],
+            "model": "test-model",
+            "stop_reason": "end_turn"
+        });
+        message
+    }
+
+    fn loaded_transcript(rows: Vec<JsonlMessage>) -> LoadedTranscript {
+        let mut loaded = LoadedTranscript::default();
+        for row in rows {
+            loaded.by_uuid.insert(row.uuid.clone(), row.clone());
+            loaded.messages_in_order.push(row);
+        }
+        loaded
     }
 
     fn user_with_content(uuid: &str, content: Value) -> JsonlMessage {
@@ -2796,6 +2802,208 @@ mod tests {
     #[test]
     fn is_loop_session_empty_transcript_is_false() {
         assert!(!is_loop_session(&[]));
+    }
+
+    #[test]
+    fn resume_parent_fallback_rejoins_tombstoned_stream_ancestry_without_mutating_links() {
+        let root = user_line("root");
+        let mut root = root;
+        root.timestamp = "2026-10-03T12:00:00.000Z".into();
+        let survivor = assistant_line(
+            "survivor",
+            Some("physically-removed-row"),
+            "2026-10-03T12:00:04.000Z",
+            false,
+        );
+        let loaded = loaded_transcript(vec![root, survivor]);
+
+        let (chain, _) = build_conversation_chain(&loaded, "session");
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "survivor"]
+        );
+        assert_eq!(
+            chain.last().and_then(|row| row.parent_uuid.as_deref()),
+            Some("physically-removed-row"),
+            "resume may recover the chain in memory but must preserve the source parent field"
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_tombstone_keeps_dangling_parent_and_resume_recovers_preceding_row() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("session.jsonl");
+        let session_id = Uuid::new_v4().to_string();
+        let root_id = Uuid::new_v4().to_string();
+        let discarded_id = Uuid::new_v4().to_string();
+        let survivor_id = Uuid::new_v4().to_string();
+        let source_rows = [
+            serde_json::json!({
+                "type":"user", "uuid":root_id, "parentUuid":null,
+                "sessionId":session_id, "timestamp":"2026-10-03T12:00:00.000Z",
+                "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+                "message":{"role":"user","content":"prompt"}
+            }),
+            serde_json::json!({
+                "type":"assistant", "uuid":discarded_id, "parentUuid":root_id,
+                "sessionId":session_id, "timestamp":"2026-10-03T12:00:02.000Z",
+                "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+                "message":{"id":"provider-1","role":"assistant","model":"model-a","stop_reason":"end_turn","content":[{"type":"text","text":"discard me"}]}
+            }),
+            serde_json::json!({
+                "type":"assistant", "uuid":survivor_id, "parentUuid":discarded_id,
+                "sessionId":session_id, "timestamp":"2026-10-03T12:00:04.000Z",
+                "cwd":"/tmp", "version":"0.12.0", "isSidechain":false,
+                "message":{"id":"provider-2","role":"assistant","model":"model-b","stop_reason":"end_turn","content":[{"type":"text","text":"survived"}]}
+            }),
+        ];
+        let mut source = source_rows
+            .iter()
+            .map(|row| row.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        source.push('\n');
+        std::fs::write(&path, source).unwrap();
+
+        let fs = make_fs(temp.path());
+        let writer = crate::jsonl::writer::JsonlWriter::new(path.clone(), fs.clone());
+        writer
+            .bootstrap_session_message_identity_snapshot(&path)
+            .await
+            .expect("import the existing Native rows before Host tombstone mutation");
+        assert!(writer.remove_message_by_uuid(&discarded_id).await.unwrap());
+
+        let loaded = JsonlReader::new(path, fs).read_routed().await.unwrap();
+        assert!(!loaded.by_uuid.contains_key(&discarded_id));
+        assert_eq!(
+            loaded.by_uuid[&survivor_id].parent_uuid.as_deref(),
+            Some(discarded_id.as_str()),
+            "physical deletion leaves the child's native parentUuid untouched"
+        );
+        let (chain, _) = build_conversation_chain(&loaded, &session_id);
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            [root_id.as_str(), survivor_id.as_str()]
+        );
+    }
+
+    #[test]
+    fn resume_parent_fallback_rejects_other_sidechains_and_rows_over_five_seconds_old() {
+        let mut wrong_sidechain = user_line("sidechain");
+        wrong_sidechain.timestamp = "2026-10-03T12:00:04.000Z".into();
+        wrong_sidechain.is_sidechain = true;
+        let too_old = assistant_line("too-old", None, "2026-10-03T11:59:54.999Z", false);
+        let survivor = assistant_line(
+            "survivor",
+            Some("missing"),
+            "2026-10-03T12:00:00.000Z",
+            false,
+        );
+        let loaded = loaded_transcript(vec![wrong_sidechain, too_old, survivor]);
+
+        let (chain, _) = build_conversation_chain(&loaded, "session");
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            ["survivor"],
+            "candidate scope is exact sidechain identity and an inclusive 5000ms window"
+        );
+    }
+
+    #[test]
+    fn resume_parent_fallback_requires_valid_current_and_candidate_timestamps() {
+        let mut invalid_candidate = user_line("invalid-candidate");
+        invalid_candidate.timestamp = "not-a-date".into();
+        let invalid_current =
+            assistant_line("invalid-current", Some("missing"), "not-a-date", false);
+        let tip = assistant_line(
+            "tip",
+            Some("invalid-current"),
+            "2026-10-03T12:00:00.000Z",
+            false,
+        );
+        let loaded = loaded_transcript(vec![user_line("valid-root"), invalid_current, tip]);
+
+        let (chain, _) = build_conversation_chain(&loaded, "session");
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            ["invalid-current", "tip"],
+            "an invalid current timestamp does not invoke the timestamp fallback"
+        );
+
+        let current = assistant_line(
+            "current",
+            Some("missing"),
+            "2026-10-03T12:00:00.000Z",
+            false,
+        );
+        let loaded = loaded_transcript(vec![invalid_candidate, current]);
+        let (chain, _) = build_conversation_chain(&loaded, "session");
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            ["current"],
+            "invalid candidate timestamps are ignored"
+        );
+    }
+
+    #[test]
+    fn resume_parent_fallback_uses_first_transcript_candidate_for_equal_timestamps() {
+        let first = user_line("first");
+        let mut first = first;
+        first.timestamp = "2026-10-03T12:00:00.000Z".into();
+        let second = assistant_line("second", None, "2026-10-03T12:00:00.000Z", false);
+        let survivor = assistant_line(
+            "survivor",
+            Some("missing"),
+            "2026-10-03T12:00:01.000Z",
+            false,
+        );
+        let loaded = loaded_transcript(vec![first, second, survivor]);
+
+        let (chain, _) = build_conversation_chain(&loaded, "session");
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "survivor"],
+            "the nearest timestamp tie keeps Map insertion order"
+        );
+    }
+
+    #[test]
+    fn resume_parent_fallback_breaks_a_cycle_with_the_nearest_preceding_row() {
+        let mut root = user_line("root");
+        root.timestamp = "2026-10-03T12:00:00.000Z".into();
+        let left = assistant_line("left", Some("right"), "2026-10-03T12:00:01.000Z", false);
+        let right = assistant_line("right", Some("left"), "2026-10-03T12:00:02.000Z", false);
+        let tip = assistant_line("tip", Some("right"), "2026-10-03T12:00:03.000Z", false);
+        let loaded = loaded_transcript(vec![root, left, right, tip]);
+
+        let (chain, _) = build_conversation_chain(&loaded, "session");
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "left", "right", "tip"]
+        );
+        assert_eq!(chain[1].parent_uuid.as_deref(), Some("right"));
+        assert_eq!(chain[2].parent_uuid.as_deref(), Some("left"));
     }
 
     #[test]

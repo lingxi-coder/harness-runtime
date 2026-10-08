@@ -431,7 +431,7 @@ impl tool_api::tool_trait::Tool for SuccessfulReadFixture {
 
 fn read_response(id: &str, input: Value) -> llm_runtime::HistoryResponse {
     crate::test_support::mock_message_response(
-        vec![llm_runtime::ContentBlock::ToolCall {
+        vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
             id: id.to_owned(),
             name: "Read".into(),
             input,

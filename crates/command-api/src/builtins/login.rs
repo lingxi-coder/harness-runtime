@@ -136,6 +136,12 @@ pub(crate) mod tests {
     }
     #[async_trait]
     impl AuthHandle for MockAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             self.result.lock().unwrap().clone()
         }
@@ -214,6 +220,12 @@ pub(crate) mod tests {
     }
     #[async_trait]
     impl AuthHandle for RollbackAuth {
+        fn register_account_change_observer(
+            &self,
+            _observer: std::sync::Weak<dyn lingxi_core::host::auth::AccountChangeObserver>,
+        ) {
+        }
+
         async fn login(&self) -> Result<LoginInfo, AuthError> {
             Ok(self.info.clone())
         }

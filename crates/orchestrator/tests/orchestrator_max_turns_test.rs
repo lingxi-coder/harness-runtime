@@ -17,7 +17,7 @@ async fn never_ending_loop_aborts_with_max_turns_reached() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "still thinking".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("max_tokens"), // any value other than "end_turn"
         )
@@ -72,7 +72,7 @@ async fn max_turns_zero_means_unbounded() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "still thinking".into(),
-                cache_control: None,
+                cache_control: None, citations: None,
             }],
             Some("max_tokens"),
         )
@@ -126,7 +126,7 @@ async fn default_config_single_end_turn_completes_cleanly() {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "Done.".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     )]));

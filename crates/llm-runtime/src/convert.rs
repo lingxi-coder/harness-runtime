@@ -52,6 +52,11 @@ impl ConversationMessagesWithSources {
                     | ConversationMessage::Assistant { id, content, .. } => {
                         (Some(*id), content.len())
                     }
+                    ConversationMessage::System {
+                        id,
+                        api_system: Some(message),
+                        ..
+                    } => (Some(*id), message.content.len()),
                     ConversationMessage::System { .. } => (None, 0),
                 };
                 (0..len)
@@ -193,6 +198,19 @@ pub(crate) fn normalize_messages_for_api_with_tool_search_and_sources(
         .zip(messages.block_sources)
         .skip(start)
     {
+        if let ConversationMessage::User {
+            id,
+            api_message_override: Some(message),
+            ..
+        } = &msg
+        {
+            let id = *id;
+            let message = message.clone();
+            block_sources = (0..message.content.len())
+                .map(|_| [id].into_iter().collect())
+                .collect();
+            msg = ConversationMessage::api_system(id, message);
+        }
         // `stripAdvisorBlocks` (claude-code `claude.ts:1305`): drop
         // `advisor_tool_result` (no advisor beta) and `connector_text` (no
         // encode path — the Anthropic encoder rejects them) before the wire.
@@ -222,6 +240,10 @@ pub(crate) fn normalize_messages_for_api_with_tool_search_and_sources(
             // the `system` parameter and `convert_message` rejects any `System`
             // here. claude-code `isVisibleInTranscriptOnly`. Dropping pre-merge
             // also lets the surrounding same-role messages collapse below.
+            ConversationMessage::System {
+                api_system: Some(_),
+                ..
+            } => {}
             ConversationMessage::System { .. } => continue,
         }
         if let ConversationMessage::User { content, .. } = &mut msg {
@@ -256,6 +278,25 @@ pub(crate) fn normalize_messages_for_api_with_tool_search_and_sources(
             ) => {
                 join_text_at_seam(prev_content, prev_sources, new_content, new_sources);
                 hoist_tool_results(prev_content, prev_sources);
+            }
+            (
+                Some(ConversationMessage::System {
+                    api_system: Some(previous),
+                    ..
+                }),
+                Some(previous_sources),
+                ConversationMessage::System {
+                    api_system: Some(next),
+                    ..
+                },
+                next_sources,
+            ) if previous.output_config.is_none() && next.output_config.is_none() => {
+                join_api_system_content(
+                    &mut previous.content,
+                    previous_sources,
+                    next.content,
+                    next_sources,
+                );
             }
             // `mergeAssistantMessages` (claude-code `messages.ts`): the
             // per-content-block assistant lines emitted by the streaming writer
@@ -401,6 +442,69 @@ fn join_text_at_seam(
     a_sources.append(&mut b_sources);
 }
 
+/// Native adjacent API-system rows coalesce their text with two LF while
+/// retaining block order and every contributing accepted message identity.
+fn join_api_system_content(
+    a: &mut Vec<ProtoBlock>,
+    a_sources: &mut Vec<HashSet<lingxi_core::types::MessageId>>,
+    mut b: Vec<ProtoBlock>,
+    mut b_sources: Vec<HashSet<lingxi_core::types::MessageId>>,
+) {
+    if let (Some(left), Some(right)) = (a.last(), b.first()) {
+        if matches!(
+            left,
+            ProtoBlock::Text { .. } | ProtoBlock::TextJsUtf16 { .. }
+        ) && matches!(
+            right,
+            ProtoBlock::Text { .. } | ProtoBlock::TextJsUtf16 { .. }
+        ) {
+            let mut units = left
+                .visible_text_utf16_units()
+                .map(<[u16]>::to_vec)
+                .unwrap_or_else(|| {
+                    left.visible_text()
+                        .unwrap_or_default()
+                        .encode_utf16()
+                        .collect()
+                });
+            units.extend([10, 10]);
+            units.extend(
+                right
+                    .visible_text_utf16_units()
+                    .map(<[u16]>::to_vec)
+                    .unwrap_or_else(|| {
+                        right
+                            .visible_text()
+                            .unwrap_or_default()
+                            .encode_utf16()
+                            .collect()
+                    }),
+            );
+            let block = match String::from_utf16(&units) {
+                Ok(text) => ProtoBlock::Text {
+                    text,
+                    citations: None,
+                },
+                Err(_) => ProtoBlock::TextJsUtf16 {
+                    text: String::from_utf16_lossy(&units),
+                    utf16_code_units: units,
+                    citations: None,
+                },
+            };
+            *a.last_mut().expect("joined text seam") = block;
+            if let (Some(left_sources), Some(right_sources)) =
+                (a_sources.last_mut(), b_sources.first())
+            {
+                left_sources.extend(right_sources);
+            }
+            b.remove(0);
+            b_sources.remove(0);
+        }
+    }
+    a.append(&mut b);
+    a_sources.append(&mut b_sources);
+}
+
 /// Stable-partition `ToolResult` blocks to the front, preserving relative order
 /// within each group.
 ///
@@ -467,6 +571,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             id: asst_id,
             content,
             stop_reason,
+            ..
         } = msg
         else {
             if let ConversationMessage::User {
@@ -475,6 +580,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                 is_meta,
                 is_compact_summary,
                 is_visible_in_transcript_only,
+                ..
             } = msg
             {
                 let prev_is_assistant = matches!(
@@ -494,6 +600,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                     }
                     if !stripped.is_empty() {
                         result.messages.push(ConversationMessage::User {
+                            api_message_override: None,
                             id: *id,
                             content: stripped,
                             is_meta: *is_meta,
@@ -568,6 +675,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             final_sources.push(sources);
         }
         result.messages.push(ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: *asst_id,
             content: final_content,
             stop_reason: stop_reason.clone(),
@@ -609,6 +717,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             .map(|id| {
                 let sources = tool_use_sources.get(id).cloned().unwrap_or_default();
                 let block = B::ToolResult {
+                    content_projection: None,
                     tool_use_id: lingxi_core::types::ToolUseId::from(id.clone()),
                     content: SYNTH.to_string(),
                     is_error: Some(true),
@@ -625,6 +734,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             is_meta,
             is_compact_summary,
             is_visible_in_transcript_only,
+            ..
         }) = next
         {
             let mut c = content
@@ -649,6 +759,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             patched.extend(c);
             if !patched.is_empty() {
                 result.messages.push(ConversationMessage::User {
+                    api_message_override: None,
                     id: *uid,
                     content: patched.iter().map(|(block, _)| block.clone()).collect(),
                     is_meta: *is_meta,
@@ -662,6 +773,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                 // Role-alternation placeholder (claude-code `NO_CONTENT_MESSAGE`,
                 // isMeta: true).
                 result.messages.push(ConversationMessage::User {
+                    api_message_override: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![B::Text {
                         text: NO_CONTENT.to_string(),
@@ -679,6 +791,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             // isMeta: true).
             if !synth.is_empty() {
                 result.messages.push(ConversationMessage::User {
+                    api_message_override: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: synth.iter().map(|(block, _)| block.clone()).collect(),
                     is_meta: true,
@@ -701,7 +814,9 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
 /// Each value must have string fields `name` and `description` and a
 /// non-null `input_schema`; missing or wrong-typed fields produce
 /// `Err(LlmError::InvalidRequest)` naming the offending field.
-pub fn to_tool_declarations(tools: Vec<Value>) -> Result<Vec<ToolDeclaration>, LlmError> {
+pub fn to_tool_declarations(
+    tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> Result<Vec<ToolDeclaration>, LlmError> {
     tools.into_iter().map(convert_tool_declaration).collect()
 }
 
@@ -709,19 +824,24 @@ pub fn to_tool_declarations(tools: Vec<Value>) -> Result<Vec<ToolDeclaration>, L
 
 fn convert_message(msg: ConversationMessage) -> Result<Message, LlmError> {
     match msg {
-        ConversationMessage::User { content, .. } => Ok(Message {
+        ConversationMessage::User { content, .. } => Ok(Message { api_output_config: None,
             role: "user".to_string(),
             content: content
                 .into_iter()
                 .map(convert_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        ConversationMessage::Assistant { content, .. } => Ok(Message {
+        ConversationMessage::Assistant { content, .. } => Ok(Message { api_output_config: None,
             role: "assistant".to_string(),
             content: content
                 .into_iter()
                 .map(convert_block)
                 .collect::<Result<Vec<_>, _>>()?,
+        }),
+        ConversationMessage::System { api_system:Some(message), .. } => Ok(Message {
+            role:"system".into(),
+            content:message.content.into_iter().map(convert_block).collect::<Result<Vec<_>,_>>()?,
+            api_output_config:message.output_config,
         }),
         ConversationMessage::System { .. } => Err(LlmError::InvalidRequest {
             message: "System messages must not appear in the messages vec; pass them via the system parameter".to_string(),
@@ -753,8 +873,11 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             id,
             name,
             input,
+            input_projection,
             provider_id,
+            ..
         } => Ok(LlmBlock::ToolCall {
+            input_projection,
             // `id` IS the canonical provider-issued id (Anthropic `toolu_…`,
             // OpenAI `call_…`). `provider_id` is now vestigial/always None, so
             // this resolves to `id.to_string()` = the canonical id (byte parity).
@@ -768,7 +891,10 @@ fn convert_block(block: ProtoBlock) -> Result<LlmBlock, LlmError> {
             is_error,
             provider_tool_use_id,
             content_blocks,
+            content_projection,
+            ..
         } => Ok(LlmBlock::ToolResult {
+            output_projection: content_projection,
             // Must echo the same canonical id the paired `tool_use` carried so the
             // provider pairs them; `provider_tool_use_id` is vestigial/always None.
             tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
@@ -898,7 +1024,15 @@ fn convert_document_source(source: DocumentSource) -> Result<LlmBlock, LlmError>
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn convert_tool_declaration(value: Value) -> Result<ToolDeclaration, LlmError> {
+fn convert_tool_declaration(
+    projection: lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> Result<ToolDeclaration, LlmError> {
+    projection
+        .validate()
+        .map_err(|error| LlmError::InvalidRequest {
+            message: error.to_string(),
+        })?;
+    let value = &projection.value;
     let name = value
         .get("name")
         .and_then(Value::as_str)
@@ -936,6 +1070,11 @@ fn convert_tool_declaration(value: Value) -> Result<ToolDeclaration, LlmError> {
         .unwrap_or(false);
 
     Ok(ToolDeclaration {
+        input_schema_projection: Some(projection.subprojection("/input_schema").map_err(
+            |error| LlmError::InvalidRequest {
+                message: error.to_string(),
+            },
+        )?),
         name,
         description,
         input_schema,

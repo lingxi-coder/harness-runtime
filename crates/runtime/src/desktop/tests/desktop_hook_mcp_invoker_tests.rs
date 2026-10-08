@@ -172,6 +172,8 @@ fn hook_full_name_normalizes_server_and_respects_existing_prefix() {
 #[test]
 fn hook_result_mapping_extracts_text_and_preserves_is_error() {
     let success = map_hook_mcp_tool_result(McpToolResultDto {
+        result_projection: None,
+
         content: serde_json::json!([
             {"type":"text","text":"first"},
             "second",
@@ -190,6 +192,8 @@ fn hook_result_mapping_extracts_text_and_preserves_is_error() {
     );
 
     let is_error = map_hook_mcp_tool_result(McpToolResultDto {
+        result_projection: None,
+
         content: serde_json::json!("boom"),
         is_error: true,
         meta: None,

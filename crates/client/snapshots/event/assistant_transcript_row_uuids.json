@@ -1,0 +1,8 @@
+{
+  "type": "assistant_transcript_row_uuids",
+  "message_id": "assistant-turn-1",
+  "uuids": [
+    "assistant-text-row-1",
+    null
+  ]
+}

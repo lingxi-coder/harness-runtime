@@ -7,25 +7,25 @@
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::test_support::{HookExecutor, PermissionGate};
-use crate::token_budget::{check_token_budget, BudgetTracker, TokenBudgetDecision};
+use crate::token_budget::{BudgetTracker, TokenBudgetDecision, check_token_budget};
 use crate::turn_loop::{
-    execute_one_turn_with_recovery_tracked, RecoveryState, TurnStepOutcome,
     MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_NUDGE,
-    MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, THINKING_ONLY_NUDGE,
+    MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE, RecoveryState,
+    THINKING_ONLY_NUDGE, TurnStepOutcome, execute_one_turn_with_recovery_tracked,
 };
 use async_trait::async_trait;
 use hooks::events::HookEvent;
 use hooks::registry::HookContext;
-use lingxi_core::types::{ConversationMessage, HookId, MessageId, SessionId};
 use lingxi_core::SessionState;
+use lingxi_core::types::{ConversationMessage, HookId, MessageId, SessionId};
 use llm_runtime::{HistoryEvent, HistoryResponse, LlmError};
 use session::JsonlWriter;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::time::Duration;
 
-use lingxi_core::host::orchestrator::ModelListing;
 use lingxi_core::host::OutputStream;
+use lingxi_core::host::orchestrator::ModelListing;
 /// Re-export of the canonical image-source shape (FROZEN in `protocol`) so callers
 /// that do NOT depend on the `protocol` crate — notably the desktop bridge's
 /// `OrchestratorTurnDriver` — can construct the already-decoded sources handed to
@@ -35,8 +35,8 @@ use std::sync::Arc;
 use telemetry::tengu::orchestrator as orch_events;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tool_api::registry::ToolRegistry;
 use tool_api::ToolRegistryView as _;
+use tool_api::registry::ToolRegistry;
 
 /// Current owned request for the conversation API. Each implementation must
 /// explicitly execute the selected policy and every main-request option.
@@ -134,7 +134,8 @@ pub trait OrchestratorApiClient: Send + Sync {
         &self,
         request: llm_runtime::MessagesCreateRequest,
     ) -> Result<HistoryResponse, LlmError> {
-        self.messages_create(OrchestratorApiRequest::Main(request)).await
+        self.messages_create(OrchestratorApiRequest::Main(request))
+            .await
     }
 
     /// Count the input tokens a `messages.create` for `(model, system, msgs,
@@ -153,7 +154,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         _profile: Option<&str>,
         system: Option<&str>,
         msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        _tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<u64, LlmError> {
         let mut bytes = system.map_or(0u64, |s| s.len() as u64);
         bytes += msgs
@@ -172,7 +173,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         _profile: Option<&str>,
         _system: Option<&str>,
         _msgs: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        _tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) -> Result<Option<u64>, LlmError> {
         Ok(None)
     }
@@ -364,7 +365,7 @@ pub trait OrchestratorApiClient: Send + Sync {
         _profile: Option<&str>,
         _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        _tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         _skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
         Ok(())
@@ -428,7 +429,7 @@ pub trait StreamingApiClient: Send + Sync {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         query_source: &str,
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
@@ -442,7 +443,7 @@ pub trait StreamingApiClient: Send + Sync {
         profile: Option<&str>,
         system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
-        tools: Vec<serde_json::Value>,
+        tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         effort: Option<&str>,
         query_source: &str,
         skip_global_cache_for_system_prompt: bool,
@@ -517,11 +518,12 @@ pub enum TurnOutcome {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ConversationOutcome {
-    /// Model emitted `stop_reason == "end_turn"` after `turn_count` API
-    /// calls. `final_message_id` is the id of the final assistant message
+    /// The query completed after `turn_count` admitted query cycles.
+    /// `final_message_id` is the id of the final assistant message
     /// appended to the session.
     EndTurn {
-        /// Number of API round-trips it took to reach `end_turn`.
+        /// Admitted query cycles, including a StructuredOutput terminal cycle
+        /// that finishes from the accepted tool result without another API call.
         turn_count: u32,
         /// Stable identifier of the final assistant message.
         final_message_id: MessageId,
@@ -531,7 +533,7 @@ pub enum ConversationOutcome {
     /// (hooks B4, TS `query.ts:1278`). Distinct from [`Self::EndTurn`] so callers
     /// can tell a hook-forced stop from a natural `end_turn`.
     StopHookPrevented {
-        /// Number of API round-trips before the Stop hook forced termination.
+        /// Admitted query cycles before the Stop hook forced termination.
         turn_count: u32,
         /// Stable identifier of the final assistant message, if any.
         final_message_id: MessageId,
@@ -743,7 +745,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         },
         // Generic-Error fallthrough (`Flp`: `if(e instanceof $o)→"unknown"`;
         // generic Error → "unknown"). These orchestrator-internal variants never
-        // carry a status. `MaxTurnsReached`/`MaxBudgetReached` are handled
+        // carry a status. Turn/budget/structured-output retry limits are handled
         // upstream and never reach `surface_model_error` — dead arms kept for
         // totality.
         OrchestratorError::Internal(_)
@@ -756,6 +758,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         | OrchestratorError::RepeatedOverloaded
         | OrchestratorError::RateLimitRejected { .. }
         | OrchestratorError::MaxTurnsReached { .. }
+        | OrchestratorError::MaxStructuredOutputRetries { .. }
         | OrchestratorError::MaxBudgetReached { .. } => (Some("unknown"), None),
     };
     ApiErrorEnvelope {
@@ -1013,6 +1016,7 @@ pub(crate) struct MainThreadAgentState {
 struct WireToolSchemaCacheKey {
     tool_names: Vec<String>,
     dynamic_schema_revisions: Vec<(String, String)>,
+    exact_schema_identities: Vec<(String, String)>,
     model: String,
     model_profile: Option<String>,
     /// Whether the `workflow-authoring` skill was loadable when this entry was
@@ -1029,7 +1033,7 @@ struct WireToolSchemaCacheKey {
 #[derive(Debug, Clone)]
 struct WireToolSchemaCache {
     key: WireToolSchemaCacheKey,
-    wire: Vec<serde_json::Value>,
+    wire: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
 }
 
 /// `date_change` (cc `Cop`) per-conversation state.
@@ -1048,6 +1052,7 @@ pub(crate) struct PendingToolFrame {
     /// content to detect a substitution.
     pub(crate) model_text: String,
     pub(crate) result: serde_json::Value,
+    pub(crate) projection: Option<lingxi_core::host::ToolResultProjection>,
     pub(crate) denial_kind: Option<String>,
 }
 
@@ -1619,8 +1624,8 @@ mod tooling_impl;
 mod transcript_impl;
 pub use transcript_impl::ScheduledLoopFire;
 pub(crate) use transcript_impl::{
-    active_mod_result_stage_is_virtual, with_mod_result_stage, with_virtual_mod_result_stage,
-    ModResultStage,
+    ModResultStage, active_mod_result_stage_is_virtual, with_mod_result_stage,
+    with_virtual_mod_result_stage,
 };
 #[path = "conversation/wiring.rs"]
 mod wiring_impl;
@@ -1630,14 +1635,20 @@ mod output_accounting_impl;
 #[path = "conversation/runtime.rs"]
 mod runtime_impl;
 
+#[path = "conversation/headless_mcp.rs"]
+mod headless_mcp;
+#[path = "conversation/headless_ui.rs"]
+mod headless_ui;
+
 use drivers_impl::parse_generated_session_name;
 use runtime_impl::{
-    camelize_json_keys, compact_file_reference_body, extend_session_memory_fork_context,
-    find_unresolved_tool_use_in_history, CompactionRuntime, LifecycleRuntime, ModelRuntime,
-    PromptRuntime, SessionMemoryInFlightReset, TranscriptStore,
+    CompactionRuntime, LifecycleRuntime, ModelRuntime, PromptRuntime, SessionMemoryInFlightReset,
+    TranscriptStore, camelize_json_keys, compact_file_reference_body,
+    extend_session_memory_fork_context, find_unresolved_tool_use_in_history,
 };
 pub use runtime_impl::{
-    CostSessionSwitcher, PreparedSessionSwitch, SessionActivationObserver, SessionMemoryHandle, TurnExecutionMetrics,
+    CostSessionSwitcher, PreparedSessionSwitch, SessionActivationObserver, SessionMemoryHandle,
+    TurnExecutionMetrics,
 };
 
 /// Internal no-op streaming client used by [`ConversationOrchestrator::new`]
@@ -1656,7 +1667,7 @@ impl StreamingApiClient for NoStreamingApiClient {
         _profile: Option<&str>,
         _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _messages: Vec<ConversationMessage>,
-        _tools: Vec<serde_json::Value>,
+        _tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         _query_source: &str,
         _skip_global_cache_for_system_prompt: bool,
         _request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,

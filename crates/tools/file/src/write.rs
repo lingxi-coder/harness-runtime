@@ -26,7 +26,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
 use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd, translate_model_path,
+    canonicalize_and_validate, emit_blocked_event, translate_model_path,
 };
 use tool_api::BuiltinToolContext;
 
@@ -324,12 +324,12 @@ impl Tool for FileWriteTool {
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
-        let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+        let requested_path = crate::normalize_model_file_path(file_path, &self.ctx.cwd());
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
         // Desktop filesystems translate nothing and this is a no-op.
-        let path = match translate_model_path(&self.ctx.fs, path, true) {
+        let path = match translate_model_path(&self.ctx.fs, requested_path.clone(), true) {
             Ok(path) => path,
             Err(message) => return Err(ToolError::InvalidInput(message)),
         };
@@ -433,7 +433,7 @@ impl Tool for FileWriteTool {
             let cmp_content = prior_decoded.as_deref().unwrap_or("");
             if let Err(e) = crate::check_read_before_write(
                 &self.ctx.read_file_state,
-                &canon,
+                &requested_path,
                 current_mtime_ms,
                 cmp_content,
                 crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon),
@@ -499,9 +499,9 @@ impl Tool for FileWriteTool {
         let new_mtime_ms = write_result
             .modified
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set(
+        tool_api::read_file_state::set_with_requested_aliases(
             &self.ctx.read_file_state,
-            canon.clone(),
+            requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: content.to_string(),
                 mtime_ms: new_mtime_ms,
@@ -513,6 +513,8 @@ impl Tool for FileWriteTool {
                 seeded_from_context: false,
                 is_partial_view: false,
             },
+            true,
+            vec![requested_path.clone(), path.clone()],
         );
 
         // Mirror Claude Code's automatic post-edit diagnostics path by
@@ -570,7 +572,7 @@ impl Tool for FileWriteTool {
             Value::String(prior_decoded.clone().unwrap_or_default())
         };
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "type": type_str,
                 "filePath": file_path,
@@ -614,9 +616,11 @@ mod tests {
     /// Simulate a prior full `Read` of `target` so the read-before-write
     /// staleness guard (Batch F) is satisfied when overwriting an EXISTING
     /// file: records the file's current raw-UTF-8 content + floored mtime under
-    /// the canonicalized key with `offset`/`limit` = `None`. Call AFTER writing
+    /// Native's normalized model-route key with `offset`/`limit` = `None`.
+    /// Canonical remains the source for disk access only. Call AFTER writing
     /// the file so the seeded mtime matches the on-disk mtime.
     fn seed_full_read(ctx: &BuiltinToolContext, target: &std::path::Path) {
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(target).unwrap();
         let bytes = std::fs::read(&canon).unwrap();
         let content = crate::shared::decode_utf8_strict(&bytes)
@@ -627,7 +631,7 @@ mod tests {
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         tool_api::read_file_state::set(
             &ctx.read_file_state,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content,
                 mtime_ms,
@@ -639,6 +643,38 @@ mod tests {
                 is_partial_view: false,
             },
         );
+    }
+
+    #[tokio::test]
+    async fn actual_read_then_write_uses_the_normalized_session_route_key() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("nested")).unwrap();
+        let target = tmp.path().join("source.txt");
+        std::fs::write(&target, "old text\n").unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let state = ctx.read_file_state.clone();
+        let input_path = "nested/../source.txt";
+        let route = crate::normalize_model_file_path(input_path, &ctx.cwd());
+
+        crate::read::FileReadTool::new(ctx.clone())
+            .call(
+                json!({ "file_path": input_path }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read succeeds through the active session cwd");
+        assert!(tool_api::read_file_state::get(&state, &route).is_some());
+
+        FileWriteTool::new(ctx)
+            .call(
+                json!({ "file_path": input_path, "content": "new text\n" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Write looks up the same Native lexical route that Read recorded");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "new text\n");
     }
 
     #[test]
@@ -655,7 +691,14 @@ mod tests {
         std::fs::write(&target, "original").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let (ctx, _sink) = make_ctx(&tmp);
-        seed_full_read(&ctx, &target);
+        crate::read::FileReadTool::new(ctx.clone())
+            .call(
+                json!({ "file_path": link.to_string_lossy() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("Read the same lexical route before testing the write refusal");
         let tool = FileWriteTool::new(ctx);
 
         let error = tool
@@ -729,6 +772,7 @@ mod tests {
                 include_examples: false,
                 model: None,
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert_eq!(long, WRITE_PROMPT_LONG);
@@ -740,6 +784,7 @@ mod tests {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
+                ..Default::default()
             })
             .await;
         assert_eq!(short, WRITE_PROMPT_SHORT);

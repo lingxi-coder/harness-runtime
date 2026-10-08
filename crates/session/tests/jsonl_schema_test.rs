@@ -36,7 +36,7 @@ fn assistant_effort_field_sits_after_timestamp_before_trailer() {
     let mut extra: Map<String, Value> = Map::new();
     extra.insert("effort".into(), Value::String("high".into()));
 
-    let msg = JsonlMessage {
+    let msg = JsonlMessage { json_projection: None,
         message_type: "assistant".into(),
         uuid: "22222222-3333-4444-5555-666666666666".into(),
         parent_uuid: Some("0a1b2c3d-4e5f-6789-abcd-ef0123456789".into()),
@@ -93,7 +93,7 @@ fn unknown_outer_fields_preserved_in_extra() {
 
 #[test]
 fn parent_uuid_null_serializes_as_null_not_missing() {
-    let msg = JsonlMessage {
+    let msg = JsonlMessage { json_projection: None,
         message_type: "user".into(),
         uuid: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".into(),
         parent_uuid: None,
@@ -132,7 +132,7 @@ fn assistant_api_error_outer_key_order_matches_claude() {
     extra.insert("isApiErrorMessage".into(), Value::Bool(true));
     extra.insert("apiErrorStatus".into(), Value::Number(529.into()));
 
-    let msg = JsonlMessage {
+    let msg = JsonlMessage { json_projection: None,
         message_type: "assistant".into(),
         uuid: "22222222-3333-4444-5555-666666666666".into(),
         parent_uuid: Some("0a1b2c3d-4e5f-6789-abcd-ef0123456789".into()),
@@ -164,7 +164,7 @@ fn assistant_api_error_truncated_after_output_sits_before_is_api_error_message()
     extra.insert("truncatedAfterOutput".into(), Value::Bool(true));
     extra.insert("isApiErrorMessage".into(), Value::Bool(true));
 
-    let msg = JsonlMessage {
+    let msg = JsonlMessage { json_projection: None,
         message_type: "assistant".into(),
         uuid: "22222222-3333-4444-5555-666666666666".into(),
         parent_uuid: Some("0a1b2c3d-4e5f-6789-abcd-ef0123456789".into()),
@@ -193,7 +193,7 @@ fn user_meta_outer_key_order_places_ismeta_before_uuid() {
     // message, isMeta, uuid, timestamp.
     let mut extra: Map<String, Value> = Map::new();
     extra.insert("isMeta".into(), Value::Bool(true));
-    let msg = JsonlMessage {
+    let msg = JsonlMessage { json_projection: None,
         message_type: "user".into(),
         uuid: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".into(),
         parent_uuid: None,
@@ -222,7 +222,7 @@ fn unrecognized_extra_key_tail_appended_after_trailer() {
     // tail-appends after the common trailer, preserving round-trip fidelity.
     let mut extra: Map<String, Value> = Map::new();
     extra.insert("agentId".into(), Value::String("agent-42".into()));
-    let msg = JsonlMessage {
+    let msg = JsonlMessage { json_projection: None,
         message_type: "user".into(),
         uuid: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".into(),
         parent_uuid: None,
@@ -285,7 +285,7 @@ fn non_boundary_system_line_keeps_generic_envelope() {
     // extras — the flattened arm is boundary-only.
     let mut extra: Map<String, Value> = Map::new();
     extra.insert("subtype".into(), Value::String("other_subtype".into()));
-    let msg = JsonlMessage {
+    let msg = JsonlMessage { json_projection: None,
         message_type: "system".into(),
         uuid: "0a1b2c3d-4e5f-6789-abcd-ef0123456789".into(),
         parent_uuid: None,

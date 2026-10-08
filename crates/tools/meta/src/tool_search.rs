@@ -693,7 +693,7 @@ impl Tool for ToolSearchTool {
                 .collect::<Vec<_>>());
         }
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content,
             new_messages: vec![],

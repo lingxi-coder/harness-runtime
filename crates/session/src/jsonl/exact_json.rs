@@ -41,10 +41,33 @@ pub fn native_message_bytes(
     message: &super::schema::JsonlMessage,
 ) -> Result<Vec<u8>, ExactJsonError> {
     let overrides = message_utf16_overrides(message);
+    if message.json_projection.is_some() {
+        return native_projection_bytes(&serde_json::to_value(message)?, &overrides, message.json_projection.as_ref());
+    }
     if overrides.is_empty() {
         return Ok(serde_json::to_vec(message)?);
     }
     to_vec_with_overrides(&serde_json::to_value(message)?, &overrides)
+}
+
+/// Apply a producer-owned row projection after trusted writer metadata
+/// transformations, preserving exact input keys and strings without carriers.
+pub fn native_projection_bytes(
+    value: &serde_json::Value,
+    overrides: &Utf16Overrides,
+    projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> Result<Vec<u8>, ExactJsonError> {
+    let Some(projection) = projection else { return to_vec_with_overrides(value, overrides); };
+    let mut projection = projection.clone();
+    projection.rebase_display_value(value.clone()).map_err(|error| ExactJsonError::InvalidOverride(error.to_string()))?;
+    for (pointer, code_units) in overrides {
+        if let Some(existing) = projection.strings.iter().find(|entry| entry.pointer == *pointer) {
+            if existing.code_units != *code_units { return Err(ExactJsonError::InvalidOverride(pointer.clone())); }
+        } else {
+            projection.strings.push(lingxi_core::types::utf16_json::Utf16JsonString { pointer: pointer.clone(), code_units: code_units.clone() });
+        }
+    }
+    projection.to_json_string().map(String::into_bytes).map_err(|error| ExactJsonError::InvalidOverride(error.to_string()))
 }
 
 #[cfg(test)]

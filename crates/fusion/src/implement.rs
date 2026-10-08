@@ -575,6 +575,24 @@ impl WorktreeScopedInvoker {
 
 #[async_trait]
 impl ToolInvoker for WorktreeScopedInvoker {
+    async fn cleanup_computer_inputs(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        origin_session_id: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        self.inner
+            .cleanup_computer_inputs(agent_id, origin_session_id)
+            .await
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        self.inner.permission_mode()
+    }
+
+    fn tool_is_concurrency_safe(&self, name: &str, input: &Value) -> Option<bool> {
+        self.inner.tool_is_concurrency_safe(name, input)
+    }
+
     async fn invoke(
         &self,
         name: &str,
@@ -611,17 +629,22 @@ impl ToolInvoker for WorktreeScopedInvoker {
             .await
     }
 
+    async fn invoke_supplied_detailed(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: SubagentInvocationContext,
+        workspace_lease_token: Option<u64>,
+        supplied: Arc<dyn Any + Send + Sync>,
+    ) -> Result<ToolInvocationResult, ToolInvokerError> {
+        let (input, ctx) = self.scope(name, input, ctx)?;
+        self.inner
+            .invoke_supplied_detailed(name, input, ctx, workspace_lease_token, supplied)
+            .await
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
-    }
-    async fn cleanup_computer_inputs(
-        &self,
-        agent_id: lingxi_core::types::AgentId,
-        origin_session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
-        self.inner
-            .cleanup_computer_inputs(agent_id, origin_session_id)
-            .await
     }
 }
 
@@ -696,9 +719,13 @@ mod tests {
 
     fn ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            input_projection: None,
+            cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
             origin_session_id: None,
+            instruction_context: None,
+            fork_context: None,
             tool_execution_policy: ToolExecutionPolicy::Ordinary,
             agent_name: None,
             team_name: None,
@@ -712,6 +739,11 @@ mod tests {
             observer: None,
             parent_model: None,
             parent_model_profile: None,
+            agent_spawn_provenance: Default::default(),
+            tool_context_state: None,
+            assistant_message: None,
+            same_turn_tool_uses: Vec::new(),
+            current_history: Vec::new(),
             mode_override: None,
             request_source: None,
             frozen_command_denies: Vec::new(),

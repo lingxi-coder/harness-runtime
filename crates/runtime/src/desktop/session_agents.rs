@@ -1034,7 +1034,7 @@ mod tests {
             observer
                 .on_event(SubagentObservation::Message {
                     agent_id,
-                    message: ConversationMessage::System {
+                    message: ConversationMessage::System { api_system: None,
                         id: lingxi_core::types::MessageId::new(),
                         content: "idle".into(),
                         subtype: Some("agent_idle".into()),
@@ -1123,7 +1123,7 @@ mod tests {
     fn revision_counts_hidden_records_while_lowering_only_visible() {
         let visible =
             ConversationMessage::user(lingxi_core::types::MessageId::new(), "hello".to_string());
-        let hidden = ConversationMessage::User {
+        let hidden = ConversationMessage::User { api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "summary".into(),
@@ -1344,7 +1344,7 @@ mod tests {
         observer
             .on_event(SubagentObservation::Message {
                 agent_id,
-                message: ConversationMessage::Assistant {
+                message: ConversationMessage::Assistant { per_turn_effort: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "resumed output".to_string(),

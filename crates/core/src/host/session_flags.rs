@@ -789,3 +789,118 @@ pub fn set_single_shot_print_session(value: bool) {
 pub fn is_single_shot_print_session() -> bool {
     SINGLE_SHOT_PRINT_SESSION.load(Ordering::Relaxed)
 }
+
+// Request ownership is task-local and has no process-global fallback.
+#[derive(Clone, Copy)]
+struct RequestSessionOrigin {
+    session_id: Option<crate::types::SessionId>,
+    is_subagent: bool,
+}
+tokio::task_local! { static REQUEST_SESSION_ID: RequestSessionOrigin; }
+
+pub async fn scope_request_session_id<F: std::future::Future>(
+    session_id: crate::types::SessionId,
+    future: F,
+) -> F::Output {
+    let is_subagent = current_request_is_subagent();
+    REQUEST_SESSION_ID
+        .scope(
+            RequestSessionOrigin {
+                session_id: Some(session_id),
+                is_subagent,
+            },
+            future,
+        )
+        .await
+}
+
+/// Actual AgentRunner entry owns this fact, alongside its captured session ID.
+pub async fn scope_subagent_request_session_id<F: std::future::Future>(
+    session_id: Option<crate::types::SessionId>,
+    future: F,
+) -> F::Output {
+    REQUEST_SESSION_ID
+        .scope(
+            RequestSessionOrigin {
+                session_id,
+                is_subagent: true,
+            },
+            future,
+        )
+        .await
+}
+pub fn current_request_is_subagent() -> bool {
+    REQUEST_SESSION_ID
+        .try_with(|origin| origin.is_subagent)
+        .unwrap_or(false)
+}
+pub fn current_request_session_id() -> Option<crate::types::SessionId> {
+    REQUEST_SESSION_ID
+        .try_with(|origin| origin.session_id)
+        .ok()
+        .flatten()
+}
+
+/// Freeze trusted attribution before an existing future crosses a task boundary.
+pub fn bind_current_request_session_id<F: std::future::Future>(
+    future: F,
+) -> impl std::future::Future<Output = F::Output> {
+    let origin = REQUEST_SESSION_ID.try_with(|origin| *origin).ok();
+    async move {
+        if let Some(origin) = origin {
+            REQUEST_SESSION_ID.scope(origin, future).await
+        } else {
+            future.await
+        }
+    }
+}
+
+#[cfg(test)]
+mod request_session_tests {
+    use super::*;
+    #[tokio::test]
+    async fn request_origin_is_frozen_before_async_task_transfer() {
+        let origin = crate::types::SessionId::new();
+        let replacement = crate::types::SessionId::new();
+        let bound = scope_request_session_id(origin, async {
+            bind_current_request_session_id(async { current_request_session_id() })
+        })
+        .await;
+        let observed =
+            scope_request_session_id(replacement, async { tokio::spawn(bound).await.unwrap() })
+                .await;
+        assert_eq!(observed, Some(origin));
+        assert!(current_request_session_id().is_none());
+    }
+}
+
+#[cfg(test)]
+mod request_subagent_origin_tests {
+    use super::*;
+    #[tokio::test]
+    async fn subagent_fact_shares_session_origin_and_survives_task_transfer() {
+        let parent = crate::types::SessionId::new();
+        let work = scope_subagent_request_session_id(Some(parent), async {
+            bind_current_request_session_id(async move {
+                assert_eq!(current_request_session_id(), Some(parent));
+                assert!(current_request_is_subagent());
+                scope_request_session_id(parent, async {
+                    assert!(current_request_is_subagent());
+                })
+                .await;
+            })
+        })
+        .await;
+        scope_request_session_id(crate::types::SessionId::new(), async {
+            assert!(!current_request_is_subagent());
+            tokio::spawn(work).await.unwrap();
+            assert!(!current_request_is_subagent());
+        })
+        .await;
+        scope_subagent_request_session_id(None, async {
+            assert_eq!(current_request_session_id(), None);
+            assert!(current_request_is_subagent());
+        })
+        .await;
+    }
+}

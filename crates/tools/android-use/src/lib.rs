@@ -223,7 +223,7 @@ fn parse_query(value: Option<&Value>) -> Result<AndroidNodeQuery, ToolError> {
 }
 
 fn action_result(data: Value) -> ToolCallResult {
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data,
         model_content: None,
         new_messages: vec![],
@@ -267,7 +267,7 @@ fn screenshot_result(
             "displayHeight": display_height,
         });
     }
-    Ok(ToolCallResult {
+    Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data: json!({
             "type": "image",
             "file": file,

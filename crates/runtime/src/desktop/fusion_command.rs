@@ -27,8 +27,7 @@ const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-
 /// "setup". Naming the surfaces that can actually configure it is the only
 /// honest answer a handler with no UI of its own can give.
 const FUSION_SETUP_ELSEWHERE: &str = "`/fusion setup` opens an interactive wizard, which this surface cannot show.\n     In the terminal UI run `/fusion setup`; on the desktop open Settings → Fusion 多模型合议.\n     Either way it writes fusion.panelModels / fusion.analystModel to settings.json, which you can also edit by hand.";
-const FUSION_PERSISTENCE_REQUIRED: &str =
-    "durable session storage is disabled; /fusion requires session persistence (remove --no-session-persistence)";
+const FUSION_PERSISTENCE_REQUIRED: &str = "durable session storage is disabled; /fusion requires session persistence (remove --no-session-persistence)";
 
 /// Idempotent parent-history sink for Fusion results.
 pub struct DesktopFusionCompletionSink {
@@ -401,7 +400,7 @@ impl DesktopFusionCommandHandler {
             Err(message) => {
                 return CommandResult::Done {
                     display: Some(message),
-                }
+                };
             }
         };
         if let Some(run_id) = retry_run_id {
@@ -614,8 +613,8 @@ mod tests {
     #[tokio::test]
     async fn every_command_branch_preserves_original_request_and_reply() {
         use orchestrator::test_support::{
-            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-            StaticMemoryProvider,
+            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+            noop_hook_executor,
         };
         let dir = tempfile::tempdir().unwrap();
         let transcript_path = dir.path().join("session.jsonl");
@@ -809,10 +808,12 @@ mod tests {
             lingxi_core::host::FusionPublicationStatus::OutboxFailed
         );
         assert_eq!(duplicate, first);
-        assert!(first
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("not durably queued")));
+        assert!(
+            first
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("not durably queued"))
+        );
 
         let counter = Arc::new(CountingSink(AtomicUsize::new(0)));
         deferred.bind(counter.clone()).await;
@@ -1092,10 +1093,12 @@ mod tests {
             receipt.status,
             lingxi_core::host::FusionPublicationStatus::StorageFailure
         );
-        assert!(receipt
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("requires session persistence")));
+        assert!(
+            receipt
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("requires session persistence"))
+        );
         assert!(
             mock.background_notices().is_empty(),
             "the defensive guard returns before attempting append/notification work"

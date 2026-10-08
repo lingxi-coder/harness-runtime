@@ -2994,6 +2994,7 @@ impl lingxi_core::host::mailbox::MailboxRouterHandle for PlanReviewTransport {
 }
 fn plan_invocation() -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
     lingxi_core::host::tool_invoker::SubagentInvocationContext {
+        input_projection: None,
         cancellation_token: lingxi_core::host::CancellationToken::new(),
         permission_pause_observer: None,
         instruction_context: None,

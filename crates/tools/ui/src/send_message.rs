@@ -1244,7 +1244,7 @@ impl Tool for SendMessageTool {
             serde_json::to_string(&model_data)
                 .map_err(|error| ToolError::Internal(error.to_string()))?,
         );
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content,
             new_messages: vec![],
@@ -1350,6 +1350,7 @@ mod tests {
                     .to_string(),
                     description: "research".to_string(),
                     killed_by: killed_by.map(str::to_string),
+                    agent_facts: None,
                     ..TaskRecord::default()
                 },
             );
@@ -1395,6 +1396,7 @@ mod tests {
             Ok(TaskRecord {
                 task_id: "t12345678".into(),
                 status: "killed".into(),
+                agent_facts: None,
                 ..Default::default()
             })
         }

@@ -86,6 +86,37 @@ pub use notebook_edit::NotebookEditTool;
 pub use read::FileReadTool;
 pub use write::FileWriteTool;
 
+/// Resolve a model file path against the active session cwd and normalize it
+/// lexically, matching Native `VE`/`Ke`. The result is the read-state key and
+/// observed route; canonical paths remain separate for permission and I/O.
+#[must_use]
+pub(crate) fn normalize_model_file_path(
+    file_path: &str,
+    cwd: &std::path::Path,
+) -> std::path::PathBuf {
+    let path = tool_api::util::path_validation::resolve_against_cwd(
+        std::path::PathBuf::from(file_path),
+        cwd,
+    );
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
 /// Read-before-write staleness error: emitted when Edit / Write / NotebookEdit
 /// detect that the target file changed on disk since the last `Read` (its
 /// floor-truncated mtime advanced past the recorded read timestamp, and the
@@ -168,8 +199,8 @@ pub const FILE_CONTENT_CHANGED_LINTER_MESSAGE: &str =
 ///
 /// Arguments:
 /// - `map`: the shared `read_file_state` registry (`ctx.read_file_state`).
-/// - `canon`: the canonicalized absolute path used as the registry key (the
-///   same key the `Read` tool wrote under).
+/// - `read_state_key`: Native's normalized absolute model path, produced by
+///   the same current session-cwd route normalizer as `Read`.
 /// - `current_mtime_ms`: the file's *current* floor-truncated mtime (ms).
 /// - `current_full_content`: the file's *current* content, decoded the SAME
 ///   way `Read` stores it (so the content-equality fallback compares like with
@@ -264,16 +295,19 @@ pub fn read_requirement_waived(model: Option<&str>, canon: &std::path::Path) -> 
     lingxi_core::host::read_auto_allow::read_auto_allowed(&canon.to_string_lossy())
 }
 
+/// Check the entry under Native's normalized model-path key. Callers retain
+/// canonical paths separately for I/O and permission, and pass current mtime
+/// and content separately as staleness metadata.
 pub fn check_read_before_write(
     map: &tool_api::read_file_state::ReadFileStateMap,
-    canon: &std::path::Path,
+    read_state_key: &std::path::Path,
     current_mtime_ms: i64,
     current_full_content: &str,
     waived: bool,
 ) -> Result<(), tool_api::tool_trait::ToolError> {
     use tool_api::tool_trait::ToolError;
 
-    let entry = match tool_api::read_file_state::get(map, canon) {
+    let entry = match tool_api::read_file_state::get(map, read_state_key) {
         Some(e) => e,
         // No recorded read at all → refuse. (claude-code `FOg`: `if(!r) throw
         // PWn`.) A ranged / offset read still HAS an entry, so it is NOT
@@ -397,6 +431,24 @@ pub fn register_all_with_live_cwd(
 mod staleness_guard_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn model_path_normalization_uses_session_cwd_and_clamps_above_root() {
+        let cwd = PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
+            .join("workspace")
+            .join("current");
+        assert_eq!(
+            normalize_model_file_path("nested/../source.txt", &cwd),
+            cwd.join("source.txt")
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            normalize_model_file_path("/../tmp/source.txt", &cwd),
+            PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
+                .join("tmp")
+                .join("source.txt")
+        );
+    }
     use tool_api::read_file_state::{new_read_file_state_map, set, ReadFileEntry};
     use tool_api::tool_trait::ToolError;
 

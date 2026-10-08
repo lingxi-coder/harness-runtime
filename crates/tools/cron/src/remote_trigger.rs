@@ -1215,7 +1215,7 @@ impl Tool for RemoteTriggerTool {
             Some(s) => format!("HTTP {status}\n{json}\n\n{s}"),
             None => format!("HTTP {status}\n{json}"),
         };
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "status": status,
                 "json": json,

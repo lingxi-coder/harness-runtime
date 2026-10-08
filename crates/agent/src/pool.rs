@@ -556,6 +556,7 @@ mod tests {
             structured_output_parse_retries: 0,
             budget: None,
             hook_executor: None,
+            agent_spawn_token: None,
             stop_hook_scope: Default::default(),
             subagent_stop_firer: None,
             strict_plugin_only_hooks: false,

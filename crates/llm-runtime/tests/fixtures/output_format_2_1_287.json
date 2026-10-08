@@ -1,0 +1,2871 @@
+{
+  "version": "2.1.287",
+  "native_sha256": "6eab8333fe2121553100d8f40bfada384a3e989b94f947e18ba6677a6fcb41ea",
+  "sourceByteRanges": [
+    {
+      "label": "px SDK output-format normalization",
+      "start": 184296876,
+      "end": 184297175,
+      "sha256": "6f004ba23ee61e689905c35be1f56e9b9ad9822ef2720e961b77a3256c6f74c7"
+    }
+  ],
+  "scope": "Unmodified current native px with only its error class supplied; exact resulting JSON bytes and conflict messages. Not whole SDK/CLI acceptance.",
+  "cases": [
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":null,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":false,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":7,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":\"ab\",\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":\"💥\",\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":[],\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":[\"x\",null],\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":null},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":false,\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":0},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"\"},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"existing\"}},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": null,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":null,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":null,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":false,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":7,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":\"ab\",\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":\"💥\",\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":[],\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":[\"x\",null],\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":null},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":false,\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":0},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"\"},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"existing\"}},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": false,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":false,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"a\",\"1\":\"b\",\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"\\ud83d\",\"1\":\"\\udca5\",\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"x\",\"1\":null,\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":true,\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": true,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true,\"format\":true},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":null,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":false,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":7,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":\"ab\",\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":\"💥\",\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":[],\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":[\"x\",null],\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":null},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":false,\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":0},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"\"},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"existing\"}},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 0,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":0,\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"a\",\"1\":\"b\",\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"\\ud83d\",\"1\":\"\\udca5\",\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"x\",\"1\":null,\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":7,\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": 7,
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true,\"format\":7},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":null,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":false,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":7,\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":\"ab\",\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":\"💥\",\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":[],\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":[\"x\",null],\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":null},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":false,\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":0},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"\"},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"existing\"}},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true},\"metadata\":{\"user_id\":\"fixture\"},\"output_format\":\"\",\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"a\",\"1\":\"b\",\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"\\ud83d\",\"1\":\"\\udca5\",\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"x\",\"1\":null,\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"json\",\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "json",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true,\"format\":\"json\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"a\",\"1\":\"b\",\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"\\ud83d\",\"1\":\"\\udca5\",\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"x\",\"1\":null,\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"💥\",\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": "💥",
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true,\"format\":\"💥\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"a\",\"1\":\"b\",\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"\\ud83d\",\"1\":\"\\udca5\",\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"x\",\"1\":null,\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[],\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": [],
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true,\"format\":[]},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"a\",\"1\":\"b\",\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"\\ud83d\",\"1\":\"\\udca5\",\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"x\",\"1\":null,\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{},\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {},
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true,\"format\":{}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": null,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": false,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": 7,
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "ab",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"a\",\"1\":\"b\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": "💥",
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"\\ud83d\",\"1\":\"\\udca5\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": [
+          "x",
+          null
+        ],
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"x\",\"1\":null,\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {},
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "effort": "high",
+          "format": null
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"effort\":\"high\",\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": false,
+          "effort": "low"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}},\"effort\":\"low\"},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": 0
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": ""
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": []
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {}
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "format": {
+            "type": "existing"
+          }
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "error": "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated)."
+      }
+    },
+    {
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "output_config": {
+          "0": "zero",
+          "2": "two",
+          "extension": true
+        },
+        "metadata": {
+          "user_id": "fixture"
+        },
+        "output_format": {
+          "type": "json_schema",
+          "schema": {
+            "type": "object"
+          }
+        },
+        "max_tokens": 16
+      },
+      "expected": {
+        "body_json": "{\"model\":\"claude-sonnet-4-6\",\"output_config\":{\"0\":\"zero\",\"2\":\"two\",\"extension\":true,\"format\":{\"type\":\"json_schema\",\"schema\":{\"type\":\"object\"}}},\"metadata\":{\"user_id\":\"fixture\"},\"max_tokens\":16}"
+      }
+    },
+    {
+      "body": {
+        "model": "fixture"
+      },
+      "expected": {
+        "body_json": "{\"model\":\"fixture\"}"
+      }
+    },
+    {
+      "body": {
+        "model": "fixture",
+        "output_format": {
+          "type": "plain"
+        },
+        "metadata": {
+          "user_id": "fixture"
+        }
+      },
+      "expected": {
+        "body_json": "{\"model\":\"fixture\",\"metadata\":{\"user_id\":\"fixture\"},\"output_config\":{\"format\":{\"type\":\"plain\"}}}"
+      }
+    },
+    {
+      "body": {
+        "model": "fixture",
+        "output_format": {
+          "type": "plain"
+        },
+        "output_config": {
+          "format": null
+        },
+        "tail": true
+      },
+      "expected": {
+        "body_json": "{\"model\":\"fixture\",\"output_config\":{\"format\":{\"type\":\"plain\"}},\"tail\":true}"
+      }
+    }
+  ]
+}

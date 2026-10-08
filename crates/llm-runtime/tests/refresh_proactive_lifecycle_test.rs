@@ -115,6 +115,7 @@ async fn short_ttl_token_refreshes_at_half_remaining() {
         Secret::new("INITIAL".to_string()),
         Some(Secret::new("INITIAL_R".to_string())),
         base + Duration::from_secs(60),
+        lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0).scopes,
         transport,
         clock,
         None,
@@ -187,6 +188,7 @@ async fn shutdown_cancels_handle_and_emits_event() {
         Secret::new("INITIAL".into()),
         Some(Secret::new("INITIAL_R".into())),
         base + Duration::from_secs(3600),
+        lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0).scopes,
         transport,
         clock,
         Some(bus.clone()),
@@ -239,7 +241,8 @@ async fn proactive_then_reactive_collapses_to_one_refresh() {
         cfg,
         Secret::new("INITIAL".into()),
         Some(Secret::new("R_INITIAL".into())),
-        base + Duration::from_secs(60), // 1-minute TTL so proactive wakes at 30s
+        base + Duration::from_secs(60),
+        lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig::default_with_port(0).scopes, // 1-minute TTL so proactive wakes at 30s
         transport,
         clock,
         None,

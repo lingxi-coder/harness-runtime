@@ -6,8 +6,8 @@
 //! and a group waits on tokio's own FIFO-fair semaphore.
 
 use lingxi_core::host::panel_pool::PanelAdmissionCancellation as CancellationToken;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;

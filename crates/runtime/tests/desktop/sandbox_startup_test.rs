@@ -73,9 +73,6 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
     std::fs::write(lingxi_home.join("settings.json"), settings_json).expect("write settings.json");
 
     let cfg = DesktopConfig {
-        composition: None,
-        defer_session_start: false,
-        verified_computer_profiles: Vec::new(),
         build_info: harness_runtime::desktop::BuildInfo::default(),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,

@@ -232,6 +232,7 @@ async fn remote_disposable_probe_classifies_wrong_id_and_redials_legacy() {
                 expected_era: Some(McpProtocolEra::Modern),
                 deadline_ms: 5_000,
                 probe_timeout_ms: Some(50_000),
+                elicitation: lingxi_core::host::McpElicitationCapabilities::default(),
             },
         )
         .await

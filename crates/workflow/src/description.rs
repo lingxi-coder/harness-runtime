@@ -190,7 +190,7 @@ pub fn authoring_skill_body(model_forced: bool) -> String {
     body
 }
 
-/// `a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE` — the deployment pin that makes
+/// The product deployment pin makes
 /// per-agent `model` overrides meaningless, so the passages documenting them are
 /// dropped. Read here at the edge and passed down as a parameter: a gate that
 /// reads the environment deep inside the call graph cannot be tested without
@@ -198,8 +198,7 @@ pub fn authoring_skill_body(model_forced: bool) -> String {
 #[must_use]
 pub fn subagent_model_forced() -> bool {
     lingxi_core::host::env::is_env_truthy(
-        std::env::var("LINGXI_SUBAGENT_MODEL_FORCE")
-            .or_else(|_| std::env::var("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"))
+        std::env::var(branding::SUBAGENT_MODEL_FORCE_ENV)
             .ok()
             .as_deref(),
     )

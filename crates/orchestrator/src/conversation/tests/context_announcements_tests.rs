@@ -17,7 +17,8 @@ async fn second_turn_releases_snapshot_lock_before_context_routing() {
                 mock_message_response(
                     vec![llm_runtime::ContentBlock::Text {
                         text: "answer".into(),
-                        cache_control: None, citations: None,
+                        cache_control: None,
+                        citations: None,
                     }],
                     Some("end_turn"),
                 )

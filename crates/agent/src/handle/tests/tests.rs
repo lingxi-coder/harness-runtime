@@ -267,21 +267,21 @@ fn llm_usage_rollup_maps_only_billable_subagent_fields() {
 fn restored_observer_index_counts_only_client_visible_messages() {
     let visible = ConversationMessage::user(MessageId::new(), "visible".to_string());
     let hidden_meta = ConversationMessage::user_meta(MessageId::new(), "meta".to_string());
-    let compact_summary = ConversationMessage::User {
+    let compact_summary = ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: true,
         is_visible_in_transcript_only: false,
     };
-    let transcript_only = ConversationMessage::User {
+    let transcript_only = ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: true,
     };
-    let lifecycle = ConversationMessage::System {
+    let lifecycle = ConversationMessage::System { api_system: None,
         id: MessageId::new(),
         content: "idle".to_string(),
         subtype: Some("agent_idle".to_string()),
@@ -318,6 +318,7 @@ async fn spawn_without_registry_cannot_launch_an_unmanaged_observer() {
     });
     let spawner = test_spawner(pool).with_api_client(api.clone());
     let request = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -631,9 +632,9 @@ async fn agent_scoped_mcp_tools_reach_the_wire_and_are_torn_down_on_exit() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
 
-    let seen_tools: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_tools: Arc<Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>> = Arc::new(Mutex::new(Vec::new()));
     struct CapturingApi {
-        seen_tools: Arc<Mutex<Vec<Value>>>,
+        seen_tools: Arc<Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
     }
     #[async_trait]
     impl crate::api::SubagentApiClient for CapturingApi {
@@ -841,10 +842,13 @@ async fn rejected_startup_reports_failure_instead_of_killed_without_calling_mode
         let spawner = test_spawner(pool)
             .with_api_client(api.clone())
             .with_spawn_observer(observer.clone());
+        let statistics = Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+        let mut request = minimal_spawn_request("plan");
+        request.agent_spawn_token = Some(statistics.prepare_spawn("general-purpose".into(), None, persistent, 1));
         let result = if persistent {
             spawner
                 .spawn_persistent_with_observer(
-                    minimal_spawn_request("plan"),
+                    request.clone(),
                     dummy_inherit(),
                     Arc::new(RejectStartup),
                 )
@@ -853,7 +857,7 @@ async fn rejected_startup_reports_failure_instead_of_killed_without_calling_mode
         } else {
             spawner
                 .spawn_with_observer(
-                    minimal_spawn_request("plan"),
+                    request.clone(),
                     dummy_inherit(),
                     None,
                     Some(Arc::new(RejectStartup)),
@@ -880,6 +884,7 @@ async fn rejected_startup_reports_failure_instead_of_killed_without_calling_mode
         );
         assert_eq!(api.calls.load(Ordering::SeqCst), 0);
         assert_eq!(observer.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(statistics.snapshot(), Default::default(), "a rejected startup never counts a spawn or terminal");
     }
 }
 
@@ -895,11 +900,13 @@ async fn observer_receives_resolved_type_and_ordered_terminal_event() {
     let spawner = test_spawner(pool)
         .with_api_client(api)
         .with_spawn_observer(observer.clone());
-    let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+    let mut request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
         "subagent_type": "unknown-agent-type",
         "prompt": "finish"
     }))
     .expect("minimal spawn request");
+    let statistics = Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    request.agent_spawn_token = Some(statistics.prepare_spawn("general-purpose".into(), Some(false), false, 1));
 
     spawner
         .spawn(
@@ -922,6 +929,9 @@ async fn observer_receives_resolved_type_and_ordered_terminal_event() {
     })
     .await
     .expect("observer events arrive");
+    assert_eq!(statistics.snapshot().spawned, 1);
+    assert_eq!(statistics.snapshot().completed, 1);
+    assert_eq!(statistics.snapshot().requested.foreground, 1);
     let events = observer.events.lock().unwrap();
     assert!(matches!(
         &events[0],
@@ -1219,11 +1229,13 @@ async fn dropped_spawn_future_lets_runner_reach_cancelled_before_hard_abort() {
             Some(dir.path().to_path_buf()),
         )
         .with_transcript_fs(fs);
-    let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+    let mut request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
         "subagent_type": "general-purpose",
         "prompt": "go"
     }))
     .expect("minimal spawn request");
+    let statistics = Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    request.agent_spawn_token = Some(statistics.prepare_spawn("general-purpose".into(), None, false, 1));
 
     let spawn_result = tokio::time::timeout(
         std::time::Duration::from_millis(50),
@@ -1241,6 +1253,9 @@ async fn dropped_spawn_future_lets_runner_reach_cancelled_before_hard_abort() {
         "the hanging API call must still be in flight when the caller times out"
     );
 
+    assert_eq!(statistics.snapshot().spawned, 1);
+    assert_eq!(statistics.snapshot().killed.user, 1);
+    assert_eq!(statistics.snapshot().completed, 0);
     let agent_id = match observer.events.lock().unwrap().first() {
         Some(SubagentObservation::Allocated { agent_id, .. }) => *agent_id,
         other => panic!("expected an Allocated observation first, got {other:?}"),
@@ -4078,6 +4093,7 @@ async fn build_subagent_context_inherit_resolves_to_parent_model_override() {
     // `AgentModel::Inherit` against THAT model, not the boot default.
     let spawner = test_spawner(pool).with_default_model("claude-opus-4-7");
     let req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -4156,6 +4172,7 @@ async fn effective_parent_model_precedence_override_then_live_then_boot() {
         .with_default_model("boot-model")
         .with_default_model_provider(Arc::new(|| Some("live-model".to_string())));
     let mut req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -4603,7 +4620,7 @@ fn make_subagent_context_fork_seeds_prefix_and_empty_prompt_messages() {
     // fork_context_messages → ctx.fork_context_messages, prompt_messages = [].
     let def = crate::builtins::fork_agent_definition();
     let prefix = vec![
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "assistant turn".to_string(),
@@ -5079,6 +5096,7 @@ async fn spawn_request_model_override_takes_precedence() {
     // general-purpose is Inherit; request a haiku override → resolves to the
     // concrete haiku id (different tier from the opus parent).
     let mut req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -5236,6 +5254,7 @@ async fn build_subagent_context_ignores_deprecated_mode_param() {
         budget: Arc::new(DummyBudget),
     };
     let base_req = || SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -5472,6 +5491,7 @@ async fn build_subagent_context_definition_plan_mode_overrides() {
     };
     // No `mode` call param — the override must come purely from frontmatter.
     let req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -5562,6 +5582,7 @@ async fn build_subagent_context_plan_mode_narrows_advertised_schemas() {
         budget: Arc::new(DummyBudget),
     };
     let req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -5644,6 +5665,7 @@ async fn build_subagent_context_threads_persistent_flag() {
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     let spawner = test_spawner(pool);
     let req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -5768,6 +5790,7 @@ async fn build_subagent_context_copies_correlation_id() {
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     let spawner = test_spawner(pool);
     let req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -6090,6 +6113,7 @@ async fn spawn_persistent_cancellation_cleans_up_runner_started_during_allocate(
     let spawner = Arc::new(test_spawner(pool.clone()));
 
     let req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -6211,6 +6235,7 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
         budget: Arc::new(DummyBudget),
     };
     let mut req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -6321,6 +6346,7 @@ async fn build_subagent_context_preserves_spawn_name_and_team() {
     let pool = Arc::new(StateMachinePool::new(runtime, 1));
     let spawner = test_spawner(pool);
     let request = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,
@@ -6958,6 +6984,7 @@ async fn spawn_async_default_returns_internal_error() {
     let invoker: Arc<dyn ToolInvoker> = Arc::new(DummyInvoker);
     let budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(DummyBudget);
     let req = SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,

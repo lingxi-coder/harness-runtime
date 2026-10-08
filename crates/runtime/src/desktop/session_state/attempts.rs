@@ -86,7 +86,7 @@ impl AttemptProjection {
             _ => {
                 return Err(CostPersistError::Storage(
                     "non-attempt event in attempt fold".into(),
-                ))
+                ));
             }
         }
         self.acks.insert(
@@ -494,10 +494,12 @@ mod tests {
         let session = SessionId::new();
         let coordinator = open(root.path(), session);
         let worker = coordinator.start().await.unwrap();
-        assert!(coordinator
-            .acquire_attempt_permit(SessionId::new())
-            .await
-            .is_err());
+        assert!(
+            coordinator
+                .acquire_attempt_permit(SessionId::new())
+                .await
+                .is_err()
+        );
         let authorization = intent(session, "detached");
         let (ack, receiver) = tokio::sync::oneshot::channel();
         coordinator
@@ -549,10 +551,12 @@ mod tests {
             .unwrap();
         let mut conflict = authorization.clone();
         conflict.authorized_nano_usd += 1;
-        assert!(coordinator
-            .state
-            .persist_attempt(session, AttemptPersistMutation::Intent(conflict))
-            .is_err());
+        assert!(
+            coordinator
+                .state
+                .persist_attempt(session, AttemptPersistMutation::Intent(conflict))
+                .is_err()
+        );
         let duplicate = coordinator
             .state
             .persist_attempt(
@@ -648,12 +652,14 @@ mod tests {
             ordinary_rx.await.unwrap(),
             Err(CostPersistError::Frozen(_))
         ));
-        assert!(coordinator
-            .state
-            .journal
-            .find_event_durable("ordinary-after-failed-attempt")
-            .unwrap()
-            .is_none());
+        assert!(
+            coordinator
+                .state
+                .journal
+                .find_event_durable("ordinary-after-failed-attempt")
+                .unwrap()
+                .is_none()
+        );
         assert!(coordinator.hydrate_blocking().is_err());
         assert_eq!(
             coordinator
@@ -662,12 +668,14 @@ mod tests {
                 .unwrap_err(),
             failure
         );
-        assert!(coordinator
-            .state
-            .journal
-            .find_event_durable(&receipt_id(&receipt(&b)))
-            .unwrap()
-            .is_none());
+        assert!(
+            coordinator
+                .state
+                .journal
+                .find_event_durable(&receipt_id(&receipt(&b)))
+                .unwrap()
+                .is_none()
+        );
         coordinator.close_and_drain().await.unwrap();
         worker.await.unwrap();
         drop(coordinator);

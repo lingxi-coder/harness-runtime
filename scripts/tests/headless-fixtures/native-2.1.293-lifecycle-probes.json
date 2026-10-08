@@ -1,0 +1,2045 @@
+{
+  "version": "2.1.293",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "researchOnly": true,
+  "parityEstablished": false,
+  "responseSelection": "Exact last-user-text markers or actual tool_result block, never request arrival index; child delayed200ms, parentfinal immediate. Notification response matches task-notification marker.",
+  "backgroundStream": [
+    {
+      "label": "native-a",
+      "captureRoot": "/tmp/headless-baseline-293-background-agent-complete/probe-background-agent/native-a",
+      "captureComplete": true,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "stdoutSha256": "d2f72f7a95b21cf3be9669cff9c8022b46d8e0422141d175cdb00cae7e109ab6",
+      "stdoutOrder": [
+        {
+          "index": 0,
+          "type": "control_response",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 1,
+          "type": "system",
+          "subtype": "init",
+          "result": null
+        },
+        {
+          "index": 2,
+          "type": "assistant",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 3,
+          "type": "system",
+          "subtype": "background_tasks_changed",
+          "result": null
+        },
+        {
+          "index": 4,
+          "type": "system",
+          "subtype": "task_started",
+          "result": null
+        },
+        {
+          "index": 5,
+          "type": "user",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 6,
+          "type": "assistant",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 7,
+          "type": "result",
+          "subtype": "success",
+          "result": "HEADLESS_PARENT_COMPLETE"
+        },
+        {
+          "index": 8,
+          "type": "assistant",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 9,
+          "type": "system",
+          "subtype": "task_updated",
+          "result": null
+        },
+        {
+          "index": 10,
+          "type": "system",
+          "subtype": "task_notification",
+          "result": null
+        },
+        {
+          "index": 11,
+          "type": "system",
+          "subtype": "background_tasks_changed",
+          "result": null
+        },
+        {
+          "index": 12,
+          "type": "system",
+          "subtype": "init",
+          "result": null
+        },
+        {
+          "index": 13,
+          "type": "assistant",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 14,
+          "type": "result",
+          "subtype": "success",
+          "result": "HEADLESS_AFTER_CHILD_NOTIFICATION"
+        }
+      ],
+      "results": [
+        {
+          "duration_api_ms": 18,
+          "stop_reason": "end_turn",
+          "session_id": "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2",
+          "total_cost_usd": 4.4e-05,
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 4,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 2,
+              "outputTokens": 4,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 4.4e-05,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 1,
+            "requested": {
+              "background": 1,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 1,
+            "max_depth": 1,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {
+              "general-purpose": 1
+            }
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 2,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "HEADLESS_PARENT_COMPLETE",
+          "ttft_ms": 38,
+          "type": "result",
+          "duration_ms": 63,
+          "uuid": "558c8f3d-47a7-4e98-90f7-252db13ccb0c",
+          "ttft_stream_ms": 37,
+          "time_to_request_ms": 33,
+          "first_content_frame_ms": 37,
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        {
+          "duration_api_ms": 231,
+          "stop_reason": "end_turn",
+          "session_id": "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2",
+          "total_cost_usd": 8.8e-05,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 4,
+              "outputTokens": 8,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 8.8e-05,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "origin": {
+            "kind": "task-notification",
+            "producer": "session-task",
+            "runId": "0muz04yqp-02a2155d"
+          },
+          "subagent_stats": {
+            "spawned": 1,
+            "requested": {
+              "background": 1,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 1,
+            "max_depth": 1,
+            "spawned_by_subagents": 0,
+            "completed": 1,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {
+              "general-purpose": 1
+            }
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 1,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "HEADLESS_AFTER_CHILD_NOTIFICATION",
+          "ttft_ms": 8,
+          "type": "result",
+          "duration_ms": 9,
+          "uuid": "31d79061-80ba-4f72-a5ef-1e80b90cc02d",
+          "ttft_stream_ms": 7,
+          "time_to_request_ms": 6,
+          "first_content_frame_ms": 8,
+          "queued_turn_count": 0,
+          "result_index": 1
+        }
+      ],
+      "resultEofCloseEvents": [
+        {
+          "kind": "result",
+          "wallMs": 1791431628022,
+          "elapsedNs": "399391084",
+          "subtype": "success"
+        },
+        {
+          "kind": "stdin-eof",
+          "wallMs": 1791431628022,
+          "elapsedNs": "399394959"
+        },
+        {
+          "kind": "result",
+          "wallMs": 1791431628257,
+          "elapsedNs": "633693417",
+          "subtype": "success"
+        },
+        {
+          "kind": "close",
+          "wallMs": 1791431628282,
+          "elapsedNs": "659471334",
+          "code": 0,
+          "signal": null
+        }
+      ],
+      "providerTiming": [
+        {
+          "ordinal": 0,
+          "method": "POST",
+          "url": "/v1/messages?beta=true",
+          "protocol": "HTTP/1.1",
+          "headers": [
+            [
+              "Accept",
+              "application/json"
+            ],
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "User-Agent",
+              "claude-cli/2.1.293 (external, sdk-cli)"
+            ],
+            [
+              "X-Claude-Code-Session-Id",
+              "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2"
+            ],
+            [
+              "X-Stainless-Arch",
+              "arm64"
+            ],
+            [
+              "X-Stainless-Lang",
+              "js"
+            ],
+            [
+              "X-Stainless-OS",
+              "MacOS"
+            ],
+            [
+              "X-Stainless-Package-Version",
+              "0.128.0"
+            ],
+            [
+              "X-Stainless-Retry-Count",
+              "0"
+            ],
+            [
+              "X-Stainless-Runtime",
+              "node"
+            ],
+            [
+              "X-Stainless-Runtime-Version",
+              "v26.3.0"
+            ],
+            [
+              "X-Stainless-Timeout",
+              "600"
+            ],
+            [
+              "anthropic-beta",
+              "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,thinking-display-updates-2026-08-18"
+            ],
+            [
+              "anthropic-dangerous-direct-browser-access",
+              "true"
+            ],
+            [
+              "anthropic-version",
+              "2023-06-01"
+            ],
+            [
+              "x-api-key",
+              "sk-ant-headless-local-fixture-only"
+            ],
+            [
+              "x-app",
+              "cli"
+            ],
+            [
+              "Connection",
+              "keep-alive"
+            ],
+            [
+              "Host",
+              "127.0.0.1:57448"
+            ],
+            [
+              "Accept-Encoding",
+              "gzip, deflate, br, zstd"
+            ],
+            [
+              "Content-Length",
+              "7124"
+            ]
+          ],
+          "process": 0,
+          "fixtureResponse": 0,
+          "requestWallMs": 1791431627994,
+          "responseWriteWallMs": 1791431627994,
+          "responseWriteAttempted": true
+        },
+        {
+          "ordinal": 1,
+          "method": "POST",
+          "url": "/v1/messages?beta=true",
+          "protocol": "HTTP/1.1",
+          "headers": [
+            [
+              "Accept",
+              "application/json"
+            ],
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "User-Agent",
+              "claude-cli/2.1.293 (external, sdk-cli)"
+            ],
+            [
+              "X-Claude-Code-Session-Id",
+              "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2"
+            ],
+            [
+              "X-Stainless-Arch",
+              "arm64"
+            ],
+            [
+              "X-Stainless-Lang",
+              "js"
+            ],
+            [
+              "X-Stainless-OS",
+              "MacOS"
+            ],
+            [
+              "X-Stainless-Package-Version",
+              "0.128.0"
+            ],
+            [
+              "X-Stainless-Retry-Count",
+              "0"
+            ],
+            [
+              "X-Stainless-Runtime",
+              "node"
+            ],
+            [
+              "X-Stainless-Runtime-Version",
+              "v26.3.0"
+            ],
+            [
+              "X-Stainless-Timeout",
+              "600"
+            ],
+            [
+              "anthropic-beta",
+              "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,thinking-display-updates-2026-08-18"
+            ],
+            [
+              "anthropic-dangerous-direct-browser-access",
+              "true"
+            ],
+            [
+              "anthropic-version",
+              "2023-06-01"
+            ],
+            [
+              "x-api-key",
+              "sk-ant-headless-local-fixture-only"
+            ],
+            [
+              "x-app",
+              "cli"
+            ],
+            [
+              "x-claude-code-agent-id",
+              "a53dc0cef9a7fafae"
+            ],
+            [
+              "Connection",
+              "keep-alive"
+            ],
+            [
+              "Host",
+              "127.0.0.1:57448"
+            ],
+            [
+              "Accept-Encoding",
+              "gzip, deflate, br, zstd"
+            ],
+            [
+              "Content-Length",
+              "8249"
+            ]
+          ],
+          "process": 0,
+          "fixtureResponse": 1,
+          "requestWallMs": 1791431628012,
+          "responseWriteWallMs": 1791431628215,
+          "responseWriteAttempted": true
+        },
+        {
+          "ordinal": 2,
+          "method": "POST",
+          "url": "/v1/messages?beta=true",
+          "protocol": "HTTP/1.1",
+          "headers": [
+            [
+              "Accept",
+              "application/json"
+            ],
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "User-Agent",
+              "claude-cli/2.1.293 (external, sdk-cli)"
+            ],
+            [
+              "X-Claude-Code-Session-Id",
+              "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2"
+            ],
+            [
+              "X-Stainless-Arch",
+              "arm64"
+            ],
+            [
+              "X-Stainless-Lang",
+              "js"
+            ],
+            [
+              "X-Stainless-OS",
+              "MacOS"
+            ],
+            [
+              "X-Stainless-Package-Version",
+              "0.128.0"
+            ],
+            [
+              "X-Stainless-Retry-Count",
+              "0"
+            ],
+            [
+              "X-Stainless-Runtime",
+              "node"
+            ],
+            [
+              "X-Stainless-Runtime-Version",
+              "v26.3.0"
+            ],
+            [
+              "X-Stainless-Timeout",
+              "600"
+            ],
+            [
+              "anthropic-beta",
+              "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,thinking-display-updates-2026-08-18"
+            ],
+            [
+              "anthropic-dangerous-direct-browser-access",
+              "true"
+            ],
+            [
+              "anthropic-version",
+              "2023-06-01"
+            ],
+            [
+              "x-api-key",
+              "sk-ant-headless-local-fixture-only"
+            ],
+            [
+              "x-app",
+              "cli"
+            ],
+            [
+              "Connection",
+              "keep-alive"
+            ],
+            [
+              "Host",
+              "127.0.0.1:57448"
+            ],
+            [
+              "Accept-Encoding",
+              "gzip, deflate, br, zstd"
+            ],
+            [
+              "Content-Length",
+              "8321"
+            ]
+          ],
+          "process": 0,
+          "fixtureResponse": 2,
+          "requestWallMs": 1791431628019,
+          "responseWriteWallMs": 1791431628019,
+          "responseWriteAttempted": true
+        },
+        {
+          "ordinal": 3,
+          "method": "POST",
+          "url": "/v1/messages?beta=true",
+          "protocol": "HTTP/1.1",
+          "headers": [
+            [
+              "Accept",
+              "application/json"
+            ],
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "User-Agent",
+              "claude-cli/2.1.293 (external, sdk-cli)"
+            ],
+            [
+              "X-Claude-Code-Session-Id",
+              "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2"
+            ],
+            [
+              "X-Stainless-Arch",
+              "arm64"
+            ],
+            [
+              "X-Stainless-Lang",
+              "js"
+            ],
+            [
+              "X-Stainless-OS",
+              "MacOS"
+            ],
+            [
+              "X-Stainless-Package-Version",
+              "0.128.0"
+            ],
+            [
+              "X-Stainless-Retry-Count",
+              "0"
+            ],
+            [
+              "X-Stainless-Runtime",
+              "node"
+            ],
+            [
+              "X-Stainless-Runtime-Version",
+              "v26.3.0"
+            ],
+            [
+              "X-Stainless-Timeout",
+              "600"
+            ],
+            [
+              "anthropic-beta",
+              "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,thinking-display-updates-2026-08-18"
+            ],
+            [
+              "anthropic-dangerous-direct-browser-access",
+              "true"
+            ],
+            [
+              "anthropic-version",
+              "2023-06-01"
+            ],
+            [
+              "x-api-key",
+              "sk-ant-headless-local-fixture-only"
+            ],
+            [
+              "x-app",
+              "cli"
+            ],
+            [
+              "Connection",
+              "keep-alive"
+            ],
+            [
+              "Host",
+              "127.0.0.1:57448"
+            ],
+            [
+              "Accept-Encoding",
+              "gzip, deflate, br, zstd"
+            ],
+            [
+              "Content-Length",
+              "9559"
+            ]
+          ],
+          "process": 0,
+          "fixtureResponse": 3,
+          "requestWallMs": 1791431628254,
+          "responseWriteWallMs": 1791431628254,
+          "responseWriteAttempted": true
+        }
+      ],
+      "sessionFiles": [
+        {
+          "path": "projects/-private-tmp-headless-baseline-293-background-agent-complete-probe-background-agent-workspace/10d9d2a8-1995-4839-84d0-6eaac0ef9fc2/subagents/agent-a53dc0cef9a7fafae.jsonl",
+          "bytes": 17492,
+          "sha256": "6f747af258fe70fd7468f8eea5e161f3d4672377b34ab546067435e3b7b37d77"
+        },
+        {
+          "path": "projects/-private-tmp-headless-baseline-293-background-agent-complete-probe-background-agent-workspace/10d9d2a8-1995-4839-84d0-6eaac0ef9fc2.jsonl",
+          "bytes": 24628,
+          "sha256": "fd07dd8a2a7cc9187f804dfc6300415f8d148ada97b2558f638b39be9e85b6a5"
+        }
+      ]
+    },
+    {
+      "label": "native-b",
+      "captureRoot": "/tmp/headless-baseline-293-background-agent-complete/probe-background-agent/native-b",
+      "captureComplete": true,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "stdoutSha256": "2e80756b0d4fc37215da66183b0d975c1c2de556ddc33ab47cd4defe224881cc",
+      "stdoutOrder": [
+        {
+          "index": 0,
+          "type": "control_response",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 1,
+          "type": "system",
+          "subtype": "init",
+          "result": null
+        },
+        {
+          "index": 2,
+          "type": "assistant",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 3,
+          "type": "system",
+          "subtype": "background_tasks_changed",
+          "result": null
+        },
+        {
+          "index": 4,
+          "type": "system",
+          "subtype": "task_started",
+          "result": null
+        },
+        {
+          "index": 5,
+          "type": "user",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 6,
+          "type": "assistant",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 7,
+          "type": "result",
+          "subtype": "success",
+          "result": "HEADLESS_PARENT_COMPLETE"
+        },
+        {
+          "index": 8,
+          "type": "assistant",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 9,
+          "type": "system",
+          "subtype": "task_updated",
+          "result": null
+        },
+        {
+          "index": 10,
+          "type": "system",
+          "subtype": "task_notification",
+          "result": null
+        },
+        {
+          "index": 11,
+          "type": "system",
+          "subtype": "background_tasks_changed",
+          "result": null
+        },
+        {
+          "index": 12,
+          "type": "system",
+          "subtype": "init",
+          "result": null
+        },
+        {
+          "index": 13,
+          "type": "assistant",
+          "subtype": null,
+          "result": null
+        },
+        {
+          "index": 14,
+          "type": "result",
+          "subtype": "success",
+          "result": "HEADLESS_AFTER_CHILD_NOTIFICATION"
+        }
+      ],
+      "results": [
+        {
+          "duration_api_ms": 22,
+          "stop_reason": "end_turn",
+          "session_id": "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2",
+          "total_cost_usd": 4.4e-05,
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 4,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 2,
+              "outputTokens": 4,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 4.4e-05,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 1,
+            "requested": {
+              "background": 1,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 1,
+            "max_depth": 1,
+            "spawned_by_subagents": 0,
+            "completed": 0,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {
+              "general-purpose": 1
+            }
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 2,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "HEADLESS_PARENT_COMPLETE",
+          "ttft_ms": 38,
+          "type": "result",
+          "duration_ms": 63,
+          "uuid": "0588d74a-5067-4bb5-846f-11b69afe385b",
+          "ttft_stream_ms": 38,
+          "time_to_request_ms": 34,
+          "first_content_frame_ms": 38,
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        {
+          "duration_api_ms": 235,
+          "stop_reason": "end_turn",
+          "session_id": "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2",
+          "total_cost_usd": 8.8e-05,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 4,
+              "outputTokens": 8,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 8.8e-05,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "origin": {
+            "kind": "task-notification",
+            "producer": "session-task",
+            "runId": "0muz04z4x-e41562f3"
+          },
+          "subagent_stats": {
+            "spawned": 1,
+            "requested": {
+              "background": 1,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 1,
+            "max_depth": 1,
+            "spawned_by_subagents": 0,
+            "completed": 1,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {
+              "general-purpose": 1
+            }
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 1,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "HEADLESS_AFTER_CHILD_NOTIFICATION",
+          "ttft_ms": 8,
+          "type": "result",
+          "duration_ms": 10,
+          "uuid": "15e0b8dc-ce6a-4195-bca8-f2681cb62583",
+          "ttft_stream_ms": 8,
+          "time_to_request_ms": 6,
+          "first_content_frame_ms": 8,
+          "queued_turn_count": 0,
+          "result_index": 1
+        }
+      ],
+      "resultEofCloseEvents": [
+        {
+          "kind": "result",
+          "wallMs": 1791431628533,
+          "elapsedNs": "240930334",
+          "subtype": "success"
+        },
+        {
+          "kind": "stdin-eof",
+          "wallMs": 1791431628533,
+          "elapsedNs": "240932959"
+        },
+        {
+          "kind": "result",
+          "wallMs": 1791431628771,
+          "elapsedNs": "479255042",
+          "subtype": "success"
+        },
+        {
+          "kind": "close",
+          "wallMs": 1791431628798,
+          "elapsedNs": "505808709",
+          "code": 0,
+          "signal": null
+        }
+      ],
+      "providerTiming": [
+        {
+          "ordinal": 0,
+          "method": "POST",
+          "url": "/v1/messages?beta=true",
+          "protocol": "HTTP/1.1",
+          "headers": [
+            [
+              "Accept",
+              "application/json"
+            ],
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "User-Agent",
+              "claude-cli/2.1.293 (external, sdk-cli)"
+            ],
+            [
+              "X-Claude-Code-Session-Id",
+              "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2"
+            ],
+            [
+              "X-Stainless-Arch",
+              "arm64"
+            ],
+            [
+              "X-Stainless-Lang",
+              "js"
+            ],
+            [
+              "X-Stainless-OS",
+              "MacOS"
+            ],
+            [
+              "X-Stainless-Package-Version",
+              "0.128.0"
+            ],
+            [
+              "X-Stainless-Retry-Count",
+              "0"
+            ],
+            [
+              "X-Stainless-Runtime",
+              "node"
+            ],
+            [
+              "X-Stainless-Runtime-Version",
+              "v26.3.0"
+            ],
+            [
+              "X-Stainless-Timeout",
+              "600"
+            ],
+            [
+              "anthropic-beta",
+              "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,thinking-display-updates-2026-08-18"
+            ],
+            [
+              "anthropic-dangerous-direct-browser-access",
+              "true"
+            ],
+            [
+              "anthropic-version",
+              "2023-06-01"
+            ],
+            [
+              "x-api-key",
+              "sk-ant-headless-local-fixture-only"
+            ],
+            [
+              "x-app",
+              "cli"
+            ],
+            [
+              "Connection",
+              "keep-alive"
+            ],
+            [
+              "Host",
+              "127.0.0.1:57448"
+            ],
+            [
+              "Accept-Encoding",
+              "gzip, deflate, br, zstd"
+            ],
+            [
+              "Content-Length",
+              "7124"
+            ]
+          ],
+          "process": 0,
+          "fixtureResponse": 0,
+          "requestWallMs": 1791431628506,
+          "responseWriteWallMs": 1791431628506,
+          "responseWriteAttempted": true
+        },
+        {
+          "ordinal": 1,
+          "method": "POST",
+          "url": "/v1/messages?beta=true",
+          "protocol": "HTTP/1.1",
+          "headers": [
+            [
+              "Accept",
+              "application/json"
+            ],
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "User-Agent",
+              "claude-cli/2.1.293 (external, sdk-cli)"
+            ],
+            [
+              "X-Claude-Code-Session-Id",
+              "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2"
+            ],
+            [
+              "X-Stainless-Arch",
+              "arm64"
+            ],
+            [
+              "X-Stainless-Lang",
+              "js"
+            ],
+            [
+              "X-Stainless-OS",
+              "MacOS"
+            ],
+            [
+              "X-Stainless-Package-Version",
+              "0.128.0"
+            ],
+            [
+              "X-Stainless-Retry-Count",
+              "0"
+            ],
+            [
+              "X-Stainless-Runtime",
+              "node"
+            ],
+            [
+              "X-Stainless-Runtime-Version",
+              "v26.3.0"
+            ],
+            [
+              "X-Stainless-Timeout",
+              "600"
+            ],
+            [
+              "anthropic-beta",
+              "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,thinking-display-updates-2026-08-18"
+            ],
+            [
+              "anthropic-dangerous-direct-browser-access",
+              "true"
+            ],
+            [
+              "anthropic-version",
+              "2023-06-01"
+            ],
+            [
+              "x-api-key",
+              "sk-ant-headless-local-fixture-only"
+            ],
+            [
+              "x-app",
+              "cli"
+            ],
+            [
+              "x-claude-code-agent-id",
+              "ab765dd6bdb507b60"
+            ],
+            [
+              "Connection",
+              "keep-alive"
+            ],
+            [
+              "Host",
+              "127.0.0.1:57448"
+            ],
+            [
+              "Accept-Encoding",
+              "gzip, deflate, br, zstd"
+            ],
+            [
+              "Content-Length",
+              "8249"
+            ]
+          ],
+          "process": 0,
+          "fixtureResponse": 1,
+          "requestWallMs": 1791431628523,
+          "responseWriteWallMs": 1791431628725,
+          "responseWriteAttempted": true
+        },
+        {
+          "ordinal": 2,
+          "method": "POST",
+          "url": "/v1/messages?beta=true",
+          "protocol": "HTTP/1.1",
+          "headers": [
+            [
+              "Accept",
+              "application/json"
+            ],
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "User-Agent",
+              "claude-cli/2.1.293 (external, sdk-cli)"
+            ],
+            [
+              "X-Claude-Code-Session-Id",
+              "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2"
+            ],
+            [
+              "X-Stainless-Arch",
+              "arm64"
+            ],
+            [
+              "X-Stainless-Lang",
+              "js"
+            ],
+            [
+              "X-Stainless-OS",
+              "MacOS"
+            ],
+            [
+              "X-Stainless-Package-Version",
+              "0.128.0"
+            ],
+            [
+              "X-Stainless-Retry-Count",
+              "0"
+            ],
+            [
+              "X-Stainless-Runtime",
+              "node"
+            ],
+            [
+              "X-Stainless-Runtime-Version",
+              "v26.3.0"
+            ],
+            [
+              "X-Stainless-Timeout",
+              "600"
+            ],
+            [
+              "anthropic-beta",
+              "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,thinking-display-updates-2026-08-18"
+            ],
+            [
+              "anthropic-dangerous-direct-browser-access",
+              "true"
+            ],
+            [
+              "anthropic-version",
+              "2023-06-01"
+            ],
+            [
+              "x-api-key",
+              "sk-ant-headless-local-fixture-only"
+            ],
+            [
+              "x-app",
+              "cli"
+            ],
+            [
+              "Connection",
+              "keep-alive"
+            ],
+            [
+              "Host",
+              "127.0.0.1:57448"
+            ],
+            [
+              "Accept-Encoding",
+              "gzip, deflate, br, zstd"
+            ],
+            [
+              "Content-Length",
+              "8321"
+            ]
+          ],
+          "process": 0,
+          "fixtureResponse": 2,
+          "requestWallMs": 1791431628529,
+          "responseWriteWallMs": 1791431628529,
+          "responseWriteAttempted": true
+        },
+        {
+          "ordinal": 3,
+          "method": "POST",
+          "url": "/v1/messages?beta=true",
+          "protocol": "HTTP/1.1",
+          "headers": [
+            [
+              "Accept",
+              "application/json"
+            ],
+            [
+              "Content-Type",
+              "application/json"
+            ],
+            [
+              "User-Agent",
+              "claude-cli/2.1.293 (external, sdk-cli)"
+            ],
+            [
+              "X-Claude-Code-Session-Id",
+              "10d9d2a8-1995-4839-84d0-6eaac0ef9fc2"
+            ],
+            [
+              "X-Stainless-Arch",
+              "arm64"
+            ],
+            [
+              "X-Stainless-Lang",
+              "js"
+            ],
+            [
+              "X-Stainless-OS",
+              "MacOS"
+            ],
+            [
+              "X-Stainless-Package-Version",
+              "0.128.0"
+            ],
+            [
+              "X-Stainless-Retry-Count",
+              "0"
+            ],
+            [
+              "X-Stainless-Runtime",
+              "node"
+            ],
+            [
+              "X-Stainless-Runtime-Version",
+              "v26.3.0"
+            ],
+            [
+              "X-Stainless-Timeout",
+              "600"
+            ],
+            [
+              "anthropic-beta",
+              "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24,thinking-display-updates-2026-08-18"
+            ],
+            [
+              "anthropic-dangerous-direct-browser-access",
+              "true"
+            ],
+            [
+              "anthropic-version",
+              "2023-06-01"
+            ],
+            [
+              "x-api-key",
+              "sk-ant-headless-local-fixture-only"
+            ],
+            [
+              "x-app",
+              "cli"
+            ],
+            [
+              "Connection",
+              "keep-alive"
+            ],
+            [
+              "Host",
+              "127.0.0.1:57448"
+            ],
+            [
+              "Accept-Encoding",
+              "gzip, deflate, br, zstd"
+            ],
+            [
+              "Content-Length",
+              "9559"
+            ]
+          ],
+          "process": 0,
+          "fixtureResponse": 3,
+          "requestWallMs": 1791431628768,
+          "responseWriteWallMs": 1791431628769,
+          "responseWriteAttempted": true
+        }
+      ],
+      "sessionFiles": [
+        {
+          "path": "projects/-private-tmp-headless-baseline-293-background-agent-complete-probe-background-agent-workspace/10d9d2a8-1995-4839-84d0-6eaac0ef9fc2/subagents/agent-ab765dd6bdb507b60.jsonl",
+          "bytes": 17492,
+          "sha256": "2f3f5cddc67c6f46b83516be196df327777d809b4cc40ea8f8fee005fc3038c6"
+        },
+        {
+          "path": "projects/-private-tmp-headless-baseline-293-background-agent-complete-probe-background-agent-workspace/10d9d2a8-1995-4839-84d0-6eaac0ef9fc2.jsonl",
+          "bytes": 24628,
+          "sha256": "13e46760a25471f7cb117f133e6a697027df13d3636a416250d5f7eb4cd3df96"
+        }
+      ]
+    }
+  ],
+  "backgroundPrintModes": [
+    {
+      "id": "probe-background-agent-json",
+      "captureRoot": "/tmp/headless-baseline-293-background-print-modes/probe-background-agent-json/native-a",
+      "captureComplete": true,
+      "nativeRepetitions": 1,
+      "stdoutBytes": 1706,
+      "stdoutSha256": "c580918b8ad5d263b80a042982a8d47968644c9d177c27f53864437fb57d5dc9",
+      "stderrBytes": 0,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "topLevel": "object",
+      "stdoutOrder": [
+        {
+          "index": 0,
+          "type": "result",
+          "subtype": "success",
+          "result": "HEADLESS_AFTER_CHILD_NOTIFICATION",
+          "parent_tool_use_id": null
+        }
+      ],
+      "results": [
+        {
+          "duration_api_ms": 230,
+          "stop_reason": "end_turn",
+          "session_id": "0d935682-7807-4a39-8eb7-9ac7024951b9",
+          "total_cost_usd": 8.8e-05,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 4,
+              "outputTokens": 8,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 8.8e-05,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "origin": {
+            "kind": "task-notification",
+            "producer": "session-task",
+            "runId": "0muz07rt3-50d5f96e"
+          },
+          "subagent_stats": {
+            "spawned": 1,
+            "requested": {
+              "background": 1,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 1,
+            "max_depth": 1,
+            "spawned_by_subagents": 0,
+            "completed": 1,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {
+              "general-purpose": 1
+            }
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 1,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "HEADLESS_AFTER_CHILD_NOTIFICATION",
+          "ttft_ms": 8,
+          "type": "result",
+          "duration_ms": 9,
+          "uuid": "c75c41bb-1a54-41a1-91e6-b2ed057e07ba",
+          "ttft_stream_ms": 8,
+          "time_to_request_ms": 6,
+          "first_content_frame_ms": 8,
+          "queued_turn_count": 0,
+          "result_index": 1
+        }
+      ]
+    },
+    {
+      "id": "probe-background-agent-json-verbose",
+      "captureRoot": "/tmp/headless-baseline-293-background-print-modes/probe-background-agent-json-verbose/native-a",
+      "captureComplete": true,
+      "nativeRepetitions": 1,
+      "stdoutBytes": 11118,
+      "stdoutSha256": "6faed7379529a47eba052fa14a5b3f7f9e15f38f8a72101108a1d7424ca917ef",
+      "stderrBytes": 0,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "topLevel": "array",
+      "stdoutOrder": [
+        {
+          "index": 0,
+          "type": "system",
+          "subtype": "init",
+          "result": null,
+          "parent_tool_use_id": null
+        },
+        {
+          "index": 1,
+          "type": "assistant",
+          "subtype": null,
+          "result": null,
+          "parent_tool_use_id": null
+        },
+        {
+          "index": 2,
+          "type": "user",
+          "subtype": null,
+          "result": null,
+          "parent_tool_use_id": null
+        },
+        {
+          "index": 3,
+          "type": "assistant",
+          "subtype": null,
+          "result": null,
+          "parent_tool_use_id": null
+        },
+        {
+          "index": 4,
+          "type": "system",
+          "subtype": "init",
+          "result": null,
+          "parent_tool_use_id": null
+        },
+        {
+          "index": 5,
+          "type": "assistant",
+          "subtype": null,
+          "result": null,
+          "parent_tool_use_id": null
+        },
+        {
+          "index": 6,
+          "type": "result",
+          "subtype": "success",
+          "result": "HEADLESS_PARENT_COMPLETE",
+          "parent_tool_use_id": null
+        },
+        {
+          "index": 7,
+          "type": "result",
+          "subtype": "success",
+          "result": "HEADLESS_AFTER_CHILD_NOTIFICATION",
+          "parent_tool_use_id": null
+        }
+      ],
+      "results": [
+        {
+          "duration_api_ms": 227,
+          "stop_reason": "end_turn",
+          "session_id": "c12a7113-43ec-4588-8a6e-9ee2f2be5ebe",
+          "total_cost_usd": 8.8e-05,
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 4,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 4,
+              "outputTokens": 8,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 8.8e-05,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "subagent_stats": {
+            "spawned": 1,
+            "requested": {
+              "background": 1,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 1,
+            "max_depth": 1,
+            "spawned_by_subagents": 0,
+            "completed": 1,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {
+              "general-purpose": 1
+            }
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 2,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "HEADLESS_PARENT_COMPLETE",
+          "ttft_ms": 49,
+          "type": "result",
+          "duration_ms": 71,
+          "uuid": "6811a5ca-ad38-4274-89b9-25e425d9552d",
+          "ttft_stream_ms": 49,
+          "time_to_request_ms": 46,
+          "first_content_frame_ms": 49,
+          "queued_turn_count": 0,
+          "result_index": 0
+        },
+        {
+          "duration_api_ms": 227,
+          "stop_reason": "end_turn",
+          "session_id": "c12a7113-43ec-4588-8a6e-9ee2f2be5ebe",
+          "total_cost_usd": 8.8e-05,
+          "usage": {
+            "input_tokens": 1,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 2,
+            "output_tokens_details": {
+              "thinking_tokens": 0
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 0,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "modelUsage": {
+            "claude-sonnet-5-5": {
+              "inputTokens": 4,
+              "outputTokens": 8,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0,
+              "webSearchRequests": 0,
+              "costUSD": 8.8e-05,
+              "contextWindow": 1000000,
+              "maxOutputTokens": 128000,
+              "thinkingTokens": 0,
+              "canonicalModel": "claude-sonnet-5-5",
+              "provider": "firstParty",
+              "costBasis": "list"
+            }
+          },
+          "permission_denials": [],
+          "terminal_reason": "completed",
+          "fast_mode_state": "off",
+          "fast_mode_disabled_reason": "sdk_opt_in_required",
+          "origin": {
+            "kind": "task-notification",
+            "producer": "session-task",
+            "runId": "0muz07s9d-1e1e0925"
+          },
+          "subagent_stats": {
+            "spawned": 1,
+            "requested": {
+              "background": 1,
+              "foreground": 0,
+              "unset": 0
+            },
+            "started_in_background": 1,
+            "max_depth": 1,
+            "spawned_by_subagents": 0,
+            "completed": 1,
+            "failed": 0,
+            "killed": {
+              "parent": 0,
+              "user": 0,
+              "system": 0
+            },
+            "refused": {
+              "depth_limit": 0,
+              "concurrency_limit": 0,
+              "budget": 0
+            },
+            "by_type": {
+              "general-purpose": 1
+            }
+          },
+          "safety_stops": 0,
+          "is_error": false,
+          "num_turns": 1,
+          "subtype": "success",
+          "api_error_status": null,
+          "result": "HEADLESS_AFTER_CHILD_NOTIFICATION",
+          "ttft_ms": 7,
+          "type": "result",
+          "duration_ms": 8,
+          "uuid": "832b9ed5-6d50-4211-8a5b-5a12610e1bd6",
+          "ttft_stream_ms": 7,
+          "time_to_request_ms": 5,
+          "first_content_frame_ms": 7,
+          "queued_turn_count": 0,
+          "result_index": 1
+        }
+      ]
+    },
+    {
+      "id": "probe-background-agent-text",
+      "captureRoot": "/tmp/headless-baseline-293-background-print-modes/probe-background-agent-text/native-a",
+      "captureComplete": true,
+      "nativeRepetitions": 1,
+      "stdoutBytes": 34,
+      "stdoutSha256": "c719d4434a584aa7be0031832c5c10aa4970ffa224acf7624bfd615744327520",
+      "stderrBytes": 0,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "stdoutText": "HEADLESS_AFTER_CHILD_NOTIFICATION\n"
+    }
+  ],
+  "ordinaryRefusal": [
+    {
+      "label": "native-a",
+      "captureRoot": "/tmp/headless-baseline-293-refusal-complete/probe-safety-refusal/native-a",
+      "captureComplete": true,
+      "providerMessageCount": 2,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "result": {
+        "duration_api_ms": 12,
+        "stop_reason": "end_turn",
+        "session_id": "c811f76e-35c5-4a54-84e6-0b5baa67eba1",
+        "total_cost_usd": 4.4e-05,
+        "usage": {
+          "input_tokens": 2,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 4,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "",
+          "iterations": [],
+          "speed": "standard",
+          "fallback_credit": null
+        },
+        "modelUsage": {
+          "claude-sonnet-5-5": {
+            "inputTokens": 2,
+            "outputTokens": 4,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 4.4e-05,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "canonicalModel": "claude-sonnet-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "subagent_stats": {
+          "spawned": 0,
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "started_in_background": 0,
+          "max_depth": 0,
+          "spawned_by_subagents": 0,
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "user": 0,
+            "system": 0
+          },
+          "refused": {
+            "depth_limit": 0,
+            "concurrency_limit": 0,
+            "budget": 0
+          },
+          "by_type": {}
+        },
+        "safety_stops": 1,
+        "is_error": false,
+        "num_turns": 2,
+        "subtype": "success",
+        "api_error_status": null,
+        "result": "HEADLESS_AFTER_REFUSAL",
+        "ttft_ms": 23,
+        "type": "result",
+        "duration_ms": 33,
+        "uuid": "c60313b9-c216-45f6-9729-32f68a0e398a",
+        "ttft_stream_ms": 23,
+        "time_to_request_ms": 19,
+        "first_content_frame_ms": 23,
+        "queued_turn_count": 0,
+        "result_index": 0
+      }
+    },
+    {
+      "label": "native-b",
+      "captureRoot": "/tmp/headless-baseline-293-refusal-complete/probe-safety-refusal/native-b",
+      "captureComplete": true,
+      "providerMessageCount": 2,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "result": {
+        "duration_api_ms": 13,
+        "stop_reason": "end_turn",
+        "session_id": "c811f76e-35c5-4a54-84e6-0b5baa67eba1",
+        "total_cost_usd": 4.4e-05,
+        "usage": {
+          "input_tokens": 2,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 4,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "",
+          "iterations": [],
+          "speed": "standard",
+          "fallback_credit": null
+        },
+        "modelUsage": {
+          "claude-sonnet-5-5": {
+            "inputTokens": 2,
+            "outputTokens": 4,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 4.4e-05,
+            "contextWindow": 1000000,
+            "maxOutputTokens": 128000,
+            "thinkingTokens": 0,
+            "canonicalModel": "claude-sonnet-5-5",
+            "provider": "firstParty",
+            "costBasis": "list"
+          }
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "fast_mode_state": "off",
+        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "subagent_stats": {
+          "spawned": 0,
+          "requested": {
+            "background": 0,
+            "foreground": 0,
+            "unset": 0
+          },
+          "started_in_background": 0,
+          "max_depth": 0,
+          "spawned_by_subagents": 0,
+          "completed": 0,
+          "failed": 0,
+          "killed": {
+            "parent": 0,
+            "user": 0,
+            "system": 0
+          },
+          "refused": {
+            "depth_limit": 0,
+            "concurrency_limit": 0,
+            "budget": 0
+          },
+          "by_type": {}
+        },
+        "safety_stops": 1,
+        "is_error": false,
+        "num_turns": 2,
+        "subtype": "success",
+        "api_error_status": null,
+        "result": "HEADLESS_AFTER_REFUSAL",
+        "ttft_ms": 23,
+        "type": "result",
+        "duration_ms": 33,
+        "uuid": "68d8f7a9-343a-428b-9281-8caf2e267ab5",
+        "ttft_stream_ms": 23,
+        "time_to_request_ms": 18,
+        "first_content_frame_ms": 23,
+        "queued_turn_count": 0,
+        "result_index": 0
+      }
+    }
+  ],
+  "unverified": [
+    "Native-Harness lifecycle/counter equality",
+    "fallback answered refusal plus final refusal in one API call",
+    "background wait-ceiling kill/system/parent/user counter branches"
+  ],
+  "failedPreparatoryEvidence": {
+    "bareAgentUnavailable": "/tmp/headless-baseline-293-background-agent-live",
+    "notificationRouteMissing": "/tmp/headless-baseline-293-background-agent-normal",
+    "refusalFollowupMissing": "/tmp/headless-baseline-293-background-agent-complete/probe-safety-refusal"
+  }
+}

@@ -350,7 +350,7 @@ impl SessionState {
                         is_meta: false,
                         is_compact_summary: false,
                         is_visible_in_transcript_only: false,
-                    } if !self.virtual_user_messages.contains(id)
+                     .. } if !self.virtual_user_messages.contains(id)
                         && !self.compact_summary_messages.contains(id)
                         && !self.transcript_only_messages.contains(id)
                         && !content.iter().any(|block| matches!(block, crate::types::ContentBlock::ToolResult { .. }))
@@ -376,9 +376,9 @@ mod mod_session_turn_tests {
             first,
             ConversationMessage::user_meta(MessageId::new(), "meta".into()),
             virtual_user,
-            ConversationMessage::User {
+            ConversationMessage::User { api_message_override: None,
                 id: MessageId::new(),
-                content: vec![ContentBlock::ToolResult {
+                content: vec![ContentBlock::ToolResult { content_projection: None,
                     tool_use_id: ToolUseId::new(),
                     content: "result".into(),
                     is_error: Some(false),

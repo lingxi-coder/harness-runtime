@@ -300,7 +300,7 @@ pub fn collect_mcp_config_warnings(
             return vec![McpConfigWarning {
                 file: file.map(str::to_string),
                 path: String::new(),
-                message: "Missing \"mcpServers\" \u{2014} found \"servers\" instead. Claude Code reads MCP servers from the \"mcpServers\" key.".to_string(),
+                message: "Missing \"mcpServers\" \u{2014} found \"servers\" instead. MCP servers must be configured in the \"mcpServers\" key.".to_string(),
                 suggestion: Some(format!(
                     "Rename the top-level \"servers\" key to \"mcpServers\" in {}",
                     file.unwrap_or("your MCP config")
@@ -560,6 +560,16 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
     if let Some(always_load) = object.get("alwaysLoad") {
         if !always_load.is_boolean() {
             issues.push("alwaysLoad: expected boolean".to_string());
+        }
+    }
+    if crate::json_config::bare_elicitation_is_schema_key_for(Some(ty)) {
+        if let Some(bare) = object.get("bareElicitationCapability") {
+            if !bare.is_boolean() {
+                issues.push(format!(
+                    "bareElicitationCapability: expected boolean, received {}",
+                    json_type_name(bare)
+                ));
+            }
         }
     }
     // §11 — `discoveryCache: q().optional()` is declared by `OAn`/`sGt`
@@ -894,6 +904,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn malformed_bare_elicitation_flag_is_reported_only_where_declared() {
+        for ty in ["stdio", "http", "sse", "streamable-http", "ws"] {
+            let warnings = only(
+                &json!({"mcpServers":{"srv":{"type":ty,"command":"mcp-test","url":"https://mcp.test","bareElicitationCapability":"true"}}}),
+            );
+            assert_eq!(warnings.len(), 1, "{ty}: {warnings:?}");
+            assert_eq!(warnings[0].message, "Skipped \u{2014} invalid MCP server config for \"srv\": bareElicitationCapability: expected boolean, received string");
+        }
+        for ty in ["sdk", "claudeai-proxy"] {
+            assert!(only(&json!({"mcpServers":{"srv":{"type":ty,"name":"sdk-client","id":"connector","url":"https://mcp.test","bareElicitationCapability":"true"}}})).is_empty(), "{ty}");
+        }
+    }
+
     /// Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` carries NO `url`.
     /// An `sdk` entry with neither `url` NOR `command` must NOT be reported as
     /// an invalid config — unlike every other KNOWN_MCP_TYPES member, `sdk`
@@ -1136,7 +1160,7 @@ mod tests {
         assert_eq!(w[0].severity, McpConfigSeverity::Fatal);
         assert_eq!(
             w[0].message,
-            "Missing \"mcpServers\" \u{2014} found \"servers\" instead. Claude Code reads MCP servers from the \"mcpServers\" key."
+            "Missing \"mcpServers\" \u{2014} found \"servers\" instead. MCP servers must be configured in the \"mcpServers\" key."
         );
         assert_eq!(
             w[0].suggestion.as_deref(),

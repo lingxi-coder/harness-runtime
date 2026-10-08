@@ -25,7 +25,7 @@ use tempfile::TempDir;
 const SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 
 fn make_msg(uuid: &str, extra: Map<String, serde_json::Value>) -> JsonlMessage {
-    JsonlMessage {
+    JsonlMessage { json_projection: None,
         message_type: "user".into(),
         uuid: uuid.into(),
         parent_uuid: None,

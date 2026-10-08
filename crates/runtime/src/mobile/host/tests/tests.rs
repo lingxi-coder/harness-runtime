@@ -204,14 +204,14 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
 
 #[test]
 fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
-    let visible = lingxi_core::types::ConversationMessage::Assistant {
+    let visible = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "visible".to_string(), citations: None,
         }],
         stop_reason: None,
     };
-    let compact = lingxi_core::types::ConversationMessage::User {
+    let compact = lingxi_core::types::ConversationMessage::User { api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "replacement summary".to_string(), citations: None,
@@ -242,7 +242,7 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         "declined fallback",
         "2026-10-04T00:00:00.000Z".into(),
     );
-    let first_message = ConversationMessage::Assistant {
+    let first_message = ConversationMessage::Assistant { per_turn_effort: None,
         id: first_id,
         content: vec![ContentBlock::Text {
             text: "kept main row".into(), citations: None,
@@ -354,7 +354,7 @@ fn session_agent_id_from_nested_transcript_path_requires_agent_jsonl_shape() {
 
 #[test]
 fn session_agent_index_excludes_hidden_transcript_records() {
-    let hidden_meta = lingxi_core::types::ConversationMessage::User {
+    let hidden_meta = lingxi_core::types::ConversationMessage::User { api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "<runtime-reminder>internal</runtime-reminder>".to_string(), citations: None,
@@ -363,21 +363,21 @@ fn session_agent_index_excludes_hidden_transcript_records() {
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
     };
-    let hidden_summary = lingxi_core::types::ConversationMessage::User {
+    let hidden_summary = lingxi_core::types::ConversationMessage::User { api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: true,
         is_visible_in_transcript_only: false,
     };
-    let hidden_transcript_only = lingxi_core::types::ConversationMessage::User {
+    let hidden_transcript_only = lingxi_core::types::ConversationMessage::User { api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: true,
     };
-    let visible = lingxi_core::types::ConversationMessage::Assistant {
+    let visible = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         stop_reason: None,
@@ -427,7 +427,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::Assistant {
+            message: lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "working".to_string(), citations: None,
@@ -510,7 +510,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::System {
+            message: lingxi_core::types::ConversationMessage::System { api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 subtype: Some("agent_idle".to_string()),
                 content: "idle".to_string(),
@@ -544,7 +544,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::User {
+            message: lingxi_core::types::ConversationMessage::User { api_message_override: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "follow-up".to_string(), citations: None,
@@ -572,7 +572,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::Assistant {
+            message: lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "resumed".to_string(), citations: None,

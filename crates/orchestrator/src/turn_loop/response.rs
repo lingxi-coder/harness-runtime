@@ -151,8 +151,8 @@ pub(super) async fn handle_malformed_tool_use(
         // assistant response — two assistant messages in a row, matching the
         // binary. (The port previously persisted a USER message here.) Shape
         // mirrors `surface_model_error`'s assistant-api-error message.
-        orch.output.emit_text(MALFORMED_TOOL_USE_RETRY_FAILED).await;
-        let failed_msg = ConversationMessage::Assistant {
+        orch.output.emit_text(MALFORMED_TOOL_USE_RETRY_FAILED, None).await;
+        let failed_msg = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(), citations: None,
@@ -240,7 +240,7 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
                 utf16_code_units: utf16_code_units.clone(),
                 citations: citations.clone(),
             }),
-            LlmContentBlock::ToolCall { id, name, input } => {
+            LlmContentBlock::ToolCall { id, name, input, input_projection } => {
                 // The provider-issued id (e.g. Anthropic `toolu_…`, OpenAI
                 // `call_…`) IS the canonical `ToolUseId`, so JSONL/resume bytes
                 // match upstream claude-code. The `provider_id` sidecar is left
@@ -253,7 +253,12 @@ pub(crate) fn translate_response_blocks(content: &[LlmContentBlock]) -> Vec<Cont
                 // sequences are left verbatim; `Workflow.script` is restored.
                 let (input, _stats) =
                     llm_runtime::unicode_repair::repair_tool_input(name, input);
+                let mut input_projection = input_projection.clone();
+                if let Some(projection) = &mut input_projection {
+                    projection.rebase_display_value(input.clone()).expect("valid tool input projection remains valid after repair");
+                }
                 Some(ContentBlock::ToolUse {
+                    input_projection,
                     id: ToolUseId::from(id.clone()),
                     name: name.clone(),
                     input,

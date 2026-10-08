@@ -12,6 +12,7 @@ mod tests {
     #[test]
     fn text_block_maps_to_llm_text_with_no_cache_control() {
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hello".to_string(),
@@ -35,8 +36,10 @@ mod tests {
         let id = ToolUseId::new();
         let id_str = id.to_string();
         let msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolUse {
+                input_projection: None,
                 id,
                 name: "Read".to_string(),
                 input: serde_json::json!({"path": "/tmp/x"}),
@@ -48,7 +51,7 @@ mod tests {
         assert_eq!(result[0].role, "assistant");
         assert!(matches!(
             &result[0].content[0],
-            LlmBlock::ToolCall { id, name, input }
+            LlmBlock::ToolCall { id, name, input , .. }
                 if id == &id_str && name == "Read" && input["path"] == "/tmp/x"
         ));
     }
@@ -58,8 +61,10 @@ mod tests {
         // P0: the canonical provider id (Anthropic `toolu_…`) carried in the
         // `ToolUseId` MUST be replayed verbatim as the egress `tool_call` id.
         let msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolUse {
+                input_projection: None,
                 id: ToolUseId::from("toolu_01ABCDEF"),
                 name: "Read".to_string(),
                 input: serde_json::json!({"path": "/tmp/x"}),
@@ -78,8 +83,10 @@ mod tests {
     fn tool_result_provider_id_replayed_verbatim_on_egress() {
         // P0: the paired `tool_result` must echo the SAME verbatim canonical id.
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: ToolUseId::from("toolu_01ABCDEF"),
                 content: "file content".to_string(),
                 is_error: Some(false),
@@ -102,8 +109,10 @@ mod tests {
         let tool_use_id = ToolUseId::new();
         let tool_call_id_str = tool_use_id.to_string();
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
+                content_projection: None,
                 tool_use_id,
                 content: "file content".to_string(),
                 is_error: Some(false),
@@ -117,7 +126,7 @@ mod tests {
         let result = to_llm_messages(vec![msg]).unwrap();
         assert!(matches!(
             &result[0].content[0],
-            LlmBlock::ToolResult { tool_call_id, output, is_error: Some(false), cache_control: None, cache_reference: None }
+            LlmBlock::ToolResult { tool_call_id, output, is_error: Some(false), cache_control: None, cache_reference: None , .. }
                 if tool_call_id == &tool_call_id_str && output == &Value::String("file content".to_string())
         ));
     }
@@ -125,8 +134,10 @@ mod tests {
     #[test]
     fn tool_result_error_flag_preserved() {
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "boom".to_string(),
                 is_error: Some(true),
@@ -150,6 +161,7 @@ mod tests {
     #[test]
     fn thinking_block_maps_to_reasoning() {
         let msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Thinking {
                 thinking: "let me think".to_string(),
@@ -171,6 +183,7 @@ mod tests {
         let raw = b"hello";
         let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Image {
                 source: ImageSource::Base64 {
@@ -193,6 +206,7 @@ mod tests {
     #[test]
     fn image_url_source_maps_to_image_url() {
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Image {
                 source: ImageSource::Url {
@@ -213,6 +227,7 @@ mod tests {
     #[test]
     fn media_analysis_block_is_lowered_to_model_visible_text() {
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::MediaAnalysis {
                 analysis: MediaAnalysis {
@@ -258,6 +273,7 @@ mod tests {
     #[test]
     fn redacted_thinking_replayed_verbatim() {
         let msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::RedactedThinking {
                 data: "enc==".to_string(),
@@ -274,6 +290,7 @@ mod tests {
     #[test]
     fn server_tool_use_replayed_verbatim() {
         let msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ServerToolUse {
                 id: "srvtoolu_01".to_string(),
@@ -293,6 +310,7 @@ mod tests {
     #[test]
     fn connector_text_and_advisor_result_replayed_verbatim() {
         let msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ProtoBlock::ConnectorText {
@@ -325,6 +343,7 @@ mod tests {
         let id = ToolUseId::new();
         let id_str = id.to_string();
         let msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ProtoBlock::Text {
@@ -332,6 +351,7 @@ mod tests {
                     citations: None,
                 },
                 ProtoBlock::ToolUse {
+                    input_projection: None,
                     id,
                     name: "Read".to_string(),
                     input: serde_json::json!({"path": "/x"}),
@@ -362,6 +382,7 @@ mod tests {
         let raw = b"%PDF-1.4";
         let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Document {
                 source: DocumentSource::Base64 {
@@ -384,6 +405,7 @@ mod tests {
     #[test]
     fn system_message_rejected_with_invalid_request() {
         let msg = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: "you are a helpful assistant".to_string(),
             subtype: None,
@@ -398,6 +420,7 @@ mod tests {
     #[test]
     fn user_and_assistant_roles_mapped_correctly() {
         let user = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hi".to_string(),
@@ -408,6 +431,7 @@ mod tests {
             is_visible_in_transcript_only: false,
         };
         let assistant = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hello".to_string(),
@@ -486,6 +510,7 @@ mod tests {
     #[test]
     fn image_bad_base64_returns_invalid_request() {
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Image {
                 source: ImageSource::Base64 {
@@ -505,6 +530,7 @@ mod tests {
 
     fn user(id: MessageId, text: &str) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id,
             content: vec![ProtoBlock::Text {
                 text: text.to_string(),
@@ -518,6 +544,7 @@ mod tests {
 
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: text.to_string(),
@@ -572,6 +599,7 @@ mod tests {
         let out = normalize_messages_for_api(vec![
             user(MessageId::new(), "old"),
             ConversationMessage::System {
+                api_system: None,
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
                 subtype: Some("compact_boundary".to_string()),
@@ -603,6 +631,7 @@ mod tests {
                 user(before, "before notice"),
                 assistant("answer before notice"),
                 ConversationMessage::System {
+                    api_system: None,
                     id: MessageId::new(),
                     content: notice.to_string(),
                     subtype: None,
@@ -657,6 +686,7 @@ mod tests {
         let out = normalize_messages_for_api(vec![
             user(MessageId::new(), "old"),
             ConversationMessage::System {
+                api_system: None,
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
                 subtype: Some("compact_boundary".to_string()),
@@ -666,6 +696,7 @@ mod tests {
             },
             user(MessageId::new(), "first summary"),
             ConversationMessage::System {
+                api_system: None,
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
                 subtype: Some("compact_boundary".to_string()),
@@ -742,6 +773,7 @@ mod tests {
 
     fn user_blocks(id: MessageId, content: Vec<ProtoBlock>) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id,
             content,
             is_meta: false,
@@ -752,6 +784,7 @@ mod tests {
 
     fn tool_result(content: &str) -> ProtoBlock {
         ProtoBlock::ToolResult {
+            content_projection: None,
             tool_use_id: ToolUseId::new(),
             content: content.to_string(),
             is_error: Some(false),
@@ -926,6 +959,7 @@ mod tests {
 
     fn tu(id: &str) -> ProtoBlock {
         ProtoBlock::ToolUse {
+            input_projection: None,
             id: ToolUseId::from(id),
             name: "Read".into(),
             input: serde_json::json!({}),
@@ -934,6 +968,7 @@ mod tests {
     }
     fn tr(id: &str) -> ProtoBlock {
         ProtoBlock::ToolResult {
+            content_projection: None,
             tool_use_id: ToolUseId::from(id),
             content: "ok".into(),
             is_error: Some(false),
@@ -943,6 +978,7 @@ mod tests {
     }
     fn asst_blocks(blocks: Vec<ProtoBlock>) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: blocks,
             stop_reason: None,
@@ -950,6 +986,7 @@ mod tests {
     }
     fn usr_blocks(blocks: Vec<ProtoBlock>) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: blocks,
             is_meta: false,
@@ -1047,6 +1084,7 @@ mod tests {
         let first = MessageId::new();
         let out = normalize_messages_for_api(vec![
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: first,
                 content: vec![ProtoBlock::Text {
                     text: "hi".into(),
@@ -1124,6 +1162,7 @@ mod tests {
 
     fn tool_reference_result(names: &[&str]) -> ConversationMessage {
         usr_blocks(vec![ProtoBlock::ToolResult {
+            content_projection: None,
             tool_use_id: ToolUseId::from("toolu_search"),
             content: String::new(),
             is_error: Some(false),
@@ -1276,6 +1315,7 @@ mod tests {
         let messages = ConversationMessagesWithSources::new(vec![
             user(discarded_id, "discarded before compaction"),
             ConversationMessage::System {
+                api_system: None,
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
                 subtype: Some("compact_boundary".to_string()),
@@ -1285,7 +1325,8 @@ mod tests {
             },
             user(current_id, "current summary"),
         ]);
-        let normalized = normalize_messages_for_api_with_tool_search_and_sources(messages, true, None);
+        let normalized =
+            normalize_messages_for_api_with_tool_search_and_sources(messages, true, None);
         let paired = ensure_tool_result_pairing_with_sources(normalized);
         let sources = paired.contributing_message_ids();
         assert!(!sources.contains(&discarded_id));
@@ -1299,6 +1340,7 @@ mod tests {
         let merged = normalize_messages_for_api_with_tool_search_and_sources(
             ConversationMessagesWithSources::new(vec![
                 ConversationMessage::User {
+                    api_message_override: None,
                     id: discarded_id,
                     content: vec![tr("toolu_orphan")],
                     is_meta: true,
@@ -1320,4 +1362,41 @@ mod tests {
                 if text_of(content).contains(&"ordinary user content")
         ));
     }
+}
+
+#[test]
+fn queued_api_system_rows_merge_exact_text_and_admission_sources() {
+    let first = lingxi_core::types::MessageId::new();
+    let second = lingxi_core::types::MessageId::new();
+    let row = |id, units: Vec<u16>| {
+        ConversationMessage::api_system(
+            id,
+            lingxi_core::types::ApiSystemMessage {
+                content: vec![ProtoBlock::TextJsUtf16 {
+                    text: String::from_utf16_lossy(&units),
+                    utf16_code_units: units,
+                    citations: None,
+                }],
+                output_config: None,
+            },
+        )
+    };
+    let normalized = normalize_messages_for_api_with_tool_search_and_sources(
+        ConversationMessagesWithSources::new(vec![
+            row(first, vec![0xD800]),
+            row(second, vec![0xD801]),
+        ]),
+        false,
+        None,
+    );
+    assert_eq!(normalized.messages.len(), 1);
+    assert_eq!(
+        normalized.contributing_message_ids(),
+        HashSet::from([first, second])
+    );
+    let messages = to_llm_messages(normalized.messages).unwrap();
+    assert_eq!(messages[0].role, "system");
+    assert!(
+        matches!(&messages[0].content[0],LlmBlock::TextJsUtf16 {utf16_code_units,..} if utf16_code_units==&vec![0xD800,10,10,0xD801])
+    );
 }

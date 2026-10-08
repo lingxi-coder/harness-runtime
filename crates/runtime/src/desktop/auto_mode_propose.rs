@@ -133,7 +133,7 @@ pub fn propose_messages_to_conversation(
                 MessageId::new(),
                 m.content.clone(),
             )),
-            "assistant" => Some(ConversationMessage::Assistant {
+            "assistant" => Some(ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: m.content.clone(),

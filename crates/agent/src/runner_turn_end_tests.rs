@@ -99,6 +99,9 @@ impl lingxi_core::host::ToolInvoker for TurnEndInvoker {
             }
         }
         Ok(ToolInvocationResult {
+            mcp_meta_projection: None,
+            model_content_projection: None,
+            data_projection: None,
             // These JSON fields alone are intentionally untrusted. The two
             // negative cases below carry the same data without valid control.
             data: serde_json::json!({
@@ -194,11 +197,13 @@ async fn successful_tool_turn_end_finishes_batch_and_persists_read_context_befor
         let mut response = tool_use_response("Finish", Some("tool_use"));
         response.content.extend([
             llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: "read-after-finish".into(),
                 name: "Read".into(),
                 input: serde_json::json!({"file_path": "/project/pkg/code.rs"}),
             },
             llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: "write-after-finish".into(),
                 name: "Write".into(),
                 input: serde_json::json!({}),
@@ -261,11 +266,9 @@ async fn successful_tool_turn_end_finishes_batch_and_persists_read_context_befor
             "<system-reminder>\ntool.call hook additional context: Contents of /project/pkg/AGENTS.md:\n\nKeep this instruction.\n</system-reminder>"
         );
         assert_eq!(rows.last().unwrap()["status"], "completed");
-        assert!(
-            !rows
-                .iter()
-                .any(|row| row["message"]["subtype"] == "instruction_context")
-        );
+        assert!(!rows
+            .iter()
+            .any(|row| row["message"]["subtype"] == "instruction_context"));
         assert_eq!(one_completed(&events)["stop_reason"], "tool_use");
         assert!(events.iter().any(|event| matches!(
             event,
@@ -326,6 +329,7 @@ async fn tool_turn_end_uses_last_accepted_batch_source_once() {
     ] {
         let mut response = tool_use_response(first, Some("tool_use"));
         response.content.push(llm_runtime::ContentBlock::ToolCall {
+            input_projection: None,
             id: "last-marker".into(),
             name: last.into(),
             input: serde_json::json!({}),
@@ -427,11 +431,9 @@ async fn tool_turn_end_stops_schema_nudges_but_preserves_final_schema_failure() 
         );
         assert!(events.iter().any(|event| matches!(event, SubagentEvent::Failed { error, .. }
             if error == "agent({schema}): subagent completed without calling StructuredOutput (after in-conversation nudge)")));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, SubagentEvent::Completed { .. }))
-        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
         assert!(events.iter().any(|event| matches!(event, SubagentEvent::Message { message, .. }
             if message["content"].as_array().is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result" && block["content"] == "Finish result")))));
         assert!(!events.iter().any(|event| matches!(event, SubagentEvent::Message { message, .. }
@@ -484,13 +486,11 @@ async fn persistent_tool_turn_end_resets_on_a_later_real_message() {
         "the previous terminal marker must reset"
     );
     assert_eq!(*invoker.calls.lock().unwrap(), ["Finish", "Read"]);
-    assert!(
-        api.histories.lock().unwrap()[2]
-            .iter()
-            .any(|message| matches!(message,
+    assert!(api.histories.lock().unwrap()[2]
+        .iter()
+        .any(|message| matches!(message,
         ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block,
-            ContentBlock::Text { text, .. } if text == "continue with a real task"))))
-    );
+            ContentBlock::Text { text, .. } if text == "continue with a real task")))));
     drop(event_tx);
     runner.await.unwrap();
 }
@@ -562,13 +562,11 @@ async fn tool_turn_end_parks_owned_work_before_pending_notification_can_wake_it(
     .await
     .expect("terminal park and later background notification wake complete");
     assert_eq!(api.call_count(), 2);
-    assert!(
-        api.histories.lock().unwrap()[1]
-            .iter()
-            .any(|message| matches!(message,
+    assert!(api.histories.lock().unwrap()[1]
+        .iter()
+        .any(|message| matches!(message,
         ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block,
-            ContentBlock::Text { text, .. } if text.contains("child finished")))))
-    );
+            ContentBlock::Text { text, .. } if text.contains("child finished"))))));
     drop(event_tx);
     runner.await.unwrap();
 }

@@ -1360,7 +1360,7 @@ impl Tool for TaskCreateTool {
         )
         .await;
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "content": format!("Task #{task_id} created successfully: {subject}"),
                 "task": { "id": task_id, "subject": subject },
@@ -1514,7 +1514,7 @@ impl Tool for TaskGetTool {
             }),
             None => Value::Null,
         };
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "content": content, "task": task_json }),
             model_content: None,
             new_messages: vec![],
@@ -1692,7 +1692,7 @@ impl Tool for TaskListTool {
                 obj
             })
             .collect();
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "content": content, "tasks": tasks }),
             model_content: None,
             new_messages: vec![],
@@ -1858,7 +1858,7 @@ impl Tool for TaskUpdateTool {
                 // model-facing string is rendered by
                 // mapToolResultToToolResultBlockParam (`error || "Task #N not
                 // found"`), carried here via `model_content`.
-                return Ok(ToolCallResult {
+                return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     data: json!({
                         "success": false,
                         "taskId": task_id,
@@ -1921,7 +1921,7 @@ impl Tool for TaskUpdateTool {
                     render_task_update_fail(&task_id, Some("Failed to delete task")),
                 )
             };
-            return Ok(ToolCallResult {
+            return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data,
                 model_content: Some(model_content),
                 new_messages: vec![],
@@ -2049,7 +2049,7 @@ impl Tool for TaskUpdateTool {
                             // this way (`TaskCreated` above, `Stop` and
                             // `TeammateIdle` in the orchestrator).
                             let feedback = format!("TaskCompleted hook feedback:\n{reason}");
-                            return Ok(ToolCallResult {
+                            return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                                 data: json!({
                                     "success": false,
                                     "taskId": task_id,
@@ -2212,7 +2212,7 @@ impl Tool for TaskUpdateTool {
         if let Some((from, to)) = status_change {
             data["statusChange"] = json!({ "from": status_wire(from), "to": status_wire(to) });
         }
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content: Some(content),
             new_messages: vec![],
@@ -2596,7 +2596,7 @@ impl Tool for TaskStopTool {
         if ended_with_live_loop {
             data["note"] = json!(format!("had already ended ({}) but its loop had not exited; re-signalled it and killed {stopped_process_groups} process group(s). The record remains listed while the loop is still live.", record.status));
         }
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content: None,
             new_messages: vec![],
@@ -3051,7 +3051,7 @@ fn task_output_retrieval_status(done: bool, block: bool) -> &'static str {
 /// A task can disappear after the initial existence check, including before
 /// the first output read. Both races have the same zqo timeout/null shape.
 fn missing_waited_task_output() -> ToolCallResult {
-    ToolCallResult {
+    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
         data: json!({
             "retrieval_status": "timeout",
             "task": null,
@@ -3447,7 +3447,7 @@ impl Tool for TaskOutputTool {
 
         // Nested `{ retrieval_status, task: { … } }` plus the `content` render so
         // the model sees it (`TaskOutputTool.tsx` data + `…BlockParam`).
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "retrieval_status": retrieval_status,
                 "task": Value::Object(task_obj),

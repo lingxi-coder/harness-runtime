@@ -228,7 +228,8 @@ Usage:\n\
             .and_then(Value::as_str)
             .map(std::string::ToString::to_string);
 
-        let path = PathBuf::from(notebook_path);
+        let requested_path = crate::normalize_model_file_path(notebook_path, &self.ctx.cwd());
+        let path = requested_path.clone();
         let started = Instant::now();
         self.emit_started(&invocation_id, &path).await;
 
@@ -272,7 +273,7 @@ Usage:\n\
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
         // Desktop filesystems translate nothing and this is a no-op.
-        let path = match translate_model_path(&self.ctx.fs, path, true) {
+        let path = match translate_model_path(&self.ctx.fs, requested_path.clone(), true) {
             Ok(path) => path,
             Err(message) => {
                 self.emit_failed(&invocation_id, "path_blocked").await;
@@ -320,7 +321,7 @@ Usage:\n\
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         if let Err(e) = crate::check_read_before_write(
             &self.ctx.read_file_state,
-            &canon,
+            &requested_path,
             current_mtime_ms,
             &raw,
             // Oracle `X_n(S)`: notebooks are excluded from the waiver
@@ -340,7 +341,7 @@ Usage:\n\
                 // than throwing (`NotebookEditTool.ts:331-348`). Mirror that
                 // data shape so the model sees the soft error.
                 self.emit_failed(&invocation_id, "json_parse").await;
-                return Ok(ToolCallResult {
+                return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     data: json!({
                         "new_source": new_source,
                         "cell_type": cell_type.clone().unwrap_or_else(|| "code".to_string()),
@@ -575,9 +576,9 @@ Usage:\n\
             .ok()
             .and_then(|m| m.modified().ok())
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set(
+        tool_api::read_file_state::set_with_requested_aliases(
             &self.ctx.read_file_state,
-            canon.clone(),
+            requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: serialized.clone(),
                 mtime_ms: new_mtime_ms,
@@ -588,6 +589,8 @@ Usage:\n\
                 seeded_from_context: false,
                 is_partial_view: false,
             },
+            true,
+            vec![requested_path.clone(), path.clone()],
         );
 
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -622,7 +625,7 @@ Usage:\n\
         );
         nb_data.insert("original_file".to_string(), json!(raw));
         nb_data.insert("updated_file".to_string(), json!(serialized));
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: Value::Object(nb_data),
             model_content: Some(content),
             new_messages: vec![],
@@ -656,14 +659,14 @@ mod tests {
 
     /// Simulate a prior full read of `target` (a notebook) so the
     /// read-before-write staleness guard (Batch F) is satisfied. Records the
-    /// file's current content + floored mtime under the canonicalized key with
-    /// `offset`/`limit` = `None`. Call AFTER writing the file's bytes.
+    /// file's current content + floored mtime under Native's normalized
+    /// session-cwd route key with `offset`/`limit` = `None`. Canonical remains
+    /// for disk access only.
     ///
-    /// NB: the Rust `Read` tool cannot populate this for `.ipynb` (no notebook
-    /// media support), so in production only a prior NotebookEdit's own
-    /// post-write `set` satisfies the guard — these tests seed it directly to
-    /// exercise the post-guard logic. (Documented partial-coverage gap.)
+    /// These focused guard tests seed state directly. The current production
+    /// Read-to-NotebookEdit path is exercised separately below.
     fn seed_full_read(ctx: &BuiltinToolContext, target: &std::path::Path) {
+        let route = crate::normalize_model_file_path(target.to_str().unwrap(), &ctx.cwd());
         let canon = std::fs::canonicalize(target).unwrap();
         let content = std::fs::read_to_string(&canon).unwrap();
         let mtime_ms = std::fs::metadata(&canon)
@@ -672,7 +675,7 @@ mod tests {
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         tool_api::read_file_state::set(
             &ctx.read_file_state,
-            canon,
+            route,
             tool_api::read_file_state::ReadFileEntry {
                 content,
                 mtime_ms,
@@ -721,7 +724,7 @@ mod tests {
         let read_tool = crate::read::FileReadTool::new(ctx.clone());
         read_tool
             .call(
-                json!({ "file_path": target.to_str().unwrap() }),
+                json!({ "file_path": "nb.ipynb" }),
                 fresh_ctx(),
                 fresh_tx(),
             )
@@ -732,7 +735,7 @@ mod tests {
         let result = tool
             .call(
                 json!({
-                    "notebook_path": target.to_str().unwrap(),
+                    "notebook_path": "nb.ipynb",
                     "cell_id": "c1",
                     "edit_mode": "replace",
                     "new_source": "print('via-real-read')"
@@ -745,6 +748,50 @@ mod tests {
         assert_eq!(
             result.model_content.as_deref(),
             Some("Updated cell c1 with print('via-real-read')")
+        );
+    }
+
+    #[tokio::test]
+    async fn relative_notebook_path_uses_session_cwd_and_records_the_absolute_route() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("relative.ipynb");
+        std::fs::write(&target, sample_notebook()).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        assert_ne!(
+            ctx.cwd(),
+            std::env::current_dir().unwrap(),
+            "the test must distinguish the session cwd from the process cwd"
+        );
+        seed_full_read(&ctx, &target);
+        let tool = NotebookEditTool::new(ctx.clone());
+
+        // The schema accepts this string and NotebookEdit has no validator
+        // rejecting relative paths. Its session cwd, not the process cwd, is
+        // the path base (the same rule as Read/Edit/Write).
+        let result = tool
+            .call(
+                json!({
+                    "notebook_path": "relative.ipynb",
+                    "cell_id": "c1",
+                    "edit_mode": "replace",
+                    "new_source": "print('session-cwd')"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("relative NotebookEdit path resolves in the active session cwd");
+        assert!(result.model_content.unwrap().contains("session-cwd"));
+
+        let key = crate::normalize_model_file_path("relative.ipynb", &ctx.cwd());
+        let routes = ctx
+            .read_file_state
+            .lock()
+            .unwrap()
+            .requested_path_groups(&key);
+        assert!(
+            routes.iter().any(|route| route == &[target.clone()]),
+            "the model route is captured as the resolved session-cwd spelling: {routes:?}"
         );
     }
 

@@ -199,7 +199,7 @@ impl Tool for SyntheticOutputTool {
 
         // Model-facing return value is identical to the TS tool
         // (`SyntheticOutputTool.ts:59-65`): echo the input verbatim.
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "data": STRUCTURED_OUTPUT_SUCCESS_DATA,
                 "structured_output": input,

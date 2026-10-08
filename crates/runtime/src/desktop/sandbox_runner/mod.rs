@@ -47,10 +47,10 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig as EngineConfig};
 use sandbox::wrap::SandboxWrapError;
+use sandbox_runtime::SandboxManager;
 use sandbox_runtime::linux::cleanup_bwrap_mount_points;
 use sandbox_runtime::manager::ManagerError;
 pub use sandbox_runtime::matcher::AskFn;
-use sandbox_runtime::SandboxManager;
 use tokio::sync::Mutex;
 
 /// Map a [`ManagerError`] into the engine's [`SandboxWrapError`].
@@ -270,8 +270,8 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
 mod tests {
     use super::*;
     use sandbox::runtime_config::NetworkRestrictionConfig;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tool_api::SandboxRunner as _;
 
     fn cfg_with_domains(domains: &[&str]) -> EngineConfig {
@@ -693,9 +693,11 @@ mod monitor_proxy_tests {
         assert_eq!(&payload, b"hello");
         server.await.unwrap();
         env.insert("NO_PROXY".into(), "example.com".into());
-        assert!(connect_monitor_proxy("events.example.com", 443, true, &env)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            connect_monitor_proxy("events.example.com", 443, true, &env)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

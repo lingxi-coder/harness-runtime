@@ -82,6 +82,7 @@ impl Drop for MainLoopActivityGuard {
 /// freezes the output-token baseline, and
 /// `tests/turn_loop_state_boundary_test.rs` fails on both.
 pub(crate) struct TurnLoopState {
+    structured_output_retry: crate::structured_output::StructuredOutputRetryState,
     /// One Mod-visible id across the full turn, including each streamed model
     /// response and the eventual completion event.
     mod_turn_id: String,
@@ -120,6 +121,9 @@ impl TurnLoopState {
             std::sync::atomic::Ordering::Relaxed,
         );
         Self {
+            structured_output_retry: crate::structured_output::StructuredOutputRetryState::new(
+                orch.config.structured_output_enabled,
+            ),
             mod_turn_id: uuid::Uuid::new_v4().to_string(),
             mod_turn_started: false,
             recovery: RecoveryState::default(),
@@ -182,6 +186,9 @@ impl ConversationOrchestrator {
         let Some(source) = self.mid_turn_input.get() else {
             return injected;
         };
+        if !source.admits_at(crate::prompt::mid_turn_input::MidTurnInputPoint::LoopStart) {
+            return injected;
+        }
         // Loop so a burst of consecutive enqueues all land before the next call.
         // The production source ([`MsgQueueMidTurnInput`]) is consume-once — it
         // REMOVES the commands it returns each call — so it self-terminates after
@@ -228,6 +235,77 @@ impl ConversationOrchestrator {
             }
         }
         injected
+    }
+
+    /// SDK human input folds only after tool settlement. Ordinary completions
+    /// return before this native path, leaving their followers for dispatch.
+    async fn drain_mid_turn_input_after_tools(&self) -> Result<(), OrchestratorError> {
+        let Some(source) = self.mid_turn_input.get() else {
+            return Ok(());
+        };
+        if !source.admits_at(crate::prompt::mid_turn_input::MidTurnInputPoint::AfterTools) {
+            return Ok(());
+        }
+        let Some(batch) = source.take_mid_turn_batch().await else {
+            return Ok(());
+        };
+        if batch.is_empty() {
+            return Ok(());
+        }
+        self.reset_goal_interruption();
+        // Native ordinary SDK humans are separate attachments; initial-turn
+        // uC merging and verified-Slack batch rendering do not apply here.
+        for input in &batch {
+            let prompt = input.projected_content.clone().unwrap_or_else(|| {
+                lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!(
+                    input.text
+                ))
+            });
+            let id = input
+                .source_message_uuid
+                .as_ref()
+                .and_then(|uuid| uuid.value.as_str())
+                .and_then(MessageId::parse_prefixed)
+                .unwrap_or_else(MessageId::new);
+            let message = Self::queued_human_attachment_projection(id, &prompt)?;
+            self.session.lock().await.history.push(message);
+            if let Some(delivery) = &input.queue_delivery {
+                let rendered = projected_content::queued_human_rendered(&prompt)?;
+                self.persist_queued_input_to_jsonl(
+                    &prompt,
+                    input.source_message_uuid.as_ref(),
+                    delivery,
+                    &rendered,
+                )
+                .await;
+            }
+        }
+        for input in &batch {
+            self.persist_absorbed_queue_input(input).await;
+        }
+        source
+            .input_consumed(&batch)
+            .await
+            .map_err(OrchestratorError::Internal)?;
+        Ok(())
+    }
+
+    pub(crate) fn queued_human_attachment_projection(
+        id: MessageId,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<ConversationMessage, OrchestratorError> {
+        let content = projected_content::queued_human_content(prompt)?;
+        Ok(ConversationMessage::User {
+            id,
+            content: content.clone(),
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            api_message_override: Some(lingxi_core::types::messages::ApiSystemMessage {
+                content,
+                output_config: None,
+            }),
+        })
     }
 
     /// The origin-specific 2.1.288 `$$e` envelope follows receive screening.
@@ -507,6 +585,9 @@ impl ConversationOrchestrator {
                 allow_budget_continuation,
                 tool_requested_end,
             } => {
+                if tool_requested_end {
+                    self.admit_structured_output_completion(state).await;
+                }
                 self.end_of_turn_sequence(
                     state,
                     &stop_reason,
@@ -528,6 +609,7 @@ impl ConversationOrchestrator {
     /// - [`orch_events::CONVERSATION_FAILED`] on error
     pub async fn run_turn(&self, prompt: &str) -> Result<ConversationOutcome, OrchestratorError> {
         let _turn_guard = self.turn_gate.lock().await;
+        self.begin_turn_metrics();
         let _activity_guard = self.main_loop_activity(true);
         tracing::info!(
             event = orch_events::CONVERSATION_STARTED,
@@ -547,6 +629,7 @@ impl ConversationOrchestrator {
         let cleanup = crate::native_computer::cleanup(self).await;
         let result = result.and_then(|outcome| cleanup.map(|()| outcome));
         self.fire_mod_turn_complete(false, result.is_err()).await;
+        self.complete_turn_metrics(&result);
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         // ConversationOutcome is #[non_exhaustive] so future variants will
@@ -655,6 +738,7 @@ impl ConversationOrchestrator {
                 .await
             {
                 loop_state::GuardVerdict::Proceed => {}
+                loop_state::GuardVerdict::StructuredOutputRetries(error) => return Err(error),
                 loop_state::GuardVerdict::MaxTurns => {
                     return Err(OrchestratorError::MaxTurnsReached {
                         max_turns: self.config.max_turns,
@@ -837,6 +921,9 @@ impl ConversationOrchestrator {
         &self,
         cancel: Option<CancellationToken>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        // A gate-admitted notification/report wake is a new query. Internal
+        // transient rewakes inside its driver continue sharing these metrics.
+        self.begin_turn_metrics();
         let _activity_guard = self.main_loop_activity(false);
         let cancel_probe = cancel.clone();
         self.output.emit_turn_started().await;
@@ -846,6 +933,7 @@ impl ConversationOrchestrator {
                 Box::pin(self.try_run_turn_streaming("", Vec::new(), cancel, None, true, false)),
             )
             .await;
+        self.complete_turn_metrics(&result);
         self.emit_terminal_rate_limit_if_changed(&result).await;
         match result {
             Ok(
@@ -959,6 +1047,7 @@ impl ConversationOrchestrator {
             };
             let result_timestamp = crate::streaming_loop::assistant_row_timestamp();
             let raw_result = ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![drained.block],
                 is_meta: false,
@@ -1127,12 +1216,14 @@ impl ConversationOrchestrator {
         if !partial.assistant_blocks.is_empty() || !partial.tool_uses.is_empty() {
             let mut content = partial.assistant_blocks.clone();
             content.extend(partial.tool_uses.iter().map(|tool| ContentBlock::ToolUse {
+                input_projection: None,
                 id: tool.id.clone(),
                 name: tool.name.clone(),
                 input: tool.input.clone(),
                 provider_id: tool.provider_id.clone(),
             }));
             let assistant = ConversationMessage::Assistant {
+                per_turn_effort: partial.per_turn_effort.clone(),
                 id: partial
                     .replacement_message_id
                     .unwrap_or(logical_assistant_id),
@@ -1421,6 +1512,7 @@ impl ConversationOrchestrator {
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
         let mut sequence_result = None;
         let sequence = async {
+            self.admit_structured_output_completion(loop_state).await;
             sequence_result = Some(
                 self.end_of_turn_sequence(loop_state, "end_turn", assistant_id, false, true)
                     .await,
@@ -1785,6 +1877,10 @@ impl ConversationOrchestrator {
                     }
                     return Ok(StreamingIterationDisposition::Complete(assistant_id));
                 }
+                // Native post-tool fold is gated before the next model cycle.
+                if self.config.max_turns == 0 || loop_state.turn_count < self.config.max_turns {
+                    self.drain_mid_turn_input_after_tools().await?;
+                }
                 Ok(StreamingIterationDisposition::Continue)
             }
             Some("end_turn") => {
@@ -1833,8 +1929,11 @@ impl ConversationOrchestrator {
                     // after the malformed assistant response (two assistants in
                     // a row, matching the binary). Shape mirrors
                     // `surface_model_error`. (Was a USER message.)
-                    self.output.emit_text(MALFORMED_TOOL_USE_RETRY_FAILED).await;
+                    self.output
+                        .emit_text(MALFORMED_TOOL_USE_RETRY_FAILED, None)
+                        .await;
                     let failed_msg = ConversationMessage::Assistant {
+                        per_turn_effort: None,
                         id: MessageId::new(),
                         content: vec![ContentBlock::Text {
                             text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),
@@ -1953,6 +2052,7 @@ impl ConversationOrchestrator {
                 };
                 let surfaced_id = if let Some(text) = api_error {
                     let err_msg = ConversationMessage::Assistant {
+                        per_turn_effort: None,
                         id: MessageId::new(),
                         content: vec![ContentBlock::Text {
                             text: text.clone(),
@@ -1975,7 +2075,7 @@ impl ConversationOrchestrator {
                     };
                     self.persist_api_error_message_to_jsonl(&err_msg, envelope)
                         .await;
-                    self.output.emit_text(&text).await;
+                    self.output.emit_text(&text, None).await;
                     Some(err_msg.id())
                 } else {
                     None
@@ -2249,6 +2349,7 @@ impl ConversationOrchestrator {
                 .await
             {
                 loop_state::GuardVerdict::Proceed => {}
+                loop_state::GuardVerdict::StructuredOutputRetries(error) => return Err(error),
                 loop_state::GuardVerdict::MaxTurns => return Ok(TurnOutcome::MaxTurns),
                 loop_state::GuardVerdict::OverBudget => {
                     return Err(OrchestratorError::MaxBudgetReached {
@@ -2796,6 +2897,7 @@ pub(super) fn llm_response_to_pumped_turn(
             name,
             input,
             provider_id,
+            ..
         } = block
         {
             tool_uses.push(ObservedToolUse {
@@ -2820,6 +2922,7 @@ pub(super) fn llm_response_to_pumped_turn(
     });
 
     PumpedTurn {
+        per_turn_effort: resp.per_turn_effort().map(str::to_owned),
         tool_use_removals: Vec::new(),
         served_model,
         assistant_rows: Vec::new(),
@@ -2872,6 +2975,7 @@ pub(super) fn pumped_assistant_message(
     for tool in &pumped.tool_uses {
         if !indexed_tools.contains(&tool.id) {
             content.push(lingxi_core::types::ContentBlock::ToolUse {
+                input_projection: None,
                 id: tool.id.clone(),
                 name: tool.name.clone(),
                 input: tool.input.clone(),
@@ -2880,6 +2984,7 @@ pub(super) fn pumped_assistant_message(
         }
     }
     ConversationMessage::Assistant {
+        per_turn_effort: pumped.per_turn_effort.clone(),
         id: assistant_id,
         content,
         stop_reason: pumped.stop_reason.clone(),
@@ -2947,6 +3052,7 @@ mod server_fallback_response_tests {
                     citations: None,
                 },
                 llm_runtime::ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "toolu_read".into(),
                     name: "Read".into(),
                     input: serde_json::json!({"file_path":"a.txt"}),
@@ -2957,6 +3063,7 @@ mod server_fallback_response_tests {
                     citations: None,
                 },
                 llm_runtime::ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "toolu_bash".into(),
                     name: "Bash".into(),
                     input: serde_json::json!({"command":"pwd"}),
@@ -2975,6 +3082,7 @@ mod server_fallback_response_tests {
             id,
             content,
             stop_reason,
+            ..
         } = row
         else {
             panic!("recovered row must be an assistant row");

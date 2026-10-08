@@ -26,7 +26,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
 };
 use tool_api::util::path_validation::{
-    canonicalize_and_validate, emit_blocked_event, resolve_against_cwd, translate_model_path,
+    canonicalize_and_validate, emit_blocked_event, translate_model_path,
 };
 use tool_api::BuiltinToolContext;
 
@@ -530,12 +530,12 @@ impl Tool for FileEditTool {
         // `EnterWorktree`/`ExitWorktree`), not the frozen OS process cwd that
         // `std::fs::canonicalize` would otherwise consult below. An absolute
         // `file_path` (the documented/expected case) is unaffected.
-        let path = resolve_against_cwd(PathBuf::from(file_path), &self.ctx.cwd());
+        let requested_path = crate::normalize_model_file_path(file_path, &self.ctx.cwd());
         // Mobile-linux guest paths: rewrite onto the host-backed twin (or
         // refuse fenced guest space) BEFORE canonicalization/containment, so a
         // guest path validates as the host directory that actually backs it.
         // Desktop filesystems translate nothing and this is a no-op.
-        let path = match translate_model_path(&self.ctx.fs, path, true) {
+        let path = match translate_model_path(&self.ctx.fs, requested_path.clone(), true) {
             Ok(path) => path,
             Err(message) => {
                 self.emit_failed(&invocation_id, "path_blocked").await;
@@ -690,7 +690,7 @@ impl Tool for FileEditTool {
                 // full-read content-equality fallback.
                 if let Err(e) = crate::check_read_before_write(
                     &self.ctx.read_file_state,
-                    &canon,
+                    &requested_path,
                     guard_mtime_ms,
                     &guard_raw_content,
                     crate::read_requirement_waived(Some(&ctx.options.main_loop_model), &canon),
@@ -873,9 +873,9 @@ impl Tool for FileEditTool {
         let new_mtime_ms = write_result
             .modified
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
-        tool_api::read_file_state::set(
+        tool_api::read_file_state::set_with_requested_aliases(
             &self.ctx.read_file_state,
-            canon.clone(),
+            requested_path.clone(),
             tool_api::read_file_state::ReadFileEntry {
                 content: after.clone(),
                 mtime_ms: new_mtime_ms,
@@ -886,6 +886,8 @@ impl Tool for FileEditTool {
                 seeded_from_context: false,
                 is_partial_view: false,
             },
+            true,
+            vec![requested_path.clone(), path.clone()],
         );
 
         // Keep an installed language server synchronized immediately after a
@@ -938,7 +940,7 @@ impl Tool for FileEditTool {
         if stale_recovered {
             data["staleRecovered"] = json!(true);
         }
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data,
             model_content: Some(content),
             new_messages: vec![],

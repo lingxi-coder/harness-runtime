@@ -39,6 +39,14 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+/// The existing driver's admission boundary, before queue input is consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidTurnInputPoint {
+    LoopStart,
+    AfterTools,
+}
 
 /// Why the active turn's [`tokio_util::sync::CancellationToken`] was fired.
 ///
@@ -138,6 +146,17 @@ impl Default for CancelReasonFlag {
 /// each origin through the Mod receive screen before the text is joined.
 #[async_trait]
 pub trait MidTurnInputSource: Send + Sync {
+    /// Hosts can restrict their input to a particular native consumption point.
+    /// Desktop and mobile queues retain their existing drain behavior.
+    fn admits_at(&self, point: MidTurnInputPoint) -> bool {
+        point != MidTurnInputPoint::AfterTools
+    }
+
+    /// Called after post-tool input has entered canonical session history.
+    /// Hosts retire delivery identities and publish consumption acknowledgments here.
+    async fn input_consumed(&self, _inputs: &[MidTurnInput]) -> Result<(), String> {
+        Ok(())
+    }
     /// Whether this host can admit cancellable goal wake-ups.
     fn supports_goal_retries(&self) -> bool {
         false
@@ -168,6 +187,9 @@ pub trait MidTurnInputSource: Send + Sync {
             vec![MidTurnInput {
                 text,
                 origin_kind: None,
+                projected_content: None,
+                source_message_uuid: None,
+                queue_delivery: None,
             }]
         })
     }
@@ -177,6 +199,19 @@ pub trait MidTurnInputSource: Send + Sync {
 pub struct MidTurnInput {
     pub text: String,
     pub origin_kind: Option<&'static str>,
+    /// Original content, including exact JavaScript strings and media blocks.
+    pub projected_content: Option<Utf16JsonProjection>,
+    /// Delivery identity from the source. Generated transcript IDs are not substitutes.
+    pub source_message_uuid: Option<Utf16JsonProjection>,
+    pub queue_delivery: Option<MidTurnInputDelivery>,
+}
+
+/// Facts recorded when a host accepts an input delivery, before tool folding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MidTurnInputDelivery {
+    pub delivery_id: String,
+    pub timestamp: String,
+    pub reference_version: String,
 }
 
 #[cfg(test)]

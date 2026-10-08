@@ -10,13 +10,13 @@
 // ============================================================================
 #[cfg(test)]
 mod terminal_sequence_tests {
+    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-        StaticMemoryProvider,
+        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        noop_hook_executor,
     };
     use crate::turn_loop::apply_terminal_sequence;
-    use crate::OrchestratorConfig;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
@@ -322,20 +322,20 @@ mod model_text_tests {
 }
 #[cfg(test)]
 mod read_file_state_tests {
+    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
-        NoOpPermissionGate, StaticMemoryProvider,
+        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        mock_message_response, noop_hook_executor,
     };
     use crate::turn_loop::{
         dispatch_tool_uses, dispatch_tool_uses_tracked_deferred, execute_one_turn,
     };
-    use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
     use hooks::events::HookEventType;
-    use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
     use lingxi_core::host::OrchestratorHandle;
+    use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
     use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
     use permission::{
         PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
@@ -437,7 +437,7 @@ mod read_file_state_tests {
             let content = tokio::fs::read_to_string(&resolved)
                 .await
                 .map_err(|e| ToolError::Io(format!("read {}: {e}", resolved.display())))?;
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": content }),
                 model_content: None,
                 new_messages: vec![],
@@ -484,9 +484,11 @@ mod read_file_state_tests {
             hooks::mods::ModSessionContext::messages(&orch, json!({"agentId":"not-this-session"}))
                 .await
                 .unwrap_err();
-        assert!(missing_agent
-            .to_string()
-            .contains("no conversation of agent not-this-session"));
+        assert!(
+            missing_agent
+                .to_string()
+                .contains("no conversation of agent not-this-session")
+        );
     }
 
     fn orch_with_tools_and_gate(
@@ -553,14 +555,121 @@ mod read_file_state_tests {
     // ===== Orphaned-permission recovery (run_orphaned_permission) ===========
     // 1:1 with claude-code's handleOrphanedPermission (queryHelpers.ts:224-343).
 
+    struct ExactInputEchoTool;
+
+    #[async_trait]
+    impl Tool for ExactInputEchoTool {
+        fn name(&self) -> &str {
+            "ExactInputEcho"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
+                once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+            &SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: Default::default(),
+            }
+        }
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "exact echo".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            input: serde_json::Value,
+            ctx: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            let input = ctx
+                .projected_input(&input)
+                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+            Ok(ToolCallResult::from_data(
+                json!({"input_json": input.to_json_string().map_err(|error| ToolError::InvalidInput(error.to_string()))?}),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_preserves_utf16_updated_input_through_tool_and_persistence() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![Arc::new(ExactInputEchoTool)])
+            .with_jsonl_writer(writer);
+        let id = ToolUseId::new();
+        orch.session
+            .lock()
+            .await
+            .history
+            .push(assistant_with_tool_use(&id, "ExactInputEcho", json!({})));
+        let updated =
+            Utf16JsonProjection::parse(r#"{"text":"\udfff","\ud901":"approved"}"#).unwrap();
+        assert!(
+            orch.run_orphaned_permission(
+                &id,
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                    updated_input: Some(updated.clone()),
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                }
+            )
+            .await
+            .unwrap()
+        );
+        let (content, failed) = last_tool_result(&orch.session.lock().await.history);
+        assert!(!failed);
+        let returned: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            returned["input_json"].as_str().unwrap(),
+            updated.to_json_string().unwrap()
+        );
+        let durable = tokio::fs::read_to_string(path).await.unwrap();
+        assert!(durable.contains("input_json"));
+        assert!(durable.contains("udfff"));
+        assert!(durable.contains("ud901"));
+    }
+
     fn assistant_with_tool_use(
         tuid: &ToolUseId,
         name: &str,
         input: serde_json::Value,
     ) -> lingxi_core::types::ConversationMessage {
-        lingxi_core::types::ConversationMessage::Assistant {
+        lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
-            content: vec![lingxi_core::types::ContentBlock::ToolUse {
+            content: vec![lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
                 id: tuid.clone(),
                 name: name.to_string(),
                 input,
@@ -615,7 +724,11 @@ mod read_file_state_tests {
             .run_orphaned_permission(
                 &tuid,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    updated_input: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                            json!({"file_path":"real.txt"}),
+                        ),
+                    ),
                     permission_updates: vec![],
                     decision_classification: None,
                 },
@@ -675,8 +788,8 @@ mod read_file_state_tests {
             "destination": "session"
         });
 
-        assert!(orch
-            .run_orphaned_permission(
+        assert!(
+            orch.run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
                     updated_input: None,
@@ -685,7 +798,8 @@ mod read_file_state_tests {
                 },
             )
             .await
-            .expect("recovery"));
+            .expect("recovery")
+        );
         assert_eq!(
             *gate
                 .applied
@@ -725,15 +839,20 @@ mod read_file_state_tests {
                 json!({"file_path":"missing.txt"}),
             ));
 
-        assert!(orch
-            .run_orphaned_permission(
+        assert!(
+            orch.run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
-                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    updated_input: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                            json!({"file_path":"real.txt"})
+                        )
+                    ),
                 },
             )
             .await
-            .expect("recovery"));
+            .expect("recovery")
+        );
         assert_eq!(
             *gate
                 .mode_sets
@@ -835,17 +954,22 @@ mod read_file_state_tests {
                 "Read",
                 json!({"file_path":"real.txt"}),
             ));
-        assert!(orch
-            .run_orphaned_permission(
+        assert!(
+            orch.run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    updated_input: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                            json!({"file_path":"real.txt"})
+                        )
+                    ),
                     permission_updates: vec![],
                     decision_classification: None,
                 },
             )
             .await
-            .unwrap());
+            .unwrap()
+        );
         let (content, is_error) = last_tool_result(&orch.session().lock().await.history);
         assert!(is_error, "{content}");
         assert_eq!(
@@ -895,17 +1019,22 @@ mod read_file_state_tests {
                 "Schemic",
                 json!({"path":"/x"}),
             ));
-        assert!(orch
-            .run_orphaned_permission(
+        assert!(
+            orch.run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                    updated_input: Some(json!({"path":"/x"})),
+                    updated_input: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                            json!({"path":"/x"})
+                        )
+                    ),
                     permission_updates: vec![],
                     decision_classification: None,
                 },
             )
             .await
-            .unwrap());
+            .unwrap()
+        );
         let (content, is_error) = last_tool_result(&orch.session().lock().await.history);
         assert!(is_error, "{content}");
         assert!(content.contains("recovery veto before core"), "{content}");
@@ -953,17 +1082,22 @@ mod read_file_state_tests {
                 "Read",
                 json!({"file_path":"real.txt"}),
             ));
-        assert!(orch
-            .run_orphaned_permission(
+        assert!(
+            orch.run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    updated_input: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                            json!({"file_path":"real.txt"})
+                        )
+                    ),
                     permission_updates: vec![],
                     decision_classification: None,
                 },
             )
             .await
-            .unwrap());
+            .unwrap()
+        );
         let (content, is_error) = last_tool_result(&orch.session().lock().await.history);
         assert!(is_error, "{content}");
         assert!(!content.contains("SHOULD_NOT_READ"));
@@ -989,9 +1123,9 @@ mod read_file_state_tests {
             ));
             // A matching tool_result already exists ⇒ resolved.
             s.history
-                .push(lingxi_core::types::ConversationMessage::User {
+                .push(lingxi_core::types::ConversationMessage::User { api_message_override: None,
                     id: lingxi_core::types::MessageId::new(),
-                    content: vec![lingxi_core::types::ContentBlock::ToolResult {
+                    content: vec![lingxi_core::types::ContentBlock::ToolResult { content_projection: None,
                         tool_use_id: tuid.clone(),
                         content: "prior".into(),
                         is_error: Some(false),
@@ -1302,7 +1436,7 @@ mod read_file_state_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "ok": true }),
                 model_content: None,
                 new_messages: vec![],
@@ -1442,7 +1576,7 @@ mod read_file_state_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({"ran":true}),
                 model_content: None,
                 new_messages: vec![],
@@ -1528,7 +1662,7 @@ mod read_file_state_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({"ran":true}),
                 model_content: None,
                 new_messages: vec![],
@@ -1847,7 +1981,7 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()),
+                .get(uses[0].0.as_str()).map(|projection| &projection.value),
             Some(&json!({
                 "cwd": first_cwd.to_string_lossy(),
                 "root": first_cwd.to_string_lossy(),
@@ -1873,7 +2007,7 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(moved_use[0].0.as_str()),
+                .get(moved_use[0].0.as_str()).map(|projection| &projection.value),
             Some(&json!({
                 "cwd": second_cwd.to_string_lossy(),
                 "root": second_cwd.to_string_lossy(),
@@ -2607,7 +2741,7 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()),
+                .get(uses[0].0.as_str()).map(|projection| &projection.value),
             Some(&json!({"decision":"allow","rule":"Schemic"}))
         );
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
@@ -2902,7 +3036,7 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()),
+                .get(uses[0].0.as_str()).map(|projection| &projection.value),
             Some(&json!("redacted")),
             "the core payload must not reach transcript persistence"
         );
@@ -3006,9 +3140,11 @@ mod read_file_state_tests {
         );
         let mut model_copy = vec![reminder.clone()];
         orch.screen_mod_persisted_attachments(&mut model_copy).await;
-        assert!(model_copy[0]
-            .text_content()
-            .starts_with("<system-reminder>\nmodded tool.call hook additional context:"));
+        assert!(
+            model_copy[0]
+                .text_content()
+                .starts_with("<system-reminder>\nmodded tool.call hook additional context:")
+        );
     }
 
     #[tokio::test]
@@ -3045,7 +3181,7 @@ mod read_file_state_tests {
                 suffix.clone(),
             ]
             .concat();
-            let message = ConversationMessage::User {
+            let message = ConversationMessage::User { api_message_override: None,
                 id,
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: String::from_utf16_lossy(&units),
@@ -3134,7 +3270,7 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()),
+                .get(uses[0].0.as_str()).map(|projection| &projection.value),
             Some(&json!({"ok":true}))
         );
     }
@@ -3243,7 +3379,7 @@ mod read_file_state_tests {
                     .tool_use_results
                     .lock()
                     .await
-                    .get(uses[0].0.as_str()),
+                    .get(uses[0].0.as_str()).map(|projection| &projection.value),
                 Some(&json!({"mapped":"direct"}))
             );
         }
@@ -3375,13 +3511,14 @@ mod read_file_state_tests {
             .expect("registered tool");
         assert!(tool.is_mcp());
         assert_eq!(tool.input_schema()["required"], json!(["text"]));
-        assert!(orch
-            .build_wire_tools()
-            .await
-            .0
-            .iter()
-            .any(|entry| entry["name"] == "mcp__mod-test__echo"
-                && entry["description"] == "Echo a message"));
+        assert!(
+            orch.build_wire_tools()
+                .await
+                .0
+                .iter()
+                .any(|entry| entry["name"] == "mcp__mod-test__echo"
+                    && entry["description"] == "Echo a message")
+        );
         let second = vec![(
             ToolUseId::new(),
             "mcp__mod-test__echo".into(),
@@ -3442,7 +3579,7 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()),
+                .get(uses[0].0.as_str()).map(|projection| &projection.value),
             Some(&json!("<tool_use_error>hidden</tool_use_error>")),
         );
     }
@@ -3494,7 +3631,7 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()),
+                .get(uses[0].0.as_str()).map(|projection| &projection.value),
             Some(&json!("2")),
         );
     }
@@ -3549,7 +3686,7 @@ mod read_file_state_tests {
                 .tool_use_results
                 .lock()
                 .await
-                .get(uses[0].0.as_str()),
+                .get(uses[0].0.as_str()).map(|projection| &projection.value),
             Some(&json!("synthetic replacement")),
         );
     }
@@ -3647,7 +3784,7 @@ mod read_file_state_tests {
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rejected_message_id = Arc::new(std::sync::Mutex::new(None));
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: "Schemic".into(),
                 input: json!({}),
@@ -4160,12 +4297,13 @@ mod read_file_state_tests {
         // A fresh orchestrator has an empty read-state registry, so `/files`
         // renders the "No files in context" branch.
         let orch = orch_with_tools(PathBuf::from("/tmp"), vec![]);
-        assert!(orch
-            .prompt_runtime
-            .read_state_map
-            .lock()
-            .unwrap()
-            .is_empty());
+        assert!(
+            orch.prompt_runtime
+                .read_state_map
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
         assert!(orch.files_in_context().await.is_empty());
     }
 
@@ -4277,7 +4415,7 @@ mod read_file_state_tests {
                         ),
                     ));
                 } else {
-                    s.history.push(ConversationMessage::Assistant {
+                    s.history.push(ConversationMessage::Assistant { per_turn_effort: None,
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
@@ -4443,7 +4581,7 @@ mod read_file_state_tests {
                         ),
                     ));
                 } else {
-                    s.history.push(ConversationMessage::Assistant {
+                    s.history.push(ConversationMessage::Assistant { per_turn_effort: None,
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),
@@ -4561,16 +4699,16 @@ mod read_file_state_tests {
 // ============================================================================
 #[cfg(test)]
 mod max_output_tokens_recovery_tests {
+    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
-        NoOpPermissionGate, StaticMemoryProvider,
+        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        mock_message_response, noop_hook_executor,
     };
     use crate::turn_loop::{
-        execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome, ESCALATED_MAX_TOKENS,
-        MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+        ESCALATED_MAX_TOKENS, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+        RecoveryState, TurnStepOutcome, execute_one_turn_with_recovery,
     };
-    use crate::OrchestratorConfig;
     use lingxi_core::types::{ContentBlock, ConversationMessage};
     use llm_runtime::HistoryResponse;
     use std::path::PathBuf;
@@ -4631,8 +4769,8 @@ mod max_output_tokens_recovery_tests {
     #[test]
     fn truncated_response_recovery_nudge_matches_2_1_263() {
         use crate::turn_loop::{
-            truncated_response_recovery_eligible, TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN,
-            TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT,
+            TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN, TRUNCATED_RESPONSE_RECOVERY_NUDGE_SUBAGENT,
+            truncated_response_recovery_eligible,
         };
         assert_eq!(
             TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN,
@@ -5240,17 +5378,17 @@ mod max_output_tokens_recovery_tests {
 // ============================================================================
 #[cfg(test)]
 mod malformed_and_thinking_only_tests {
+    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
-        NoOpPermissionGate, StaticMemoryProvider,
+        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        mock_message_response, noop_hook_executor,
     };
     use crate::turn_loop::{
-        execute_one_turn, execute_one_turn_with_recovery, prior_assistant_used_structured_output,
-        RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
-        MALFORMED_TOOL_USE_RETRY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
+        MALFORMED_TOOL_USE_RETRY_FAILED, MALFORMED_TOOL_USE_RETRY_NUDGE, RecoveryState,
+        STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE, TurnStepOutcome, execute_one_turn,
+        execute_one_turn_with_recovery, prior_assistant_used_structured_output,
     };
-    use crate::OrchestratorConfig;
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
     use llm_runtime::HistoryResponse;
     use std::path::PathBuf;
@@ -5455,7 +5593,7 @@ mod malformed_and_thinking_only_tests {
     #[tokio::test]
     async fn normal_tool_use_does_not_trigger_malformed_path() {
         let resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: "toolu_1".into(),
                 name: "Nope".into(), // unknown tool → synthetic error, still dispatched
                 input: serde_json::json!({}),
@@ -5498,9 +5636,9 @@ mod malformed_and_thinking_only_tests {
     // ---- #78 nudge guard `!Pt(ce)` (StructuredOutput exchange) -------------
 
     fn so_tool_use_assistant() -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: ToolUseId::new(),
                 name: STRUCTURED_OUTPUT_TOOL_NAME.to_string(),
                 input: serde_json::json!({}),
@@ -5511,9 +5649,9 @@ mod malformed_and_thinking_only_tests {
     }
 
     fn tool_result_user() -> ConversationMessage {
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "Structured output provided successfully".into(),
                 is_error: Some(false),
@@ -5527,7 +5665,7 @@ mod malformed_and_thinking_only_tests {
     }
 
     fn real_user(text: &str) -> ConversationMessage {
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.into(),
@@ -5540,7 +5678,7 @@ mod malformed_and_thinking_only_tests {
     }
 
     fn empty_assistant() -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![],
             stop_reason: None,
@@ -5577,9 +5715,9 @@ mod malformed_and_thinking_only_tests {
     fn pt_false_for_non_structured_output_tool_use() {
         // An assistant that used a DIFFERENT tool is not a match; scanning hits
         // the real user and returns false.
-        let other = ConversationMessage::Assistant {
+        let other = ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: ToolUseId::new(),
                 name: "Read".into(),
                 input: serde_json::json!({}),
@@ -5780,21 +5918,21 @@ mod malformed_and_thinking_only_tests {
 mod pre_tool_hook_tests {
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        mock_message_response, MockApiClient, MockOutputStream, PermissionDecision,
-        PermissionDecisionSource, PermissionGate, PermissionResolution, StaticMemoryProvider,
+        MockApiClient, MockOutputStream, PermissionDecision, PermissionDecisionSource,
+        PermissionGate, PermissionResolution, StaticMemoryProvider, mock_message_response,
     };
     use crate::turn_loop::{
-        dispatch_tool_uses_tracked, dispatch_tool_uses_tracked_deferred, execute_one_turn,
-        run_post_tool_batch_hooks, run_post_tool_batch_hooks_after_turn_end, TurnStepOutcome,
+        TurnStepOutcome, dispatch_tool_uses_tracked, dispatch_tool_uses_tracked_deferred,
+        execute_one_turn, run_post_tool_batch_hooks, run_post_tool_batch_hooks_after_turn_end,
     };
     use crate::{ConversationOutcome, OrchestratorConfig};
     use async_trait::async_trait;
+    use hooks::HookExecutorImpl;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
     use hooks::events::{HookEvent, HookEventType};
     use hooks::executor::BuiltinHookHandler;
     use hooks::registry::{HookContext, HookRegistry};
     use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
-    use hooks::HookExecutorImpl;
     use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, MessageId, ToolUseId};
     use serde_json::json;
     use std::path::PathBuf;
@@ -6585,7 +6723,7 @@ mod pre_tool_hook_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "ECHOED-OUTPUT" }),
                 model_content: None,
                 new_messages: vec![],
@@ -6660,7 +6798,7 @@ mod pre_tool_hook_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!([{ "type": "text", "text": "ENDED" }]),
                 model_content: Some("ENDED".into()),
                 new_messages: vec![],
@@ -6748,7 +6886,7 @@ mod pre_tool_hook_tests {
                 .as_ref()
                 .expect("shared tool registry wired")
                 .register_mcp_tools(self.conn_id, tools);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "refreshed" }),
                 model_content: None,
                 new_messages: vec![],
@@ -6824,7 +6962,7 @@ mod pre_tool_hook_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "noop" }),
                 model_content: None,
                 new_messages: vec![],
@@ -6902,7 +7040,7 @@ mod pre_tool_hook_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             *self.captured.lock().unwrap() = Some(ctx.fork_parent_system_prompt.clone());
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
@@ -7050,7 +7188,7 @@ mod pre_tool_hook_tests {
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({
                     "content": "TOOL-RESULT",
                     "model_content": "Launching skill: demo",
@@ -7230,9 +7368,10 @@ mod pre_tool_hook_tests {
                 if message == "Agent aborted: too many classifier denials in headless mode"
         ));
         assert!(crate::turn_loop::is_carveout_propagated(&error));
-        assert!(gate
-            .saw_non_interactive
-            .load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            gate.saw_non_interactive
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
     }
 
     // ----- SKILLEXEC.3 (Part A): tool-injected new_messages -----------------
@@ -7288,7 +7427,7 @@ mod pre_tool_hook_tests {
     async fn injected_message_sources_records_tool_use_id() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: tu.to_string(),
                 name: "Inject".into(),
                 input: json!({}),
@@ -7338,7 +7477,7 @@ mod pre_tool_hook_tests {
     async fn normal_tool_records_no_source_and_serializes_no_field() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -7376,7 +7515,7 @@ mod pre_tool_hook_tests {
     async fn new_messages_appended_to_history_after_tool_result() {
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: tu.to_string(),
                 name: "Inject".into(),
                 input: json!({}),
@@ -7488,7 +7627,9 @@ mod pre_tool_hook_tests {
                 assert_eq!(content.len(), 1);
                 assert_eq!(
                     content[0].visible_text(),
-                    Some("<system-reminder>\nPreToolUse:Echo hook additional context: INJECTED-CTX\n</system-reminder>")
+                    Some(
+                        "<system-reminder>\nPreToolUse:Echo hook additional context: INJECTED-CTX\n</system-reminder>"
+                    )
                 );
             }
             other => panic!("expected injected User message, got {other:?}"),
@@ -7690,7 +7831,7 @@ mod pre_tool_hook_tests {
         // ends with stop_reason "hook_stopped" (TS query.ts `{reason:'hook_stopped'}`).
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -7719,7 +7860,7 @@ mod pre_tool_hook_tests {
         // Without continue:false a tool-bearing step keeps looping (Continue).
         let tu = ToolUseId::new();
         let api_resp = mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: tu.to_string(),
                 name: "Echo".into(),
                 input: json!({}),
@@ -7741,7 +7882,7 @@ mod pre_tool_hook_tests {
     async fn mcp_end_turn_result_ends_the_step_without_a_follow_up_call() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -7857,7 +7998,7 @@ mod pre_tool_hook_tests {
     async fn errored_mcp_result_cannot_end_the_turn() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -7904,9 +8045,9 @@ mod pre_tool_hook_tests {
             assistant_id,
             crate::turn_loop::ToolUseDispatchFacts {
                 query_history: vec![],
-                assistant_message: ConversationMessage::Assistant {
+                assistant_message: ConversationMessage::Assistant { per_turn_effort: None,
                     id: assistant_id,
-                    content: vec![ContentBlock::ToolUse {
+                    content: vec![ContentBlock::ToolUse { input_projection: None,
                         id: id.clone(),
                         name: "McpEndTurn".into(),
                         input: json!({}),
@@ -7925,17 +8066,20 @@ mod pre_tool_hook_tests {
         assert!(!dispatched.publish_results(&orch, &fence).await);
         assert!(orch.transcript.tool_use_results.lock().await.is_empty());
         assert!(orch.transcript.tool_use_mcp_meta.lock().await.is_empty());
-        assert!(orch
-            .transcript
-            .pending_tool_result_turn_end
-            .lock()
-            .await
-            .is_empty());
-        assert!(output
-            .snapshot()
-            .await
-            .iter()
-            .all(|event| !matches!(event, lingxi_core::host::OutputEvent::ToolResult { .. })));
+        assert!(
+            orch.transcript
+                .pending_tool_result_turn_end
+                .lock()
+                .await
+                .is_empty()
+        );
+        assert!(
+            output
+                .snapshot()
+                .await
+                .iter()
+                .all(|event| !matches!(event, lingxi_core::host::OutputEvent::ToolResult { .. }))
+        );
     }
 
     #[tokio::test]
@@ -7978,7 +8122,7 @@ mod pre_tool_hook_tests {
                 .tool_use_mcp_meta
                 .lock()
                 .await
-                .get(uses[0].0.as_str()),
+                .get(uses[0].0.as_str()).map(|projection| &projection.value),
             Some(&json!({ "_meta": { "claude/endTurn": true } })),
         );
         assert_eq!(
@@ -7995,7 +8139,7 @@ mod pre_tool_hook_tests {
     #[tokio::test]
     async fn multiple_mcp_end_turn_results_emit_one_event() {
         let calls = (0..2)
-            .map(|_| llm_runtime::ContentBlock::ToolCall {
+            .map(|_| llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: ToolUseId::new().to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -8052,7 +8196,7 @@ mod pre_tool_hook_tests {
     async fn post_tool_batch_emits_tools_refreshed_mid_turn_when_mcp_count_changes() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: tu.to_string(),
                 name: "RefreshMcpTools".into(),
                 input: json!({}),
@@ -8093,7 +8237,7 @@ mod pre_tool_hook_tests {
     async fn tool_requested_end_runs_but_cannot_be_blocked_by_stop_hook() {
         let tu = ToolUseId::new();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
-            vec![llm_runtime::ContentBlock::ToolCall {
+            vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
                 input: json!({}),
@@ -9477,7 +9621,7 @@ mod pre_tool_hook_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({"ran":true}),
                 model_content: None,
                 new_messages: vec![],
@@ -9745,7 +9889,7 @@ mod pre_tool_hook_tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({"content":"CAPTURED-PREFLIGHT-RAN"}),
                 model_content: None,
                 new_messages: Vec::new(),
@@ -10080,13 +10224,13 @@ mod pre_tool_hook_tests {
 /// and content = `CANCEL_MESSAGE` for every pending tool.
 #[cfg(test)]
 mod pre_cancel_tests {
+    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-        StaticMemoryProvider,
+        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        noop_hook_executor,
     };
-    use crate::turn_loop::{dispatch_tool_uses_tracked, CANCEL_MESSAGE};
-    use crate::OrchestratorConfig;
+    use crate::turn_loop::{CANCEL_MESSAGE, dispatch_tool_uses_tracked};
     use async_trait::async_trait;
     use lingxi_core::types::{ContentBlock, ToolUseId};
     use serde_json::json;
@@ -10569,9 +10713,9 @@ mod pre_cancel_tests {
         input: serde_json::Value,
     ) {
         orch.session().lock().await.history.push(
-            lingxi_core::types::ConversationMessage::Assistant {
+            lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
-                content: vec![ContentBlock::ToolUse {
+                content: vec![ContentBlock::ToolUse { input_projection: None,
                     id: id.clone(),
                     name: name.into(),
                     input,
@@ -10671,7 +10815,7 @@ mod pre_cancel_tests {
 // token-budget continuation and the Stop-hook blocking continuation.
 #[cfg(test)]
 mod recovery_state_reset_tests {
-    use crate::turn_loop::{RecoveryState, ESCALATED_MAX_TOKENS};
+    use crate::turn_loop::{ESCALATED_MAX_TOKENS, RecoveryState};
 
     /// `reset_max_output_tokens_recovery` zeroes the consecutive nudge count,
     /// drops any armed escalation override, and re-arms the 8k→64k single-shot
@@ -10694,13 +10838,13 @@ mod recovery_state_reset_tests {
 
 #[cfg(test)]
 mod memdir_index_cap_tests {
+    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-        StaticMemoryProvider,
+        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        noop_hook_executor,
     };
     use crate::turn_loop::dispatch_tool_uses_tracked;
-    use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use lingxi_core::types::{ContentBlock, ToolUseId};
     use serde_json::json;
@@ -10873,7 +11017,7 @@ mod memdir_index_cap_tests {
             tokio::fs::write(&path, content)
                 .await
                 .map_err(|e| ToolError::Io(e.to_string()))?;
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "content": "wrote file" }),
                 model_content: Some("wrote file".into()),
                 new_messages: vec![],
@@ -10984,10 +11128,11 @@ mod memdir_index_cap_tests {
             1,
             "notice surfaces once, as additional context"
         );
-        assert!(injected[0]
-            .0
-            .text_content()
-            .contains("PostToolUse:Write hook additional context: The memory index at MEMORY.md"));
+        assert!(
+            injected[0].0.text_content().contains(
+                "PostToolUse:Write hook additional context: The memory index at MEMORY.md"
+            )
+        );
 
         let events = sink.events().await;
         assert_eq!(events.len(), 1, "one memdir near-cap telemetry event");
@@ -11042,13 +11187,13 @@ mod memdir_index_cap_tests {
 // ============================================================================
 #[cfg(test)]
 mod compaction_failure_hint_tests {
+    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-        StaticMemoryProvider,
+        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        noop_hook_executor,
     };
     use crate::turn_loop::surface_prompt_too_long;
-    use crate::OrchestratorConfig;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tool_api::registry::ToolRegistry;
@@ -11130,8 +11275,8 @@ mod compaction_failure_hint_tests {
 #[cfg(test)]
 mod goal_auto_clear_tests {
     use crate::turn_loop::{
-        goal_clear_bucket, goal_cleared_after_error_message, GoalClearBucket, GoalClearReason,
-        GOAL_CLEAR_CONDITION_WIDTH,
+        GOAL_CLEAR_CONDITION_WIDTH, GoalClearBucket, GoalClearReason, goal_clear_bucket,
+        goal_cleared_after_error_message,
     };
 
     /// Both bucket tests mutate `CLAUDE_CODE_REMOTE`, and cargo runs the tests

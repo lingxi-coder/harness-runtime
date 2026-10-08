@@ -61,10 +61,74 @@ impl LocalAgentHandler {
             .map_err(|error| TaskError::Io(error.to_string()))?
             .content;
         let mut history = Vec::new();
+        let mut peer_attachments = Vec::new();
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
-                TaskError::Internal(format!("agent transcript is incomplete: {error}"))
-            })?;
+            let decoded =
+                lingxi_core::types::exact_json::parse_exact_json(line).map_err(|error| {
+                    TaskError::Internal(format!("agent transcript is incomplete: {error}"))
+                })?;
+            let value = decoded.value;
+            if let Some(attachment) = value.get("attachment").filter(|attachment| {
+                attachment.get("type").and_then(serde_json::Value::as_str)
+                    == Some("subagent_handback")
+                    || attachment.get("envelope").is_some()
+            }) {
+                use lingxi_core::host::handback::{HandbackEnvelope, HandbackRecipient};
+                let envelope: HandbackEnvelope = serde_json::from_value(
+                    attachment.get("envelope").cloned().ok_or_else(|| {
+                        TaskError::Internal(
+                            "peer report transcript row is missing its envelope".into(),
+                        )
+                    })?,
+                )
+                .map_err(|error| {
+                    TaskError::Internal(format!("invalid peer report transcript envelope: {error}"))
+                })?;
+                let expected = envelope.model_message();
+                let message: lingxi_core::types::ConversationMessage =
+                    serde_json::from_value(value.get("message").cloned().ok_or_else(|| {
+                        TaskError::Internal(
+                            "peer report transcript row is missing its model projection".into(),
+                        )
+                    })?)
+                    .map_err(|error| {
+                        TaskError::Internal(format!(
+                            "invalid peer report transcript message: {error}"
+                        ))
+                    })?;
+                let valid = value.get("type").and_then(serde_json::Value::as_str)
+                    == Some("attachment")
+                    && attachment.get("type").and_then(serde_json::Value::as_str)
+                        == Some("subagent_handback")
+                    && envelope.validate()
+                    && matches!(envelope.receipt.recipient, HandbackRecipient::Agent { agent_id: target, .. } if target == agent_id)
+                    && request
+                        .origin_session_id
+                        .is_none_or(|session| envelope.origin.scope.session_id == session)
+                    && value.get("uuid")
+                        == Some(
+                            &serde_json::to_value(envelope.receipt.message_id)
+                                .map_err(|error| TaskError::Internal(error.to_string()))?,
+                        )
+                    && value.get("agent_id")
+                        == Some(
+                            &serde_json::to_value(agent_id)
+                                .map_err(|error| TaskError::Internal(error.to_string()))?,
+                        )
+                    && message == expected
+                    && decoded.utf16_overrides == envelope.transcript_utf16_overrides();
+                if !valid {
+                    return Err(TaskError::Internal("peer report transcript row lost its recipient, scope, identity, or Peer authority".into()));
+                }
+                history.push(expected);
+                peer_attachments.push(attachment.clone());
+                continue;
+            }
+            if !decoded.utf16_overrides.is_empty() {
+                return Err(TaskError::Internal(
+                    "agent transcript contains unowned exact UTF-16 text".into(),
+                ));
+            }
             if let Some(model) = value
                 .get("model")
                 .and_then(serde_json::Value::as_str)
@@ -151,6 +215,13 @@ impl LocalAgentHandler {
             }
         }
         request.resumed_history = Some(history);
+        if !peer_attachments.is_empty() {
+            request
+                .instruction_context
+                .get_or_insert_with(Default::default)
+                .announcement_history
+                .extend(peer_attachments);
+        }
         request.prompt.clear();
         request.run_in_background = true;
         let input = TaskSpawnInput::LocalAgent {

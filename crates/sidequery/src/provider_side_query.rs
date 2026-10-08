@@ -272,7 +272,7 @@ fn decode_response(
                 }
                 saw_text = true;
             }
-            llm_runtime::ContentBlock::ToolCall { id, name, input } => {
+            llm_runtime::ContentBlock::ToolCall { id, name, input , .. } => {
                 tool_calls.push(serde_json::json!({
                     "id": id,
                     "name": name,
@@ -767,14 +767,14 @@ fn convert_one_message(
     msg: lingxi_core::types::ConversationMessage,
 ) -> Result<llm_runtime::Message, llm_runtime::LlmError> {
     match msg {
-        lingxi_core::types::ConversationMessage::User { content, .. } => Ok(llm_runtime::Message {
+        lingxi_core::types::ConversationMessage::User { content, .. } => Ok(llm_runtime::Message { api_output_config: None,
             role: "user".to_string(),
             content: content
                 .into_iter()
                 .map(convert_content_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        lingxi_core::types::ConversationMessage::Assistant { content, .. } => Ok(llm_runtime::Message {
+        lingxi_core::types::ConversationMessage::Assistant { content, .. } => Ok(llm_runtime::Message { api_output_config: None,
             role: "assistant".to_string(),
             content: content
                 .into_iter()
@@ -817,8 +817,11 @@ fn convert_content_block(
             id,
             name,
             input,
+            input_projection,
             provider_id,
+            ..
         } => Ok(llm_runtime::ContentBlock::ToolCall {
+            input_projection,
             // Replay the verbatim provider id when preserved (see agent::convert).
             id: provider_id.unwrap_or_else(|| id.to_string()),
             name,
@@ -830,7 +833,10 @@ fn convert_content_block(
             is_error,
             provider_tool_use_id,
             content_blocks,
+            content_projection,
+            ..
         } => Ok(llm_runtime::ContentBlock::ToolResult {
+            output_projection: content_projection,
             tool_call_id: provider_tool_use_id.unwrap_or_else(|| tool_use_id.to_string()),
             // A structured content-block array (e.g. MCP image/resource) rides
             // as the `Value::Array` output and is emitted verbatim; plain text
@@ -929,7 +935,7 @@ fn render_media_analysis(analysis: &MediaAnalysis) -> String {
 }
 
 fn convert_tool_declarations(
-    tools: Vec<serde_json::Value>,
+    tools: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
 ) -> Result<Vec<llm_runtime::ToolDeclaration>, llm_runtime::LlmError> {
     tools.into_iter().map(convert_one_tool).collect()
 }
@@ -954,7 +960,7 @@ fn convert_tool_choice(choice: Option<&serde_json::Value>) -> Option<llm_runtime
 
 #[allow(clippy::needless_pass_by_value)]
 fn convert_one_tool(
-    value: serde_json::Value,
+    value: lingxi_core::types::utf16_json::Utf16JsonProjection,
 ) -> Result<llm_runtime::ToolDeclaration, llm_runtime::LlmError> {
     let name = value
         .get("name")
@@ -980,7 +986,18 @@ fn convert_one_tool(
             message: "Tool declaration missing required field: input_schema".to_string(),
         })?;
 
+    value
+        .validate()
+        .map_err(|error| llm_runtime::LlmError::InvalidRequest {
+            message: error.to_string(),
+        })?;
+    let input_schema_projection = Some(value.subprojection("/input_schema").map_err(|error| {
+        llm_runtime::LlmError::InvalidRequest {
+            message: error.to_string(),
+        }
+    })?);
     Ok(llm_runtime::ToolDeclaration {
+        input_schema_projection,
         name,
         description,
         input_schema,
@@ -1190,7 +1207,7 @@ mod tests {
         let mut request = req(None);
         request.query_source = QuerySource::Custom("hook_prompt".into());
         request.system_prompt = Some(r#"Answer with exactly one label: "\ud800"."#.into());
-        request.messages = vec![ConversationMessage::User {
+        request.messages = vec![ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                 text: prompt_display.clone(),
@@ -1232,7 +1249,7 @@ mod tests {
         let units = vec![b'a' as u16, 0xd800, b'z' as u16];
         let display = String::from_utf16_lossy(&units);
         let mut request = req(None);
-        request.messages = vec![ConversationMessage::User {
+        request.messages = vec![ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                 text: display,
@@ -1401,9 +1418,13 @@ mod tests {
             "description": "Read a file from the parent session.",
             "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}}
         })];
-        request.tools = parent_tools.clone();
+        request.tools = parent_tools
+            .iter()
+            .cloned()
+            .map(lingxi_core::types::utf16_json::Utf16JsonProjection::plain)
+            .collect();
         request.messages = vec![
-            ConversationMessage::System {
+            ConversationMessage::System { api_system: None,
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string(),
                 subtype: None,
@@ -1590,9 +1611,9 @@ mod tests {
         let client = ProviderSideQueryClient::new("sk-test", None, transport.clone());
         let mut r = req(None);
         r.tool_choice = Some(serde_json::json!({ "type": "any" }));
-        r.tools = vec![
+        r.tools = vec![lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
             serde_json::json!({"name":"search","description":"Search","input_schema":{"type":"object","properties":{}}}),
-        ];
+        )];
         r.stop_sequences = vec!["STOP".into()];
         client.query(r).await.expect("query ok");
         let received = transport.received.lock().unwrap();

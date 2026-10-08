@@ -704,6 +704,10 @@ pub struct McpConfiguredToolPolicyDto {
 /// One tool advertised by an MCP server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolDto {
+    #[serde(skip)]
+    pub input_schema_projection: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    #[serde(skip)]
+    pub definition_projection: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// Server name (logical, e.g. registry key).
     pub server_name: String,
     /// Tool name as exposed by the server.
@@ -870,6 +874,8 @@ pub struct McpPromptArgumentDto {
 /// when the server omits them, so non-claude-code servers decode cleanly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpToolResultDto {
+    #[serde(skip)]
+    pub result_projection: Option<crate::types::utf16_json::Utf16JsonProjection>,
     /// JSON content returned by the tool.
     pub content: Value,
     /// True when the server flagged the result as an error.
@@ -1162,6 +1168,9 @@ mod tests {
     #[test]
     fn mcp_tool_dto_preserves_optional_metadata_fields() {
         let value = serde_json::to_value(McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: "local_app_habits".to_string(),
             tool_name: "save_habit".to_string(),
             description: "Save one habit entry.".to_string(),

@@ -98,7 +98,7 @@ impl Tool for SimpleReadTool {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| ToolError::Io(format!("read {path}: {e}")))?;
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "content": content }),
             model_content: None,
             new_messages: vec![],
@@ -120,7 +120,7 @@ async fn orchestrator_drives_real_file_read_tool_on_a_tempfile() {
 
     let tool_use_id = ToolUseId::new();
     let r1 = mock_message_response(
-        vec![LlmContentBlock::ToolCall {
+        vec![LlmContentBlock::ToolCall { input_projection: None,
             id: tool_use_id.to_string(),
             name: "Read".into(),
             input: json!({ "file_path": path.to_string_lossy() }),
@@ -130,7 +130,7 @@ async fn orchestrator_drives_real_file_read_tool_on_a_tempfile() {
     let r2 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "I read it".into(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         Some("end_turn"),
     );

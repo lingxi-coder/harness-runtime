@@ -71,6 +71,13 @@ pub struct ToolRegistry {
     /// Optional session-scoped built-in filter. `None` preserves historical
     /// behavior; restricted sessions install this before sharing the registry.
     builtin_filter: Option<BuiltinToolFilter>,
+    /// Tools required by explicit execution configuration, such as the
+    /// schema capture tool. These survive `--tools` selection but still obey
+    /// the complete session capability allowlist.
+    required_builtins: std::collections::HashSet<String>,
+    /// Composition-level built-in catalog, independent of user selection and
+    /// dynamic MCP tools. Required execution tools are added after this catalog.
+    builtin_catalog: Option<std::collections::HashSet<String>>,
     /// Optional complete session capability allowlist. Unlike
     /// `builtin_filter`, this applies to every registry partition so a dynamic
     /// MCP/LSP/plugin refresh cannot re-introduce a tool hidden by the session
@@ -121,6 +128,8 @@ impl ToolRegistry {
             deferral: Arc::new(DeferralState::disabled()),
             tool_search_view: Arc::new(SharedToolSearchView::new()),
             builtin_filter: None,
+            required_builtins: std::collections::HashSet::new(),
+            builtin_catalog: None,
             session_allowlist: None,
             main_loop_model: RwLock::new(None),
             bash_precommit_skills_provider: RwLock::new(None),
@@ -169,8 +178,17 @@ impl ToolRegistry {
     /// Install the restricted-session built-in filter. Values are flattened by
     /// comma/whitespace and legacy aliases are normalized by the permission
     /// crate, keeping `--tools` compatible with its existing parser surface.
-    /// Calling this with `None` leaves the normal registry unchanged.
+    /// `None` installs the restricted default deny set; an explicit empty
+    /// selection disables ordinary built-ins, including in unrestricted sessions.
     pub fn set_restricted_builtin_filter(&mut self, tools: Option<&[String]>) {
+        if tools.is_some_and(|values| {
+            values
+                .iter()
+                .any(|value| value.split(',').any(|name| name.trim() == "default"))
+        }) {
+            self.builtin_filter = None;
+            return;
+        }
         let explicit_allowlist = tools.map(|values| {
             values
                 .iter()
@@ -184,6 +202,12 @@ impl ToolRegistry {
                 .collect()
         });
         self.builtin_filter = Some(BuiltinToolFilter { explicit_allowlist });
+    }
+
+    /// Select the built-in catalog for a composition without hiding explicitly
+    /// configured dynamic MCP tools or changing empty `--tools` Mod policy.
+    pub fn set_builtin_catalog(&mut self, names: &[&str]) {
+        self.builtin_catalog = Some(names.iter().map(|name| (*name).to_owned()).collect());
     }
 
     /// Install a complete session capability allowlist for built-ins and hide
@@ -228,10 +252,15 @@ impl ToolRegistry {
 
     fn builtin_allowed(&self, name: &str) -> bool {
         self.session_allows(name)
-            && self
-                .builtin_filter
-                .as_ref()
-                .is_none_or(|filter| filter.allows(name))
+            && (self.required_builtins.contains(name)
+                || (self
+                    .builtin_catalog
+                    .as_ref()
+                    .is_none_or(|catalog| catalog.contains(name))
+                    && self
+                        .builtin_filter
+                        .as_ref()
+                        .is_none_or(|filter| filter.allows(name))))
     }
 
     /// The shared Tool Search deferral state.
@@ -283,7 +312,10 @@ impl ToolRegistry {
     /// Refresh the deferred search view and fill descriptions from the complete
     /// pre-filter wire schema list. This keeps ToolSearch keyword scoring on the
     /// same long-form descriptions the model would receive after discovery.
-    pub fn refresh_tool_search_view_from_wire(&self, wire: &[serde_json::Value]) {
+    pub fn refresh_tool_search_view_from_wire(
+        &self,
+        wire: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
+    ) {
         let descriptions: std::collections::HashMap<&str, &str> = wire
             .iter()
             .filter_map(|entry| {
@@ -317,6 +349,14 @@ impl ToolRegistry {
     /// Register a builtin tool. Insertion order is preserved.
     pub fn register_builtin(&mut self, tool: Arc<dyn Tool>) {
         self.builtin.push(tool);
+    }
+
+    /// Register a tool required to fulfill explicit execution configuration.
+    /// This bypasses only the built-in selection filter, never the complete
+    /// session capability allowlist or the tool's own enablement gate.
+    pub fn register_required_builtin(&mut self, tool: Arc<dyn Tool>) {
+        self.required_builtins.insert(tool.name().to_owned());
+        self.register_builtin(tool);
     }
 
     /// Publish the session's main-loop model, the port of claude-code's
@@ -698,11 +738,11 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolUseContext;
     use crate::tool_search_view::ToolRegistryView;
     use crate::tool_trait::{
         DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     };
-    use crate::ToolUseContext;
     use async_trait::async_trait;
     use permission::result::PermissionMetadata;
     use permission::{PermissionDecisionReason, PermissionResult};
@@ -763,6 +803,9 @@ mod tests {
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({"ok": true}),
                 model_content: None,
                 new_messages: vec![],
@@ -847,6 +890,9 @@ mod tests {
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({"ok": true}),
                 model_content: None,
                 new_messages: vec![],
@@ -957,6 +1003,55 @@ mod tests {
     }
 
     #[test]
+    fn default_selection_restores_only_composition_catalog_and_preserves_mcp() {
+        let mut registry = ToolRegistry::new();
+        for name in ["Bash", "Edit", "Read", "Agent"] {
+            registry.register_builtin(Arc::new(NamedTool(name)));
+        }
+        registry.set_builtin_catalog(&["Bash", "Edit", "Read"]);
+        registry.register_mcp_tools(
+            McpConnectionId::new(),
+            vec![Arc::new(NamedTool("mcp__fixture__tool"))],
+        );
+        registry.set_restricted_builtin_filter(Some(&[String::new()]));
+        assert!(registry.mod_registration_disabled());
+        registry.set_restricted_builtin_filter(Some(&["default".into()]));
+        assert!(!registry.mod_registration_disabled());
+        let names: Vec<_> = registry
+            .available_tools(&ToolStaticContext::default())
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        assert_eq!(names, ["Bash", "Edit", "Read", "mcp__fixture__tool"]);
+        assert!(registry.find_by_name("Agent").is_none());
+    }
+
+    #[test]
+    fn required_builtin_survives_empty_selection_without_enabling_mods() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NamedTool("Bash")));
+        registry.register_required_builtin(Arc::new(NamedTool("StructuredOutput")));
+        registry.set_restricted_builtin_filter(Some(&[String::new()]));
+        assert!(registry.mod_registration_disabled());
+        assert!(registry.find_by_name("Bash").is_none());
+        assert!(registry.find_by_name("StructuredOutput").is_some());
+        let names: Vec<_> = registry
+            .available_tools(&ToolStaticContext::default())
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        assert_eq!(names, ["StructuredOutput"]);
+
+        registry.set_session_tool_allowlist(&[]);
+        assert!(registry.find_by_name("StructuredOutput").is_none());
+        assert!(
+            registry
+                .available_tools(&ToolStaticContext::default())
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn session_allowlist_filters_schema_lookup_names_and_dynamic_tools() {
         let mut r = ToolRegistry::new();
         r.register_builtin(Arc::new(NamedTool("Read")));
@@ -1046,6 +1141,9 @@ mod tests {
             _tx: crate::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 data: json!({"ok": true}),
                 model_content: None,
                 new_messages: vec![],
@@ -1159,11 +1257,12 @@ mod tests {
             }) as Arc<dyn Tool>],
         );
         r.refresh_tool_search_view();
-        assert!(r
-            .tool_search_view()
-            .entries()
-            .iter()
-            .any(|entry| entry.name == "Write"));
+        assert!(
+            r.tool_search_view()
+                .entries()
+                .iter()
+                .any(|entry| entry.name == "Write")
+        );
         r.set_session_tool_allowlist(&["Read".to_string()]);
 
         let names = r

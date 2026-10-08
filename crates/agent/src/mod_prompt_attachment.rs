@@ -259,7 +259,7 @@ mod tests {
             "toolUseID":"toolu_child-context",
             "hookEvent":"PostToolUse",
         });
-        let marker = ConversationMessage::System {
+        let marker = ConversationMessage::System { api_system: None,
             id: MessageId::new(),
             content: json!({"messageId":message.id(),"attachment":attachment}).to_string(),
             subtype: Some("mod_attachment_source".into()),
@@ -318,7 +318,7 @@ mod tests {
             String::from_utf16_lossy(&message_text_units),
             message_text_units,
         );
-        let marker = ConversationMessage::System {
+        let marker = ConversationMessage::System { api_system: None,
             id: MessageId::new(),
             content: format!(
                 "{{\"messageId\":{},\"attachment\":{attachment_json}}}",

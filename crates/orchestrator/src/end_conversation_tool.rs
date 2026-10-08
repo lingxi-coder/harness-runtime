@@ -159,7 +159,7 @@ impl Tool for EndConversationTool {
             // FORK branch (206 checks `t.agentId` FIRST): a background fork can
             // end neither the main conversation nor itself. Return the fork
             // reflection prompt with ended:false and NEVER raise the slot.
-            return Ok(ToolCallResult {
+            return Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({
                     "ended": false,
                     "message": ec::END_CONVERSATION_FORK_REFLECTION_PROMPT,
@@ -178,7 +178,7 @@ impl Tool for EndConversationTool {
             // (MWn), NOT the finalMessage — matching 206's
             // `{data:{ended:true, message: MWn}}` + `finalMessage: k4i`.
             self.end_requested.store(true, Ordering::SeqCst);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({
                     "ended": true,
                     "message": ec::END_CONVERSATION_TOOL_RESULT,
@@ -193,7 +193,7 @@ impl Tool for EndConversationTool {
             // FIRST call → do NOT end; return the re-read reminder (guidance
             // appended) so the model must confirm by calling again.
             let reminder = ec::render_reread_reminder(tool, &ec::render_prompt(tool));
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "ended": false, "message": reminder }),
                 model_content: Some(reminder),
                 new_messages: Vec::new(),
@@ -215,9 +215,9 @@ mod tests {
     }
 
     fn asst_calling_endconv() -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id: Default::default(),
                 name: "EndConversation".into(),
                 input: json!({}),

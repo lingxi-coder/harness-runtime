@@ -1315,13 +1315,21 @@ impl ConversationOrchestrator {
         Ok(())
     }
 
-    /// Return all registered tool names (alphabetical, same order as the
-    /// system-prompt listing). Used by stream-json `system/init` to populate
-    /// the `tools` array — mirrors `self.tools.all_names()` but through a
-    /// public seam that does not expose the `ToolRegistry` internals.
+    /// Return registered tool names in registry partition order, before the
+    /// model-visible enablement and permission filters.
     #[must_use]
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.all_names()
+    }
+
+    /// Names from the same ordered, filtered catalog used by model requests.
+    /// Headless initialization must not advertise disabled registered tools.
+    pub async fn advertised_tool_names(&self) -> Vec<String> {
+        self.filtered_available_tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name().to_owned())
+            .collect()
     }
 
     /// The session's DEFAULT main-loop model — the boot-configured model the

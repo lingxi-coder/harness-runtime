@@ -185,7 +185,7 @@ mod tests {
             signature: Some("sig".into()),
         };
         let mut messages = vec![
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: old,
                 content: vec![
                     thinking(),
@@ -201,7 +201,7 @@ mod tests {
                 ],
                 stop_reason: None,
             },
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: fresh,
                 content: vec![thinking()],
                 stop_reason: None,
@@ -232,14 +232,14 @@ mod tests {
     }
 
     fn assistant(content: Vec<ContentBlock>) -> Message {
-        Message {
+        Message { api_output_config: None,
             role: "assistant".into(),
             content,
         }
     }
 
     fn user(content: Vec<ContentBlock>) -> Message {
-        Message {
+        Message { api_output_config: None,
             role: "user".into(),
             content,
         }
@@ -322,7 +322,7 @@ mod tests {
                 },
                 text("   "),
                 text("keep me"),
-                ContentBlock::ToolCall {
+                ContentBlock::ToolCall { input_projection: None,
                     id: "t1".into(),
                     name: "Echo".into(),
                     input: serde_json::json!({}),
@@ -340,7 +340,7 @@ mod tests {
             messages[0].content,
             vec![
                 text("keep me"),
-                ContentBlock::ToolCall {
+                ContentBlock::ToolCall { input_projection: None,
                     id: "t1".into(),
                     name: "Echo".into(),
                     input: serde_json::json!({}),

@@ -185,8 +185,8 @@ impl McpPolicyContext {
     }
 }
 
-/// The refusal copy upstream returns for this case, kept verbatim.
-pub const PROJECT_UNRESOLVED_ENV_REF_REFUSAL: &str = "Its url, command or args reference an environment variable; on connect Claude Code would expand it into a repo-authored command or url. Add it manually with `claude mcp add` if you trust this repo.";
+/// Refusal shown when a repository-provided MCP entry has unresolved env references.
+pub const PROJECT_UNRESOLVED_ENV_REF_REFUSAL: &str = "Its url, command or args reference an environment variable; connecting would expand it into a repo-authored command or url. Add it manually with `lingxi mcp add` if you trust this repo.";
 
 /// Whether a project entry's url / command / args still carry a `${…}` AFTER
 /// expansion.

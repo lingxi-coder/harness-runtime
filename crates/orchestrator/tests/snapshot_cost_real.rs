@@ -28,7 +28,7 @@ fn end_turn_response_with_usage(input: u64, output: u64) -> HistoryResponse {
         // serve.
         content: vec![ContentBlock::Text {
             text: "Done.".to_string(),
-            cache_control: None,
+            cache_control: None, citations: None,
         }],
         stop_reason: Some("end_turn".to_string()),
         stop_details: None,

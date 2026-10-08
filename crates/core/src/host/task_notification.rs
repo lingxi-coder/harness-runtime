@@ -825,6 +825,9 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> String {
                     n.description,
                     exit.map_or(String::new(), |c| format!(" with exit code {c}"))
                 ),
+                _ if n.killed_by.as_deref() == Some("deadline") => format!(
+                    "Background command \"{}\" was stopped after reaching its background time limit", n.description
+                ),
                 _ if n.killed_by.as_deref() == Some("memory_pressure") => format!(
                     "Background command \"{}\" was stopped because the system is running low on memory", n.description
                 ),
@@ -1165,6 +1168,14 @@ mod tests {
             .unwrap();
         assert!(utf16_len(result) <= 100_000);
         assert!(result.ends_with("[saved to /tmp/a&lt;&amp;&gt;.txt]"));
+    }
+
+    #[test]
+    fn background_deadline_notification_matches_286_bytes() {
+        let mut n = base("b12345678", "local_bash", "killed", "watch build");
+        n.killed_by = Some("deadline".into());
+        let rendered = render_one(&n);
+        assert!(rendered.contains("<summary>Background command \"watch build\" was stopped after reaching its background time limit</summary>"));
     }
 
     #[test]

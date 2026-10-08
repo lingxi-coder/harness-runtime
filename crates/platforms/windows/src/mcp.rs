@@ -132,8 +132,19 @@ impl McpTransport for WindowsMcpTransport {
     async fn connect_and_initialize(
         &self,
         spec: &McpTransportSpec,
-        options: McpConnectOptions,
+        mut options: McpConnectOptions,
     ) -> Result<McpConnectResult, McpError> {
+        if options.expected_era.is_none() {
+            match mcp::protocol_negotiation::resolve_for_spec(spec, options.deadline_ms) {
+                mcp::protocol_negotiation::NegotiationMode::Auto { probe_timeout_ms } => {
+                    options.expected_era = Some(McpProtocolEra::Modern);
+                    options.probe_timeout_ms = Some(probe_timeout_ms);
+                }
+                mcp::protocol_negotiation::NegotiationMode::Legacy => {
+                    options.expected_era = Some(McpProtocolEra::Legacy)
+                }
+            }
+        }
         // Keep remote transports on the shared modern-negotiation path. This
         // is what POSIX does and is important for IDE servers that advertise
         // the modern result envelope or skills extension.
@@ -200,6 +211,13 @@ impl McpTransport for WindowsMcpTransport {
                 version: "2025-11-25".into(),
             },
         })
+    }
+
+    fn server_metadata(
+        &self,
+        id: McpConnectionId,
+    ) -> Option<lingxi_core::host::McpServerMetadataDto> {
+        self.remote.server_metadata(id)
     }
 
     async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {

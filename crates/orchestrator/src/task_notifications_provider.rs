@@ -250,7 +250,7 @@ mod tests {
             std::env::temp_dir(),
         )
         .with_task_notifications(Arc::new(RegistryTaskNotifications::new(registry)));
-        (Arc::new(orch), api, output)
+        (crate::ConversationOrchestrator::into_shared(orch), api, output)
     }
 
     #[tokio::test]
@@ -283,10 +283,46 @@ mod tests {
             .join("\n");
         assert!(content.contains(lingxi_core::host::task_notification::NON_USER_INPUT_HEADER));
         assert!(!content.contains(lingxi_core::host::task_notification::IN_HUMAN_TURN_HEADER));
-        assert!(calls[0]
-            .messages
+        assert!(calls[0].messages.iter().all(|message| !matches!(
+            message,
+            lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+        ) || !message.text_content().is_empty()));
+        let native_context = orch.context_attachment_history(&calls[0].messages);
+        assert_eq!(
+            native_context,
+            vec![
+                serde_json::json!({"type":"session_context","context":{}}),
+                serde_json::json!({"type":"date","date":crate::prompt::env_meta::current_date_string()}),
+                serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+            ]
+        );
+        let normalized =
+            llm_runtime::convert::normalize_messages_for_api(calls[0].messages.clone());
+        let wire = serde_json::to_value(
+            llm_runtime::convert::to_llm_messages(normalized).expect("rewake request converts"),
+        )
+        .unwrap();
+        assert!(
+            wire.as_array().unwrap().iter().all(|message| {
+                message["role"] != "user"
+                    || message["content"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block["text"].as_str().is_some_and(|text| !text.is_empty())
+                                || block["type"] != "text"
+                        })
+                    })
+            }),
+            "the converted request must not contain an empty User message"
+        );
+        let wire_text = wire
+            .as_array()
+            .unwrap()
             .iter()
-            .all(|m| m.is_meta() || !m.text_content().is_empty()));
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(wire_text.contains(lingxi_core::host::task_notification::NON_USER_INPUT_HEADER));
     }
 
     #[tokio::test]

@@ -30,6 +30,7 @@ pub(super) fn process_visible_response<'a>(
         //    `final_message_id` to return to the caller.
         let assistant_id = MessageId::new();
         let mut assistant_msg = ConversationMessage::Assistant {
+            per_turn_effort: response.per_turn_effort().map(str::to_owned),
             id: assistant_id,
             content: assistant_blocks.clone(),
             stop_reason: response.stop_reason.clone(),
@@ -127,7 +128,9 @@ pub(super) fn process_visible_response<'a>(
         //    M5-04 will switch to per-delta).
         for blk in &assistant_blocks {
             if let Some(text) = blk.visible_text() {
-                orch.output.emit_text(text).await;
+                orch.output
+                    .emit_text(text, blk.visible_text_utf16_units())
+                    .await;
             }
         }
         crate::server_fallback::flush_pending_notice(orch).await;
@@ -178,6 +181,7 @@ pub(super) fn process_visible_response<'a>(
                         name,
                         input,
                         provider_id,
+                        ..
                     } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
                     _ => None,
                 })
@@ -269,6 +273,7 @@ pub(super) fn process_visible_response<'a>(
                 remaining_injected = rest;
 
                 let mut tool_result_msg = ConversationMessage::User {
+                    api_message_override: None,
                     id: MessageId::new(),
                     content: result_content,
                     is_meta: false,

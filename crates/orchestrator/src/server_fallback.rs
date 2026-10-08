@@ -226,7 +226,7 @@ fn make_notice(
         lingxi_core::host::refusal_server_control::BannerScope::Session => "session",
         lingxi_core::host::refusal_server_control::BannerScope::Local => "local",
     };
-    lingxi_core::types::ConversationMessage::System {
+    lingxi_core::types::ConversationMessage::System { api_system: None,
         id,
         content,
         subtype: Some("model_refusal_fallback".into()),
@@ -411,7 +411,7 @@ async fn surface_declined_row(
         .await;
     for block in &row.message.content {
         if let lingxi_core::types::ContentBlock::Text { text, .. } = block {
-            orch.output.emit_text(text).await;
+            orch.output.emit_text(text, None).await;
         }
     }
     row.uuid

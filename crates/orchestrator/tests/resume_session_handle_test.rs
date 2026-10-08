@@ -56,10 +56,10 @@ async fn resume_session_adopts_history_named_id_and_runtime_model() {
     );
     let history = vec![
         ConversationMessage::user(MessageId::new(), "prior user turn".to_string()),
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
-                text: "prior assistant turn".to_string(),
+                text: "prior assistant turn".to_string(), citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
         },

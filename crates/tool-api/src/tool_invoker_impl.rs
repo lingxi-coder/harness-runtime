@@ -756,6 +756,8 @@ impl RegistryToolInvoker {
                 other => ToolInvokerError::Internal(format!("{other}")),
             })?;
 
+        result.validate_projection().map_err(|error| ToolInvokerError::Internal(error.to_string()))?;
+
         let turn_end = crate::tool_trait::tool_result_turn_end(
             tool.result_ends_turn(&result),
             result.is_error,
@@ -764,12 +766,15 @@ impl RegistryToolInvoker {
         Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
             is_error: result.is_error,
             data: result.data,
+            data_projection: result.data_projection,
+            model_content_projection: result.model_content_projection,
             model_content: result.model_content,
             new_messages: result.new_messages,
             context_modifier: result.context_modifier.map(|modifier| {
                 ToolInvocationContextModifier::new::<crate::context::ToolUseContext, _>(modifier)
             }),
             mcp_meta: result.mcp_meta,
+            mcp_meta_projection: result.mcp_meta_projection,
             turn_end,
             context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(Value::Array(
                 Vec::new(),
@@ -885,7 +890,7 @@ mod tests {
         ) -> Result<ToolCallResult, ToolError> {
             ctx.projected_input(&input)
                 .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 is_error: input.get("fail").and_then(Value::as_bool).unwrap_or(false),
                 data: json!({ "echo": input }),
                 model_content: None,
@@ -958,7 +963,7 @@ mod tests {
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({ "called": true }),
                 model_content: None,
                 new_messages: vec![],
@@ -1033,7 +1038,7 @@ mod tests {
         ) -> Result<ToolCallResult, ToolError> {
             *self.captured.lock().unwrap() =
                 Some((ctx.subagent_registry.clone(), ctx.cancel.clone()));
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({}),
                 model_content: None,
                 new_messages: vec![],
@@ -1180,7 +1185,7 @@ mod tests {
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 model_content: Some(input.to_string()),
                 data: input,
                 new_messages: vec![],
@@ -1516,7 +1521,7 @@ mod tests {
                 ctx.assistant_message,
                 ctx.same_turn_tool_uses,
             ));
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({}),
                 model_content: None,
                 new_messages: vec![],
@@ -1548,18 +1553,18 @@ mod tests {
             lingxi_core::types::MessageId::new(),
             "nested instruction body".into(),
         );
-        let current_tool_use = lingxi_core::types::ContentBlock::ToolUse {
+        let current_tool_use = lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
             id: lingxi_core::types::ToolUseId::new(),
             name: "Agent".into(),
             input: json!({"description":"current row"}),
             provider_id: Some("provider-current".into()),
         };
-        let current_assistant_row = lingxi_core::types::ConversationMessage::Assistant {
+        let current_assistant_row = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![current_tool_use],
             stop_reason: Some("tool_use".into()),
         };
-        let prior_sibling_tool_use = lingxi_core::types::ContentBlock::ToolUse {
+        let prior_sibling_tool_use = lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
             id: lingxi_core::types::ToolUseId::new(),
             name: "Read".into(),
             input: json!({"file_path":"prior.txt"}),
@@ -1567,7 +1572,7 @@ mod tests {
         };
         let mut stale_context = crate::context::ToolUseContext::model_seed("stale".into(), None);
         stale_context.assistant_message =
-            Some(lingxi_core::types::ConversationMessage::Assistant {
+            Some(lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "stale assistant row".into(),
@@ -1685,9 +1690,9 @@ mod tests {
             lingxi_core::types::MessageId::new(),
             "next query history".into(),
         );
-        let next_assistant_row = lingxi_core::types::ConversationMessage::Assistant {
+        let next_assistant_row = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
-            content: vec![lingxi_core::types::ContentBlock::ToolUse {
+            content: vec![lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
                 id: lingxi_core::types::ToolUseId::new(),
                 name: "Agent".into(),
                 input: json!({"description":"next current row"}),
@@ -1695,7 +1700,7 @@ mod tests {
             }],
             stop_reason: Some("tool_use".into()),
         };
-        let next_sibling_tool_use = lingxi_core::types::ContentBlock::ToolUse {
+        let next_sibling_tool_use = lingxi_core::types::ContentBlock::ToolUse { input_projection: None,
             id: lingxi_core::types::ToolUseId::new(),
             name: "Read".into(),
             input: json!({"file_path":"next-prior.txt"}),
@@ -1829,7 +1834,7 @@ mod tests {
                 ctx.options.main_loop_model.clone(),
                 ctx.options.model_profile.clone(),
             ));
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({}),
                 model_content: None,
                 new_messages: vec![],
@@ -1987,7 +1992,7 @@ mod tests {
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             *self.captured.lock().unwrap() = Some(ctx.options.is_non_interactive_session);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!({}),
                 model_content: None,
                 new_messages: vec![],

@@ -29,6 +29,9 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
+pub mod remote_ui;
+pub use remote_ui::{ModRemoteUiAnswer, ModRemoteUiClient, ModRemoteUiHost};
+
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
@@ -140,6 +143,7 @@ pub mod mcp_result;
 pub mod mobile_runtime_environment;
 pub mod mod_agent_list;
 pub mod model_attempt;
+pub mod model_safety;
 pub mod model_capabilities;
 pub mod notification;
 pub mod observer_pairing;
@@ -168,6 +172,7 @@ pub mod skill_loader;
 pub mod stt;
 pub mod subagent_output;
 pub mod subagent_output_guard;
+pub mod agent_statistics;
 pub mod subagent_spawn;
 pub mod subscription;
 pub mod swarm;
@@ -291,6 +296,7 @@ pub use model_attempt::{
 };
 pub use notification::{NotificationError, NotificationRequest, NotificationService};
 pub use orchestrator::{
+    ToolResultProjection,
     curated_model_listings, curated_model_names, curated_model_refs, is_curated_model,
     parse_model_ref, provider_default_model, provider_fallback_order, provider_has_curated_list,
     provider_model_catalog, provider_model_catalog_listings, qualified_model_ref,

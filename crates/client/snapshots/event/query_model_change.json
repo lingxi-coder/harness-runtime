@@ -1,0 +1,4 @@
+{
+  "type": "query_model_change",
+  "to_model": "claude-sonnet-4"
+}

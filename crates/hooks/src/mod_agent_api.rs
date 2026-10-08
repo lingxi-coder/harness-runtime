@@ -415,12 +415,18 @@ mod tests {
 
     #[test]
     fn wrapper_preserves_model_profile_presence() {
-        for profile in [None, Some(Value::Null), Some(Value::String("openai-custom".into()))] {
+        for profile in [
+            None,
+            Some(Value::Null),
+            Some(Value::String("openai-custom".into())),
+        ] {
             let mut wrapper = serde_json::json!({
                 "tool": "Agent", "prompt": "inspect", "description": "inspect",
                 "run_in_background": true, "model": "gpt-model"
             });
-            if let Some(value) = profile.clone() { wrapper["model_profile"] = value; }
+            if let Some(value) = profile.clone() {
+                wrapper["model_profile"] = value;
+            }
             let input = ModAgentSpawnInput::from_native_wrapper(&wrapper).unwrap();
             assert_eq!(input.as_json().get("model_profile"), profile.as_ref());
         }

@@ -282,54 +282,78 @@ fn block(block: &ContentBlock) -> Result<wire::ContentBlock, LlmError> {
             },
             title: None,
         },
-        ContentBlock::ToolCall { id, name, input } => wire::ContentBlock::ToolUse {
-            id: wire::ToolUseId::new(id),
-            name: name.clone(),
-            input: input.clone(),
-            provider_id: None,
-            caller: None,
-            toolset_name: None,
-            thought_signature: None,
-        },
+        ContentBlock::ToolCall {
+            id,
+            name,
+            input,
+            input_projection,
+        } => {
+            let input_json = input_projection
+                .as_ref()
+                .map(|projection| {
+                    if projection.value != *input {
+                        return Err(invalid("tool input projection belongs to different input"));
+                    }
+                    projection
+                        .to_json_string()
+                        .map_err(|error| invalid(&error.to_string()))
+                })
+                .transpose()?;
+            let input = match &input_json {
+                Some(raw) => lingxi_llm_client::exact_json::parse_tool_input_json(raw)
+                    .map_err(crate::upstream::error)?,
+                None => input.clone(),
+            };
+            wire::ContentBlock::ToolUse {
+                id: wire::ToolUseId::new(id),
+                name: name.clone(),
+                input,
+                input_json,
+                provider_id: None,
+                caller: None,
+                toolset_name: None,
+                thought_signature: None,
+            }
+        }
         ContentBlock::ToolResult {
             tool_call_id,
             output,
+            output_projection,
             is_error,
-            cache_control,
             cache_reference,
+            ..
         } => {
-            let exact_text =
+            let legacy_text =
                 ::lingxi_core::types::js_utf16::tool_result_display(output).map(Value::String);
-            let output = exact_text.as_ref().unwrap_or(output);
-            if cache_reference.is_some() {
-                let content = if output.is_string() || output.is_array() {
-                    output.clone()
-                } else {
-                    Value::String(output.to_string())
-                };
-                let mut value =
-                    json!({"type":"tool_result","tool_use_id":tool_call_id,"content":content});
-                if let Some(is_error) = is_error {
-                    value["is_error"] = json!(is_error);
-                }
-                if let Some(control) = cache_control {
-                    value["cache_control"] = cache(control).wire_value();
-                }
-                if let Some(reference) = cache_reference {
-                    value["cache_reference"] = json!(reference);
-                }
-                native(value)
-            } else {
-                wire::ContentBlock::ToolResult {
-                    tool_use_id: wire::ToolUseId::new(tool_call_id),
-                    content: output
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| output.to_string()),
-                    is_error: *is_error,
-                    blocks: output.as_array().cloned(),
-                    toolset_name: None,
-                }
+            let output = legacy_text.as_ref().unwrap_or(output);
+            let output_json = output_projection
+                .as_ref()
+                .map(|projection| {
+                    if projection.value != *output {
+                        return Err(invalid("tool result projection association changed"));
+                    }
+                    projection.to_json_string().map_err(invalid)
+                })
+                .transpose()?;
+            let sdk_output = output_json
+                .as_ref()
+                .map(|raw| {
+                    lingxi_llm_client::exact_json::parse_tool_output_json(raw)
+                        .map_err(crate::upstream::error)
+                })
+                .transpose()?;
+            let output = sdk_output.as_ref().unwrap_or(output);
+            wire::ContentBlock::ToolResult {
+                tool_use_id: wire::ToolUseId::new(tool_call_id),
+                content: output
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| output.to_string()),
+                is_error: *is_error,
+                blocks: output.as_array().cloned(),
+                toolset_name: None,
+                output_json,
+                cache_reference: cache_reference.clone(),
             }
         }
         ContentBlock::Reasoning { text, signature } => wire::ContentBlock::Thinking {
@@ -637,7 +661,10 @@ pub fn history_input(
                     && matches!(block, wire::ContentBlock::ToolUse { .. })
             });
         }
-        if projected.is_empty() {
+        if projected.is_empty()
+            && !(native_family(protocol) == wire::ProtocolFamily::AnthropicMessages
+                && message.api_output_config.is_some())
+        {
             continue;
         }
         // Retain malformed UTF-16 text at a protocol-neutral message/content
@@ -701,11 +728,24 @@ pub fn history_input(
                 }
             }
         }
-        result.messages.push(wire::ConversationMessage {
+        let mut wire_message = wire::ConversationMessage {
             role: serde_json::from_value(json!(message.role)).map_err(invalid)?,
             content: projected.into_iter().map(|(_, block)| block).collect(),
             native_options: Vec::new(),
-        });
+        };
+        if native_family(protocol) == wire::ProtocolFamily::AnthropicMessages {
+            if let Some(config) = &message.api_output_config {
+                if let Some(effort) = config.effort.as_ref() {
+                    wire_message = wire_message.with_anthropic_options(
+                        lingxi_llm_client::providers::anthropic::types::AnthropicMessageOptions {
+                            effort: Some(serde_json::from_value(json!(effort)).map_err(invalid)?),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+        result.messages.push(wire_message);
     }
     let toolsets: BTreeMap<_, _> = result
         .messages
@@ -782,17 +822,52 @@ pub fn history_input(
     }
     result.tools = tools
         .iter()
-        .map(|t| wire::ToolSpec {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            input_schema: t.input_schema.clone(),
-            strict: t.strict,
-            tool_type: t.tool_type.clone(),
-            defer_loading: t.defer_loading,
-            native_options: Vec::new(),
-            extra: Value::Object(t.extra.clone()),
+        .map(|t| {
+            let mut strict = t.strict;
+            let input_schema_json = t
+                .input_schema_projection
+                .as_ref()
+                .filter(|projection| !projection.strings.is_empty() || !projection.keys.is_empty())
+                .map(|projection| {
+                    projection.validate().map_err(invalid)?;
+                    if projection.value != t.input_schema {
+                        return Err(invalid(
+                            "Tool schema projection does not match its display schema",
+                        ));
+                    }
+                    if strict {
+                        let consumer = lingxi_core::types::utf16_json::Utf16JsonConsumer::new(&[projection]).map_err(invalid)?;
+                        match lingxi_llm_client::providers::anthropic::strict_schema::to_strict_schema(&consumer.values()[0]) {
+                            Ok(schema) => consumer.restore(&schema).map_err(invalid)?.to_json_string().map_err(invalid),
+                            Err(_) => {
+                                strict = false;
+                                projection.to_json_string().map_err(invalid)
+                            }
+                        }
+                    } else {
+                        projection.to_json_string().map_err(invalid)
+                    }
+                })
+                .transpose()?;
+            let input_schema = match input_schema_json.as_deref() {
+                Some(raw) => {
+                    lingxi_llm_client::exact_json::parse_tool_input_json(raw).map_err(invalid)?
+                }
+                None => t.input_schema.clone(),
+            };
+            Ok(wire::ToolSpec {
+                input_schema_json,
+                name: t.name.clone(),
+                description: t.description.clone(),
+                input_schema,
+                strict,
+                tool_type: t.tool_type.clone(),
+                defer_loading: t.defer_loading,
+                native_options: Vec::new(),
+                extra: Value::Object(t.extra.clone()),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, LlmError>>()?;
     for tool in &mut result.tools {
         if let Some(extra) = tool.extra.as_object_mut() {
             if let Some(callers) = extra.remove("allowed_callers") {
@@ -801,7 +876,7 @@ pub fn history_input(
                 );
             }
         }
-        if tool.strict {
+        if tool.strict && tool.input_schema_json.is_none() {
             match lingxi_llm_client::providers::anthropic::strict_schema::to_strict_schema(
                 &tool.input_schema,
             ) {
@@ -815,7 +890,76 @@ pub fn history_input(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exact_tool_result_uses_typed_sdk_carrier_and_rejects_stale_output() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let output =
+            Utf16JsonProjection::parse(r#"[{"type":"text","text":"\udfff","\ud800":1}]"#).unwrap();
+        let mut source = super::ContentBlock::ToolResult {
+            tool_call_id: "toolu_exact".into(),
+            output: output.value.clone(),
+            output_projection: Some(output.clone()),
+            is_error: Some(false),
+            cache_control: None,
+            cache_reference: Some("cache-result".into()),
+        };
+        let wire = super::block(&source).unwrap();
+        let lingxi_llm_client::protocol::ContentBlock::ToolResult {
+            output_json,
+            blocks,
+            cache_reference,
+            ..
+        } = wire
+        else {
+            panic!("typed tool result required");
+        };
+        assert_eq!(
+            output_json.as_deref(),
+            Some(output.to_json_string().unwrap().as_str())
+        );
+        assert_eq!(cache_reference.as_deref(), Some("cache-result"));
+        assert_eq!(blocks.unwrap()[0]["text"], "\u{fffd}");
+        let super::ContentBlock::ToolResult { output, .. } = &mut source else {
+            unreachable!()
+        };
+        *output = serde_json::json!([]);
+        assert!(super::block(&source).is_err());
+    }
     use super::*;
+
+    #[test]
+    fn strict_tool_schema_rebases_exact_keys_required_and_distinct_enum_values() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
+        let schema = Projection::parse(r#"{"type":"object","properties":{"\ud800":{"type":"string","enum":["\ud801","\ud802"]}},"required":["\ud800"]}"#).unwrap();
+        let tool = ToolDeclaration {
+            input_schema_projection: Some(schema.clone()),
+            name: "Exact".into(),
+            description: "Exact schema".into(),
+            input_schema: schema.value.clone(),
+            tool_type: None,
+            extra: serde_json::Map::new(),
+            strict: true,
+            defer_loading: false,
+        };
+        let (request, _) = history_input(
+            "claude",
+            &[],
+            &[],
+            &[tool],
+            wire::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        assert!(request.tools[0].strict);
+        let raw = request.tools[0].input_schema_json.as_ref().unwrap();
+        let restored = Projection::parse(raw).unwrap();
+        assert_eq!(restored.value["additionalProperties"], false);
+        assert_eq!(restored.string_units("/required/0"), Some(vec![0xd800]));
+        assert!(raw.contains(r#""enum":["\ud801","\ud802"]"#));
+        assert_eq!(
+            request.tools[0].input_schema,
+            lingxi_llm_client::exact_json::parse_tool_input_json(raw).unwrap()
+        );
+    }
 
     fn encoded_body(request: &wire::ChatRequest, protocol: wire::ProtocolFamily) -> Value {
         use lingxi_llm_client::{CodecContext, EncodeRequest, RequestMode, WireCodec};
@@ -934,6 +1078,7 @@ mod tests {
         let synthetic = format!("synthetic-{response_id}");
         let mut content = vec![
             ContentBlock::ToolCall {
+                input_projection: None,
                 id: synthetic.clone(),
                 name: "computer".into(),
                 input: json!({"action":"screenshot"}),
@@ -955,13 +1100,16 @@ mod tests {
         }
         (
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content,
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![
                     ContentBlock::ToolResult {
+                        output_projection: None,
                         tool_call_id: synthetic,
                         output: json!(observation),
                         is_error: None,
@@ -1158,6 +1306,7 @@ mod tests {
                 old_call,
                 old_receipt,
                 Message {
+                    api_output_config: None,
                     role: "user".into(),
                     content: vec![
                         ContentBlock::ProviderContent {
@@ -1227,16 +1376,19 @@ mod tests {
     #[test]
     fn computer_markers_restore_old_binding_and_strip_only_mapped_rows() {
         let synthetic = ContentBlock::ToolCall {
+            input_projection: None,
             id: "synthetic".into(),
             name: "computer".into(),
             input: json!({"action":"screenshot"}),
         };
         let unrelated = ContentBlock::ToolCall {
+            input_projection: None,
             id: "ordinary".into(),
             name: "computer".into(),
             input: json!({"action":"get_access"}),
         };
         let result = |id: &str| ContentBlock::ToolResult {
+            output_projection: None,
             tool_call_id: id.into(),
             output: json!("done"),
             is_error: None,
@@ -1248,10 +1400,12 @@ mod tests {
         })).unwrap();
         let messages = vec![
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![synthetic, unrelated, computer_binding(&["synthetic"])],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![
                     result("synthetic"),
@@ -1290,6 +1444,7 @@ mod tests {
     #[test]
     fn computer_history_rejects_protocol_switch_and_malformed_binding() {
         let message = Message {
+            api_output_config: None,
             role: "assistant".into(),
             content: vec![computer_binding(&["synthetic"])],
         };
@@ -1305,6 +1460,7 @@ mod tests {
         assert!(history_input(
             "model",
             &[Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![malformed.clone()]
             }],
@@ -1320,6 +1476,7 @@ mod tests {
         assert!(history_input(
             "model",
             &[Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![malformed]
             }],
@@ -1346,6 +1503,7 @@ mod tests {
                 .to_owned();
             let messages = [
                 Message {
+                    api_output_config: None,
                     role: "user".into(),
                     content: vec![ContentBlock::ProviderContent {
                         protocol: source.clone(),
@@ -1353,6 +1511,7 @@ mod tests {
                     }],
                 },
                 Message {
+                    api_output_config: None,
                     role: "assistant".into(),
                     content: vec![ContentBlock::ProviderContent {
                         protocol: source,
@@ -1372,10 +1531,12 @@ mod tests {
         })).unwrap();
         let messages = [
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![computer_binding(&["synthetic"])],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::ProviderContent {
                     protocol: "anthropic_messages".into(),
@@ -1383,6 +1544,7 @@ mod tests {
                 }],
             },
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![ContentBlock::ProviderContent {
                     protocol: "anthropic_messages".into(),
@@ -1390,6 +1552,7 @@ mod tests {
                 }],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::Text {
                     text: "Check access again".into(),
@@ -1476,14 +1639,17 @@ mod tests {
             let receipt:wire::ContentBlock = serde_json::from_value(json!({"type":"tool_result","tool_use_id":"native-call","content":"obsolete receipt","toolset_name":"computer"})).unwrap();
             let messages = [
                 Message {
+                    api_output_config: None,
                     role: "assistant".into(),
                     content: vec![
                         ContentBlock::ToolCall {
+                            input_projection: None,
                             id: "ordinary".into(),
                             name: "computer".into(),
                             input: json!({"action":"get_access"}),
                         },
                         ContentBlock::ToolCall {
+                            input_projection: None,
                             id: "synthetic".into(),
                             name: "computer".into(),
                             input: json!({"action":"screenshot"}),
@@ -1492,9 +1658,11 @@ mod tests {
                     ],
                 },
                 Message {
+                    api_output_config: None,
                     role: "user".into(),
                     content: vec![
                         ContentBlock::ToolResult {
+                            output_projection: None,
                             tool_call_id: "ordinary".into(),
                             output: json!("normal audit result"),
                             is_error: None,
@@ -1502,6 +1670,7 @@ mod tests {
                             cache_reference: None,
                         },
                         ContentBlock::ToolResult {
+                            output_projection: None,
                             tool_call_id: "synthetic".into(),
                             output: json!("old synthetic result"),
                             is_error: None,
@@ -1515,6 +1684,7 @@ mod tests {
                     ],
                 },
                 Message {
+                    api_output_config: None,
                     role: "user".into(),
                     content: vec![
                         ContentBlock::ProviderContent {
@@ -1561,6 +1731,7 @@ mod tests {
             json!({"type":"lingxi_computer_abandoned","call_ids":["id"],"reason":"unknown","force":true}),
         ] {
             let message = Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::ProviderContent {
                     protocol: "anthropic_messages".into(),
@@ -1586,6 +1757,7 @@ mod tests {
         })).unwrap();
         let messages = [
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::Text {
                     text: "old user input".into(),
@@ -1594,9 +1766,11 @@ mod tests {
                 }],
             },
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![
                     ContentBlock::ToolCall {
+                        input_projection: None,
                         id: "current-call".into(),
                         name: "Read".into(),
                         input: json!({}),
@@ -1608,8 +1782,10 @@ mod tests {
                 ],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::ToolResult {
+                    output_projection: None,
                     tool_call_id: "current-call".into(),
                     output: json!("new tool result"),
                     is_error: None,
@@ -1657,6 +1833,7 @@ mod tests {
             "account_scope":"account","request_model":"model"
         })).unwrap();
         let result = |id: &str, text: &str| ContentBlock::ToolResult {
+            output_projection: None,
             tool_call_id: id.into(),
             output: json!(text),
             is_error: None,
@@ -1665,21 +1842,26 @@ mod tests {
         };
         let messages = [
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "old-call".into(),
                     name: "computer".into(),
                     input: json!({"action":"get_access"}),
                 }],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![result("old-call", "old accepted output")],
             },
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![
                     ContentBlock::ToolCall {
+                        input_projection: None,
                         id: "current-call".into(),
                         name: "computer".into(),
                         input: json!({"action":"get_access"}),
@@ -1691,6 +1873,7 @@ mod tests {
                 ],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![result("current-call", "new output")],
             },
@@ -1734,6 +1917,7 @@ mod tests {
             (Some(Some(json!([]))), Some(json!([]))),
         ] {
             let message = Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::Text {
                     text: "prompt".into(),
@@ -1751,6 +1935,7 @@ mod tests {
     #[test]
     fn omitted_tool_result_error_survives_next_request_projection() {
         let result = ContentBlock::ToolResult {
+            output_projection: None,
             tool_call_id: "toolu_1".into(),
             output: json!("ok"),
             is_error: None,
@@ -1767,6 +1952,7 @@ mod tests {
     #[test]
     fn history_edge_consumes_companion_once_and_preserves_tool_metadata() {
         let native = wire::ContentBlock::ToolUse {
+            input_json: None,
             id: wire::ToolUseId::new("call-1"),
             name: "old".into(),
             input: json!({}),
@@ -1776,9 +1962,11 @@ mod tests {
             thought_signature: None,
         };
         let history = vec![Message {
+            api_output_config: None,
             role: "assistant".into(),
             content: vec![
                 ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "call-1".into(),
                     name: "updated".into(),
                     input: json!({"url":"example"}),
@@ -1818,6 +2006,7 @@ mod tests {
     #[test]
     fn filtered_history_remaps_exact_strings_and_typed_cache_positions_together() {
         let history = vec![Message {
+            api_output_config: None,
             role: "user".into(),
             content: vec![
                 ContentBlock::ProviderContent {

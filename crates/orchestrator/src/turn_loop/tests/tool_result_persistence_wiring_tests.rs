@@ -95,7 +95,7 @@ impl Tool for SizedTool {
         {
             body.replace_range(1999..2001, "😀");
         }
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!(body),
             model_content: Some(body),
             new_messages: vec![],
@@ -155,10 +155,10 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
     let orch = orch_with(Arc::new(SizedTool), Some(tmp.path().into())).with_jsonl_writer(writer);
     let mut call = use_of("Sized", 4000).remove(0);
     call.2["split_surrogate"] = json!(true);
-    let assistant = ConversationMessage::Assistant {
+    let assistant = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
         stop_reason: Some("tool_use".into()),
-        content: vec![ContentBlock::ToolUse {
+        content: vec![ContentBlock::ToolUse { input_projection: None,
             id: call.0.clone(),
             name: "Sized".into(),
             input: call.2.clone(),
@@ -200,8 +200,15 @@ async fn split_surrogate_survives_dispatch_jsonl_resume_and_request_encoding() {
             )
             .unwrap();
         let body = serde_json::from_slice(&encoded.body).unwrap();
-        let wire =
-            String::from_utf8(sdk::exact_json::serialize(&body, &overrides).unwrap()).unwrap();
+        let wire = String::from_utf8(
+            sdk::exact_json::serialize(
+                &body,
+                &overrides,
+                sdk::exact_json::JsonEncoding::JavaScript,
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert!(
             wire.contains("\\ud83d\\n..."),
             "exact JS surrogate must reach wire: {wire}"
@@ -451,7 +458,7 @@ async fn persisting_an_mcp_array_result_drops_the_array() {
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             let body = "y".repeat(THRESHOLD * 4);
-            Ok(ToolCallResult {
+            Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 data: json!([{ "type": "text", "text": body }]),
                 model_content: Some(body),
                 new_messages: vec![],

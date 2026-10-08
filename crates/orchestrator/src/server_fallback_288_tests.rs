@@ -292,7 +292,7 @@ fn server_notice_message(
     previous_profile: Option<&str>,
     serving_profile: Option<&str>,
 ) -> ConversationMessage {
-    ConversationMessage::System {
+    ConversationMessage::System { api_system: None,
         id: MessageId::new(),
         content: "native server fallback notice".into(),
         subtype: Some("model_refusal_fallback".into()),
@@ -1660,7 +1660,7 @@ async fn declined_received_model_discards_text_and_tool_use() {
                 text: "must not be shown".into(),
                 cache_control: None, citations: None,
             },
-            LlmContentBlock::ToolCall {
+            LlmContentBlock::ToolCall { input_projection: None,
                 id: "toolu_disallowed".into(),
                 name: "Bash".into(),
                 input: json!({"command":"touch should-not-run"}),

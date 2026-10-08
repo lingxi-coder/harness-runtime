@@ -252,6 +252,7 @@ fn pending_teammate_ctx(model: Arc<PendingModel>) -> SubagentContext {
         structured_output_parse_retries: 0,
         budget: None,
         hook_executor: None,
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         subagent_stop_firer: None,
         strict_plugin_only_hooks: false,
@@ -362,6 +363,7 @@ async fn fill_with_pending_teammates(pool: &StateMachinePool) -> FilledTeammates
 
 fn agent_tool_request() -> SubagentSpawnRequest {
     SubagentSpawnRequest {
+        agent_spawn_token: None,
         stop_hook_scope: Default::default(),
         agent_spawn_provenance: Default::default(),
         teammate_color: None,

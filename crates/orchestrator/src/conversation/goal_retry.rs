@@ -327,7 +327,7 @@ mod tests {
             message_delta_stop("end_turn"),
             message_stop(),
         ]]));
-        let orch = Arc::new(ConversationOrchestrator::new_with_streaming(
+        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
             crate::OrchestratorConfig {
                 interactive_session: interactive,
                 ..Default::default()

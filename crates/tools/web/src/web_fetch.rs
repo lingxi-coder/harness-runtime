@@ -872,6 +872,28 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
+/// Claude Code 2.1.287 WebFetch output, including the optional artifact-read
+/// observation attached by an Artifact URL fetch.
+static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
+    json!({
+        "type":"object",
+        "required":["bytes","code","codeText","result","durationMs","url"],
+        "properties":{
+            "bytes":{"type":"number"},
+            "code":{"type":"number"},
+            "codeText":{"type":"string"},
+            "result":{"type":"string"},
+            "durationMs":{"type":"number"},
+            "url":{"type":"string"},
+            "artifactRead":{"type":"object","required":["slug"],"properties":{
+                "slug":{"type":"string"},
+                "ver":{"type":"string"},
+                "seeded":{"const":false}
+            }}
+        }
+    })
+});
+
 #[async_trait]
 impl Tool for WebFetchTool {
     fn name(&self) -> &str {
@@ -884,6 +906,15 @@ impl Tool for WebFetchTool {
     }
     fn input_schema(&self) -> &Value {
         &INPUT_SCHEMA
+    }
+    fn output_schema(&self) -> Option<&Value> {
+        Some(&OUTPUT_SCHEMA)
+    }
+    fn map_result_text(&self, result: &Value) -> Option<String> {
+        result
+            .get("result")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -1107,7 +1138,7 @@ Usage notes:\n\
                 hit.bytes,
             );
             return finish_fusion_result(
-                ToolCallResult {
+                ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                     // claude-code WebFetch result `data` (byte-faithful key set + order):
                     // `{bytes, code, codeText, result, durationMs, url}` (verified vs the
                     // 2.1.191 binary; `result` is the model-facing content, `codeText` is
@@ -1249,7 +1280,7 @@ Usage notes:\n\
                             self.emit_completed(&invocation_id, resp.status, 0, false, elapsed_ms)
                                 .await;
                             return finish_fusion_result(
-                                ToolCallResult {
+                                ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                                     data: json!({
                                         "bytes": 0,
                                         "code": resp.status,
@@ -1316,7 +1347,7 @@ Usage notes:\n\
                     )
                     .await;
                     return finish_fusion_result(
-                        ToolCallResult {
+                        ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                             data: json!({
                                 "bytes": message.len(),
                                 "code": resp.status,
@@ -1369,7 +1400,7 @@ Usage notes:\n\
                 self.emit_completed(&invocation_id, resp.status, 0, false, elapsed_ms)
                     .await;
                 finish_fusion_result(
-                    ToolCallResult {
+                    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                         data: json!({
                             "bytes": 0,
                             "code": resp.status,
@@ -1504,7 +1535,7 @@ Usage notes:\n\
                 );
 
                 finish_fusion_result(
-                    ToolCallResult {
+                    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                         data: json!({
                             "bytes": body_bytes,
                             "code": status,
@@ -1535,7 +1566,7 @@ Usage notes:\n\
                 self.emit_completed(&invocation_id, status, 0, false, elapsed_ms)
                     .await;
                 finish_fusion_result(
-                    ToolCallResult {
+                    ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                         data: json!({
                             "bytes": 0,
                             "code": status,

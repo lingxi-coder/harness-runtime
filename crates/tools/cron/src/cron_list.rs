@@ -317,7 +317,7 @@ impl Tool for CronListTool {
         md.insert("job_count".into(), AnalyticsValue::Int(jobs.len() as i64));
         bus.log_event(CRON_LIST_COMPLETED, md).await;
 
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "jobs": jobs,
                 "content": content,

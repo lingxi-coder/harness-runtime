@@ -96,7 +96,7 @@ impl Tool for EchoTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({ "out": "ECHOED-OUTPUT" }),
             model_content: Some("ECHOED-OUTPUT".into()),
             new_messages: vec![],
@@ -1238,7 +1238,7 @@ async fn accepted_assistant_row_keeps_its_fence_until_request_admission() {
         lock: Arc::new(tokio::sync::Mutex::new(())),
         entered: Mutex::new(None),
     });
-    let row = ConversationMessage::Assistant {
+    let row = ConversationMessage::Assistant { per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "accepted assistant row".into(),
@@ -1566,7 +1566,7 @@ async fn dispatched_tool_result_reaches_the_transcript_as_tool_use_result() {
     let (results, _prevent, _injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
         .await
         .expect("dispatch");
-    let msg = ConversationMessage::User {
+    let msg = ConversationMessage::User { api_message_override: None,
         id: MessageId::new(),
         content: results,
         is_meta: false,
@@ -1720,14 +1720,14 @@ struct BlockingAssistantAppendLog {
 
 #[async_trait]
 impl lingxi_core::host::OutputStream for BlockingAssistantAppendLog {
-    async fn emit_text(&self, _text: &str) {}
+    async fn emit_text(&self, _text: &str, _utf16_code_units: Option<&[u16]>) {}
 
     async fn emit_tool_call(
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
         _input: &serde_json::Value,
-    ) {}
+     _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {}
 
     async fn emit_tool_result(
         &self,
@@ -1735,7 +1735,7 @@ impl lingxi_core::host::OutputStream for BlockingAssistantAppendLog {
         _tool: &str,
         _model_text: &str,
         _result: &serde_json::Value,
-    ) {}
+     _projection: Option<&lingxi_core::host::ToolResultProjection>) {}
 
     async fn emit_end_turn(
         &self,
@@ -1817,9 +1817,9 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         publication_lock,
     );
     let tool_use_id = ToolUseId::from("toolu_w1_interleaved");
-    let assistant = ConversationMessage::Assistant {
+    let assistant = ConversationMessage::Assistant { per_turn_effort: None,
         id: MessageId::new(),
-        content: vec![ContentBlock::ToolUse {
+        content: vec![ContentBlock::ToolUse { input_projection: None,
             id: tool_use_id.clone(),
             name: "Echo".into(),
             input: json!({}),

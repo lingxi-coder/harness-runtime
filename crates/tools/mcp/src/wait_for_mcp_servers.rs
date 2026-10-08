@@ -499,7 +499,7 @@ impl Tool for WaitForMcpServersTool {
         emit_pending_call(&self.ctx.bus, &pending_payload).await;
 
         let model_content = render_for_model(&buckets, ready);
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: json!({
                 "ready": ready,
                 "connected": buckets.connected,

@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 type AdmissionCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+type DispatchObserver = Arc<dyn Fn(std::time::Instant) + Send + Sync>;
 
 struct AdmissionChecks {
     global: Vec<AdmissionCheck>,
@@ -20,6 +21,7 @@ struct AdmissionChecks {
 pub struct RequestDispatchAdmission {
     checks: Arc<AdmissionChecks>,
     selected_messages: Option<Arc<std::collections::HashSet<lingxi_core::types::MessageId>>>,
+    dispatch_observer: Option<DispatchObserver>,
 }
 
 impl RequestDispatchAdmission {
@@ -50,6 +52,7 @@ impl RequestDispatchAdmission {
                 by_message: by_message.into_iter().collect(),
             }),
             selected_messages: None,
+            dispatch_observer: None,
         }
     }
 
@@ -63,10 +66,7 @@ impl RequestDispatchAdmission {
             ),
         >,
     ) -> Self {
-        Self::with_global_and_message_sources(
-            std::iter::empty::<AdmissionCheck>(),
-            checks,
-        )
+        Self::with_global_and_message_sources(std::iter::empty::<AdmissionCheck>(), checks)
     }
 
     /// Retain row-scoped checks only while their source content contributes to
@@ -89,25 +89,59 @@ impl RequestDispatchAdmission {
             })
             .map(|(id, _)| *id)
             .collect::<std::collections::HashSet<_>>();
-        if self.checks.global.is_empty() && selected_messages.is_empty() {
+        if self.checks.global.is_empty()
+            && selected_messages.is_empty()
+            && self.dispatch_observer.is_none()
+        {
             return None;
         }
         Some(Self {
             checks: Arc::clone(&self.checks),
             selected_messages: Some(Arc::new(selected_messages)),
+            dispatch_observer: self.dispatch_observer.clone(),
         })
+    }
+
+    /// Attach an observational callback independently of admission predicates.
+    /// The SDK invokes it only after admission and durable dispatch marking.
+    #[must_use]
+    pub fn observing_dispatch(
+        admission: Option<Self>,
+        observer: impl Fn(std::time::Instant) + Send + Sync + 'static,
+    ) -> Self {
+        let mut value = admission.unwrap_or_else(|| {
+            Self::with_global_and_message_sources(
+                std::iter::empty::<AdmissionCheck>(),
+                std::iter::empty::<(lingxi_core::types::MessageId, AdmissionCheck)>(),
+            )
+        });
+        value.dispatch_observer = Some(Arc::new(observer));
+        value
+    }
+
+    /// Trace receipt cannot reject or rewrite an admitted physical request.
+    /// Observers should not panic; isolate one that does from transport status.
+    pub(crate) fn observe_dispatch(&self) {
+        if let Some(observer) = &self.dispatch_observer {
+            let at = std::time::Instant::now();
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(at))).is_err() {
+                tracing::warn!("request dispatch timing observer panicked");
+            }
+        }
     }
 
     /// Return whether this prepared request may cross the SDK dispatch marker.
     #[must_use]
     pub fn is_admitted(&self) -> bool {
         self.checks.global.iter().all(|check| check())
-            && self.checks.by_message.iter().all(|(id, check)| {
-                match &self.selected_messages {
+            && self
+                .checks
+                .by_message
+                .iter()
+                .all(|(id, check)| match &self.selected_messages {
                     None => check(),
                     Some(selected) => !selected.contains(id) || check(),
-                }
-            })
+                })
     }
 }
 
@@ -121,6 +155,33 @@ impl PartialEq for RequestDispatchAdmission {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.checks, &other.checks)
             && self.selected_messages == other.selected_messages
+            && match (&self.dispatch_observer, &other.dispatch_observer) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// Credential captures owned by one logical native request. Retry drafts share
+/// the existing per-profile snapshot; a different route never inherits another
+/// provider's credential. No secret is exposed through Debug or serialization.
+#[derive(Clone, Default)]
+pub struct RequestCredentials {
+    pub(crate) snapshots: Arc<
+        std::sync::Mutex<
+            std::collections::BTreeMap<String, Arc<crate::execution::RequestCredentialSnapshot>>,
+        >,
+    >,
+}
+impl std::fmt::Debug for RequestCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RequestCredentials(<captured>)")
+    }
+}
+impl PartialEq for RequestCredentials {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.snapshots, &other.snapshots)
     }
 }
 
@@ -128,6 +189,12 @@ impl PartialEq for RequestDispatchAdmission {
 /// recovery scope; it does not authorize another physical dispatch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionContext {
+    /// Trusted main/origin session captured before provider preparation.
+    pub request_session_id: Option<String>,
+    /// Logical request credential capture reused across retry drafts only.
+    pub request_credentials: Option<RequestCredentials>,
+    /// Session authority captured before execution; never resolved from provider input.
+    pub model_safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
     /// Native prompt source and typed cache inputs, projected after the
     /// selected request credential is captured in `ModelRuntime`. The Host
     /// account generation comes from a separate live getter, not from the SDK
@@ -145,6 +212,12 @@ pub struct ExecutionContext {
     /// Native service feature resolution; raw ModelRuntime callers keep their
     /// provider-neutral SDK controls unless the host selects this policy.
     pub resolve_native_effort: bool,
+    /// Native main thinking state admitted before preparation; None is neutral.
+    pub anthropic_context_management:
+        Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicContextManagement>,
+    /// Ordinary foreground noninteractive thinking display selected by the host.
+    pub native_thinking_display:
+        Option<lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy>,
     /// Native inherited defaults are a boot snapshot, independently of live caps.
     pub inherited_effort_settings: Option<Vec<lingxi_core::host::effort::EffortSettingsLayer>>,
     pub effort_table_options: lingxi_core::host::effort_table::TableOptions,
@@ -224,20 +297,15 @@ mod tests {
     #[test]
     fn unprojected_source_checks_fail_closed() {
         let stale_id = lingxi_core::types::MessageId::new();
-        let admission = RequestDispatchAdmission::for_message_sources([(
-            stale_id,
-            check(false),
-        )]);
+        let admission = RequestDispatchAdmission::for_message_sources([(stale_id, check(false))]);
         assert!(!admission.is_admitted());
     }
 
     #[test]
     fn projection_prunes_row_checks_but_keeps_global_checks() {
         let source_id = lingxi_core::types::MessageId::new();
-        let message_only = RequestDispatchAdmission::for_message_sources([(
-            source_id,
-            check(false),
-        )]);
+        let message_only =
+            RequestDispatchAdmission::for_message_sources([(source_id, check(false))]);
         assert!(message_only
             .retaining_message_sources(&HashSet::new())
             .is_none());
@@ -260,6 +328,45 @@ mod tests {
         .expect("global admission remains after row pruning");
         assert!(!global_rejection.is_admitted());
     }
+
+    #[test]
+    fn dispatch_observation_survives_pruning_without_participating_in_admission() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = count.clone();
+        let admission = RequestDispatchAdmission::observing_dispatch(None, move |_| {
+            received.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        assert!(admission.is_admitted());
+        assert!(admission.is_admitted());
+        let projected = admission
+            .retaining_message_sources(&HashSet::new())
+            .expect("observer is independent of message admission");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        projected.observe_dispatch();
+        projected.observe_dispatch();
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "each SDK physical attempt publishes one receipt"
+        );
+        let received = count.clone();
+        let rejected = RequestDispatchAdmission::observing_dispatch(
+            Some(RequestDispatchAdmission::new(|| false)),
+            move |_| {
+                received.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
+        assert!(!rejected.is_admitted());
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn timing_observer_panic_cannot_turn_admission_into_a_transport_rejection() {
+        let admission =
+            RequestDispatchAdmission::observing_dispatch(None, |_| panic!("broken observer"));
+        admission.observe_dispatch();
+        assert!(admission.is_admitted());
+    }
 }
 
 /// Host-only inputs needed to project a Native system prompt at provider
@@ -270,6 +377,12 @@ mod tests {
 pub struct PromptCacheRequestContext {
     /// The current Native system-prompt input, before provider block projection.
     pub system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+    /// Versioned system protocol prefix and accepted query facts, captured by
+    /// the host before normalization. None keeps neutral request semantics.
+    pub native_system_prefix: Option<(
+        lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix,
+        lingxi_llm_client::providers::anthropic::system_prompt::NativePromptAttribution,
+    )>,
     /// SDK-owned process and host settings supplied by this request's builder.
     pub policy: lingxi_llm_client::providers::anthropic::system_prompt::CachePolicy,
     /// Read the current Host auth generation. ModelRuntime samples it before
@@ -309,6 +422,10 @@ impl std::fmt::Debug for PromptCacheRequestContext {
         formatter
             .debug_struct("PromptCacheRequestContext")
             .field("system", &self.system)
+            .field(
+                "native_system_prefix",
+                &self.native_system_prefix.as_ref().map(|_| "<captured>"),
+            )
             .field("policy", &self.policy)
             .field("current_account_epoch", &"<host generation getter>")
             .field("native_bare_mode", &self.native_bare_mode)
@@ -324,6 +441,7 @@ impl PartialEq for PromptCacheRequestContext {
         let left = &self.policy;
         let right = &other.policy;
         self.system == other.system
+            && self.native_system_prefix == other.native_system_prefix
             && self.native_bare_mode == other.native_bare_mode
             && self.native_unix_socket == other.native_unix_socket
             && left.hipaa_tainted == right.hipaa_tainted

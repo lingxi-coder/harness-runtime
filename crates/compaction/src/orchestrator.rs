@@ -38,13 +38,13 @@ fn media_analysis_messages(messages: &[ConversationMessage]) -> Vec<Conversation
                 is_meta,
                 is_compact_summary,
                 is_visible_in_transcript_only,
-            } => {
+             .. } => {
                 let analysis_blocks = content
                     .iter()
                     .filter(|block| matches!(block, ContentBlock::MediaAnalysis { .. }))
                     .cloned()
                     .collect::<Vec<_>>();
-                (!analysis_blocks.is_empty()).then(|| ConversationMessage::User {
+                (!analysis_blocks.is_empty()).then(|| ConversationMessage::User { api_message_override: None,
                     id: *id,
                     content: analysis_blocks,
                     is_meta: *is_meta,
@@ -256,10 +256,9 @@ impl CompactionOrchestrator {
     /// Manual compaction is deliberately separate from the automatic
     /// threshold/circuit-breaker pipeline: Claude Code invokes the summarizer
     /// whenever the history has a valid prefix/tail split, even when the
-    /// context is far below the automatic threshold. It summarizes the complete
-    /// history (`messagesToKeep: []`); suffix preservation is reserved for
-    /// automatic/reactive compaction. Too-short histories return the byte-exact
-    /// user-facing error instead of a successful zero-delta pass.
+    /// context is far below the automatic threshold. It preserves recent API
+    /// rounds when possible; 2.1.286 also permits a short-history summarize-all
+    /// fallback. Fewer than two groups returns the byte-exact user-facing error.
     pub async fn process_forced(
         &self,
         messages: Vec<ConversationMessage>,
@@ -708,11 +707,11 @@ mod tests {
             cross_media_findings: Vec::new(),
             truncated: false,
         };
-        let message = ConversationMessage::User {
+        let message = ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
-                    text: "user text".into(),
+                    text: "user text".into(), citations: None,
                 },
                 ContentBlock::MediaAnalysis {
                     analysis: analysis.clone(),
@@ -801,9 +800,9 @@ mod tests {
     }
 
     fn assistant(text: &str) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::Text { text: text.into(), citations: None }],
             stop_reason: Some("end_turn".into()),
         }
     }
@@ -893,22 +892,16 @@ mod tests {
         assert_eq!(err.to_string(), "Not enough messages to compact.");
     }
 
-    /// Binary-verified (`Nto` with `s = 1`): manual `/compact` on a single
-    /// complete exchange `[user, assistant]` groups as `[u],[a]` (assistant-led
-    /// `uQt` split, o = 2), then bails `too_few_groups` because the summarize
-    /// prefix (`[u]`) has no assistant message — CC surfaces
-    /// `Not enough messages to compact.`. (An earlier revision asserted the
-    /// full-history `messagesToKeep: []` path here; that is `Pto`, which the
-    /// binary only ever calls with `isAutoCompact: !0` — never manual.)
+    /// The 2.1.286 Hre last resort summarizes a complete single exchange.
     #[tokio::test]
-    async fn forced_compact_rejects_one_complete_exchange() {
+    async fn forced_compact_summarizes_one_complete_exchange() {
         let orch = forced_orchestrator(u64::MAX).await;
-        let err = orch
+        let result = orch
             .process_forced(vec![long_user(0), assistant("only reply")], None)
             .await
-            .expect_err("one exchange: summarize prefix has no assistant → too_few_groups");
-        assert!(matches!(err, CompactionError::NotEnoughMessages));
-        assert_eq!(err.to_string(), "Not enough messages to compact.");
+            .expect("286 summarize_all covers one complete exchange");
+        assert!(result.was_compacted);
+        assert!(result.messages_to_preserve.is_empty());
     }
 
     /// Binary-verified: the manual path preserves the LAST API-round group
@@ -942,7 +935,7 @@ mod tests {
             ConversationMessage::Assistant { content, .. } => {
                 assert!(matches!(
                     &content[0],
-                    ContentBlock::Text { text } if text == "second reply"
+                    ContentBlock::Text { text, .. } if text == "second reply"
                 ));
             }
             other => panic!("preserved tail must be the final assistant reply, got {other:?}"),
@@ -980,9 +973,9 @@ mod tests {
     }
 
     fn assistant_tool_use(name: &str, id: ToolUseId) -> ConversationMessage {
-        ConversationMessage::Assistant {
+        ConversationMessage::Assistant { per_turn_effort: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolUse {
+            content: vec![ContentBlock::ToolUse { input_projection: None,
                 id,
                 name: name.into(),
                 input: json!({}),
@@ -993,12 +986,12 @@ mod tests {
     }
 
     fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
-        ConversationMessage::User {
+        ConversationMessage::User { api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
+            content: vec![ContentBlock::ToolResult { content_projection: None,
                 tool_use_id,
                 content: content.into(),
-                is_error: false,
+                is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
             }],

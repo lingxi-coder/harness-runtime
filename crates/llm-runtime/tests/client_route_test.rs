@@ -471,7 +471,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
     assign_history(
         &mut resumed,
         &[
-            llm_runtime::Message {
+            llm_runtime::Message { api_output_config: None,
                 role: "assistant".to_string(),
                 content: vec![
                     llm_runtime::ContentBlock::Reasoning {
@@ -481,14 +481,16 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
                     llm_runtime::ContentBlock::Text {
                         text: "the answer is 42".to_string(),
                         cache_control: None,
+                        citations: None,
                     },
                 ],
             },
-            llm_runtime::Message {
+            llm_runtime::Message { api_output_config: None,
                 role: "user".to_string(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "thanks".to_string(),
                     cache_control: None,
+                    citations: None,
                 }],
             },
         ],
@@ -555,12 +557,13 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
     let mut image_request = LlmRequest::new("qwen/qwen3-coder:free");
     assign_history(
         &mut image_request,
-        &[llm_runtime::Message {
+        &[llm_runtime::Message { api_output_config: None,
             role: "user".to_string(),
             content: vec![
                 llm_runtime::ContentBlock::Text {
                     text: "describe this image".to_string(),
                     cache_control: None,
+                    citations: None,
                 },
                 llm_runtime::ContentBlock::Image {
                     media_type: "image/png".to_string(),
@@ -586,12 +589,13 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
     assign_history(
         &mut history_request,
         &[
-            llm_runtime::Message {
+            llm_runtime::Message { api_output_config: None,
                 role: "user".to_string(),
                 content: vec![
                     llm_runtime::ContentBlock::Text {
                         text: "look at this".to_string(),
                         cache_control: None,
+                        citations: None,
                     },
                     llm_runtime::ContentBlock::Image {
                         media_type: "image/png".to_string(),
@@ -599,18 +603,20 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
                     },
                 ],
             },
-            llm_runtime::Message {
+            llm_runtime::Message { api_output_config: None,
                 role: "assistant".to_string(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "i see a photo".to_string(),
                     cache_control: None,
+                    citations: None,
                 }],
             },
-            llm_runtime::Message {
+            llm_runtime::Message { api_output_config: None,
                 role: "user".to_string(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "ok what else".to_string(),
                     cache_control: None,
+                    citations: None,
                 }],
             },
         ],
@@ -978,4 +984,123 @@ fn assign_history(request: &mut llm_runtime::LlmRequest, messages: &[llm_runtime
     request.input.messages = input.messages;
     request.input.prompt_cache = input.prompt_cache;
     request.execution.message_json_string_overrides = exact_strings;
+}
+
+#[tokio::test]
+async fn native_hook_prompt_keeps_exact_input_until_sdk_final_serialization() {
+    use lingxi_llm_client::protocol::{ContentBlock, ConversationMessage, MessageRole};
+
+    let mut anthropic = llm_runtime::builtin_presets()
+        .providers
+        .into_iter()
+        .find(|profile| profile.profile_name == "anthropic")
+        .expect("bundled Anthropic profile");
+    anthropic.auth = AuthStrategy::None;
+    anthropic.credential = CredentialConfig::None;
+    let client = ModelRuntime::from_config(ClientConfig {
+        providers: vec![anthropic],
+    })
+    .unwrap();
+
+    let mut request = LlmRequest::new("claude-sonnet-4-6");
+    request.input.messages.push(ConversationMessage {
+        role: MessageRole::User,
+        content: vec![ContentBlock::Text {
+            text: "\u{fffd}".into(),
+            thought_signature: None,
+            citations: None,
+        }],
+        native_options: Vec::new(),
+    });
+    request.execution.input_protocol = Some(ProtocolFamily::AnthropicMessages);
+    request.execution.query_source = Some("hook_prompt".into());
+    request
+        .execution
+        .message_json_string_overrides
+        .insert("/messages/0/content/0/text".into(), vec![0xd800]);
+
+    let prepared = client.prepare(&request).await.unwrap();
+    let prompt_text = &prepared.provider_request.body_json["messages"][0]["content"][0]["text"];
+    assert_eq!(prompt_text, "\u{fffd}");
+    assert_eq!(
+        prepared.provider_request.json_string_overrides["/messages/0/content/0/text"],
+        vec![0xd800],
+        "pre-serialization host view retains exact units"
+    );
+    let wire = prepared.provider_request.wire_body_bytes().unwrap();
+    let wire = String::from_utf8(wire).unwrap();
+    assert!(wire.contains("\u{fffd}"));
+    assert!(!wire.contains("\\ud800"));
+
+    let mut ordinary_request = request;
+    ordinary_request.execution.query_source = None;
+    let ordinary = client.prepare(&ordinary_request).await.unwrap();
+    assert_eq!(
+        ordinary.provider_request.json_string_overrides["/messages/0/content/0/text"],
+        vec![0xd800]
+    );
+    let ordinary_wire = ordinary.provider_request.wire_body_bytes().unwrap();
+    assert!(
+        String::from_utf8(ordinary_wire)
+            .unwrap()
+            .contains("\\ud800")
+    );
+}
+
+#[tokio::test]
+async fn openai_codecs_reindex_and_retain_exact_text_units() {
+    use lingxi_llm_client::protocol::{ContentBlock, ConversationMessage, MessageRole};
+
+    for (protocol, encoded_pointer) in [
+        (ProtocolFamily::OpenAiChat, "/messages/0/content"),
+        (ProtocolFamily::OpenAiResponses, "/input/0/content/0/text"),
+    ] {
+        let mut openai = llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "openai")
+            .expect("bundled OpenAI profile");
+        // Select the codec this control exercises explicitly. The current
+        // bundled OpenAI route otherwise selects Responses, not Chat.
+        openai.protocol = protocol;
+        openai.auth = AuthStrategy::None;
+        openai.credential = CredentialConfig::None;
+        let model = openai
+            .models
+            .iter()
+            .find(|model| model.request_model == "gpt-5.6-sol")
+            .expect("OpenAI model")
+            .request_model
+            .clone();
+        let client = ModelRuntime::from_config(ClientConfig {
+            providers: vec![openai],
+        })
+        .unwrap();
+
+        let mut request = LlmRequest::new(model);
+        request.input.messages.push(ConversationMessage {
+            role: MessageRole::User,
+            content: vec![ContentBlock::Text {
+                text: "display".into(),
+                thought_signature: None,
+                citations: None,
+            }],
+            native_options: Vec::new(),
+        });
+        request.execution.input_protocol = Some(ProtocolFamily::OpenAiChat);
+        request
+            .execution
+            .message_json_string_overrides
+            .insert("/messages/0/content/0/text".into(), vec![0xd800]);
+
+        let prepared = client.prepare(&request).await.unwrap();
+        assert_eq!(prepared.route.protocol, protocol);
+        assert_eq!(
+            prepared.provider_request.json_string_overrides[encoded_pointer],
+            vec![0xd800]
+        );
+        let wire = String::from_utf8(prepared.provider_request.wire_body_bytes().unwrap()).unwrap();
+        assert!(wire.contains("\\ud800"));
+        assert!(!wire.contains("\\ufffd"));
+    }
 }

@@ -85,7 +85,7 @@ impl Tool for ModelSwitchTool {
             input.get("model").and_then(serde_json::Value::as_str).unwrap_or(SWITCHED_MODEL),
             input.get("model_profile").and_then(serde_json::Value::as_str),
         );
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: serde_json::json!({
                 "content": "TOOL-RESULT",
                 "model_content": "Launching skill: switcher",
@@ -158,7 +158,7 @@ impl Tool for PlainTool {
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
+        Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
             data: serde_json::json!({ "content": "PLAIN-RESULT" }),
             model_content: None,
             new_messages: vec![],
@@ -350,7 +350,7 @@ async fn skill_model_override_streaming_context_state_applies_profile_only_chang
 #[tokio::test]
 async fn batched_skill_model_override_next_call_uses_selected_profile_with_same_model() {
     let resp1 = mock_message_response(
-        vec![LlmContentBlock::ToolCall {
+        vec![LlmContentBlock::ToolCall { input_projection: None,
             id: ToolUseId::new().to_string(),
             name: "ModelSwitch".into(),
             input: serde_json::json!({"model": "b/shared"}),
@@ -448,7 +448,7 @@ async fn streaming_skill_model_override_next_call_uses_selected_profile_with_sam
 async fn batched_skill_model_override_switches_session_model() {
     let tu = ToolUseId::new();
     let resp1 = mock_message_response(
-        vec![LlmContentBlock::ToolCall {
+        vec![LlmContentBlock::ToolCall { input_projection: None,
             id: tu.to_string(),
             name: "ModelSwitch".into(),
             input: serde_json::json!({}),
@@ -492,7 +492,7 @@ async fn batched_no_modifier_leaves_session_model_untouched() {
     // `session.model`.
     let tu = ToolUseId::new();
     let resp1 = mock_message_response(
-        vec![LlmContentBlock::ToolCall {
+        vec![LlmContentBlock::ToolCall { input_projection: None,
             id: tu.to_string(),
             name: "Plain".into(),
             input: serde_json::json!({}),
