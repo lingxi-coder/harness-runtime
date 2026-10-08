@@ -53,7 +53,7 @@ packages over the network inside the emulated guest. The Xcode phase fails
 closed when it is absent, so produce it first:
 
 ```text
-scripts/local-apps/build-local-app-node-modules.sh --arch aarch64
+scripts/local-apps/build-local-app-node-modules.sh --arch aarch64   # the product repo's wrapper around local-app-builder's script
 clients/ios/scripts/stage-local-app-runtime.sh --variant full \
   --node-modules clients/ios/build/local-app-node-modules/aarch64/node_modules
 ```
@@ -124,7 +124,7 @@ such pin rather than trust the hash the evidence directory issues for itself.
 
 `mobile-linux-pins.json` carries **no `rootfs.release_archives` key**, for
 either ABI. Minting one requires a reproducible package-augmented rootfs, and
-`local-app-runtime-pins.json` records `release_ready: false`: arm64 is complete,
+`local-app-builder`'s `docs/runtime/local-app-runtime-pins.json` records `release_ready: false`: arm64 is complete,
 while x86_64 remains blocked only on native offline-install verification. The
 generic MobileLinux release archive also still needs its reproducible packaging
 run and reviewed repository digest. These pins must not be invented from a
@@ -137,7 +137,7 @@ documented gap, not coverage. Two things must not be misread as closing it:
 
 - `verify-mobile-linux-pins.sh` succeeding. It validates the source pins and
   never opens a rootfs archive.
-- The `verify-release-archive` cases in `test-local-app-supply-chain.sh`. All
+- The `verify-release-archive` cases in `test-rootfs-release-evidence.sh`. All
   but the last drive **synthetic** pin fixtures; they prove the comparator
   works, not that a real digest exists. The last block is a known-gap anchor
   that asserts the committed pins file still has no digest.
@@ -147,7 +147,7 @@ with `package-rootfs-release.sh`; confirm the two-pass determinism check in
 `test-rootfs-tooling.sh` reproduces the digest byte-for-byte; cross-check it
 against `rootfs-manifest.json`'s `archive.sha256`; commit it under
 `rootfs.release_archives.<abi>.sha256`; and convert the known-gap anchor at the
-end of `test-local-app-supply-chain.sh` into a positive match assertion. That
+end of `test-rootfs-release-evidence.sh` into a positive match assertion. That
 anchor is written to fail the moment a digest appears, so this section cannot
 silently go stale.
 

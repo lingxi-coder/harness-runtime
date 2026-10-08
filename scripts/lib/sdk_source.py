@@ -60,18 +60,8 @@ def resolve_sdk(explicit_root=None):
     return Path(inspect_metadata(json.loads(raw), dependency)["root"])
 
 
-def effective_pins(repo=ROOT, sdk_root=None):
-    sdk = resolve_sdk(sdk_root)
-    shared = json.loads((sdk / "docs/toolchains/runtime-pins.json").read_text())
-    product = json.loads((Path(repo) / "docs/mobile-linux/local-app-runtime-pins.json").read_text())
-    if set(product) != {"local_app_runtime"}:
-        raise ValueError("Harness pins may contain only product local_app_runtime; shared pins belong to SDK")
-    return {**shared, **product}
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--sdk-root", help="explicit development/test source; production omits this")
-    parser.add_argument("--effective-pins", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(effective_pins(sdk_root=args.sdk_root)) if args.effective_pins else resolve_sdk(args.sdk_root))
+    print(resolve_sdk(args.sdk_root))

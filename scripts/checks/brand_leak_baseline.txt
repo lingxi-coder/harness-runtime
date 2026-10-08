@@ -603,12 +603,7 @@ G1	scripts/checks/prompt_drift_scan.py	\.claude(?![A-Za-z0-9_.\-])
 G1	scripts/checks/prompt_drift_scan.py	\.lingxi
 G1	scripts/local-apps/check-authorizations.sh	LINGXI
 G1	scripts/local-apps/check-sbom-and-licenses.sh	LINGXI
-G1	scripts/local-apps/generate-local-app-sbom.py	LingXi
-G1	scripts/local-apps/verify-local-app-supply-chain.py	LINGXI
-G1	scripts/local-apps/verify-local-app-supply-chain.py	LingXi
-G1	scripts/local-apps/verify-local-app-supply-chain.py	\.lingxi
 G1	scripts/tests/smoke.sh	LINGXI
-G1	scripts/tests/test-local-app-supply-chain.sh	\.lingxi
 G2	crates/agent/src/model_resolution.rs	CLAUDE_CODE_USE_BEDROCK
 G2	crates/agent/src/model_resolution.rs	CLAUDE_CODE_USE_FOUNDRY
 G2	crates/agent/src/model_resolution.rs	CLAUDE_CODE_USE_VERTEX
@@ -995,11 +990,6 @@ G3	crates/tools/worktree/src/worktree.rs	.lingxi
 G3	crates/tools/worktree/src/worktree.rs	LINGXI.md
 G3	scripts/checks/prompt_drift_scan.py	.lingxi
 G3	scripts/checks/prompt_drift_scan.py	LINGXI.md
-G3	scripts/local-apps/verify-local-app-supply-chain.py	.lingxi
-G3	scripts/local-apps/verify-local-app-supply-chain.py	.lingxi-*
-G3	scripts/local-apps/verify-local-app-supply-chain.py	LINGXI.md
-G3	scripts/tests/test-local-app-supply-chain.sh	.lingxi
-G3	scripts/tests/test-local-app-supply-chain.sh	.lingxi-*
 G4	crates/agent/src/model_resolution.rs	LINGXI_SUBAGENT_MODEL
 G4	crates/coordinator/src/prompt.rs	LINGXI_SIMPLE
 G4	crates/hooks/src/executor.rs	LINGXI_SESSIONEND_HOOKS_TIMEOUT_MS
