@@ -5433,6 +5433,7 @@ impl MobileEngineHandle {
                 prompt_mode,
                 images,
                 turn_id,
+                visualization_context: _,
             } => {
                 self.start_streaming_turn(text, prompt_mode, images, turn_id, true)
                     .await

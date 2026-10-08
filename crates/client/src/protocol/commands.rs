@@ -273,6 +273,11 @@ pub enum ClientCommand {
         // when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<u64>,
+        // Inline visualization the user is following up on. The runtime
+        // attaches its confirmed `modelContent` at send time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+        visualization_context: Option<crate::protocol::message::VisualizationRefDto>,
     },
 
     // Cancel the in-flight turn. The optional `turn_id` narrows the cancel to

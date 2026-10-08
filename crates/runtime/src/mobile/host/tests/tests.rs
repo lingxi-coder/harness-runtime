@@ -5737,6 +5737,7 @@ fn submit_send_prompt_returns_promptly() {
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: Some(7),
+                visualization_context: None,
             })
             .await
     });
@@ -5778,6 +5779,7 @@ fn submit_cancel_waits_for_cleanup_before_new_session() {
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: None,
+                visualization_context: None,
             })
             .await
             .expect("submit(SendPrompt) ok");
@@ -6927,6 +6929,7 @@ fn submit_send_prompt_queues_overlapping_turn() {
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: Some(99),
+                visualization_context: None,
             })
             .await;
 
@@ -7390,6 +7393,7 @@ fn mobile_turn_end_preserves_recording_until_engine_disposal() {
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: Some(71),
+                visualization_context: None,
             })
             .await
             .expect("prompt is accepted");
@@ -7534,6 +7538,7 @@ fn submit_model_error_releases_slot() {
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: Some(100),
+                visualization_context: None,
             })
             .await
             .expect("submit(SendPrompt) ok");
@@ -8444,6 +8449,7 @@ fn submit_resume_session_mid_turn_is_rejected() {
                 prompt_mode: None,
                 images: Vec::new(),
                 turn_id: None,
+                visualization_context: None,
             })
             .await
             .expect("submit(SendPrompt) ok");

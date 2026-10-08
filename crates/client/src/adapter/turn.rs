@@ -208,12 +208,11 @@ pub fn lower_content_block_with(
 pub fn synthesize_message(turn: &PumpedTurn) -> MessageDto {
     MessageDto {
         loop_wakeup: None,
+        visualization_context: None,
         role: ASSISTANT_ROLE.to_string(),
-        blocks: turn
-            .assistant_blocks
-            .iter()
-            .filter_map(lower_content_block)
-            .collect(),
+        blocks: crate::adapter::lowering::project_visualizations(
+            turn.assistant_blocks.iter().filter_map(lower_content_block),
+        ),
         images: Vec::new(),
     }
 }

@@ -160,6 +160,15 @@ pub const MANAGED_DIR_WINDOWS: &str = r"C:\Program Files\LingXi";
 /// Other (Linux/BSD) location.
 pub const MANAGED_DIR_UNIX: &str = "/etc/lingxi";
 
+/// Start of the line-anchored directive an assistant writes to place a
+/// published inline visualization in its reply:
+/// `::lingxi-visualization{id="<id>" rev="<n>"}`.
+pub const VISUALIZATION_REFERENCE_PREFIX: &str = "::lingxi-visualization{";
+
+/// Directory under the config home that holds the inline-visualization stores
+/// (`<config-home>/visualizations/<root-session-uuid>/`).
+pub const VISUALIZATIONS_DIR: &str = "visualizations";
+
 /// Current product namespace inventory, audited by the brand gate. Native
 /// protocol identifiers and the unbranded global-config filename are separate.
 pub const NAMESPACE_VALUES: &[&str] = &[
@@ -210,6 +219,8 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     MANAGED_DIR_MACOS,
     MANAGED_DIR_WINDOWS,
     MANAGED_DIR_UNIX,
+    VISUALIZATION_REFERENCE_PREFIX,
+    VISUALIZATIONS_DIR,
 ];
 
 /// Resolve the user config-home: `$LINGXI_CONFIG_DIR` when the env value is

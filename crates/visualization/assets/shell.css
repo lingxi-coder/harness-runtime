@@ -1,0 +1,24 @@
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+iframe {
+  display: block;
+  width: 100%;
+  height: 0;
+  border: 0;
+  background: transparent;
+}
+
+body.is-expanded,
+body.is-expanded iframe {
+  height: 100vh;
+}
