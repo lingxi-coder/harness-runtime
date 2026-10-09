@@ -36,6 +36,9 @@ pub struct CompactionResult {
     pub compaction_usage: Option<Usage>,
     /// Actual model inherited by the summary side-query.
     pub summary_model: String,
+    /// Profile the summary side-query was routed through. Without it a model
+    /// id shared by several profiles is billed at the unknown tier.
+    pub summary_profile: Option<String>,
     /// Resulting messages (typically a single summary system message).
     pub summary_messages: Vec<ConversationMessage>,
     /// Trimmed model text, before the continuation wrapper, for `PostCompact`.
@@ -371,6 +374,7 @@ impl Autocompactor {
             } else {
                 cache_params.tool_use_options.main_loop_model.clone()
             };
+            let summary_profile = cache_params.tool_use_options.model_profile.clone();
             let mut summarize = messages[..split_at].to_vec();
             let mut stripped_media = false;
             let mut head_truncations = 0;
@@ -618,6 +622,7 @@ impl Autocompactor {
                 true_post_compact_token_count: result.usage.tokens.input,
                 compaction_usage: Some(result.usage),
                 summary_model,
+                summary_profile,
                 summary_messages,
                 raw_summary_text,
                 messages_to_preserve: if preserve_tail {
@@ -644,6 +649,7 @@ impl Autocompactor {
             true_post_compact_token_count: post,
             compaction_usage: Some(Usage::default()),
             summary_model: self.config.summary_model.clone(),
+            summary_profile: None,
             summary_messages,
             raw_summary_text,
             messages_to_preserve: Vec::new(),
@@ -1110,6 +1116,35 @@ mod tests {
         // Parent system prompt replayed verbatim for the cache hit.
         assert_eq!(sent.system_prompt.as_deref(), Some("PARENT SYSTEM PROMPT"));
         // Usage from the forked call is carried through.
+    }
+
+    #[tokio::test]
+    async fn compact_reports_the_profile_its_summary_was_routed_through() {
+        // `deepseek-flash` is listed under more than one profile; billed
+        // without one, the summary call was charged at the unknown tier.
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "<summary>ok</summary>".into(),
+        });
+        let runner = Arc::new(
+            ForkedAgentRunner::new()
+                .with_side_query_client(client.clone(), "claude-opus-4-6".into()),
+        );
+        let slot = Arc::new(CacheSafeParamsSlot::new());
+        let mut params = cache_safe_params(Vec::new());
+        params.tool_use_options.main_loop_model = "deepseek-flash".into();
+        params.tool_use_options.model_profile = Some("deepseek".into());
+        slot.save(params).await;
+
+        let result = Autocompactor::with_forked_runner(runner, slot)
+            .compact(vec![user_msg("hello"), user_msg("world")])
+            .await
+            .expect("wired compact succeeds");
+
+        let sent = client.seen.lock().unwrap().clone().expect("client called");
+        assert_eq!(sent.profile.as_deref(), Some("deepseek"));
+        assert_eq!(result.summary_model, "deepseek-flash");
+        assert_eq!(result.summary_profile.as_deref(), Some("deepseek"));
     }
 
     #[tokio::test]
