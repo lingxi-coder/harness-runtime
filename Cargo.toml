@@ -163,13 +163,13 @@ branding = { path = "crates/branding" }
 
 # The Local App project's crates, in a repository of their own. One revision for every crate of it, here and in the
 # product.
-device-api = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "31100e9198a9f45408bc8c0c29eeb87f27637b7f" }
-local-app-builder-contracts = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "31100e9198a9f45408bc8c0c29eeb87f27637b7f" }
-local-app-builder-plugin = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "31100e9198a9f45408bc8c0c29eeb87f27637b7f" }
-local-app-builder-service = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "31100e9198a9f45408bc8c0c29eeb87f27637b7f" }
-local-apps = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "31100e9198a9f45408bc8c0c29eeb87f27637b7f" }
-mcp-wire = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "31100e9198a9f45408bc8c0c29eeb87f27637b7f" }
-rooted-fs = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "31100e9198a9f45408bc8c0c29eeb87f27637b7f" }
+device-api = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "11a10656e4847d2e5aeb5858da21781a9618ea7e" }
+local-app-builder-contracts = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "11a10656e4847d2e5aeb5858da21781a9618ea7e" }
+local-app-builder-plugin = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "11a10656e4847d2e5aeb5858da21781a9618ea7e" }
+local-app-builder-service = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "11a10656e4847d2e5aeb5858da21781a9618ea7e" }
+local-apps = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "11a10656e4847d2e5aeb5858da21781a9618ea7e" }
+mcp-wire = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "11a10656e4847d2e5aeb5858da21781a9618ea7e" }
+rooted-fs = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "11a10656e4847d2e5aeb5858da21781a9618ea7e" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps `serde_json::Map` keys in insertion order across
 # Value round-trips. Required for claude-code wire-byte fidelity: outbound
