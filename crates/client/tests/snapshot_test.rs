@@ -261,6 +261,16 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/visualization_block.json",
+            ClientEvent::VisualizationBlock {
+                status: client::protocol::message::VisualizationBlockStatusDto::Ready,
+                reference: Some(client::protocol::message::VisualizationRefDto {
+                    id: "chart".into(),
+                    revision: 2,
+                }),
+            },
+        ),
+        (
             "event/task_lifecycle.json",
             ClientEvent::TaskLifecycle {
                 event_json: r#"{"type":"system","subtype":"task_started","task_id":"b12345678","description":"background job","task_type":"local_bash"}"#.to_string(),
@@ -490,6 +500,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 messages: vec![
                     MessageDto {
                         loop_wakeup: None,
+                        visualization_context: None,
                         role: "user".to_string(),
                         blocks: vec![MessageBlockDto::Text {
                             text: "Resume me.".to_string(),
@@ -1207,6 +1218,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                     base64: "iVBORw0KGgo=".to_string(),
                 }],
                 turn_id: Some(1),
+                visualization_context: None,
             },
         ),
         (
@@ -1939,6 +1951,7 @@ fn canonical_cost() -> CostDto {
 fn canonical_message() -> MessageDto {
     MessageDto {
         loop_wakeup: None,
+        visualization_context: None,
         role: "assistant".to_string(),
         blocks: vec![
             MessageBlockDto::Text {

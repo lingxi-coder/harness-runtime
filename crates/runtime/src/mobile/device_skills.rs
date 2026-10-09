@@ -139,6 +139,13 @@ pub(crate) fn register_mobile_device_skills(
         command.skill_root = None;
         registry.register_command(command);
     }
+    // `/visualize` follows the `Visualization` tool the same way the device
+    // workflows follow theirs, on boot and on every catalog reload.
+    crate::inline_visualization::register_skill(
+        registry,
+        available_tool_names,
+        tool_shell_mobile::TOOL_NAME,
+    );
 }
 
 #[cfg(test)]
@@ -166,6 +173,28 @@ mod tests {
 
     fn tool_names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).into()).collect()
+    }
+
+    #[tokio::test]
+    async fn visualize_skill_follows_the_visualization_tool_in_both_modes() {
+        let mut registry = CommandRegistry::new();
+        register_mobile_device_skills(&mut registry, &tool_names(&["Read"]));
+        assert!(registry.resolve("visualize").is_none());
+        register_mobile_device_skills(&mut registry, &tool_names(&["Visualization", "Shell"]));
+        let registry = Arc::new(RwLock::new(registry));
+        for mode in [SessionMode::Chat, SessionMode::Code] {
+            let loader = MobileDiskSkillLoader::for_mode(registry.clone(), mode);
+            assert_eq!(loader.list_names().await, ["visualize"]);
+            let descriptor = loader.load("visualize").await.unwrap().unwrap();
+            assert!(descriptor.allowed_tools.is_empty());
+            assert!(descriptor.shell.is_none() && descriptor.context.is_none());
+            assert_eq!(descriptor.skip_shell_expansion, mode == SessionMode::Chat);
+            assert!(descriptor
+                .dynamic_body
+                .unwrap()
+                .build("")
+                .contains("with the `Shell` tool"));
+        }
     }
 
     #[tokio::test]

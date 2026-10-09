@@ -1323,7 +1323,9 @@ fn tool_result_ids(message: &JsonlMessage) -> impl Iterator<Item = &str> {
 ///   `model_content` is the approval wording. Without them a resumed plan card
 ///   has no body and falls back to its `submitted` placeholder, so a plan the
 ///   user actually approved reads as still being prepared.
-pub const CLIENT_STATE_TOOLS: &[&str] = &["Agent", "Skill", "ExitPlanMode"];
+/// * `Visualization` — `{id, revision, title}` let a resumed tool row reopen
+///   the widget it published even when the reply never placed it.
+pub const CLIENT_STATE_TOOLS: &[&str] = &["Agent", "Skill", "ExitPlanMode", "Visualization"];
 
 /// Recover the [`CLIENT_STATE_TOOLS`] results from the persisted MAIN-CHAIN
 /// transcript, keyed by the `tool_use_id` each one answers.

@@ -114,6 +114,7 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
                     prompt_mode: None,
                     images: Vec::new(),
                     turn_id: Some(1),
+                    visualization_context: None,
                 })
                 .await
         })
@@ -242,6 +243,7 @@ fn completed_mobile_turns_are_persisted_and_listed_per_session() {
                     prompt_mode: None,
                     images: Vec::new(),
                     turn_id: Some(index as u64 + 1),
+                    visualization_context: None,
                 })
                 .await
                 .expect("send prompt");

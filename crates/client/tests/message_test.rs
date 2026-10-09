@@ -18,6 +18,7 @@ use client::protocol::message::{MessageBlockDto, MessageDto};
 fn message_dto_round_trips() {
     let msg = MessageDto {
         loop_wakeup: None,
+        visualization_context: None,
         role: "assistant".to_string(),
         blocks: vec![
             MessageBlockDto::Text {
@@ -173,9 +174,53 @@ fn loop_wakeup_metadata_is_additive_and_round_trips() {
             streak: 1,
             since_ms: 42,
         }),
+        visualization_context: None,
     };
     let bytes = serde_json::to_string(&dto).unwrap();
     assert_eq!(serde_json::from_str::<MessageDto>(&bytes).unwrap(), dto);
     let golden = include_str!("../snapshots/message_loop_wakeup.json").trim();
     assert_eq!(serde_json::to_string_pretty(&dto).unwrap(), golden);
+}
+
+#[test]
+fn visualization_block_and_context_are_additive_and_round_trip() {
+    use client::protocol::message::{VisualizationContextDto, VisualizationRefDto};
+    let block = MessageBlockDto::Visualization {
+        reference: Some(VisualizationRefDto {
+            id: "chart".into(),
+            revision: 2,
+        }),
+    };
+    let json = serde_json::to_value(&block).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({"type": "visualization", "reference": {"id": "chart", "revision": 2}})
+    );
+    assert_eq!(
+        serde_json::from_value::<MessageBlockDto>(json).unwrap(),
+        block
+    );
+    let unavailable = MessageBlockDto::Visualization { reference: None };
+    assert_eq!(
+        serde_json::to_value(&unavailable).unwrap(),
+        serde_json::json!({"type": "visualization"})
+    );
+    let old: MessageDto = serde_json::from_str(r#"{"role":"user","blocks":[]}"#).unwrap();
+    assert!(old.visualization_context.is_none());
+    let dto = MessageDto {
+        role: "user".into(),
+        blocks: vec![],
+        images: vec![],
+        loop_wakeup: None,
+        visualization_context: Some(VisualizationContextDto {
+            id: "chart".into(),
+            revision: 2,
+            title: "Sales".into(),
+        }),
+    };
+    let bytes = serde_json::to_string(&dto).unwrap();
+    assert!(bytes.contains(
+        "\"visualization_context\":{\"id\":\"chart\",\"revision\":2,\"title\":\"Sales\"}"
+    ));
+    assert_eq!(serde_json::from_str::<MessageDto>(&bytes).unwrap(), dto);
 }

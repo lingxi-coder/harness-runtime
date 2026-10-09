@@ -4125,7 +4125,22 @@ impl MobileEngineHandle {
                 prompt_mode,
                 images,
                 turn_id,
+                visualization_context,
             } => {
+                let root_session = self
+                    .inner
+                    .active_session_uuid
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let text = crate::inline_visualization::followup_text(
+                    self.fs.clone(),
+                    &self.lingxi_home,
+                    &root_session,
+                    visualization_context.as_ref(),
+                    text,
+                )
+                .await;
                 self.start_streaming_turn(text, prompt_mode, images, turn_id, true)
                     .await
             }
@@ -6737,6 +6752,27 @@ impl MobileEngineHandle {
     }
 }
 
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl MobileEngineHandle {
+    /// Inline-visualization host for a dedicated native WebView answering for
+    /// `origin` (`lingxi-viz://visualization` on iOS,
+    /// `https://lingxi-visualization.invalid` on Android). It shares this
+    /// engine's store, so widgets the agent publishes are mountable at once.
+    /// `None` for an origin that is not `scheme://host`.
+    #[must_use]
+    pub fn visualization_host(
+        &self,
+        origin: String,
+    ) -> Option<Arc<crate::mobile::visualization_host::VisualizationHost>> {
+        crate::mobile::visualization_host::VisualizationHost::for_config_home(
+            self.fs.clone(),
+            &self.lingxi_home,
+            &origin,
+            self.runtime.handle().clone(),
+        )
+        .map(Arc::new)
+    }
+}
 #[cfg(test)]
 #[path = "host/tests/tests.rs"]
 mod tests;

@@ -168,8 +168,12 @@ fn base_tool_name(value: &str) -> &str {
     value.split('(').next().unwrap_or(value).trim()
 }
 
+/// Tools a Chat-visible skill may name in `allowed-tools`. Those entries are
+/// ALLOW rules, so the per-call-prompted Chat tools are excluded: a skill can
+/// use `Write` and `Shell` in Chat only through the ordinary prompt.
 fn chat_safe_tool_name(name: &str) -> bool {
     super::MOBILE_CHAT_TOOL_ALLOWLIST.contains(&name)
+        && !super::MOBILE_CHAT_PROMPTED_TOOLS.contains(&name)
 }
 
 fn chat_compatible(frontmatter: &CommandFrontmatter) -> bool {
@@ -743,6 +747,12 @@ mod tests {
         )
         .await
         .unwrap();
+        tokio::fs::write(
+            cmd_dir.join("run.md"),
+            "---\ndescription: Run\nsession-modes: chat\nallowed-tools: Shell(ls:*)\n---\nRun $ARGUMENTS\n",
+        )
+        .await
+        .unwrap();
 
         let registry = Arc::new(RwLock::new(CommandRegistry::new()));
         {
@@ -752,7 +762,12 @@ mod tests {
         }
         let chat_loader = MobileDiskSkillLoader::for_mode(registry, SessionMode::Chat);
         assert!(chat_loader.load("research").await.unwrap().is_some());
+        // Chat runs Write and Shell, but only behind a per-call prompt: a
+        // skill's `allowed-tools` ALLOW rule must not pre-authorize them.
+        assert!(super::super::MOBILE_CHAT_TOOL_ALLOWLIST.contains(&"Write"));
+        assert!(super::super::MOBILE_CHAT_TOOL_ALLOWLIST.contains(&"Shell"));
         assert!(chat_loader.load("mutate").await.unwrap().is_none());
+        assert!(chat_loader.load("run").await.unwrap().is_none());
         assert_eq!(chat_loader.list_names().await, vec!["research"]);
     }
 

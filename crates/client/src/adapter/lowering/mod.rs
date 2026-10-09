@@ -396,7 +396,8 @@ mod messages;
 mod models;
 pub use messages::{
     lower_conversation_message, lower_conversation_message_with, lower_transcript,
-    lower_transcript_with_tool_results, lower_transcript_with_identities,
+    lower_transcript_with_tool_results, lower_transcript_with_identities, project_visualizations,
+    visualization_ref_dto,
 };
 pub use models::{lower_model_details, lower_provider_model_catalog_entry};
 

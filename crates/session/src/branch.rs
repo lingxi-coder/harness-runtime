@@ -294,6 +294,18 @@ async fn create_branch_in(
         let _ = tokio::fs::set_permissions(&dst_path, std::fs::Permissions::from_mode(0o600)).await;
     }
 
+    // Inline visualizations are owned by the root session. The branch gets
+    // its own copy (same ids) so widget state diverges independently from
+    // here on. A failed copy degrades the branch's widgets to "unavailable"
+    // cards; it must not lose the branch itself.
+    let visualizations = visualization::VisualizationStore::new(fs, lingxi_home.to_path_buf());
+    if let Err(error) = visualizations
+        .copy_session(source_session_id, new_session_id)
+        .await
+    {
+        tracing::warn!(%error, "branch: inline visualizations were not copied");
+    }
+
     Ok(BranchResult {
         new_session_id,
         source_session_id,
@@ -436,6 +448,47 @@ mod tests {
         });
         value[field] = json!(payload);
         value.to_string()
+    }
+
+    #[tokio::test]
+    async fn branch_copies_inline_visualizations_under_the_new_root_session() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = "/viz-fixture";
+        let src = Uuid::new_v4();
+        let source = session_path(home.path(), cwd, &src.to_string());
+        tokio::fs::create_dir_all(source.parent().unwrap())
+            .await
+            .unwrap();
+        let src_sid = src.to_string();
+        let line = user_line("11111111-1111-1111-1111-111111111111", &src_sid, None, "plot it");
+        tokio::fs::write(&source, format!("{line}\n")).await.unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
+        let store = visualization::VisualizationStore::new(fs.clone(), home.path().to_path_buf());
+        let reference = store
+            .publish(
+                &visualization::Publisher {
+                    root_session: src,
+                    agent_id: None,
+                },
+                None,
+                "Chart",
+                "<p>x</p>",
+                0,
+            )
+            .await
+            .unwrap()
+            .reference;
+        store.write_state(src, &reference, 0, "1", "null").await.unwrap();
+
+        let fork = create_branch(home.path(), cwd, src, None, fs).await.unwrap();
+
+        let copied = store.read_revision(fork.new_session_id, &reference).await.unwrap();
+        assert_eq!(copied.fragment, "<p>x</p>");
+        store
+            .write_state(fork.new_session_id, &reference, 1, "2", "null")
+            .await
+            .unwrap();
+        assert_eq!(store.read_state(src, &reference).await.unwrap().version, 1);
     }
 
     #[tokio::test]

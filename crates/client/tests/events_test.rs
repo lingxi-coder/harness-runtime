@@ -66,6 +66,7 @@ fn session_agent_events_round_trip() {
 
     let message = MessageDto {
         loop_wakeup: None,
+        visualization_context: None,
         role: "assistant".into(),
         blocks: vec![MessageBlockDto::Text {
             text: "done".into(),
@@ -289,6 +290,7 @@ fn message_complete_round_trips() {
         stop_reason: Some("end_turn".to_string()),
         message: Some(MessageDto {
             loop_wakeup: None,
+            visualization_context: None,
             role: "assistant".to_string(),
             blocks: vec![
                 MessageBlockDto::Text {

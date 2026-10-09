@@ -29,6 +29,7 @@ engine = [
 ]
 desktop = [
     "engine",
+    "dep:base64",
     "dep:msgqueue",
     "tokio/io-util",
     "dep:uuid",
@@ -76,6 +77,7 @@ desktop = [
     "dep:tool-meta",
     "dep:tool-cron",
     "dep:tool-ui",
+    "dep:visualization",
     "dep:tool-skill",
     "dep:tool-agent",
     "dep:tool-workflow",
@@ -137,6 +139,7 @@ mobile = [
     "dep:tool-cron",
     "dep:cron",
     "dep:tool-ui",
+    "dep:visualization",
     "dep:tool-skill",
     "dep:tool-mobile",
     "dep:tool-shell-mobile",
@@ -247,6 +250,7 @@ tool-shell-mobile = { path = "../tools/shell-mobile", optional = true }
 tool-skill = { path = "../tools/skill", optional = true }
 tool-task = { path = "../tools/task", optional = true }
 tool-ui = { path = "../tools/ui", optional = true }
+visualization = { path = "../visualization", optional = true }
 tool-web = { path = "../tools/web", optional = true }
 tool-workflow = { path = "../tools/workflow", optional = true }
 tool-worktree = { path = "../tools/worktree", optional = true }
@@ -283,6 +287,16 @@ tempfile = { version = "3", features = [] }
 test-harness = { path = "../test-harness" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
 tool-api = { path = "../tool-api", features = ["test-support"] }
+
+[[test]]
+name = "visualization_host"
+path = "tests/mobile/visualization_host.rs"
+required-features = ["mobile", "desktop"]
+
+[[test]]
+name = "inline_visualization"
+path = "tests/inline_visualization.rs"
+required-features = ["desktop"]
 
 [[test]]
 name = "decision_contract"
