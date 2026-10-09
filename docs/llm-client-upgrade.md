@@ -1,47 +1,41 @@
 # llm-client 能力接入
 
-开发子模块与运行时固定 Git 依赖当前使用 `lingxi-llm-client` 0.3.0，提交
-`a4a9880fa02737d95665b3215f6743dfc128f4a4`。该版本统一模型 HTTP/WebSocket 传输、鉴权策略、模型目录、
-托管搜索及 Anthropic/OpenAI/Copilot OAuth 协议。本次提交尚未推送；发布时须先推送
-SDK，再推送父仓库，以便 canonical 远端 `https://github.com/lingxi-coder/llm-client`
-能够解析固定依赖。
+运行时固定 Git 依赖使用 `lingxi-llm-client` 0.3.0，完整提交见根 `Cargo.toml` 的
+`[workspace.dependencies]`。SDK 统一模型 HTTP/WebSocket 传输、鉴权策略、模型目录、
+托管搜索及 Anthropic/OpenAI/Copilot OAuth 协议。发布时须先推送 SDK，再推送本仓库，
+以便 canonical 远端 `https://github.com/lingxi-coder/llm-client` 能够解析固定依赖。
 
-## 子模块联合开发
+## 联合开发
 
-`deps/llm-client` 是独立 Git 子模块。根 `Cargo.toml` 将它排除在 runtime workspace 外，
-并通过 `[patch."https://github.com/lingxi-coder/llm-client"]` 指向本地源码。
-子模块使用相对父仓库的 URL；本地 SSH 别名和 CI 的 HTTPS checkout 各自沿用父仓库身份。
-根 `[workspace.dependencies]` 保留 canonical Git URL 与完整提交，供 `llm-runtime`、
-`http-client` 及下游消费；
-Cargo 不会继承依赖仓库根的 patch，下游若也需要联调，应在自己的 workspace 根配置 patch。
+开发阶段直接使用与本仓库并排的 `../llm-client` checkout：根 `Cargo.toml` 通过
+`[patch."https://github.com/lingxi-coder/llm-client.git"]` 指向它，SDK 不在 runtime workspace 内，
+保留自己的 lockfile。根 `[workspace.dependencies]` 保留 canonical Git URL 与完整提交，供
+`llm-runtime`、`http-client` 及下游消费；Cargo 不会继承依赖仓库根的 patch，下游若也需要联调，
+应在自己的 workspace 根配置 patch。
 
 ```sh
-# 新 checkout
-git clone --recurse-submodules git@github.com-lingxi-coder:lingxi-coder/harness-runtime.git
+# 新 checkout：两个仓库并排放置
+git clone git@github.com-lingxi-coder:lingxi-coder/llm-client.git
+git clone git@github.com-lingxi-coder:lingxi-coder/harness-runtime.git
 cd harness-runtime
 
-# 已有 checkout，或切换了父仓库提交后
-git submodule update --init --recursive
-
 # SDK 回归与 runtime 集成分别验证
-cargo test --manifest-path deps/llm-client/Cargo.toml --locked
+cargo test --manifest-path ../llm-client/Cargo.toml --locked
 cargo test --locked -p llm-runtime --all-features
 ```
 
-直接修改 `deps/llm-client` 会立即进入根 workspace 的构建，无需复制源码或导入 Cargo 缓存。
-子模块默认检出父仓库记录的提交；开发前可在子模块中创建自己的分支。
+修改 `../llm-client` 会立即进入根 workspace 的构建，无需复制源码或导入 Cargo 缓存。
 协议、请求编码、HTTP/WebSocket 传输和提供方服务的缺陷应在 SDK 中修复，
 runtime 负责宿主凭证、权限、工具执行和费用结算，并保留相应集成回归。
-本轮直接在子模块联调；其他目录中的 llm-client checkout 没有被修改，也不会自动同步未提交改动。
 
 共享修改时按顺序完成：
 
-1. 在 `deps/llm-client` 验证、提交并推送 SDK 修改，确保目标提交可从 canonical 远端获取。
-2. 更新 runtime 的固定 Git revision 与子模块检出的提交，刷新根 `Cargo.lock` 并验证集成。
-3. 在父仓库提交 gitlink、固定依赖和必要的 runtime 修改；父仓库提交不会包含子模块内未提交的文件。
+1. 在 `../llm-client` 验证、提交并推送 SDK 修改，确保目标提交可从 canonical 远端获取。
+2. 更新根 `[workspace.dependencies]` 的固定 revision，刷新根 `Cargo.lock` 并验证集成。
+3. 在本仓库提交固定依赖和必要的 runtime 修改。
 
-CI 的 checkout 使用 `submodules: recursive`，因此使用父仓库锁定的 SDK 提交。
-新增 SDK 修复必须先发布，父仓库只记录已可获取的提交。
+CI 通过 `.github/actions/llm-client` 把固定 revision 检出到 `../llm-client`，
+因此构建的是本仓库锁定的 SDK 提交。新增 SDK 修复必须先发布，本仓库只记录已可获取的提交。
 
 ## 会话请求
 

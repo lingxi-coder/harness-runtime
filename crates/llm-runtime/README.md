@@ -5,11 +5,10 @@ lifecycle, credentials, routing, retries, prompt-cache policy, Fusion admission,
 and durable physical-attempt accounting. Provider wire encoding/decoding,
 native replay content, usage normalization and built-in catalog facts come from
 `lingxi-llm-client`, pinned in root `[workspace.dependencies]` and inherited by
-this crate. Development from the repository root applies a Cargo patch to the `deps/llm-client` Git submodule,
-so SDK changes are compiled directly. Initialize it with
-`git submodule update --init --recursive`; its own tests run with
-`cargo test --manifest-path deps/llm-client/Cargo.toml --locked`.
-The submodule is excluded from the runtime workspace and retains its own lockfile.
+this crate. Development from the repository root applies a Cargo patch to the sibling
+`../llm-client` checkout, so SDK changes are compiled directly; its own tests run with
+`cargo test --manifest-path ../llm-client/Cargo.toml --locked`.
+The SDK is outside the runtime workspace and retains its own lockfile.
 Downstream consumers keep the pinned Git dependency because Cargo patches apply
 only at the consuming workspace root.
 
@@ -23,7 +22,7 @@ Skills are available through `providers::AnthropicClient::skills`; operation
 credentials and deadlines arrive through `RequestOptions`. Realtime audio uses
 a separate duplex interface on the same configured SDK `HttpTransport`, with the optional `realtime-websocket` feature.
 See [the migration guide](../../docs/llm-client-upgrade.md) for the scope,
-`Arc<dyn Transport>` call-site migration and submodule contribution workflow.
+`Arc<dyn Transport>` call-site migration and joint development workflow.
 
 `upstream.rs` projects host conversation data to SDK types. Model HTTP, Responses
 WebSocket and realtime networking live in the SDK. Production hosts inject

@@ -1027,9 +1027,8 @@ mod fallback_billing_mode_inheritance_tests {
 
     #[test]
     fn omitted_mode_inherits_pinned_anthropic_row_and_explicit_unknown_does_not() {
-        // This consumes the real bundled profile from deps/llm-client at the
-        // full revision pinned in the root Cargo.toml
-        // (0c6a907d897a54e656700c00cf335d91b10dca0b); it introduces no tariff.
+        // This consumes the real bundled profile from the llm-client source
+        // the root Cargo.toml selects; it introduces no tariff.
         let mut host = crate::builtin_presets()
             .providers
             .into_iter()

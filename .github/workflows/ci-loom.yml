@@ -12,8 +12,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - uses: ./.github/actions/llm-client
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: cargo test --cfg loom (OAuth single-flight refresh)
         env:
