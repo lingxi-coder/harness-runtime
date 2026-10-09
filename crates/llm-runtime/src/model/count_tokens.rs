@@ -18,6 +18,12 @@ const REQUEST_BYTES_PER_TOKEN: u64 = 3;
 /// model-visible history estimator without charging base64 bytes as text.
 const APPROX_MEDIA_TOKENS: u64 = 2_048;
 
+/// JSON framing around one text block's string.
+const TEXT_BLOCK_WRAPPER_BYTES: u64 = 30;
+
+/// JSON framing around a structured tool result's id and blocks.
+const TOOL_RESULT_WRAPPER_BYTES: u64 = 80;
+
 /// Count input tokens for `request`'s resolved route.
 pub async fn count_tokens(
     client: &ModelRuntime,
@@ -64,7 +70,11 @@ pub fn approximate_tokens(request: &LlmRequest) -> u64 {
             use lingxi_llm_client::protocol::ContentBlock;
             let exact_text = match block {
                 ContentBlock::Text { text, .. } => Some(("text", text)),
-                ContentBlock::ToolResult { content, .. } => Some(("content", content)),
+                ContentBlock::ToolResult {
+                    content,
+                    blocks: None,
+                    ..
+                } => Some(("content", content)),
                 _ => None,
             };
             if let Some((field, display)) = exact_text {
@@ -127,7 +137,6 @@ fn serialized_len<T: serde::Serialize>(value: &T) -> u64 {
 
 fn estimated_block_bytes(block: &lingxi_llm_client::protocol::ContentBlock) -> u64 {
     use lingxi_llm_client::protocol::{ContentBlock, DocumentSource, ImageSource};
-    const TEXT_BLOCK_WRAPPER_BYTES: u64 = 30;
     let media_bytes = APPROX_MEDIA_TOKENS * REQUEST_BYTES_PER_TOKEN;
     match block {
         ContentBlock::Text { text, .. } => {
@@ -140,16 +149,7 @@ fn estimated_block_bytes(block: &lingxi_llm_client::protocol::ContentBlock) -> u
         ContentBlock::Document {
             source: DocumentSource::Base64 { data, .. },
             ..
-        } => {
-            // Count decoded document bytes, never the base64 transport expansion.
-            let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count() as u64;
-            media_bytes.max(
-                (data.len() as u64)
-                    .saturating_mul(3)
-                    .div_euclid(4)
-                    .saturating_sub(padding),
-            )
-        }
+        } => media_bytes.max(decoded_base64_len(data)),
         ContentBlock::Document {
             source: DocumentSource::Text { data, .. },
             ..
@@ -157,8 +157,48 @@ fn estimated_block_bytes(block: &lingxi_llm_client::protocol::ContentBlock) -> u
         ContentBlock::Document { .. } | ContentBlock::Video { .. } | ContentBlock::Audio { .. } => {
             media_bytes
         }
+        // `content` repeats `blocks` as one JSON string, so only the blocks
+        // count, and media inside them counts like top-level media.
+        ContentBlock::ToolResult {
+            tool_use_id,
+            blocks: Some(blocks),
+            ..
+        } => blocks.iter().fold(
+            serialized_len(tool_use_id).saturating_add(TOOL_RESULT_WRAPPER_BYTES),
+            |bytes, block| bytes.saturating_add(tool_result_block_bytes(block, media_bytes)),
+        ),
         _ => serialized_len(block),
     }
+}
+
+/// One block of a structured tool result. Base64 and URL images and base64
+/// documents reach the model as media (Anthropic blocks, or the SDK's
+/// separate parts on text-slot wires), never as base64 text.
+fn tool_result_block_bytes(block: &serde_json::Value, media_bytes: u64) -> u64 {
+    let source = &block["source"];
+    match (block["type"].as_str(), source["type"].as_str()) {
+        (Some("text"), _) => block["text"].as_str().map_or_else(
+            || serialized_len(block),
+            |text| serialized_len(&text).saturating_add(TEXT_BLOCK_WRAPPER_BYTES),
+        ),
+        (Some("image"), Some("base64")) => media_bytes,
+        (Some("image"), Some("url")) => {
+            media_bytes.saturating_add(source["url"].as_str().map_or(0, |url| url.len() as u64))
+        }
+        (Some("document"), Some("base64")) => source["data"].as_str().map_or(media_bytes, |data| {
+            media_bytes.max(decoded_base64_len(data))
+        }),
+        _ => serialized_len(block),
+    }
+}
+
+/// Decoded size of base64 `data`, never its transport expansion.
+fn decoded_base64_len(data: &str) -> u64 {
+    let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count() as u64;
+    (data.len() as u64)
+        .saturating_mul(3)
+        .div_euclid(4)
+        .saturating_sub(padding)
 }
 
 #[cfg(test)]
@@ -281,6 +321,66 @@ mod tests {
             },
         );
         assert_eq!(approximate_tokens(&req), APPROX_MEDIA_TOKENS + 2);
+    }
+
+    fn tool_result_request(output: serde_json::Value) -> LlmRequest {
+        let mut req = LlmRequest::new("model");
+        push_history(
+            &mut req,
+            Message {
+                api_output_config: None,
+                role: "user".to_string(),
+                content: vec![ContentBlock::ToolResult {
+                    output_projection: None,
+                    tool_call_id: "call-1".to_string(),
+                    output,
+                    is_error: Some(false),
+                    cache_control: None,
+                    cache_reference: None,
+                }],
+            },
+        );
+        req
+    }
+
+    #[test]
+    fn approximate_tokens_counts_tool_result_media_without_base64_inflation() {
+        // A 2000×1299 screenshot is ~323 KB of base64. Counted as text, and
+        // twice (`content` repeats `blocks`), it came to ~216k tokens, so a
+        // session holding eight images "overflowed" a 1M window unsent.
+        let screenshot = |data: String| {
+            tool_result_request(serde_json::json!([
+                {"type": "text", "text": "Screenshot taken."},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}},
+            ]))
+        };
+        let tokens = approximate_tokens(&screenshot("A".repeat(323_384)));
+        assert_eq!(tokens, approximate_tokens(&screenshot("AAAA".into())));
+        assert!(
+            (APPROX_MEDIA_TOKENS..APPROX_MEDIA_TOKENS + 100).contains(&tokens),
+            "{tokens}"
+        );
+    }
+
+    #[test]
+    fn approximate_tokens_counts_structured_tool_result_text_once() {
+        let req = tool_result_request(serde_json::json!([
+            {"type": "text", "text": "x".repeat(30_000)},
+        ]));
+        // 30 KB of text is ~10k tokens; counting `content` and `blocks` gave ~20k.
+        let tokens = approximate_tokens(&req);
+        assert!((10_000..10_100).contains(&tokens), "{tokens}");
+    }
+
+    #[test]
+    fn approximate_tokens_counts_tool_result_documents_by_decoded_size() {
+        let req = tool_result_request(serde_json::json!([{
+            "type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": "A".repeat(120_000)},
+        }]));
+        // 120,000 base64 characters decode to 90,000 bytes.
+        let tokens = approximate_tokens(&req);
+        assert!((30_000..30_100).contains(&tokens), "{tokens}");
     }
 
     #[test]
