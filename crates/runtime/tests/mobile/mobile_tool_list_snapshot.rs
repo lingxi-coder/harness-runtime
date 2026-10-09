@@ -88,13 +88,30 @@ fn mobile_tool_list_snapshot() {
             "mobile tool set must not include `{forbidden}`"
         );
     }
-    // Mobile-exclusive tools must always be present. LSP is part of the
+    // Only wired native tools are advertised. LSP is part of the
     // production UniFFI profile; the default host-only test build intentionally
     // omits its optional runtime dependency.
-    for required in ["camera", "voice", "share"] {
+    for required in ["voice", "speech"] {
         assert!(
             names.iter().any(|n| n == required),
             "mobile tool set must include `{required}`"
+        );
+    }
+    for unavailable in [
+        "camera",
+        "notification",
+        "clipboard",
+        "share",
+        "location",
+        "device_status",
+        "haptics",
+        "open_url",
+        "calendar",
+        "contacts",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == unavailable),
+            "unwired {unavailable} must be absent"
         );
     }
     #[cfg(feature = "mobile")]

@@ -91,33 +91,15 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
     assert_eq!(metrics.terminal_counts(), (2, 1, 1, 1));
 }
 
-#[test]
-fn local_app_workflow_lease_root_is_derived_from_the_requested_app() {
-    let data_root = PathBuf::from("/profile");
-    assert_eq!(
-        local_app_workspace_root(&data_root, "app-a"),
-        PathBuf::from("/profile/apps/app-a/workspace")
-    );
-    assert_eq!(
-        local_app_workspace_root(&data_root, "app-b"),
-        PathBuf::from("/profile/apps/app-b/workspace")
-    );
-    assert_ne!(
-        local_app_workspace_root(&data_root, "app-a"),
-        local_app_workspace_root(&data_root, "app-b")
-    );
-}
-
 /// The lease is what stops a build from borrowing the session cwd or another
 /// app's workspace. `requires_workspace_lease` now reads a task's typed
-/// `LocalAppWorkflowTaskScope` (design §18 Phase -1 step 8 / §8.1) instead of
+/// `ManagedWorkflowScope` (design §18 Phase -1 step 8 / §8.1) instead of
 /// a `workflow_id` name check, so a `Build`-purpose scope requires the lease
 /// regardless of which app it names, and any other purpose never does.
 #[test]
 fn only_a_build_purpose_scope_requires_a_workspace_lease() {
-    let build = crate::scope::LocalAppWorkflowTaskScope::for_build("app-a").expect("valid");
-    let canvas_build =
-        crate::scope::LocalAppWorkflowTaskScope::for_build("canvas-app").expect("valid");
+    let build = crate::scope::ManagedWorkflowScope::for_build("app-a").expect("valid");
+    let canvas_build = crate::scope::ManagedWorkflowScope::for_build("canvas-app").expect("valid");
     assert!(
         requires_workspace_lease(Some(&build)),
         "a Build scope always requires the lease, whatever app it names"
@@ -127,8 +109,8 @@ fn only_a_build_purpose_scope_requires_a_workspace_lease() {
         "the drawn-surface build writes the same workspace and needs the same lease"
     );
 
-    let use_test = crate::scope::LocalAppWorkflowTaskScope::for_use_test("app-a").expect("valid");
-    let mcp = crate::scope::LocalAppWorkflowTaskScope::for_mcp_authoring("app-a").expect("valid");
+    let use_test = crate::scope::ManagedWorkflowScope::for_use_test("app-a").expect("valid");
+    let mcp = crate::scope::ManagedWorkflowScope::for_mcp_authoring("app-a").expect("valid");
     assert!(!requires_workspace_lease(Some(&use_test)));
     assert!(!requires_workspace_lease(Some(&mcp)));
 }
@@ -136,7 +118,7 @@ fn only_a_build_purpose_scope_requires_a_workspace_lease() {
 /// §8.1 / hazard (d): a custom workflow that merely reuses a real build
 /// workflow's `workflow_id` string carries no authority any more -- there is
 /// no `workflow_id` parameter for it to reuse in the first place.
-/// `requires_workspace_lease` takes only `Option<&LocalAppWorkflowTaskScope>`,
+/// `requires_workspace_lease` takes only `Option<&ManagedWorkflowScope>`,
 /// and a `None` -- which is what every workflow gets today, since nothing
 /// yet threads a Host-minted scope through `spawn()` (see
 /// `crate::state::LocalWorkflowTaskState::scope`'s doc comment) -- never
@@ -1083,7 +1065,7 @@ async fn agent_cap_admits_first_1000_parallel_calls() {
 
 /// An explicit unknown `agentType` throws the byte-exact not-found error
 /// listing the available agents; a known one runs fine. The workflow id here
-/// (`"local-app-build"`) deliberately has NO `:` -- a saved/inline, non-plugin
+/// (`"app-build"`) deliberately has NO `:` -- a saved/inline, non-plugin
 /// workflow -- so this also pins that the plugin-namespace retry added for
 /// P0-2 (`plugin_workflow_resolves_bare_agent_type_under_its_namespace`
 /// below) does not change behavior for a non-plugin workflow: the error stays
@@ -1094,7 +1076,7 @@ async fn unknown_agent_type_throws_not_found() {
     let result = run_workflow_script(
         "await agent('p', { agentType: 'nope' }); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
-        "local-app-build",
+        "app-build",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1134,7 +1116,7 @@ async fn unknown_agent_type_throws_not_found() {
     let outcome = run_workflow_script(
         "return await agent('p', { agentType: 'Explore' });",
         DEFAULT_WORKFLOW_SUBAGENT,
-        "local-app-build",
+        "app-build",
         known_spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1224,19 +1206,19 @@ impl SubagentSpawner for NamespacedListingSpawner {
 /// `<plugin>:<agent>` (`plugin/src/manager.rs:1052-1055`), but a plugin's own
 /// workflow script authors a BARE `agentType` -- it must not need to know
 /// what namespace it was installed under. When the running workflow's own id
-/// is plugin-qualified (`lingxi-local-app:local-app-build`), the dispatch
+/// is plugin-qualified (`acme:app-build`), the dispatch
 /// must resolve under that plugin's namespace and spawn with the QUALIFIED
 /// subagent_type.
 #[tokio::test]
 async fn plugin_workflow_resolves_bare_agent_type_under_its_namespace() {
     let spawner = Arc::new(NamespacedListingSpawner {
-        listing: vec!["lingxi-local-app:builder".to_string()],
+        listing: vec!["acme:builder".to_string()],
         ..Default::default()
     });
     let outcome = run_workflow_script(
         "const r = await agent('p', { agentType: 'builder' }); return r;",
         DEFAULT_WORKFLOW_SUBAGENT,
-        "lingxi-local-app:local-app-build",
+        "acme:app-build",
         spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1257,7 +1239,7 @@ async fn plugin_workflow_resolves_bare_agent_type_under_its_namespace() {
     let reqs = spawner.seen_reqs.lock().unwrap();
     assert_eq!(reqs.len(), 1, "exactly one agent() call must have spawned");
     assert_eq!(
-        reqs[0].subagent_type, "lingxi-local-app:builder",
+        reqs[0].subagent_type, "acme:builder",
         "the spawn request must carry the NAMESPACE-QUALIFIED subagent_type, \
          not the script's bare 'builder'"
     );
@@ -1272,7 +1254,7 @@ async fn plugin_workflow_resolves_bare_agent_type_under_its_namespace() {
 /// asked for a substitution. `builder`, `designer`, `operator`, `tester` and
 /// `verifier` are all names a person plausibly gives a project agent, and
 /// under bare-first any one of them silently replaced the corresponding
-/// `lingxi-local-app:` agent for an entire local-app build, with no
+/// `acme:` agent for an entire managed-app build, with no
 /// diagnostic on any surface.
 ///
 /// So: when the running workflow belongs to a plugin AND that plugin
@@ -1283,16 +1265,13 @@ async fn plugin_workflow_resolves_bare_agent_type_under_its_namespace() {
 #[tokio::test]
 async fn plugin_namespaced_agent_wins_over_a_bare_shadow_when_both_are_registered() {
     let spawner = Arc::new(NamespacedListingSpawner {
-        listing: vec![
-            "builder".to_string(),
-            "lingxi-local-app:builder".to_string(),
-        ],
+        listing: vec!["builder".to_string(), "acme:builder".to_string()],
         ..Default::default()
     });
     let outcome = run_workflow_script(
         "const r = await agent('p', { agentType: 'builder' }); return r;",
         DEFAULT_WORKFLOW_SUBAGENT,
-        "lingxi-local-app:local-app-build",
+        "acme:app-build",
         spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1313,7 +1292,7 @@ async fn plugin_namespaced_agent_wins_over_a_bare_shadow_when_both_are_registere
     let reqs = spawner.seen_reqs.lock().unwrap();
     assert_eq!(reqs.len(), 1, "exactly one agent() call must have spawned");
     assert_eq!(
-        reqs[0].subagent_type, "lingxi-local-app:builder",
+        reqs[0].subagent_type, "acme:builder",
         "a project/user agent registered under the bare name must NOT shadow the plugin's own \
          namespaced agent of the same name inside that plugin's own workflow"
     );
@@ -1327,16 +1306,13 @@ async fn plugin_namespaced_agent_wins_over_a_bare_shadow_when_both_are_registere
 #[tokio::test]
 async fn a_bare_agent_type_the_plugin_did_not_register_still_resolves() {
     let spawner = Arc::new(NamespacedListingSpawner {
-        listing: vec![
-            "general-purpose".to_string(),
-            "lingxi-local-app:builder".to_string(),
-        ],
+        listing: vec!["general-purpose".to_string(), "acme:builder".to_string()],
         ..Default::default()
     });
     let outcome = run_workflow_script(
         "const r = await agent('p', { agentType: 'general-purpose' }); return r;",
         DEFAULT_WORKFLOW_SUBAGENT,
-        "lingxi-local-app:local-app-build",
+        "acme:app-build",
         spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1359,7 +1335,7 @@ async fn a_bare_agent_type_the_plugin_did_not_register_still_resolves() {
     assert_eq!(
         reqs[0].subagent_type, "general-purpose",
         "the bare spelling must survive when the plugin registered no \
-         `lingxi-local-app:general-purpose`"
+         `acme:general-purpose`"
     );
 }
 
@@ -1370,13 +1346,13 @@ async fn a_bare_agent_type_the_plugin_did_not_register_still_resolves() {
 #[tokio::test]
 async fn unknown_agent_type_under_plugin_workflow_names_both_spellings() {
     let spawner = Arc::new(NamespacedListingSpawner {
-        listing: vec!["lingxi-local-app:builder".to_string()],
+        listing: vec!["acme:builder".to_string()],
         ..Default::default()
     });
     let result = run_workflow_script(
         "await agent('p', { agentType: 'nope' }); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
-        "lingxi-local-app:local-app-build",
+        "acme:app-build",
         spawner,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1399,7 +1375,7 @@ async fn unknown_agent_type_under_plugin_workflow_names_both_spellings() {
         "error must name the bare spelling the script asked for: {msg}"
     );
     assert!(
-        msg.contains("lingxi-local-app:nope"),
+        msg.contains("acme:nope"),
         "error must ALSO name the namespace-qualified spelling that was tried first: {msg}"
     );
 }
@@ -1423,27 +1399,27 @@ fn nested_with_plugin_workflows(names: &[&str]) -> NestedConfig {
     }
 }
 
-/// P0-2, RESUME path. The Host relaunches a paused/adopted local-app build by
+/// P0-2, RESUME path. The Host relaunches a paused/adopted managed-app build by
 /// `script_path` with `name: None` (`runtime/src/mobile/host.rs`), so the
 /// run's `workflow_id` degrades to the script's BARE `meta.name`
-/// (`"local-app-build"`, no `:`) -- the desktop host does the same by
+/// (`"app-build"`, no `:`) -- the desktop host does the same by
 /// preferring `meta.name` over `spec.name`. Splitting the id alone therefore
 /// yields no namespace, and the very same three plugin scripts would throw
 /// again on their first uncached `agent()` call after the journal goes live.
 /// The namespace must instead be recovered from the plugin workflow registry:
-/// exactly one plugin registers `lingxi-local-app:local-app-build`, so a bare
-/// `builder` resolves under `lingxi-local-app`.
+/// exactly one plugin registers `acme:app-build`, so a bare
+/// `builder` resolves under the plugin.
 #[tokio::test]
 async fn resumed_plugin_workflow_resolves_bare_agent_type_via_registry() {
     let spawner = Arc::new(NamespacedListingSpawner {
-        listing: vec!["lingxi-local-app:builder".to_string()],
+        listing: vec!["acme:builder".to_string()],
         ..Default::default()
     });
     let outcome = run_workflow_script(
         "const r = await agent('p', { agentType: 'builder' }); return r;",
         DEFAULT_WORKFLOW_SUBAGENT,
         // Bare, exactly as the resume/desktop paths derive it.
-        "local-app-build",
+        "app-build",
         spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1452,7 +1428,7 @@ async fn resumed_plugin_workflow_resolves_bare_agent_type_via_registry() {
         None,
         None,
         0,
-        nested_with_plugin_workflows(&["lingxi-local-app:local-app-build"]),
+        nested_with_plugin_workflows(&["acme:app-build"]),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
@@ -1464,7 +1440,7 @@ async fn resumed_plugin_workflow_resolves_bare_agent_type_via_registry() {
     let reqs = spawner.seen_reqs.lock().unwrap();
     assert_eq!(reqs.len(), 1, "exactly one agent() call must have spawned");
     assert_eq!(
-        reqs[0].subagent_type, "lingxi-local-app:builder",
+        reqs[0].subagent_type, "acme:builder",
         "the namespace must be recovered from the plugin workflow registry when \
          the workflow id itself is bare"
     );
@@ -1477,13 +1453,13 @@ async fn resumed_plugin_workflow_resolves_bare_agent_type_via_registry() {
 #[tokio::test]
 async fn ambiguous_bare_workflow_name_resolves_no_namespace() {
     let spawner = Arc::new(NamespacedListingSpawner {
-        listing: vec!["lingxi-local-app:builder".to_string()],
+        listing: vec!["acme:builder".to_string()],
         ..Default::default()
     });
     let result = run_workflow_script(
         "await agent('p', { agentType: 'builder' }); return 'done';",
         DEFAULT_WORKFLOW_SUBAGENT,
-        "local-app-build",
+        "app-build",
         spawner.clone(),
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
@@ -1492,10 +1468,7 @@ async fn ambiguous_bare_workflow_name_resolves_no_namespace() {
         None,
         None,
         0,
-        nested_with_plugin_workflows(&[
-            "lingxi-local-app:local-app-build",
-            "other-plugin:local-app-build",
-        ]),
+        nested_with_plugin_workflows(&["acme:app-build", "other-plugin:app-build"]),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
@@ -1506,7 +1479,7 @@ async fn ambiguous_bare_workflow_name_resolves_no_namespace() {
     let msg = format!("{err}");
     assert!(
         msg.contains(
-            "agent({agentType}): agent type 'builder' not found. Available agents: lingxi-local-app:builder"
+            "agent({agentType}): agent type 'builder' not found. Available agents: acme:builder"
         ),
         "got: {msg}"
     );
@@ -1785,9 +1758,9 @@ fn make_request_applies_workflow_stage_tool_denies() {
     let request = make_request(
         "general-purpose",
         "stage",
-        r#"{"agentType":"builder","disallowedTools":["LocalAppGet","LocalAppScaffold","LocalAppRuntime"]}"#,
+        r#"{"agentType":"builder","disallowedTools":["ToolGet","ToolScaffold","ToolRuntime"]}"#,
     );
-    for tool in ["LocalAppGet", "LocalAppScaffold", "LocalAppRuntime"] {
+    for tool in ["ToolGet", "ToolScaffold", "ToolRuntime"] {
         assert!(
             request
                 .additional_disallowed_tools
@@ -4934,92 +4907,6 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
             }
         }
     }
-}
-
-/// r2-tests-honesty-005: nothing ties the `agentType: '<x>'` literals in the
-/// Local App plugin's workflow scripts to the shipped agent roster
-/// (`plugins/lingxi-local-app/agents/*.md`) -- neither `check-phase2-plugin.py`
-/// (which only checks the roster directory listing, never opens a workflow
-/// script) nor any Rust test. A workflow renamed to an `agentType` with no
-/// `.md` on disk passed every existing gate. This test closes the Rust half:
-/// it reads the live plugin workflow scripts and roster off disk (no
-/// hand-typed name list to rot) and fails if extraction comes back empty
-/// (fail-closed, matching the still-missing Python gate's intended posture)
-/// or if any extracted `agentType` has no matching roster file.
-#[test]
-fn plugin_workflow_agent_types_match_shipped_agent_roster() {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let plugin_root = manifest_dir
-        .parent()
-        .expect("tasks/ has a parent")
-        .join("plugins")
-        .join("lingxi-local-app");
-    let workflows_dir = plugin_root.join("workflows");
-    let agents_dir = plugin_root.join("agents");
-
-    let roster: StdHashSet<String> = std::fs::read_dir(&agents_dir)
-        .unwrap_or_else(|error| panic!("cannot read agent roster dir {agents_dir:?}: {error}"))
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .map(str::to_string)
-            } else {
-                None
-            }
-        })
-        .collect();
-    assert!(
-        !roster.is_empty(),
-        "agent roster dir {agents_dir:?} yielded zero .md files; needle extraction cannot be trusted"
-    );
-
-    let mut found_agent_types: StdHashSet<String> = StdHashSet::new();
-    let workflow_scripts = std::fs::read_dir(&workflows_dir)
-        .unwrap_or_else(|error| panic!("cannot read workflows dir {workflows_dir:?}: {error}"));
-    for entry in workflow_scripts.filter_map(|entry| entry.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("js") {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read workflow script {path:?}: {error}"));
-        let mut rest = source.as_str();
-        while let Some(at) = rest.find("agentType:") {
-            rest = &rest[at + "agentType:".len()..];
-            let rest_trimmed = rest.trim_start();
-            let quote = rest_trimmed
-                .chars()
-                .next()
-                .filter(|char_| *char_ == '\'' || *char_ == '"');
-            if let Some(quote) = quote {
-                let after_quote = &rest_trimmed[1..];
-                if let Some(end) = after_quote.find(quote) {
-                    found_agent_types.insert(after_quote[..end].to_string());
-                }
-            }
-            rest = rest_trimmed;
-        }
-    }
-    assert!(
-        !found_agent_types.is_empty(),
-        "extracted zero `agentType:` literals from {workflows_dir:?}; the needle \
-         derivation itself is broken (verify against a known sample before trusting a \
-         zero-hit scan of any workflow script)"
-    );
-
-    let unrostered: Vec<&String> = found_agent_types
-        .iter()
-        .filter(|agent_type| !roster.contains(*agent_type))
-        .collect();
-    assert!(
-        unrostered.is_empty(),
-        "workflow scripts under {workflows_dir:?} reference agentType(s) {unrostered:?} \
-         with no matching {agents_dir:?}/<name>.md in the shipped roster \
-         (roster: {roster:?})"
-    );
 }
 
 /// A value inside `int({min:1,max:256})` is taken verbatim, including the

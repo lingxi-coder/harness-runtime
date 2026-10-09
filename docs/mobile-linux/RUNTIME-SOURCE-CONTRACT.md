@@ -1,10 +1,10 @@
 # Mobile runtime source boundary
 
-The runtime Git revision pinned by Cargo owns `docs/mobile-linux` runtime pins,
-SBOM inputs, policy and rootfs schemas, plus `crates/local-apps` and
-`crates/plugins/lingxi-local-app` assets. Runtime checks never require a LingXi
-`clients` checkout. `scripts/local-apps/verify-local-app-supply-chain.py`
-validates all runtime assets and the generic execution contract independently.
+The runtime Git revision pinned by Cargo owns the rootfs schemas and policy under
+`docs/mobile-linux`. The Local App runtime seed's pins, policy, SBOM, templates and plugin
+assets, and the scripts that verify and stage them (`scripts/runtime/`), belong to the
+`local-app-builder` repository the product pins separately. Runtime checks never require a
+LingXi `clients` checkout.
 
 Rootfs and node-module tools accept `--output` / `--output-dir`; rootfs builds
 also accept `--cache-dir` (or `LINGXI_NODE_SOURCE_CACHE`). Standalone defaults

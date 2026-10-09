@@ -39,16 +39,21 @@ import sys
 import unicodedata
 from pathlib import Path
 
+
 # packer 的硬上限（设计文档 §7.2.1）。超限时 packer 点名 skill/FQN 拒绝。
 MAX_DESCRIPTION_COLUMNS = 180
 
 # 门要扫的 skill 根目录，相对仓库根。
-SKILL_ROOTS = ["crates/plugins/lingxi-local-app/skills"]
+# The Local App plugin's skills and agents are checked in the Local App repository; the device skills
+# below are the host's own.
+SKILL_ROOTS = [
+    "crates/runtime/src/mobile/device_skills",
+]
 
 # Agent 用同一套 frontmatter 判据,但形状不同:agent 是 `agents/<name>.md`
 # 单文件,identity 来自**文件名**;skill 是 `skills/<name>/SKILL.md`,identity
 # 来自**目录名**。两者都由 `plugin/src/discovery.rs` 的 `glob_md()` 递归发现。
-AGENT_ROOTS = ["crates/plugins/lingxi-local-app/agents"]
+AGENT_ROOTS = []
 
 # Prose that asserts a tool does not exist. Matched per SENTENCE against the
 # agent's own granted tool names, so "no `LocalAppActOnUi` — that is operator's
@@ -118,7 +123,7 @@ def main():
         # a nested reorg the plugin loader still finds must not go unseen here.
         agents.extend(sorted((p, base) for p in base.rglob("*.md")))
 
-    if not agents:
+    if AGENT_ROOTS and not agents:
         print("check-skill-frontmatter: enumerated ZERO agents under %s — refusing to report clean "
               "from an empty enumeration" % ", ".join(AGENT_ROOTS), file=sys.stderr)
         return 1

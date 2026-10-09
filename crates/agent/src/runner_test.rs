@@ -2245,79 +2245,6 @@ fn structured_output_validation_and_cap_helpers() {
     assert_eq!(structured_output_retry_cap(), 5);
 }
 
-#[test]
-fn local_app_operator_schema_requires_complete_host_qa_projection() {
-    let document: serde_json::Value = serde_json::from_str(include_str!(
-        "../../plugins/lingxi-local-app/schemas/workflow-agent-results.schema.json"
-    ))
-    .expect("parse checked-in Local App workflow role schemas");
-    let mut schema = document["$defs"]["operator_result"].clone();
-    schema["$defs"] = document["$defs"].clone();
-    let schema = serde_json::to_string(&schema).expect("serialize operator role schema");
-
-    let complete = serde_json::json!({
-        "ok": true,
-        "qa_handle": "qa_00000000000000000000000000000000",
-        "evidence_ids": ["evidence-1"],
-        "status": "evidence_collected",
-        "issues": [],
-        "summary": "Host evidence collected",
-        "verification_scope": {
-            "declared_target_ids": ["primary", "ipad"],
-            "in_scope_target_ids": ["primary"],
-            "unverified_target_ids": ["ipad"],
-            "unverified_scenario_ids": ["ipad-layout"]
-        },
-        "upstream_failures": [{
-            "id": "source:save",
-            "message": "save did not persist",
-            "introduced_at_ms": 10
-        }],
-        "upstream_findings": [{
-            "id": "source:save",
-            "message": "save did not persist",
-            "blocking": true,
-            "resolved_by_evidence_ids": []
-        }]
-    });
-    assert!(
-        validate_structured_output(Some(&schema), &complete).is_ok(),
-        "the complete Host QaBegin projection must satisfy the production validator"
-    );
-
-    let mut missing_scope = complete.clone();
-    missing_scope
-        .as_object_mut()
-        .expect("operator result object")
-        .remove("verification_scope");
-    assert!(
-        validate_structured_output(Some(&schema), &missing_scope).is_err(),
-        "operator output without canonical Host scope must fail closed"
-    );
-
-    for ledger_field in ["upstream_failures", "upstream_findings"] {
-        let mut missing_ledger = complete.clone();
-        missing_ledger
-            .as_object_mut()
-            .expect("operator result object")
-            .remove(ledger_field);
-        assert!(
-            validate_structured_output(Some(&schema), &missing_ledger).is_err(),
-            "operator output without {ledger_field} must fail closed"
-        );
-    }
-
-    let mut incomplete_finding = complete;
-    incomplete_finding["upstream_findings"][0]
-        .as_object_mut()
-        .expect("upstream finding object")
-        .remove("resolved_by_evidence_ids");
-    assert!(
-        validate_structured_output(Some(&schema), &incomplete_finding).is_err(),
-        "Host upstream finding projection must include resolution evidence ids"
-    );
-}
-
 #[tokio::test]
 async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
     // G1: the terminal Completed event carries the FINAL turn's usage (claude
@@ -3268,7 +3195,7 @@ async fn loop_api_error_persists_seed_and_terminal_reason() {
     )) as Arc<dyn lingxi_core::host::FileSystem>);
     ctx.prompt_messages = vec![lingxi_core::types::ConversationMessage::user(
         MessageId::new(),
-        "design the local app".to_string(),
+        "design the app".to_string(),
     )];
     let agent_id = ctx.agent_id;
 
@@ -3285,7 +3212,7 @@ async fn loop_api_error_persists_seed_and_terminal_reason() {
         )
     });
     assert!(
-        body.contains("design the local app"),
+        body.contains("design the app"),
         "the seed must survive a first-request API failure: {body}"
     );
     assert!(
@@ -5030,9 +4957,9 @@ async fn generic_workflow_watchdog_preserves_server_content_retry_and_usage_beha
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_preserves_completed_scaffold_and_read() {
+async fn host_create_transport_retry_preserves_completed_scaffold_and_read() {
     let api = ResultStreamMockApiClient::new(vec![
-        streamed_tool_use_turn("LocalAppScaffold", "tool_use")
+        streamed_tool_use_turn("HostScaffold", "tool_use")
             .into_iter()
             .map(Ok)
             .collect(),
@@ -5084,7 +5011,7 @@ async fn local_app_create_transport_retry_preserves_completed_scaffold_and_read(
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_shares_watchdog_limit_and_fails_closed() {
+async fn host_create_transport_retry_shares_watchdog_limit_and_fails_closed() {
     let api = ResultStreamMockApiClient::new(vec![
         vec![Err(response_body_transport_error())],
         vec![Err(workflow_watchdog_timeout_error(
@@ -5119,7 +5046,7 @@ async fn local_app_create_transport_retry_shares_watchdog_limit_and_fails_closed
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_discards_tools_from_interrupted_response() {
+async fn host_create_transport_retry_discards_tools_from_interrupted_response() {
     let mut interrupted: Vec<_> = streamed_tool_use_turn("Write", "tool_use")
         .into_iter()
         .take_while(|event| {
@@ -5163,7 +5090,7 @@ async fn local_app_create_transport_retry_discards_tools_from_interrupted_respon
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_never_replays_an_unclosed_server_tool() {
+async fn host_create_transport_retry_never_replays_an_unclosed_server_tool() {
     for error in [
         response_body_transport_error(),
         workflow_watchdog_timeout_error(
@@ -5213,7 +5140,7 @@ async fn local_app_create_transport_retry_never_replays_an_unclosed_server_tool(
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_is_not_a_generic_error_retry() {
+async fn host_create_transport_retry_is_not_a_generic_error_retry() {
     for (workflow, failure) in [
         (false, vec![Err(response_body_transport_error())]),
         (
@@ -5348,11 +5275,11 @@ fn create_parse_recovery_api(
 
 fn enable_create_parse_recovery(ctx: &mut SubagentContext) {
     enable_design_parse_recovery(ctx);
-    ctx.tool_schemas = ["Write", "Read", "LocalAppScaffold"]
+    ctx.tool_schemas = ["Write", "Read", "HostScaffold"]
         .into_iter()
         .map(|name| serde_json::json!({"name": name, "input_schema": {"type": "object"}}))
         .collect();
-    ctx.allowed_tools = vec!["Write".into(), "Read".into(), "LocalAppScaffold".into()];
+    ctx.allowed_tools = vec!["Write".into(), "Read".into(), "HostScaffold".into()];
 }
 
 fn reasoning_only_truncated_turn() -> Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>
@@ -5370,9 +5297,9 @@ fn reasoning_only_truncated_turn() -> Vec<Result<llm_runtime::HistoryEvent, llm_
 }
 
 #[tokio::test]
-async fn local_app_create_truncation_continues_without_replaying_completed_tools() {
+async fn host_create_truncation_continues_without_replaying_completed_tools() {
     let api = create_parse_recovery_api(vec![
-        streamed_tool_use_turn("LocalAppScaffold", "tool_use")
+        streamed_tool_use_turn("HostScaffold", "tool_use")
             .into_iter()
             .map(Ok)
             .collect(),
@@ -5414,7 +5341,7 @@ async fn local_app_create_truncation_continues_without_replaying_completed_tools
 }
 
 #[tokio::test]
-async fn local_app_create_truncation_recovery_is_bounded_by_retries_and_turns() {
+async fn host_create_truncation_recovery_is_bounded_by_retries_and_turns() {
     for (max_turns, expected_calls) in [(8, 3), (1, 1)] {
         let api =
             create_parse_recovery_api((0..3).map(|_| reasoning_only_truncated_turn()).collect());
@@ -5454,9 +5381,9 @@ async fn generic_schema_truncation_keeps_existing_structured_output_nudge() {
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_preserves_completed_scaffold_and_read() {
+async fn host_create_json_correction_preserves_completed_scaffold_and_read() {
     let api = create_parse_recovery_api(vec![
-        streamed_tool_use_turn("LocalAppScaffold", "tool_use")
+        streamed_tool_use_turn("HostScaffold", "tool_use")
             .into_iter()
             .map(Ok)
             .collect(),
@@ -5507,7 +5434,7 @@ async fn local_app_create_json_correction_preserves_completed_scaffold_and_read(
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_shares_hard_run_cap_with_structured_output() {
+async fn host_create_json_correction_shares_hard_run_cap_with_structured_output() {
     for configured in [2, 99] {
         let api = create_parse_recovery_api(vec![
             malformed_structured_turn("Write"),
@@ -5537,7 +5464,7 @@ async fn local_app_create_json_correction_shares_hard_run_cap_with_structured_ou
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_requires_host_policy_and_advertised_local_tool() {
+async fn host_create_json_correction_requires_host_policy_and_advertised_local_tool() {
     for case in [
         "ordinary agent",
         "default workflow",
@@ -5595,7 +5522,7 @@ async fn local_app_create_json_correction_requires_host_policy_and_advertised_lo
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_rejects_mixed_server_or_incomplete_response() {
+async fn host_create_json_correction_rejects_mixed_server_or_incomplete_response() {
     for (other_tool, other_first) in [
         ("local", true),
         ("local", false),
@@ -5659,7 +5586,7 @@ async fn local_app_create_json_correction_rejects_mixed_server_or_incomplete_res
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_rechecks_cancellation_and_budget() {
+async fn host_create_json_correction_rechecks_cancellation_and_budget() {
     for cancel in [true, false] {
         let api = create_parse_recovery_api(vec![
             malformed_structured_turn("Write"),

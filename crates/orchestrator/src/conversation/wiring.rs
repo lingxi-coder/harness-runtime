@@ -458,7 +458,7 @@ impl ConversationOrchestrator {
     }
 
     /// Share the API-call counter with other in-process model entry points,
-    /// such as local-app vision delegation, so one `/cost` snapshot includes
+    /// such as app vision delegation, so one `/cost` snapshot includes
     /// every billable request made on the session's behalf.
     #[must_use]
     pub fn with_api_calls_counter(mut self, counter: Arc<std::sync::atomic::AtomicU32>) -> Self {

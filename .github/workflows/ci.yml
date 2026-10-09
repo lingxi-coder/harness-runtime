@@ -17,8 +17,7 @@ jobs:
         run: |
           python3 scripts/checks/check_brand_leaks.py --selftest
           python3 scripts/tests/test_dependency_rules.py
-      - name: Runtime template behavior
-        run: node --test scripts/tests/test-local-app-r4-libs.mjs
+          python3 scripts/tests/test_product_neutral.py
       - name: Verify every gate and the trigger chain
         run: python3 scripts/tests/test_gate_triggers.py
 

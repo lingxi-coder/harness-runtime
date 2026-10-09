@@ -9,9 +9,9 @@
 //! 渲染不同文案、提供不同操作，绝不能混用。
 
 use async_trait::async_trait;
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 use lingxi_core::types::{ConversationMessage, MediaAnalysis, MessageId, MessageRole};
-use llm_runtime::{ApiService, ContentBlock, HistoryEvent};
+use llm_runtime::{ApiService, ContentBlock, HistoryContentDelta, HistoryEvent};
 use local_apps::AppError;
 use sha2::{Digest, Sha256};
 use sidequery::{
@@ -19,124 +19,12 @@ use sidequery::{
     VisionDelegationService, VisionPacket,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 
-/// Pull-based provider events exposed to the Local App host. The host lowers
-/// only text deltas to the page stream; reasoning, tool and provider metadata
-/// stay inside the trusted engine boundary.
-pub type LocalAppsModelStream = Pin<Box<dyn Stream<Item = Result<HistoryEvent, AppError>> + Send>>;
-
-/// Who wrote one turn of an app-initiated chat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRole {
-    /// The app's own user-side prompt.
-    User,
-    /// A previous answer the app is replaying for context.
-    Assistant,
-}
-
-/// One piece of a chat turn. Media arrives already decoded and
-/// size-checked by the bridge; this layer only shapes it for the provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChatPart {
-    /// Plain text.
-    Text(String),
-    /// An image the model should look at (vision).
-    Image {
-        /// MIME type, e.g. `image/jpeg`.
-        media_type: String,
-        /// Base64-encoded bytes, no `data:` prefix.
-        base64: String,
-    },
-    /// A document (PDF) the model should read.
-    Document {
-        /// MIME type, e.g. `application/pdf`.
-        media_type: String,
-        /// Base64-encoded bytes, no `data:` prefix.
-        base64: String,
-    },
-}
-
-/// One turn of an app-initiated chat.
-///
-/// Multi-part so a photo the app just captured can be asked about directly.
-/// There is deliberately no audio part: the conversation protocol has no
-/// audio content block and no provider on this stack accepts raw audio in a
-/// messages call, so an app that wants speech input transcribes it first
-/// (`device.transcribeSpeech`) and sends text — a silently dropped audio
-/// attachment would be far worse than a typed refusal.
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    /// Who wrote it.
-    pub role: ChatRole,
-    /// Ordered parts. Apps send no tool results.
-    pub content: Vec<ChatPart>,
-}
-
-/// A free-text model call a RUNNING app asked for (`window.lingxi.v2.llm`).
-///
-/// Deliberately smaller than the provider surface: the model and profile are
-/// NOT part of it — an app always rides whatever the user currently has
-/// selected (`ApiServiceModel`'s live selection), so an app can neither pin
-/// an expensive model nor route around the user's `/model` choice. Tools are
-/// absent for the same reason a running app cannot reach the orchestrator: a
-/// page's prompt is untrusted input, and giving it tool calls would hand
-/// prompt-injected text an execution surface.
-#[derive(Debug, Clone)]
-pub struct ChatRequest {
-    /// Optional system prompt written by the app's own code.
-    pub system: Option<String>,
-    /// Conversation so far, oldest first.
-    pub messages: Vec<ChatMessage>,
-    /// Output budget. An app-initiated call spends the USER's quota on the
-    /// app's behalf, so it always carries an explicit cap.
-    pub max_tokens: u32,
-    /// Optional sampling temperature.
-    pub temperature: Option<f32>,
-    /// Internal cache scope for delegated media analysis reuse.
-    pub cache_scope: Option<String>,
-}
-
-/// What a [`ChatRequest`] produced.
-#[derive(Debug, Clone)]
-pub struct ChatOutcome {
-    /// The answer's text blocks, concatenated (thinking excluded).
-    pub text: String,
-    /// Provider stop reason, when reported.
-    pub stop_reason: Option<String>,
-}
-
-/// The injectable model seam. The implementation owns auth, routing, retry
-/// and timeout — callers only see a request in, an answer or a typed error
-/// out.
-#[async_trait]
-pub trait LocalAppsModel: Send + Sync {
-    /// One free-text call on behalf of a RUNNING app. No tool, no schema —
-    /// see [`ChatRequest`] for what an app may and may not control.
-    ///
-    /// Required rather than defaulted: a double that silently answered with
-    /// canned text would make a broken wiring look green, so every
-    /// implementation states its behaviour.
-    async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError>;
-
-    /// Open a bounded streaming call on behalf of a running app. Test doubles
-    /// that only cover the legacy request/response path keep the explicit
-    /// unavailable default; the production `ApiServiceModel` overrides it.
-    async fn stream(&self, _request: ChatRequest) -> Result<LocalAppsModelStream, AppError> {
-        Err(AppError::LlmUnavailable(
-            "streaming is unavailable for this model adapter".into(),
-        ))
-    }
-
-    /// Update the default model/profile future calls route through —
-    /// `ClientCommand::SetModel` calls this so app-initiated `llm.chat`
-    /// follows a `/model` switch instead of staying pinned to whatever was
-    /// live at engine build time. Default is a no-op: only
-    /// [`ApiServiceModel`] (the production implementation) has a live
-    /// selection to update; test doubles ignore it.
-    fn set_model(&self, _model: String, _profile: Option<String>) {}
-}
+pub use local_app_builder_service::llm::{
+    ChatMessage, ChatOutcome, ChatPart, ChatRequest, ChatRole, ChatStreamEvent, LocalAppsLlm,
+    LocalAppsModel, ModelStream,
+};
 
 /// Lower one app-supplied part to the conversation vocabulary.
 fn chat_part_block(part: ChatPart) -> lingxi_core::types::ContentBlock {
@@ -154,6 +42,31 @@ fn chat_part_block(part: ChatPart) -> lingxi_core::types::ContentBlock {
                 data: base64,
             },
         },
+    }
+}
+
+/// What the service is told of one provider event: its text, and a stop reason
+/// whenever one is reported. Everything else (reasoning, tool use, search,
+/// block framing) stays inside the engine boundary.
+fn stream_event_of(event: HistoryEvent) -> Option<ChatStreamEvent> {
+    match event {
+        HistoryEvent::ContentBlockDelta {
+            delta: HistoryContentDelta::TextDelta { text },
+            ..
+        } => Some(ChatStreamEvent::TextDelta(text)),
+        HistoryEvent::MessageDelta { delta, .. } => {
+            delta.stop_reason.map(ChatStreamEvent::StopReason)
+        }
+        HistoryEvent::Completed { response } => response
+            .stop_reason
+            .clone()
+            .map(ChatStreamEvent::StopReason),
+        HistoryEvent::WebSearch { .. }
+        | HistoryEvent::MessageStart { .. }
+        | HistoryEvent::ContentBlockStart { .. }
+        | HistoryEvent::ContentBlockDelta { .. }
+        | HistoryEvent::ContentBlockStop { .. }
+        | HistoryEvent::MessageStop => None,
     }
 }
 
@@ -857,7 +770,7 @@ impl LocalAppsModel for ApiServiceModel {
         })
     }
 
-    async fn stream(&self, request: ChatRequest) -> Result<LocalAppsModelStream, AppError> {
+    async fn stream(&self, request: ChatRequest) -> Result<ModelStream, AppError> {
         let prepared = self.prepare_request(request).await?;
         let stream = self
             .service
@@ -875,46 +788,16 @@ impl LocalAppsModel for ApiServiceModel {
             )
             .await
             .map_err(|error| AppError::LlmUnavailable(format!("{error}")))?;
-        Ok(Box::pin(stream.map(|event| {
-            event.map_err(|error| AppError::LlmUnavailable(format!("{error}")))
+        Ok(Box::pin(stream.filter_map(|event| async move {
+            match event {
+                Ok(event) => stream_event_of(event).map(Ok),
+                Err(error) => Some(Err(AppError::LlmUnavailable(format!("{error}")))),
+            }
         })))
     }
 
     fn set_model(&self, model: String, profile: Option<String>) {
         *self.selection.write().expect("selection lock poisoned") = (model, profile);
-    }
-}
-
-/// The engine-side handle over the injected model — what the broker's
-/// `llm.chat` bridge operation calls through (`SharedLlm` holds one).
-pub struct LocalAppsLlm {
-    model: Arc<dyn LocalAppsModel>,
-}
-
-impl LocalAppsLlm {
-    #[must_use]
-    pub fn new(model: Arc<dyn LocalAppsModel>) -> Self {
-        Self { model }
-    }
-
-    /// Follow a live `/model` switch: see [`LocalAppsModel::set_model`].
-    pub fn set_model(&self, model: String, profile: Option<String>) {
-        self.model.set_model(model, profile);
-    }
-
-    /// One free-text call on behalf of a running app — see [`ChatRequest`].
-    ///
-    /// A passthrough: there is no prompt to compose and no validator to run,
-    /// because the answer is prose the app renders itself. Everything
-    /// policy-shaped (declared capability, budget clamp, concurrency,
-    /// truncation) lives at the bridge, where the app id is known.
-    pub async fn chat(&self, request: ChatRequest) -> Result<ChatOutcome, AppError> {
-        self.model.chat(request).await
-    }
-
-    /// Open a streaming side-query through the injected model adapter.
-    pub async fn stream(&self, request: ChatRequest) -> Result<LocalAppsModelStream, AppError> {
-        self.model.stream(request).await
     }
 }
 
@@ -1219,6 +1102,32 @@ mod tests {
     /// Pinning the extraction against hand-built blocks keeps a reasoning
     /// model's thinking out of the app's answer with no `ApiService`
     /// involved.
+    #[test]
+    fn a_stream_carries_only_text_and_stop_reasons() {
+        use llm_runtime::{HistoryContentDelta, HistoryMessageDelta};
+        assert_eq!(
+            stream_event_of(HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: HistoryContentDelta::TextDelta { text: "hi".into() },
+            }),
+            Some(ChatStreamEvent::TextDelta("hi".into()))
+        );
+        let delta = |stop_reason: Option<&str>| HistoryEvent::MessageDelta {
+            delta: HistoryMessageDelta {
+                stop_reason: stop_reason.map(str::to_string),
+                stop_details: None,
+            },
+            usage: None,
+        };
+        assert_eq!(
+            stream_event_of(delta(Some("end_turn"))),
+            Some(ChatStreamEvent::StopReason("end_turn".into()))
+        );
+        // A message delta that reports no stop reason says nothing.
+        assert_eq!(stream_event_of(delta(None)), None);
+        assert_eq!(stream_event_of(HistoryEvent::MessageStop), None);
+    }
+
     #[test]
     fn chat_text_concatenates_text_blocks_and_drops_thinking() {
         let content = vec![

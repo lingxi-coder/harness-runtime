@@ -509,30 +509,24 @@ pub trait WorkflowProgressSink: Send + Sync {
 /// Handler name reported by [`Task::name`] / used as the runtime task-name.
 const HANDLER_NAME: &str = "local_workflow";
 
-fn local_app_workspace_root(data_root: &std::path::Path, app_id: &str) -> std::path::PathBuf {
-    data_root.join("apps").join(app_id).join("workspace")
-}
-
 /// Whether this workflow run must hold its app's exclusive workspace lease.
 ///
-/// Reads the task's typed [`crate::scope::LocalAppWorkflowTaskScope`]
+/// Reads the task's typed [`crate::scope::ManagedWorkflowScope`]
 /// (design §18 Phase -1 step 8 / §8.1) instead of matching `workflow_id`
-/// against this crate's (since-deleted) `LOCAL_APP_BUILD_WORKFLOWS` array: a
+/// against this crate's (since-deleted) list of build-workflow names: a
 /// `workflow_id` is a string the *caller* supplies when launching a
 /// workflow, so a custom workflow that happens to reuse a real build
 /// workflow's name used to collect the exact same lease. `None` -- no scope
 /// at all -- never requires the lease; only a
-/// `Some` scope whose [`LocalAppWorkflowPurpose`](crate::scope::LocalAppWorkflowPurpose)
-/// is `Build` does (`LocalAppWorkflowTaskScope::requires_workspace_lease`).
+/// `Some` scope whose [`ManagedWorkflowPurpose`](crate::scope::ManagedWorkflowPurpose)
+/// is `Build` does (`ManagedWorkflowScope::requires_workspace_lease`).
 ///
 /// `pub(crate)` (not private) so `registry_test.rs` can exercise it directly
-/// alongside [`crate::registry::TaskRegistry::find_nonterminal_local_app_workflows`]
+/// alongside [`crate::registry::TaskRegistry::find_nonterminal_managed_workflows`]
 /// in the same integration test, without needing a full spawn (which needs a
 /// lease registry, a data root and a live runtime).
-pub(crate) fn requires_workspace_lease(
-    scope: Option<&crate::scope::LocalAppWorkflowTaskScope>,
-) -> bool {
-    scope.is_some_and(crate::scope::LocalAppWorkflowTaskScope::requires_workspace_lease)
+pub(crate) fn requires_workspace_lease(scope: Option<&crate::scope::ManagedWorkflowScope>) -> bool {
+    scope.is_some_and(crate::scope::ManagedWorkflowScope::requires_workspace_lease)
 }
 
 /// Claude Code `k6a` — the per-run lifetime cap on real `agent()` calls. The
@@ -952,9 +946,9 @@ pub struct LocalWorkflowHandler {
     /// snapshots `baseline.load()` so the run's `budget.spent()` is turn-relative
     /// (`pool - baseline` = `getTurnSpent()`). Unset (tests) ⇒ baseline 0.
     turn_baseline_cell: Option<Arc<OnceLock<Arc<AtomicU64>>>>,
-    /// Optional permission lease registry used by local-app build workflows.
+    /// Optional permission lease registry used by managed-app build workflows.
     workspace_leases: Option<Arc<permission::WorkspacePermissionLeaseRegistry>>,
-    /// Profile root containing `apps/<app_id>/workspace`. The local-app
+    /// Profile root containing `apps/<app_id>/workspace`. The managed-app
     /// workflow derives the exact app workspace from its validated `app_id`
     /// instead of reusing the engine session cwd (which may belong to another
     /// app or to the host project).
@@ -3290,8 +3284,8 @@ async fn run_workflow_script_with_live_updates_recorded(
                             // user or project agent called `builder`, `designer`,
                             // `operator`, `tester` or `verifier` -- all names a
                             // person plausibly picks -- silently replaced the
-                            // corresponding `lingxi-local-app:` agent for the whole
-                            // local-app build, with no diagnostic anywhere. Bare
+                            // corresponding `acme:` agent for the whole
+                            // managed-app build, with no diagnostic anywhere. Bare
                             // names still resolve normally: the namespaced spelling
                             // is only preferred when the plugin actually registered
                             // one, so `general-purpose`/`Explore` and every
@@ -3686,7 +3680,7 @@ impl Task for LocalWorkflowHandler {
             })
             .transpose()?;
 
-        // A local-app build may only run with a lease bound to the exact app
+        // A managed-app build may only run with a lease bound to the exact app
         // workspace. Do this validation before allocating task/spool state so
         // a malformed scope cannot start a prompt-heavy workflow with a
         // generic cwd or leave an orphaned spool file behind.
@@ -3713,14 +3707,14 @@ impl Task for LocalWorkflowHandler {
             let data_root = self.workspace_root.clone().ok_or_else(|| {
                 TaskError::Internal(format!("{workflow_id} requires an app data root"))
             })?;
-            // AppService's persisted invariant is exactly
-            // `apps/<id>/workspace`. Keep this derivation here, at the point
-            // where the workflow's app_id is validated, so a workflow cannot
-            // borrow the current session cwd or another app's workspace.
-            let root = local_app_workspace_root(&data_root, &app_id);
+            // The profile's workspace layout is the persisted invariant. Keep
+            // this derivation here, at the point where the workflow's app_id
+            // is validated, so a workflow cannot borrow the current session
+            // cwd or another app's workspace.
+            let root = registry.workspace_root_for(&data_root, &app_id);
             Some(
                 registry
-                    .begin_local_app(app_id, root)
+                    .begin_bound(app_id, root)
                     .map_err(TaskError::Internal)?,
             )
         } else {

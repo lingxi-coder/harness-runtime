@@ -1258,6 +1258,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "device-api",
  "figment",
  "fs2",
  "futures-core",
@@ -1265,7 +1266,9 @@ dependencies = [
  "indexmap",
  "jsonrpc",
  "libc",
+ "mcp-wire",
  "mobile-linux-api",
+ "rooted-fs",
  "rustix 0.38.44",
  "schemars",
  "secrecy",
@@ -1525,6 +1528,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "device-api"
+version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=11a10656e4847d2e5aeb5858da21781a9618ea7e#11a10656e4847d2e5aeb5858da21781a9618ea7e"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -2392,6 +2406,7 @@ dependencies = [
  "agent",
  "async-trait",
  "base64 0.22.1",
+ "boon",
  "branding",
  "bridge",
  "client",
@@ -2412,10 +2427,14 @@ dependencies = [
  "jsonrpc",
  "lingxi-llm-client",
  "llm-runtime",
+ "local-app-builder-contracts",
+ "local-app-builder-plugin",
+ "local-app-builder-service",
  "local-apps",
  "lsp",
  "lsp-types",
  "mcp",
+ "mcp-wire",
  "memory",
  "migrations",
  "mobile-linux-api",
@@ -2433,7 +2452,7 @@ dependencies = [
  "platform-windows",
  "plugin",
  "provider-config",
- "reqwest",
+ "rooted-fs",
  "sandbox",
  "sandbox-runtime",
  "secret",
@@ -3285,25 +3304,61 @@ dependencies = [
 ]
 
 [[package]]
-name = "local-apps"
+name = "local-app-builder-contracts"
 version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=11a10656e4847d2e5aeb5858da21781a9618ea7e#11a10656e4847d2e5aeb5858da21781a9618ea7e"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "local-app-builder-plugin"
+version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=11a10656e4847d2e5aeb5858da21781a9618ea7e#11a10656e4847d2e5aeb5858da21781a9618ea7e"
+
+[[package]]
+name = "local-app-builder-service"
+version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=11a10656e4847d2e5aeb5858da21781a9618ea7e#11a10656e4847d2e5aeb5858da21781a9618ea7e"
 dependencies = [
  "async-trait",
- "branding",
- "core",
+ "base64 0.22.1",
+ "device-api",
+ "futures-core",
+ "futures-util",
+ "local-app-builder-contracts",
+ "local-apps",
+ "mcp-wire",
+ "reqwest",
+ "rooted-fs",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "local-apps"
+version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=11a10656e4847d2e5aeb5858da21781a9618ea7e#11a10656e4847d2e5aeb5858da21781a9618ea7e"
+dependencies = [
+ "async-trait",
  "git2",
- "mobile-linux-api",
+ "local-app-builder-contracts",
+ "mcp-wire",
  "rand 0.9.4",
+ "rooted-fs",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tree-sitter",
- "tree-sitter-javascript",
 ]
 
 [[package]]
@@ -3458,6 +3513,7 @@ dependencies = [
  "futures-util",
  "indexmap",
  "jsonrpc",
+ "mcp-wire",
  "migrations",
  "rand 0.9.4",
  "regex",
@@ -3473,6 +3529,22 @@ dependencies = [
  "unicode-normalization",
  "url",
  "urlencoding",
+]
+
+[[package]]
+name = "mcp-wire"
+version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=11a10656e4847d2e5aeb5858da21781a9618ea7e#11a10656e4847d2e5aeb5858da21781a9618ea7e"
+dependencies = [
+ "async-trait",
+ "futures-core",
+ "futures-util",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -4669,6 +4741,7 @@ dependencies = [
  "async-trait",
  "core",
  "http-client",
+ "local-app-builder-contracts",
  "mobile-linux-android",
  "mobile-linux-api",
  "platform-common",
@@ -5512,6 +5585,18 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rooted-fs"
+version = "0.12.0"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=11a10656e4847d2e5aeb5858da21781a9618ea7e#11a10656e4847d2e5aeb5858da21781a9618ea7e"
+dependencies = [
+ "fs2",
+ "rustix 0.38.44",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -6384,7 +6469,6 @@ dependencies = [
  "futures",
  "hooks",
  "llm-runtime",
- "local-apps",
  "mcp",
  "mobile-linux-api",
  "permission",
@@ -6903,6 +6987,7 @@ dependencies = [
  "base64 0.22.1",
  "branding",
  "core",
+ "flate2",
  "futures",
  "image 0.24.9",
  "lingxi-llm-client",
@@ -7085,7 +7170,9 @@ name = "tool-mobile"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "core",
+ "image 0.24.9",
  "mobile-linux-api",
  "once_cell",
  "permission",
@@ -7094,6 +7181,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tool-api",
+ "url",
 ]
 
 [[package]]

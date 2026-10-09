@@ -753,7 +753,9 @@ pub(crate) struct MobileWorkflowStatusSink {
     /// Host-owned broker used to validate verified Local App build/use-test
     /// workflows. A weak reference avoids a broker↔workflow ownership cycle.
     local_apps_host: Arc<
-        std::sync::OnceLock<std::sync::Weak<crate::mobile::local_apps_host::LocalAppsHostBroker>>,
+        std::sync::OnceLock<
+            std::sync::Weak<local_app_builder_service::broker::LocalAppsHostBroker>,
+        >,
     >,
     /// The bound registry is needed to resolve verified launch metadata and
     /// the handler-owned spool path without trusting workflow result JSON.
@@ -765,12 +767,12 @@ pub(crate) struct MobileWorkflowStatusSink {
 /// prepared value prevents the sink from reconstructing publication identity
 /// out of model-authored result JSON.
 struct PreparedMobileQaCommit {
-    host: Arc<crate::mobile::local_apps_host::LocalAppsHostBroker>,
-    publication: crate::mobile::local_apps_host::PreparedWorkflowQaPublication,
+    host: Arc<local_app_builder_service::broker::LocalAppsHostBroker>,
+    publication: local_app_builder_service::broker::PreparedWorkflowQaPublication,
 }
 
 struct MobileQaCleanup {
-    host: Arc<crate::mobile::local_apps_host::LocalAppsHostBroker>,
+    host: Arc<local_app_builder_service::broker::LocalAppsHostBroker>,
     app_id: String,
     workflow_run_id: String,
 }
@@ -811,8 +813,8 @@ impl MobileWorkflowStatusSink {
         let scope = workflow.scope.as_ref()?;
         if !matches!(
             scope.purpose(),
-            tasks::scope::LocalAppWorkflowPurpose::Build
-                | tasks::scope::LocalAppWorkflowPurpose::UseTest
+            tasks::scope::ManagedWorkflowPurpose::Build
+                | tasks::scope::ManagedWorkflowPurpose::UseTest
         ) {
             return None;
         }
@@ -875,8 +877,8 @@ impl MobileWorkflowStatusSink {
     /// verified app/run scope from the task registry.
     pub(crate) fn attach_local_apps_host(
         &self,
-        host: std::sync::Weak<crate::mobile::local_apps_host::LocalAppsHostBroker>,
-    ) -> Result<(), std::sync::Weak<crate::mobile::local_apps_host::LocalAppsHostBroker>> {
+        host: std::sync::Weak<local_app_builder_service::broker::LocalAppsHostBroker>,
+    ) -> Result<(), std::sync::Weak<local_app_builder_service::broker::LocalAppsHostBroker>> {
         self.local_apps_host.set(host)
     }
 
@@ -1084,8 +1086,8 @@ impl MobileWorkflowStatusSink {
         let purpose = scope.purpose();
         if !matches!(
             purpose,
-            tasks::scope::LocalAppWorkflowPurpose::Build
-                | tasks::scope::LocalAppWorkflowPurpose::UseTest
+            tasks::scope::ManagedWorkflowPurpose::Build
+                | tasks::scope::ManagedWorkflowPurpose::UseTest
         ) {
             return (outcome, status, None);
         }
@@ -1100,7 +1102,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: verified workflow has no run id".into(),
+                "completion_unverified: verified workflow has no run id".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1110,7 +1112,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: verified workflow returned no result".into(),
+                "completion_unverified: verified workflow returned no result".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1120,7 +1122,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: workflow result is not JSON".into(),
+                "completion_unverified: workflow result is not JSON".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1130,7 +1132,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: workflow result is not an object".into(),
+                "completion_unverified: workflow result is not an object".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1146,8 +1148,7 @@ impl MobileWorkflowStatusSink {
                 registry,
                 &workflow.base.output_file,
                 outcome,
-                "local_app_completion_unverified: verified workflow result has no boolean ok:true"
-                    .into(),
+                "completion_unverified: verified workflow result has no boolean ok:true".into(),
             )
             .await;
             return (outcome, status, None);
@@ -1173,7 +1174,7 @@ impl MobileWorkflowStatusSink {
                     registry,
                     &workflow.base.output_file,
                     outcome,
-                    format!("local_app_completion_unverified: {error}"),
+                    format!("completion_unverified: {error}"),
                 )
                 .await;
                 return (outcome, status, None);
@@ -1189,7 +1190,7 @@ impl MobileWorkflowStatusSink {
                     registry,
                     &workflow.base.output_file,
                     outcome,
-                    format!("local_app_completion_unverified: {error}"),
+                    format!("completion_unverified: {error}"),
                 )
                 .await;
                 return (outcome, status, None);
@@ -1202,9 +1203,7 @@ impl MobileWorkflowStatusSink {
                     registry,
                     &workflow.base.output_file,
                     outcome,
-                    format!(
-                        "local_app_completion_unverified: cannot serialize checked result: {error}"
-                    ),
+                    format!("completion_unverified: cannot serialize checked result: {error}"),
                 )
                 .await;
                 return (outcome, status, None);
@@ -1296,8 +1295,8 @@ impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
                 let is_local_app_build_or_use_test = workflow.scope.as_ref().is_some_and(|scope| {
                     matches!(
                         scope.purpose(),
-                        tasks::scope::LocalAppWorkflowPurpose::Build
-                            | tasks::scope::LocalAppWorkflowPurpose::UseTest
+                        tasks::scope::ManagedWorkflowPurpose::Build
+                            | tasks::scope::ManagedWorkflowPurpose::UseTest
                     )
                 });
                 if is_local_app_build_or_use_test {
@@ -1312,7 +1311,7 @@ impl tasks::handlers::TaskStatusSink for MobileWorkflowStatusSink {
                     let actual = match prepared {
                         Some(prepared) if candidate_status == tasks::TaskStatus::Completed => {
                             registry
-                                .commit_local_app_workflow_terminal(task_id, candidate, move || {
+                                .commit_managed_workflow_terminal(task_id, candidate, move || {
                                     let PreparedMobileQaCommit { host, publication } = prepared;
                                     async move {
                                         host.commit_prepared_workflow_qa_publication(&publication)
@@ -1638,7 +1637,7 @@ fn is_verified_plugin_workflow(
         .is_some_and(|resolved| resolved == script)
 }
 
-/// Does this launch earn `LocalAppWorkflowTaskScope::for_mcp_authoring`?
+/// Does this launch earn `ManagedWorkflowScope::for_mcp_authoring`?
 ///
 /// Exactly two provenances, mirroring the build path's pair:
 ///   * a BY-NAME launch of the MCP-authoring plugin workflow whose script
@@ -1728,16 +1727,12 @@ pub(crate) const MCP_AUTHORING_EXTERNAL_ARG_KEYS: &[&str] = &["app_id", "user_go
 // These schemas are Plugin-owned inputs. Embed the checked-in JSON at build
 // time so a workflow launch never reads a workspace-provided schema or lets a
 // caller replace the contract after Plugin verification.
-const AUTHORING_SPEC_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/authoring-spec.schema.json");
-const QA_REPORT_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/qa-report.schema.json");
-const USE_TEST_REPORT_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/use-test-report.schema.json");
-const MCP_PROPOSAL_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/mcp-proposal.schema.json");
+const AUTHORING_SPEC_SCHEMA_JSON: &str = local_app_builder_plugin::schemas::AUTHORING_SPEC;
+const QA_REPORT_SCHEMA_JSON: &str = local_app_builder_plugin::schemas::QA_REPORT;
+const USE_TEST_REPORT_SCHEMA_JSON: &str = local_app_builder_plugin::schemas::USE_TEST_REPORT;
+const MCP_PROPOSAL_SCHEMA_JSON: &str = local_app_builder_plugin::schemas::MCP_PROPOSAL;
 const WORKFLOW_AGENT_RESULTS_SCHEMA_JSON: &str =
-    include_str!("../../../plugins/lingxi-local-app/schemas/workflow-agent-results.schema.json");
+    local_app_builder_plugin::schemas::WORKFLOW_AGENT_RESULTS;
 
 fn checked_in_local_app_schemas() -> Result<Value, tool_workflow::WorkflowLaunchError> {
     let parse = |name: &str, source: &str| {
@@ -2017,7 +2012,7 @@ fn apply_materialized_local_app_collections_with_provenance(
 
 /// Rewrite the launch args, and -- when this launch really is one of this
 /// Host's own Local App build workflows against an app this Host resolved --
-/// mint the [`tasks::scope::LocalAppWorkflowTaskScope`] that authorizes it.
+/// mint the [`tasks::scope::ManagedWorkflowScope`] that authorizes it.
 ///
 /// `Ok(None)` is the answer for every launch that is not a Local App build:
 /// the function returns before the app lookup, and an unscoped task row is
@@ -2030,7 +2025,7 @@ fn apply_materialized_local_app_collections_with_identity(
     trusted_local_app_resume: bool,
     expected_workflow_id: Option<&str>,
     verified_plugin_workflow: bool,
-) -> Result<Option<tasks::scope::LocalAppWorkflowTaskScope>, tool_workflow::WorkflowLaunchError> {
+) -> Result<Option<tasks::scope::ManagedWorkflowScope>, tool_workflow::WorkflowLaunchError> {
     if let Some(expected_workflow_id) = expected_workflow_id {
         if expected_workflow_id != crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
         {
@@ -2120,7 +2115,7 @@ fn apply_materialized_local_app_collections_with_identity(
     // binding as a consistent pair, and resolves the binding against the exact
     // published catalog (including its contract hash and availability).
     let build_target =
-        crate::mobile::local_apps_build::detect_build_target(&layout).map_err(|error| {
+        local_app_builder_service::app_build::detect_build_target(&layout).map_err(|error| {
             tool_workflow::WorkflowLaunchError(format!(
                 "cannot validate local-app runtime profile for app {app_id:?}: {error}"
             ))
@@ -2141,19 +2136,20 @@ fn apply_materialized_local_app_collections_with_identity(
         )));
     }
     let active_authoring_contract =
-        crate::mobile::local_apps_build::active_authoring_contract(&layout).map_err(|error| {
-            tool_workflow::WorkflowLaunchError(format!(
-                "cannot load active Local App authoring contract: {error}"
-            ))
-        })?;
-    let active_authoring_contract_sha256 =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout).map_err(
+        local_app_builder_service::app_build::active_authoring_contract(&layout).map_err(
             |error| {
                 tool_workflow::WorkflowLaunchError(format!(
-                    "cannot load active Local App authoring contract digest: {error}"
+                    "cannot load active Local App authoring contract: {error}"
                 ))
             },
         )?;
+    let active_authoring_contract_sha256 =
+        local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout)
+            .map_err(|error| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "cannot load active Local App authoring contract digest: {error}"
+                ))
+            })?;
     // The build receipt is the selector for the last successful Host build.
     // Keep its exact digest separate from the contract payload: the payload
     // intentionally has no digest field, while Plugin QA/update logic must
@@ -2194,7 +2190,7 @@ fn apply_materialized_local_app_collections_with_identity(
     // bundled bytes are running. Naming another app there does not hand the
     // forger that app's authority; it hands them a build of that app, which is
     // the same thing the tool would have done anyway.
-    let scope = tasks::scope::LocalAppWorkflowTaskScope::for_build(&app_id).map_err(|error| {
+    let scope = tasks::scope::ManagedWorkflowScope::for_build(&app_id).map_err(|error| {
         tool_workflow::WorkflowLaunchError(format!(
             "cannot authorize local-app build workflow: {error}"
         ))
@@ -2254,12 +2250,14 @@ fn apply_materialized_local_app_collections_with_identity(
             false
         };
         let schemas = checked_in_local_app_schemas()?;
-        let catalog =
-            crate::mobile::local_app_template_catalog::catalog_view().map_err(|error| {
-                tool_workflow::WorkflowLaunchError(format!(
-                    "cannot read verified template catalog: {error}"
-                ))
-            })?;
+        let catalog = crate::mobile::local_app_template_catalog::catalog_view(
+            &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+        )
+        .map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot read verified template catalog: {error}"
+            ))
+        })?;
         object.insert(
             "host_context".into(),
             serde_json::json!({
@@ -2347,7 +2345,7 @@ fn resolve_adopted_local_app_build_scope(
     script_sha256: Option<&str>,
     script_is_verbatim_builtin: Option<bool>,
     args_json: Option<&str>,
-) -> Option<tasks::scope::LocalAppWorkflowTaskScope> {
+) -> Option<tasks::scope::ManagedWorkflowScope> {
     if workflow_id != crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID {
         return None;
     }
@@ -2366,7 +2364,7 @@ fn resolve_adopted_local_app_build_scope(
         return None;
     }
     let layout = local_apps::AppLayout::new(app_data_root, app_id).ok()?;
-    let build_target = crate::mobile::local_apps_build::detect_build_target(&layout).ok()?;
+    let build_target = local_app_builder_service::app_build::detect_build_target(&layout).ok()?;
     let manifest = local_apps::load_manifest(&layout).ok()?;
     let binding = manifest.runtime_profile.as_ref()?;
     manifest.dependency_snapshot.as_ref()?;
@@ -2375,7 +2373,7 @@ fn resolve_adopted_local_app_build_scope(
     plugin_binding
         .enforce(app_id, binding.family, workflow_id)
         .ok()?;
-    tasks::scope::LocalAppWorkflowTaskScope::for_build(app_id).ok()
+    tasks::scope::ManagedWorkflowScope::for_build(app_id).ok()
 }
 
 /// Re-mint the Host scope for a restart-recovered verified Local App
@@ -2390,7 +2388,7 @@ fn resolve_adopted_local_app_scope(
     script_sha256: Option<&str>,
     script_is_verbatim_builtin: Option<bool>,
     args_json: Option<&str>,
-) -> Option<tasks::scope::LocalAppWorkflowTaskScope> {
+) -> Option<tasks::scope::ManagedWorkflowScope> {
     if workflow_id == crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID {
         return resolve_adopted_local_app_build_scope(
             app_data_root,
@@ -2416,7 +2414,7 @@ fn resolve_adopted_local_app_scope(
         .and_then(serde_json::Value::as_str)
         .filter(|app_id| !app_id.trim().is_empty())?;
     let layout = local_apps::AppLayout::new(app_data_root, app_id).ok()?;
-    let _build_target = crate::mobile::local_apps_build::detect_build_target(&layout).ok()?;
+    let _build_target = local_app_builder_service::app_build::detect_build_target(&layout).ok()?;
     let manifest = local_apps::load_manifest(&layout).ok()?;
     manifest.runtime_profile.as_ref()?;
     manifest.dependency_snapshot.as_ref()?;
@@ -2424,16 +2422,16 @@ fn resolve_adopted_local_app_scope(
     // contract; this also prevents a torn/scaffold-only app from borrowing
     // the QA gate during restart adoption.
     let active_digest =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout)
+        local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout)
             .ok()
             .flatten()?;
     if active_digest.is_empty() {
         return None;
     }
-    crate::mobile::local_apps_build::active_authoring_contract(&layout)
+    local_app_builder_service::app_build::active_authoring_contract(&layout)
         .ok()
         .flatten()?;
-    tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).ok()
+    tasks::scope::ManagedWorkflowScope::for_use_test(app_id).ok()
 }
 
 #[async_trait::async_trait]
@@ -2594,7 +2592,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             .and_then(|resolution| resolution.workflow_id.as_deref());
         // `trusted_local_app_resume` is BUILD-specific: it feeds
         // `is_mobile_local_app_builtin`, which grants the build path's
-        // args rewrite and `LocalAppWorkflowTaskScope::for_build`. A use-test
+        // args rewrite and `ManagedWorkflowScope::for_build`. A use-test
         // or MCP-authoring resume must NOT flip it on -- that would hand the
         // build workflow's authority to a different script.
         let trusted_local_app_resume = matches!(
@@ -2685,15 +2683,13 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .and_then(Value::as_str)
             {
                 local_app_scope = Some(if is_use_test_launch {
-                    tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).map_err(
-                        |error| {
-                            tool_workflow::WorkflowLaunchError(format!(
-                                "cannot authorize local-app use-test workflow: {error}"
-                            ))
-                        },
-                    )?
+                    tasks::scope::ManagedWorkflowScope::for_use_test(app_id).map_err(|error| {
+                        tool_workflow::WorkflowLaunchError(format!(
+                            "cannot authorize local-app use-test workflow: {error}"
+                        ))
+                    })?
                 } else {
-                    tasks::scope::LocalAppWorkflowTaskScope::for_mcp_authoring(app_id).map_err(
+                    tasks::scope::ManagedWorkflowScope::for_mcp_authoring(app_id).map_err(
                         |error| {
                             tool_workflow::WorkflowLaunchError(format!(
                                 "cannot authorize local-app MCP authoring workflow: {error}"
@@ -3022,27 +3018,31 @@ fn enrich_persisted_plugin_workflow_context(
     // Resolve the Host-owned scaffold/profile pair before any standalone
     // plugin workflow can mint an app scope. A valid-looking app_id and
     // manifest alone must not authorize a custom/torn shell.
-    let _build_target =
-        crate::mobile::local_apps_build::detect_build_target(&layout).map_err(|error| {
+    let _build_target = local_app_builder_service::app_build::detect_build_target(&layout)
+        .map_err(|error| {
             tool_workflow::WorkflowLaunchError(format!(
                 "cannot validate persisted Local App runtime profile: {error}"
             ))
         })?;
     let active_authoring_contract =
-        crate::mobile::local_apps_build::active_authoring_contract(&layout).map_err(|error| {
-            tool_workflow::WorkflowLaunchError(format!(
-                "cannot load active Local App authoring contract: {error}"
-            ))
-        })?;
-    let active_authoring_contract_sha256 =
-        crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout).map_err(
+        local_app_builder_service::app_build::active_authoring_contract(&layout).map_err(
             |error| {
                 tool_workflow::WorkflowLaunchError(format!(
-                    "cannot load active Local App authoring contract digest: {error}"
+                    "cannot load active Local App authoring contract: {error}"
                 ))
             },
         )?;
-    let catalog = crate::mobile::local_app_template_catalog::catalog_view().map_err(|error| {
+    let active_authoring_contract_sha256 =
+        local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout)
+            .map_err(|error| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "cannot load active Local App authoring contract digest: {error}"
+                ))
+            })?;
+    let catalog = crate::mobile::local_app_template_catalog::catalog_view(
+        &crate::mobile::local_apps_adapters::CompiledPluginBundle,
+    )
+    .map_err(|error| {
         tool_workflow::WorkflowLaunchError(format!(
             "cannot read verified template catalog: {error}"
         ))
@@ -3276,10 +3276,11 @@ mod plugin_args_tests {
             version: local_apps::AUTHORING_SCHEMA_VERSION,
             revision: 1,
             app_id: "impact123".into(),
-            runtime_profile: crate::mobile::local_app_runtime_profiles::current_binding_for_family(
-                local_apps::AppRuntimeProfile::ReactDom,
-            )
-            .expect("runtime profile"),
+            runtime_profile:
+                local_app_builder_service::runtime_profiles::current_binding_for_family(
+                    local_apps::AppRuntimeProfile::ReactDom,
+                )
+                .expect("runtime profile"),
             spec: spec.clone(),
         };
         assert!(!update_ui_impact(&active, &spec_value).expect("same spec"));
@@ -3443,7 +3444,7 @@ mod plugin_args_tests {
     }
 
     /// Pins BOTH halves of `is_mcp_authoring_launch`, the sole production
-    /// grant of `LocalAppWorkflowTaskScope::for_mcp_authoring`. The second
+    /// grant of `ManagedWorkflowScope::for_mcp_authoring`. The second
     /// case is the narrowing that previously shipped unpinned: before it, a
     /// by-name launch of a project workflow that had simply taken the name
     /// `lingxi-local-app:local-app-mcp-authoring` in the saved-workflow
@@ -3565,15 +3566,13 @@ mod plugin_args_tests {
         let cases: [(&str, &str, &str, &[&str]); 2] = [
             (
                 crate::mobile::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
-                include_str!("../../../plugins/lingxi-local-app/workflows/local-app-use-test.js"),
+                local_app_builder_plugin::workflows::USE_TEST,
                 "const ALLOWED =",
                 USE_TEST_EXTERNAL_ARG_KEYS,
             ),
             (
                 crate::mobile::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
-                include_str!(
-                    "../../../plugins/lingxi-local-app/workflows/local-app-mcp-authoring.js"
-                ),
+                local_app_builder_plugin::workflows::MCP_AUTHORING,
                 "const EXTERNAL_KEYS =",
                 MCP_AUTHORING_EXTERNAL_ARG_KEYS,
             ),
@@ -3640,8 +3639,9 @@ mod run_id_tests {
         manifest: &mut local_apps::AppManifest,
         family: local_apps::AppRuntimeProfile,
     ) {
-        let binding = crate::mobile::local_app_runtime_profiles::current_binding_for_family(family)
-            .expect("published runtime profile");
+        let binding =
+            local_app_builder_service::runtime_profiles::current_binding_for_family(family)
+                .expect("published runtime profile");
         manifest.surface = Some(family.surface());
         manifest.runtime_profile = Some(binding.clone());
         manifest.template_origin = Some(local_apps::AppTemplateOrigin {
@@ -3660,8 +3660,9 @@ mod run_id_tests {
             lockfile_sha256: "2".repeat(64),
             dependency_tree_sha256: "3".repeat(64),
             sbom_sha256: "4".repeat(64),
-            toolchain_key: crate::mobile::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
-                .to_string(),
+            toolchain_key:
+                local_app_builder_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+                    .to_string(),
             verified_profile_contract_sha256: binding.contract_sha256,
         });
     }
@@ -3669,9 +3670,9 @@ mod run_id_tests {
     fn fixture_authoring_spec(
         family: local_apps::AppRuntimeProfile,
     ) -> local_apps::AppAuthoringSpec {
-        let mut spec: local_apps::AppAuthoringSpec = serde_json::from_str(include_str!(
-            "../../../local-apps/tests/fixtures/authoring-spec.valid-null-canvas.json"
-        ))
+        let mut spec: local_apps::AppAuthoringSpec = serde_json::from_str(
+            local_app_builder_plugin::fixtures::AUTHORING_SPEC_VALID_NULL_CANVAS,
+        )
         .expect("checked-in authoring fixture");
         if family != local_apps::AppRuntimeProfile::ReactDom {
             spec.design.canvas = Some(local_apps::AppCanvasDesign {
@@ -4012,7 +4013,7 @@ mod run_id_tests {
         )
         .expect("materialized manifest should still resolve through a hostile args block");
 
-        let pinned = crate::mobile::local_app_runtime_profiles::current_binding_for_family(
+        let pinned = local_app_builder_service::runtime_profiles::current_binding_for_family(
             local_apps::AppRuntimeProfile::ReactDom,
         )
         .expect("published runtime profile");
@@ -4527,8 +4528,9 @@ mod run_id_tests {
             lockfile_sha256: "2".repeat(64),
             dependency_tree_sha256: "3".repeat(64),
             sbom_sha256: "4".repeat(64),
-            toolchain_key: crate::mobile::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
-                .to_string(),
+            toolchain_key:
+                local_app_builder_service::runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+                    .to_string(),
             verified_profile_contract_sha256: "a".repeat(64),
         });
         manifest.template_origin = Some(local_apps::AppTemplateOrigin {
@@ -5478,7 +5480,7 @@ mod run_id_tests {
 
     async fn register_terminal_test_workflow(
         registry: &Arc<tasks::registry::TaskRegistry>,
-        scope: Option<tasks::scope::LocalAppWorkflowTaskScope>,
+        scope: Option<tasks::scope::ManagedWorkflowScope>,
         args: serde_json::Value,
     ) -> String {
         let task_id = registry
@@ -5558,7 +5560,7 @@ mod run_id_tests {
         let layout = local_apps::AppLayout::new(root, app_id).expect("layout");
         let manifest = local_apps::load_manifest(&layout).expect("manifest");
         let authoring_contract_sha256 =
-            crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout)
+            local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout)
                 .expect("active build receipt")
                 .expect("active authoring contract digest");
         let runtime_profile = manifest.runtime_profile.clone().expect("runtime profile");
@@ -5595,7 +5597,7 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_build("qa-app").expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_build("qa-app").expect("scope")),
             serde_json::json!({"app_id":"qa-app","quality_level":"balanced"}),
         )
         .await;
@@ -5664,13 +5666,13 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_use_test(app_id).expect("scope")),
             serde_json::json!({"app_id":app_id,"quality_level":"balanced"}),
         )
         .await;
         let listener = Arc::new(FakeListener::default());
         let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
-        let host = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+        let host = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::ListenerSink::arc(listener.clone()),
             None,
@@ -5717,13 +5719,13 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_use_test("qa-app").expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_use_test("qa-app").expect("scope")),
             serde_json::json!({"app_id":"qa-app","quality_level":"thorough"}),
         )
         .await;
         let listener = Arc::new(FakeListener::default());
         let sink = terminal_test_sink(root.path(), listener.clone(), registry.clone(), &task_id);
-        let host = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+        let host = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::ListenerSink::arc(listener.clone()),
             None,
@@ -5750,7 +5752,7 @@ mod run_id_tests {
         assert_eq!(actual.base.status, tasks::TaskStatus::Failed);
         assert!(actual.outcome.result.is_none());
         assert!(actual.outcome.error.as_deref().is_some_and(|error| {
-            error.contains("local_app_completion_unverified")
+            error.contains("completion_unverified")
                 && !error.contains("terminal spool replacement failed")
         }));
         let spool = registry
@@ -5770,7 +5772,7 @@ mod run_id_tests {
         assert!(events[0]
             .1
             .as_deref()
-            .is_some_and(|error| { error.contains("local_app_completion_unverified") }));
+            .is_some_and(|error| { error.contains("completion_unverified") }));
     }
 
     #[tokio::test]
@@ -5781,7 +5783,7 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_build("qa-app").expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_build("qa-app").expect("scope")),
             serde_json::json!({"app_id":"qa-app"}),
         )
         .await;
@@ -5830,7 +5832,7 @@ mod run_id_tests {
         let registry = scope_test_registry();
         let task_id = register_terminal_test_workflow(
             &registry,
-            Some(tasks::scope::LocalAppWorkflowTaskScope::for_build("qa-app").expect("scope")),
+            Some(tasks::scope::ManagedWorkflowScope::for_build("qa-app").expect("scope")),
             serde_json::json!({"app_id":"qa-app"}),
         )
         .await;
@@ -5956,9 +5958,9 @@ mod run_id_tests {
 
     /// THE REGRESSION. A genuine, in-flight Local App build must block its
     /// app's delete, end to end: the Host resolves the app and mints a
-    /// `LocalAppWorkflowTaskScope` at the launch seam, the launcher puts it on
+    /// `ManagedWorkflowScope` at the launch seam, the launcher puts it on
     /// `TaskSpawnInput::LocalWorkflow`, `state_for_spawn` copies it onto the
-    /// task row, and `find_nonterminal_local_app_workflows` finds the row.
+    /// task row, and `find_nonterminal_managed_workflows` finds the row.
     ///
     /// Every link is production code; only the task HANDLER is a stub, and it
     /// is a stub in the direction that cannot help the assertion (it neither
@@ -6002,13 +6004,13 @@ mod run_id_tests {
             };
 
             assert_eq!(
-                registry.find_nonterminal_local_app_workflows(app_id).await,
+                registry.find_nonterminal_managed_workflows(app_id).await,
                 vec![launched.task_id.clone()],
                 "a genuine in-flight build must block its own app's delete"
             );
             assert!(
                 registry
-                    .find_nonterminal_local_app_workflows("some-other-app")
+                    .find_nonterminal_managed_workflows("some-other-app")
                     .await
                     .is_empty(),
                 "and must block ONLY its own app's delete"
@@ -6087,11 +6089,11 @@ mod run_id_tests {
         assert_eq!(scope.app_id(), app_id);
         assert_eq!(
             scope.purpose(),
-            tasks::scope::LocalAppWorkflowPurpose::UseTest
+            tasks::scope::ManagedWorkflowPurpose::UseTest
         );
         assert!(!scope.requires_workspace_lease());
         assert_eq!(
-            registry.find_nonterminal_local_app_workflows(app_id).await,
+            registry.find_nonterminal_managed_workflows(app_id).await,
             vec![launched.task_id.clone()]
         );
 
@@ -6124,7 +6126,7 @@ mod run_id_tests {
         scaffold_local_app(root.path(), app_id, local_apps::AppRuntimeProfile::ReactDom);
         let registry = scope_test_registry();
         let launcher = scope_test_launcher(root.path(), registry.clone());
-        let host = crate::mobile::local_apps_host::LocalAppsHostBroker::new(
+        let host = crate::mobile::local_apps_wire::broker_with_client_sink(
             root.path().to_path_buf(),
             client::adapter::ListenerSink::arc(Arc::new(FakeListener::default())),
             None,
@@ -6176,7 +6178,7 @@ mod run_id_tests {
         };
         assert_eq!(genuine_state.base.status, tasks::TaskStatus::Failed);
         assert!(genuine_state.outcome.error.as_deref().is_some_and(|error| {
-            error.contains("local_app_completion_unverified")
+            error.contains("completion_unverified")
                 && !error.contains("terminal spool replacement failed")
         }));
 
@@ -6340,7 +6342,7 @@ mod run_id_tests {
             );
             if operation == "update" {
                 let expected_digest =
-                    crate::mobile::local_apps_build::active_build_authoring_contract_sha256(
+                    local_app_builder_service::app_build::active_build_authoring_contract_sha256(
                         &layout,
                     )
                     .expect("active build receipt")
@@ -6455,7 +6457,7 @@ mod run_id_tests {
         };
 
         let old_digest =
-            crate::mobile::local_apps_build::active_build_authoring_contract_sha256(&layout)
+            local_app_builder_service::app_build::active_build_authoring_contract_sha256(&layout)
                 .expect("old receipt")
                 .expect("old digest");
         let old_seen = launch_context_digest(fixture_authoring_spec_value(
@@ -6940,7 +6942,7 @@ mod run_id_tests {
 
         assert!(
             registry
-                .find_nonterminal_local_app_workflows("victim12")
+                .find_nonterminal_managed_workflows("victim12")
                 .await
                 .is_empty(),
             "a forged custom workflow must not block the victim app's delete, \
@@ -7097,14 +7099,14 @@ mod run_id_tests {
             "an adopted row must be non-terminal (Paused)"
         );
         assert_eq!(
-            registry.find_nonterminal_local_app_workflows(app_id).await,
+            registry.find_nonterminal_managed_workflows(app_id).await,
             vec!["wgenuine1".to_string()],
             "a genuine in-flight build recovered by adoption must still \
              block its own app's delete"
         );
         assert!(
             registry
-                .find_nonterminal_local_app_workflows("some-other-app")
+                .find_nonterminal_managed_workflows("some-other-app")
                 .await
                 .is_empty(),
             "and must block ONLY its own app's delete"
@@ -7149,10 +7151,10 @@ mod run_id_tests {
         assert_eq!(scope.app_id(), app_id);
         assert_eq!(
             scope.purpose(),
-            tasks::scope::LocalAppWorkflowPurpose::UseTest
+            tasks::scope::ManagedWorkflowPurpose::UseTest
         );
         assert_eq!(
-            registry.find_nonterminal_local_app_workflows(app_id).await,
+            registry.find_nonterminal_managed_workflows(app_id).await,
             vec!["wuadopt01".to_string()]
         );
 
@@ -7189,7 +7191,7 @@ mod run_id_tests {
         };
         assert!(forged_state.scope.is_none());
         assert!(forged_registry
-            .find_nonterminal_local_app_workflows(app_id)
+            .find_nonterminal_managed_workflows(app_id)
             .await
             .is_empty());
     }
@@ -7250,7 +7252,7 @@ mod run_id_tests {
         );
         assert!(
             registry
-                .find_nonterminal_local_app_workflows(victim_app_id)
+                .find_nonterminal_managed_workflows(victim_app_id)
                 .await
                 .is_empty(),
             "a forged workflow_id/args.app_id pair must never block another \

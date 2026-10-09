@@ -52,6 +52,9 @@ mod host;
 // app-private root. Its dependencies are selected by the mobile runtime profile.
 #[cfg(feature = "mobile")]
 mod skill_loader;
+
+#[cfg(feature = "mobile")]
+mod device_skills;
 // v3 Phase 1: workflow-on-mobile composition pieces (launcher + deferred
 // invoker), consumed by the `host` build path.
 #[cfg(feature = "mobile")]
@@ -82,27 +85,25 @@ pub mod builtin_bundle;
 #[cfg(feature = "mobile")]
 mod local_app_plugin_binding;
 #[cfg(feature = "mobile")]
-mod local_app_runtime_profiles;
-#[cfg(feature = "mobile")]
-mod local_app_template_catalog;
-#[cfg(feature = "mobile")]
-mod local_apps_build;
-#[cfg(feature = "mobile")]
-mod local_apps_host;
+use local_app_builder_service::template_catalog as local_app_template_catalog;
 // Live per-connection device handles (camera / audio / location /
 // notifications) behind a SharedLlm-style swap cell — see the module doc for
 // why a bare OnceLock would pin a torn-down engine's Swift objects.
-#[cfg(feature = "mobile")]
-mod local_apps_device;
 // LOCAL-APPS (v3): the app-facing LLM seam — `LocalAppsModel` + the
 // `ApiService`-backed `chat` used by the `llm.chat` bridge operation. The
 // designer/generation pipeline that used to live behind this seam is gone.
 #[cfg(feature = "mobile")]
 mod local_apps_llm;
 #[cfg(feature = "mobile")]
-mod local_apps_mcp;
-#[cfg(feature = "mobile")]
 mod local_apps_profile;
+// The edge between the Local App service's vocabulary (`local_app_builder_contracts`)
+// and the client protocol DTOs. Every crossing goes through it.
+#[cfg(feature = "mobile")]
+mod local_apps_adapters;
+#[cfg(feature = "mobile")]
+mod local_apps_sessions;
+#[cfg(feature = "mobile")]
+mod local_apps_wire;
 #[cfg(feature = "mobile")]
 mod mcp_transport;
 #[cfg(feature = "mobile")]
@@ -722,6 +723,18 @@ pub fn mobile_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
 
 #[cfg(feature = "mobile")]
 pub(crate) const MOBILE_CHAT_TOOL_ALLOWLIST: &[&str] = &[
+    "camera",
+    "voice",
+    "speech",
+    "notification",
+    "clipboard",
+    "share",
+    "location",
+    "device_status",
+    "haptics",
+    "open_url",
+    "calendar",
+    "contacts",
     "AskUserQuestion",
     "Glob",
     "Grep",
@@ -1113,7 +1126,7 @@ mod tests {
 
     #[cfg(feature = "mobile")]
     #[test]
-    fn chat_profile_exposes_only_the_read_only_mobile_allowlist() {
+    fn chat_profile_exposes_read_tools_and_available_native_device_tools() {
         let ctx = shell_test_ctx(dummy_out());
         let code_registry = mobile_tool_registry(ctx.clone());
         assert!(code_registry.find_by_name("Write").is_some());
@@ -1143,8 +1156,6 @@ mod tests {
             "TaskCreate",
             "CronCreate",
             "ToolSearch",
-            "camera",
-            "notification",
         ] {
             assert!(
                 chat_registry.find_by_name(denied).is_none(),

@@ -1,8 +1,14 @@
-//! Ephemeral, path-bound permission leases used by local-app build workflows.
+//! Ephemeral, path-bound permission leases for host-managed workspaces.
 //!
 //! A lease is intentionally separate from the session-wide permission mode:
-//! it grants only calls whose resolved paths stay inside one app workspace and
+//! it grants only calls whose resolved paths stay inside one workspace and
 //! disappears when the workflow drops its guard.
+//!
+//! What a workspace looks like on disk, which of its files the host owns, and
+//! which host operations a lease may authorize is the business of whoever
+//! manages the workspaces. That is a [`WorkspaceProfile`], supplied when the
+//! registry is built; this module holds the lifecycle and the generic checks
+//! (canonical containment, symlink escapes, read-only shell inspection).
 
 use crate::command_path_containment::check_command_path_containment;
 use crate::filesystem::{file_tool_kind, input_path_for_tool, FileToolKind, FsRoots};
@@ -13,9 +19,48 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+/// How one kind of host-managed workspace is laid out and protected.
+///
+/// The registry asks the profile and never guesses: a profile that answers
+/// "no" or `None` makes the corresponding check fail closed.
+pub trait WorkspaceProfile: Send + Sync + std::fmt::Debug {
+    /// The id of the workspace `root` belongs to, if `root` has this profile's
+    /// on-disk shape (in the host's spelling).
+    fn workspace_id(&self, root: &Path) -> Option<String>;
+
+    /// Whether `root` and `id` agree. Roots that do not have the profile's
+    /// shape (test and in-memory roots) may answer `true`; roots that do have
+    /// it must name the same id.
+    fn root_matches_id(&self, root: &Path, id: &str) -> bool;
+
+    /// Where the workspace of `id` lives under the host's data root. This is
+    /// derived from a validated id, never taken from the session's own cwd, so
+    /// a workflow cannot borrow another workspace.
+    fn workspace_root(&self, data_root: &Path, id: &str) -> PathBuf;
+
+    /// Whether `root` is exactly the canonical workspace of `id`. This is the
+    /// production gate for starting a lease.
+    fn is_exact_root(&self, root: &Path, id: &str) -> bool;
+
+    /// Absolute path prefixes under which a sandboxed guest sees the
+    /// workspace of `id`. Paths and shell commands using them are translated
+    /// to the host root before they are checked.
+    fn guest_prefixes(&self, id: &str) -> Vec<String>;
+
+    /// A decision for a tool this profile owns, keyed by the lease's id:
+    /// `Some(allowed)` ends the check, `None` leaves the tool to the generic
+    /// file and shell rules.
+    fn tool_decision(&self, tool_name: &str, input: &serde_json::Value, id: &str) -> Option<bool>;
+
+    /// Whether `relative`, a path below the canonical workspace root, is
+    /// owned by the host and must not be written by a leased workflow. The
+    /// empty path is the root itself.
+    fn is_host_owned(&self, relative: &Path) -> bool;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceLeaseInfo {
-    pub app_id: String,
+    pub workspace_id: String,
     pub root: PathBuf,
 }
 
@@ -25,10 +70,11 @@ struct ActiveLease {
 }
 
 /// Shared registry owned by an engine composition root.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WorkspacePermissionLeaseRegistry {
     next: AtomicU64,
     active: RwLock<HashMap<u64, ActiveLease>>,
+    profile: Arc<dyn WorkspaceProfile>,
 }
 
 pub struct WorkspacePermissionLease {
@@ -44,47 +90,53 @@ impl WorkspacePermissionLease {
 }
 
 impl WorkspacePermissionLeaseRegistry {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+    pub fn new(profile: Arc<dyn WorkspaceProfile>) -> Arc<Self> {
+        Arc::new(Self {
+            next: AtomicU64::new(0),
+            active: RwLock::new(HashMap::new()),
+            profile,
+        })
     }
 
-    #[cfg(test)]
-    pub(crate) fn begin(
+    /// Begin a lease without proving that `root` is the profile's canonical
+    /// workspace for `id`. For tests that exercise the registry with roots of
+    /// their own; production code uses [`Self::begin_bound`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn begin_unchecked(
         self: &Arc<Self>,
-        app_id: impl Into<String>,
+        workspace_id: impl Into<String>,
         root: impl Into<PathBuf>,
     ) -> WorkspacePermissionLease {
-        self.begin_normalized(app_id.into(), root.into())
+        self.begin_normalized(workspace_id.into(), root.into())
     }
 
-    /// Begin a lease for a production local-app workspace.
+    /// Begin a lease for a production workspace.
     ///
-    /// Unlike the permissive helper used by this module's unit tests, this
-    /// production entry point requires the canonical
-    /// local-app layout (`apps/<app_id>/workspace` or the matching guest
-    /// `local-app-<app_id>` mount). Callers that cannot prove that binding must
-    /// fail closed instead of silently granting a lease over a generic cwd.
-    pub fn begin_local_app(
+    /// Unlike the permissive helper the unit tests use, this entry point
+    /// requires the profile's canonical layout for `id`. Callers that cannot
+    /// prove that binding must fail closed instead of silently granting a
+    /// lease over a generic cwd.
+    pub fn begin_bound(
         self: &Arc<Self>,
-        app_id: impl Into<String>,
+        workspace_id: impl Into<String>,
         root: impl Into<PathBuf>,
     ) -> Result<WorkspacePermissionLease, String> {
-        let app_id = app_id.into();
+        let workspace_id = workspace_id.into();
         let root = lexical_normalize(root.into());
         let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
-        if !is_exact_local_app_root(&canonical_root, &app_id) {
+        if !self.profile.is_exact_root(&canonical_root, &workspace_id) {
             return Err(format!(
-                "workspace lease root {} is not the canonical workspace for app {}",
+                "workspace lease root {} is not the canonical workspace for {}",
                 canonical_root.display(),
-                app_id
+                workspace_id
             ));
         }
-        Ok(self.begin_normalized(app_id, canonical_root))
+        Ok(self.begin_normalized(workspace_id, canonical_root))
     }
 
     fn begin_normalized(
         self: &Arc<Self>,
-        app_id: String,
+        workspace_id: String,
         root: PathBuf,
     ) -> WorkspacePermissionLease {
         let token = self.next.fetch_add(1, Ordering::Relaxed).saturating_add(1);
@@ -97,13 +149,19 @@ impl WorkspacePermissionLeaseRegistry {
             .insert(
                 token,
                 ActiveLease {
-                    info: WorkspaceLeaseInfo { app_id, root },
+                    info: WorkspaceLeaseInfo { workspace_id, root },
                 },
             );
         WorkspacePermissionLease {
             token,
             registry: Arc::clone(self),
         }
+    }
+
+    /// The profile's workspace root for `workspace_id` under `data_root`.
+    #[must_use]
+    pub fn workspace_root_for(&self, data_root: &Path, workspace_id: &str) -> PathBuf {
+        self.profile.workspace_root(data_root, workspace_id)
     }
 
     pub fn active(&self) -> Vec<WorkspaceLeaseInfo> {
@@ -115,16 +173,13 @@ impl WorkspacePermissionLeaseRegistry {
             .collect()
     }
 
-    /// Returns true only for a file/shell/local-app MCP call contained by an
-    /// active lease. Explicit deny/ask rules are evaluated before this hook in
-    /// `PermissionPolicy::authorize_inner`, so the lease cannot override them.
-    // Kept private for focused unit tests that exercise the registry in
-    // isolation. Production authorization must always use the token-aware
-    // entry point below; exposing an unscoped helper would make it too easy
-    // for a future caller to accidentally authorize against another active
-    // app's lease.
-    #[cfg(test)]
-    fn allows(&self, tool_name: &str, input: &serde_json::Value, roots: &FsRoots) -> bool {
+    /// Returns true only for a file/shell/profile-owned call contained by the
+    /// sole active lease. Kept out of production builds: production
+    /// authorization must always use the token-aware entry point below;
+    /// exposing an unscoped helper would make it too easy for a future caller
+    /// to accidentally authorize against another active workspace's lease.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn allows(&self, tool_name: &str, input: &serde_json::Value, roots: &FsRoots) -> bool {
         let active = self
             .active
             .read()
@@ -132,9 +187,15 @@ impl WorkspacePermissionLeaseRegistry {
         (active.len() == 1)
             .then(|| active.values().next())
             .flatten()
-            .is_some_and(|lease| allows_for_lease(&lease.info, tool_name, input, roots))
+            .is_some_and(|lease| {
+                allows_for_lease(&*self.profile, &lease.info, tool_name, input, roots)
+            })
     }
 
+    /// Returns true only for a file/shell/profile-owned call contained by the
+    /// lease `token` names. Explicit deny/ask rules are evaluated before this
+    /// hook in `PermissionPolicy::authorize_inner`, so the lease cannot
+    /// override them.
     pub fn allows_for_token(
         &self,
         token: Option<u64>,
@@ -147,14 +208,16 @@ impl WorkspacePermissionLeaseRegistry {
             .read()
             .expect("workspace lease registry poisoned")
             .get(&token)
-            .is_some_and(|lease| allows_for_lease(&lease.info, tool_name, input, roots))
+            .is_some_and(|lease| {
+                allows_for_lease(&*self.profile, &lease.info, tool_name, input, roots)
+            })
     }
 
-    /// Returns true when a leased workflow is attempting to modify a
-    /// host-owned file. This is a hard deny, not merely a failed lease match,
-    /// so a later global `auto`/allow rule cannot re-enable the mutation.
-    #[cfg(test)]
-    fn denies_host_owned(
+    /// Returns true when the sole active lease's workflow is attempting to
+    /// modify a host-owned file. Test-only for the same reason as
+    /// [`Self::allows`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn denies_host_owned(
         &self,
         tool_name: &str,
         input: &serde_json::Value,
@@ -167,9 +230,14 @@ impl WorkspacePermissionLeaseRegistry {
         (active.len() == 1)
             .then(|| active.values().next())
             .flatten()
-            .is_some_and(|lease| host_owned_for_lease(&lease.info, tool_name, input, roots))
+            .is_some_and(|lease| {
+                host_owned_for_lease(&*self.profile, &lease.info, tool_name, input, roots)
+            })
     }
 
+    /// Returns true when a leased workflow is attempting to modify a
+    /// host-owned file. This is a hard deny, not merely a failed lease match,
+    /// so a later global `auto`/allow rule cannot re-enable the mutation.
     pub fn denies_host_owned_for_token(
         &self,
         token: Option<u64>,
@@ -182,35 +250,41 @@ impl WorkspacePermissionLeaseRegistry {
             .read()
             .expect("workspace lease registry poisoned")
             .get(&token)
-            .is_some_and(|lease| host_owned_for_lease(&lease.info, tool_name, input, roots))
+            .is_some_and(|lease| {
+                host_owned_for_lease(&*self.profile, &lease.info, tool_name, input, roots)
+            })
     }
 
     /// The source-editing boundary remains protected for every conversation
-    /// rooted at a local-app workspace, even after the temporary build lease is
+    /// rooted at a managed workspace, even after the temporary build lease is
     /// dropped. The generated local settings file is itself an allow rule, so
     /// this check must not depend on a lease token or host-managed files and
     /// non-inspection shell commands would become writable after a build.
     pub fn denies_host_owned_for_workspace(
+        &self,
         tool_name: &str,
         input: &serde_json::Value,
         roots: &FsRoots,
     ) -> bool {
         let root = &roots.cwd;
-        is_local_app_workspace_root(root) && host_owned_for_root(root, tool_name, input, roots)
+        self.is_workspace_root(root)
+            && host_owned_for_root(&*self.profile, root, tool_name, input, roots)
     }
 
-    /// Return true when a file operation resolves outside a local-app's
-    /// canonical workspace. This is deliberately evaluated before generic
-    /// allow rules: `Edit(./**)` is lexical and cannot prove that a symlink
-    /// target remains inside the workspace.
-    pub fn escapes_local_app_workspace(
+    /// Return true when a file operation resolves outside a managed
+    /// workspace's canonical root. This is deliberately evaluated before
+    /// generic allow rules: `Edit(./**)` is lexical and cannot prove that a
+    /// symlink target remains inside the workspace.
+    pub fn escapes_workspace(
+        &self,
         tool_name: &str,
         input: &serde_json::Value,
         roots: &FsRoots,
     ) -> bool {
-        if !is_local_app_workspace_root(&roots.cwd) {
+        let profile = &*self.profile;
+        let Some(workspace_id) = profile.workspace_id(&roots.cwd) else {
             return false;
-        }
+        };
         match file_tool_kind(tool_name) {
             FileToolKind::Editor | FileToolKind::Reader => {
                 let lease_roots = FsRoots {
@@ -221,17 +295,11 @@ impl WorkspacePermissionLeaseRegistry {
                 let Some(raw) = input_path_for_tool(tool_name, input, &lease_roots) else {
                     return false;
                 };
-                let Some(app_id) = local_app_id(&roots.cwd) else {
-                    return false;
-                };
-                let target = resolve_target(&roots.cwd, &app_id, raw.as_ref());
+                let target = resolve_target(profile, &roots.cwd, &workspace_id, raw.as_ref());
                 !is_workspace_path(&roots.cwd, &target)
             }
             FileToolKind::NonFile if is_shell_tool(tool_name) => {
                 let Some(command) = command_from_input(input) else {
-                    return false;
-                };
-                let Some(app_id) = local_app_id(&roots.cwd) else {
                     return false;
                 };
                 let lease_roots = FsRoots {
@@ -239,16 +307,25 @@ impl WorkspacePermissionLeaseRegistry {
                     home: roots.home.clone(),
                     lingxi_home: roots.lingxi_home.clone(),
                 };
-                let command = command_with_guest_workspace_aliases(command, &roots.cwd, &app_id);
+                let command = command_with_guest_workspace_aliases(
+                    profile,
+                    command,
+                    &roots.cwd,
+                    &workspace_id,
+                );
                 // These guards are intentionally checked even before the
                 // generic Bash allow walk. A global `Bash(...)` exact allow
                 // must not authorize `cat /etc/passwd`, `cd /tmp`, or a
-                // redirect outside this local-app workspace.
+                // redirect outside this workspace.
                 check_path_constraints(&command, &lease_roots, &[], None).is_some()
                     || check_command_path_containment(&command, &lease_roots, &[], None).is_some()
             }
             _ => false,
         }
+    }
+
+    fn is_workspace_root(&self, root: &Path) -> bool {
+        self.profile.workspace_id(root).is_some()
     }
 }
 
@@ -263,36 +340,25 @@ impl Drop for WorkspacePermissionLease {
 }
 
 fn allows_for_lease(
+    profile: &dyn WorkspaceProfile,
     info: &WorkspaceLeaseInfo,
     tool_name: &str,
     input: &serde_json::Value,
     roots: &FsRoots,
 ) -> bool {
-    // A local-app workspace has the stable on-disk shape
-    // `<profile>/apps/<app-id>/workspace`. If a caller supplies a different
-    // `app_id` for that root, fail closed instead of granting an app-scoped MCP
-    // operation for a sibling app. Test/in-memory roots may use a generic
-    // directory name, so only enforce the check when the canonical layout is
-    // unambiguously the local-app shape.
-    if !workspace_root_matches_app_id(&info.root, &info.app_id) {
+    // A managed workspace has a stable on-disk shape. If a caller supplies a
+    // different id for that root, fail closed instead of granting an
+    // id-scoped operation for a sibling workspace. Test/in-memory roots may
+    // use a generic directory name, so the profile only enforces the check
+    // when the layout is unambiguously its own.
+    if !profile.root_matches_id(&info.root, &info.workspace_id) {
         return false;
     }
-    // The local-app host operations are BUILTIN tools (`LocalApp*`), not an
-    // MCP server — see `harness_runtime::mobile::local_apps_tools` for why they moved.
-    // The `app_id` equality check below is what keeps a lease for one app from
-    // authorizing an operation aimed at a sibling.
-    if tool_name.starts_with("LocalApp") {
-        let allowed = matches!(
-            tool_name,
-            "LocalAppBuild"
-                | "LocalAppLogs"
-                | "LocalAppRuntime"
-                | "LocalAppManifest"
-                | "LocalAppQueryData"
-        );
-        return allowed
-            && input.get("app_id").and_then(serde_json::Value::as_str)
-                == Some(info.app_id.as_str());
+    // Tools the profile owns are decided by it. Its id equality check is what
+    // keeps a lease for one workspace from authorizing an operation aimed at
+    // a sibling.
+    if let Some(allowed) = profile.tool_decision(tool_name, input, &info.workspace_id) {
+        return allowed;
     }
 
     match file_tool_kind(tool_name) {
@@ -305,10 +371,10 @@ fn allows_for_lease(
             let Some(raw) = input_path_for_tool(tool_name, input, &lease_roots) else {
                 return false;
             };
-            let target = resolve_target(&info.root, &info.app_id, raw.as_ref());
+            let target = resolve_target(profile, &info.root, &info.workspace_id, raw.as_ref());
             is_workspace_path(&info.root, &target)
                 && (file_tool_kind(tool_name) == FileToolKind::Reader
-                    || !is_host_owned_path_or_container(&info.root, &target))
+                    || !is_host_owned_path_or_container(profile, &info.root, &target))
         }
         FileToolKind::NonFile if is_shell_tool(tool_name) => {
             let Some(command) = command_from_input(input) else {
@@ -325,7 +391,12 @@ fn allows_for_lease(
                 home: roots.home.clone(),
                 lingxi_home: roots.lingxi_home.clone(),
             };
-            let command = command_with_guest_workspace_aliases(command, &info.root, &info.app_id);
+            let command = command_with_guest_workspace_aliases(
+                profile,
+                command,
+                &info.root,
+                &info.workspace_id,
+            );
             check_path_constraints(&command, &lease_roots, &[], None).is_none()
                 && check_command_path_containment(&command, &lease_roots, &[], None).is_none()
         }
@@ -334,18 +405,20 @@ fn allows_for_lease(
 }
 
 fn host_owned_for_lease(
+    profile: &dyn WorkspaceProfile,
     info: &WorkspaceLeaseInfo,
     tool_name: &str,
     input: &serde_json::Value,
     roots: &FsRoots,
 ) -> bool {
-    if !workspace_root_matches_app_id(&info.root, &info.app_id) {
+    if !profile.root_matches_id(&info.root, &info.workspace_id) {
         return false;
     }
-    host_owned_for_root(&info.root, tool_name, input, roots)
+    host_owned_for_root(profile, &info.root, tool_name, input, roots)
 }
 
 fn host_owned_for_root(
+    profile: &dyn WorkspaceProfile,
     root: &Path,
     tool_name: &str,
     input: &serde_json::Value,
@@ -356,26 +429,26 @@ fn host_owned_for_root(
         home: roots.home.clone(),
         lingxi_home: roots.lingxi_home.clone(),
     };
-    let app_id = local_app_id(root);
+    let workspace_id = profile.workspace_id(root);
     match file_tool_kind(tool_name) {
         // Reader access is intentionally not blocked; the lease only protects
         // host-owned files from model mutation.
         FileToolKind::Editor => input_path_for_tool(tool_name, input, &lease_roots)
-            .map(|raw| match app_id.as_deref() {
-                Some(app_id) => resolve_target(root, app_id, raw.as_ref()),
+            .map(|raw| match workspace_id.as_deref() {
+                Some(id) => resolve_target(profile, root, id, raw.as_ref()),
                 None => resolve_target_from_root(root, raw.as_ref()),
             })
-            .is_some_and(|target| is_host_owned_path_or_container(root, &target)),
+            .is_some_and(|target| is_host_owned_path_or_container(profile, root, &target)),
         FileToolKind::NonFile if is_shell_tool(tool_name) => {
             let Some(command) = command_from_input(input) else {
                 return true;
             };
-            let command = app_id
+            let command = workspace_id
                 .as_deref()
-                .map(|app_id| command_with_guest_workspace_aliases(command, root, app_id))
+                .map(|id| command_with_guest_workspace_aliases(profile, command, root, id))
                 .unwrap_or_else(|| command.to_string());
             let redirects = crate::path_constraints::write_redirect_targets(&command, &lease_roots);
-            // Local-app source mutation goes through structured file tools.
+            // Workspace source mutation goes through structured file tools.
             // Shell redirects are intentionally never lease-authorized: shell
             // expansion makes their final target impossible to prove here
             // (`TARGET=package.json; echo x > "$TARGET"`, braces, globs, ...).
@@ -384,60 +457,14 @@ fn host_owned_for_root(
             }
             // Do not try to enumerate every possible mutator (`env rm`,
             // interpreters, package-manager scripts, and future commands all
-            // make that list incomplete). A local-app shell is an inspection
-            // surface only; source mutation uses structured file tools whose
-            // final target can be checked without evaluating shell expansion.
+            // make that list incomplete). A managed-workspace shell is an
+            // inspection surface only; source mutation uses structured file
+            // tools whose final target can be checked without evaluating
+            // shell expansion.
             !workspace_shell_is_safe(&command)
         }
         _ => false,
     }
-}
-
-fn is_local_app_workspace_root(root: &Path) -> bool {
-    local_app_id(root).is_some()
-}
-
-/// The local-app id a workspace root belongs to, if any.
-///
-/// Public so the local-app BUILTIN tools can bind `app_id` to the session's
-/// own app the way the dynamic MCP tools bind it to their namespace — without
-/// it, an auto-allowed read reaches a sibling app.
-#[must_use]
-pub fn local_app_id_for_root(root: &Path) -> Option<String> {
-    if let Some(id) = local_app_id(root) {
-        return Some(id);
-    }
-    // GUEST spelling `/workspace/<app_id>`. The bare-uuid form is what the
-    // device actually reports as `model_cwd`, and `guest_workspace_relative`
-    // in this same file already accepts it — two derivations of one identity
-    // is how the guest/host split forked in the first place.
-    let mut components = root.components().filter_map(|component| match component {
-        Component::Normal(name) => name.to_str(),
-        _ => None,
-    });
-    match (components.next(), components.next(), components.next()) {
-        (Some("workspace"), Some(app_id), None) if !app_id.is_empty() => Some(app_id.to_owned()),
-        _ => None,
-    }
-}
-
-fn local_app_id(root: &Path) -> Option<String> {
-    if let Some(name) = root.file_name().and_then(|name| name.to_str()) {
-        if let Some(app_id) = name.strip_prefix("local-app-") {
-            return (!app_id.is_empty()).then(|| app_id.to_owned());
-        }
-    }
-    let app_root = root.parent()?;
-    let apps_root = app_root.parent()?;
-    if root.file_name().and_then(|name| name.to_str()) != Some("workspace")
-        || apps_root.file_name().and_then(|name| name.to_str()) != Some("apps")
-    {
-        return None;
-    }
-    app_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_owned)
 }
 
 fn resolve_target_from_root(root: &Path, raw: &str) -> PathBuf {
@@ -447,48 +474,6 @@ fn resolve_target_from_root(root: &Path, raw: &str) -> PathBuf {
     } else {
         lexical_normalize(root.join(path))
     }
-}
-
-fn workspace_root_matches_app_id(root: &Path, app_id: &str) -> bool {
-    let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    if let Some(mounted_id) = name.strip_prefix("local-app-") {
-        return mounted_id == app_id;
-    }
-    if name != "workspace" {
-        return true;
-    }
-    let Some(app_root) = root.parent() else {
-        return true;
-    };
-    let Some(apps_root) = app_root.parent() else {
-        return true;
-    };
-    if apps_root.file_name().and_then(|name| name.to_str()) != Some("apps") {
-        return true;
-    }
-    app_root.file_name().and_then(|name| name.to_str()) == Some(app_id)
-}
-
-fn is_exact_local_app_root(root: &Path, app_id: &str) -> bool {
-    let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    if name == format!("local-app-{app_id}") {
-        return true;
-    }
-    if name != "workspace" {
-        return false;
-    }
-    let Some(app_root) = root.parent() else {
-        return false;
-    };
-    let Some(apps_root) = app_root.parent() else {
-        return false;
-    };
-    apps_root.file_name().and_then(|name| name.to_str()) == Some("apps")
-        && app_root.file_name().and_then(|name| name.to_str()) == Some(app_id)
 }
 
 fn workspace_shell_is_safe(command: &str) -> bool {
@@ -504,7 +489,7 @@ fn workspace_shell_is_safe(command: &str) -> bool {
     // shell behavior. It rejects redirects, expansion, executable actions,
     // and side-effecting `find` flags such as `-fprint`/`-fprintf`. The second
     // gate below deliberately narrows that general classifier to commands
-    // useful for inspecting one local-app workspace (no git/gh/docker/etc.).
+    // useful for inspecting one workspace (no git/gh/docker/etc.).
     if !crate::read_only_command::command_is_read_only(command) {
         return false;
     }
@@ -531,10 +516,15 @@ fn workspace_shell_is_safe(command: &str) -> bool {
         })
 }
 
-fn resolve_target(root: &Path, app_id: &str, raw: &str) -> PathBuf {
+fn resolve_target(
+    profile: &dyn WorkspaceProfile,
+    root: &Path,
+    workspace_id: &str,
+    raw: &str,
+) -> PathBuf {
     let path = Path::new(raw);
     if path.is_absolute() {
-        if let Some(relative) = guest_workspace_relative(app_id, path) {
+        if let Some(relative) = guest_workspace_relative(profile, workspace_id, path) {
             lexical_normalize(root.join(relative))
         } else {
             lexical_normalize(path.to_path_buf())
@@ -544,37 +534,46 @@ fn resolve_target(root: &Path, app_id: &str, raw: &str) -> PathBuf {
     }
 }
 
-fn guest_workspace_relative<'a>(app_id: &str, path: &'a Path) -> Option<&'a Path> {
-    [
-        format!("/workspace/local-app-{app_id}"),
-        format!("/workspace/{app_id}"),
-    ]
-    .iter()
-    .find_map(|prefix| {
-        let prefix = Path::new(prefix);
-        if path == prefix {
-            Some(Path::new(""))
-        } else {
-            path.strip_prefix(prefix).ok()
-        }
-    })
+fn guest_workspace_relative<'a>(
+    profile: &dyn WorkspaceProfile,
+    workspace_id: &str,
+    path: &'a Path,
+) -> Option<&'a Path> {
+    profile
+        .guest_prefixes(workspace_id)
+        .iter()
+        .find_map(|prefix| {
+            let prefix = Path::new(prefix);
+            if path == prefix {
+                Some(Path::new(""))
+            } else {
+                path.strip_prefix(prefix).ok()
+            }
+        })
 }
 
-fn command_with_guest_workspace_aliases(command: &str, root: &Path, app_id: &str) -> String {
-    // Static command containment works in host coordinates. Mobile Linux
-    // prompts use `/workspace/<id>` (and older local-app builds used
-    // `/workspace/local-app-<id>`), so translate only those exact app-bound
-    // aliases before checking cwd, redirects, and positional paths. If the
-    // host root contains whitespace, leave the command untouched rather than
-    // introducing shell quoting into a security check; it will conservatively
-    // remain on the normal approval path.
+fn command_with_guest_workspace_aliases(
+    profile: &dyn WorkspaceProfile,
+    command: &str,
+    root: &Path,
+    workspace_id: &str,
+) -> String {
+    // Static command containment works in host coordinates. A sandboxed guest
+    // sees the workspace under its own prefixes, so translate only those
+    // exact workspace-bound aliases before checking cwd, redirects, and
+    // positional paths. If the host root contains whitespace, leave the
+    // command untouched rather than introducing shell quoting into a security
+    // check; it will conservatively remain on the normal approval path.
     let root = root.to_string_lossy();
     if root.chars().any(char::is_whitespace) {
         return command.to_string();
     }
-    command
-        .replace(&format!("/workspace/local-app-{app_id}"), root.as_ref())
-        .replace(&format!("/workspace/{app_id}"), root.as_ref())
+    profile
+        .guest_prefixes(workspace_id)
+        .iter()
+        .fold(command.to_string(), |command, prefix| {
+            command.replace(prefix.as_str(), root.as_ref())
+        })
 }
 
 fn is_workspace_path(root: &Path, target: &Path) -> bool {
@@ -595,7 +594,11 @@ fn is_workspace_path(root: &Path, target: &Path) -> bool {
     true
 }
 
-fn is_host_owned_path_or_container(root: &Path, target: &Path) -> bool {
+fn is_host_owned_path_or_container(
+    profile: &dyn WorkspaceProfile,
+    root: &Path,
+    target: &Path,
+) -> bool {
     let Some(resolved) = resolve_canonical_target(target) else {
         return false;
     };
@@ -603,113 +606,7 @@ fn is_host_owned_path_or_container(root: &Path, target: &Path) -> bool {
     let Ok(relative) = resolved.strip_prefix(&canonical_root) else {
         return false;
     };
-    // Replacing the workspace root or the `lib/` directory would also replace
-    // host-managed descendants such as the bridge and platform adapter.
-    relative.as_os_str().is_empty() || relative == Path::new("lib") || host_owned_relative(relative)
-}
-
-fn host_owned_relative(relative: &Path) -> bool {
-    if relative.components().any(|component| {
-        matches!(
-            component,
-            Component::Normal(name) if name == ".lingxi" || name == ".lingxi-build-state"
-        )
-    }) {
-        return true;
-    }
-    // Any BUILD-CONFIG file the toolchain AUTO-DISCOVERS and then executes as
-    // Node code. Matched by shape rather than an exact list because the search
-    // space belongs to the tool, not to us: Vite walks `DEFAULT_CONFIG_FILES`
-    // and PostCSS walks lilconfig's `getDefaultSearchPlaces`, and both have
-    // gained spellings across versions — an exact list rots into a hole on the
-    // next bump.
-    //
-    // Bounded on BOTH axes, or it would swallow ordinary source:
-    //   - LOCATION: only the workspace root and `.config/`, the only two
-    //     directories either tool searches. `src/vite.config.helper.js` is
-    //     app-owned and stays writable.
-    //   - EXTENSION: only executable/config extensions, so a file merely
-    //     BEGINNING with `vite.config.` is not swallowed either.
-    {
-        let mut components = relative
-            .components()
-            .filter_map(|component| match component {
-                Component::Normal(name) => name.to_str(),
-                _ => None,
-            });
-        let (dir, file) = match (components.next(), components.next(), components.next()) {
-            (Some(file), None, _) => (None, Some(file)),
-            (Some(dir), Some(file), None) => (Some(dir), Some(file)),
-            _ => (None, None),
-        };
-        if matches!(dir, None | Some(".config")) {
-            if let Some(name) = file {
-                let stem = name.strip_prefix('.').unwrap_or(name);
-                const CONFIG_EXTENSIONS: &[&str] = &[
-                    "js", "cjs", "mjs", "ts", "cts", "mts", "json", "yaml", "yml",
-                ];
-                let is_config_of = |tool: &str| {
-                    let rc = format!("{tool}rc");
-                    if stem == rc {
-                        return true;
-                    }
-                    for prefix in [format!("{rc}."), format!("{tool}.config.")] {
-                        if let Some(ext) = stem.strip_prefix(&prefix) {
-                            if CONFIG_EXTENSIONS.contains(&ext) {
-                                return true;
-                            }
-                        }
-                    }
-                    false
-                };
-                if is_config_of("vite") || is_config_of("postcss") || is_config_of("tailwind") {
-                    return true;
-                }
-            }
-        }
-    }
-    relative.file_name().is_some_and(|name| name == "LINGXI.md")
-        || relative.starts_with("node_modules")
-        || matches!(
-            relative.to_str(),
-            Some(
-                "index.html"
-                    // EVERY Vite config spelling, not just the one the template
-                    // ships. Vite self-resolves from `DEFAULT_CONFIG_FILES` and
-                    // `vite.config.js` sorts FIRST, ahead of the `.mjs` the host
-                    // writes, so creating any other spelling shadows the host
-                    // config — and a Vite config is executed Node code. `Edit`
-                    // creates files on a nonexistent path, so the workspace's
-                    // own `Edit(./**)` grant reaches this with no new permission.
-                    | "vite.config.js"
-                    | "vite.config.mjs"
-                    | "vite.config.ts"
-                    | "vite.config.cjs"
-                    | "vite.config.mts"
-                    | "vite.config.cts"
-                    | "package.json"
-                    | "pnpm-lock.yaml"
-                    // Declared host-managed by the generated LINGXI.md. These
-                    // were enforced nowhere, so `Edit(./**)` overwrote them and
-                    // `restore_host_managed_files` reverted the edit with only
-                    // a `tracing::warn!` — the model loops against a file it
-                    // cannot change and is never told why.
-                    | ".gitignore"
-                    | "jsconfig.json"
-                    | "lib/lingxi-provider.jsx"
-                    | "lib/frame-loop.js"
-                    | "lib/phaser-runtime.js"
-                    | "lib/babylon-runtime.js"
-                    | "styles/foundation.css"
-                    // Copied into the install staging tree by
-                    // `prepare_dependency_staging`, and the install runs with
-                    // the network ENABLED.
-                    | "pnpm-workspace.yaml"
-                    | "lib/device-context.js"
-                    | "lib/lingxi-bridge.js"
-                    | "lib/platform-adapter.js"
-            )
-        )
+    profile.is_host_owned(relative)
 }
 
 fn resolve_canonical_target(target: &Path) -> Option<PathBuf> {
@@ -753,6 +650,48 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// A workspace layout of this module's own, so the generic checks are
+    /// tested without any product's rules: roots are `…/ws-<id>`, the guest
+    /// sees them as `/guest/<id>`, `host.lock` and everything under `.host/`
+    /// belong to the host, and the tool `TestOp` is decided by its `id`.
+    #[derive(Debug)]
+    struct TestProfile;
+
+    impl WorkspaceProfile for TestProfile {
+        fn workspace_id(&self, root: &Path) -> Option<String> {
+            root.file_name()?
+                .to_str()?
+                .strip_prefix("ws-")
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+        }
+        fn root_matches_id(&self, root: &Path, id: &str) -> bool {
+            self.workspace_id(root).is_none_or(|own| own == id)
+        }
+        fn workspace_root(&self, data_root: &Path, id: &str) -> PathBuf {
+            data_root.join("spaces").join(format!("ws-{id}"))
+        }
+        fn is_exact_root(&self, root: &Path, id: &str) -> bool {
+            self.workspace_id(root).as_deref() == Some(id)
+        }
+        fn guest_prefixes(&self, id: &str) -> Vec<String> {
+            vec![format!("/guest/{id}")]
+        }
+        fn tool_decision(&self, name: &str, input: &serde_json::Value, id: &str) -> Option<bool> {
+            (name == "TestOp")
+                .then(|| input.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        }
+        fn is_host_owned(&self, relative: &Path) -> bool {
+            relative.as_os_str().is_empty()
+                || relative == Path::new("host.lock")
+                || relative.starts_with(".host")
+        }
+    }
+
+    fn registry() -> Arc<WorkspacePermissionLeaseRegistry> {
+        WorkspacePermissionLeaseRegistry::new(Arc::new(TestProfile))
+    }
+
     fn roots(root: &Path) -> FsRoots {
         FsRoots {
             cwd: root.to_path_buf(),
@@ -761,397 +700,170 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lease_allows_workspace_file_and_rejects_outside() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("workspace");
+    fn workspace(dir: &Path, id: &str) -> PathBuf {
+        let root = dir.join(format!("ws-{id}"));
         std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let _lease = registry.begin("app", root.clone());
-        let fs = roots(&root);
-        assert!(registry.allows(
-            "Write",
-            &serde_json::json!({"file_path":"src/App.jsx"}),
-            &fs
-        ));
-        assert!(!registry.allows("Write", &serde_json::json!({"file_path":"../secret"}), &fs));
-        assert!(!registry.allows(
-            "Write",
-            &serde_json::json!({"file_path":".lingxi/source-policy.json"}),
-            &fs
-        ));
-        assert!(!registry.allows(
-            "Write",
-            &serde_json::json!({"file_path":"lib/lingxi-bridge.js"}),
-            &fs
-        ));
-        assert!(!registry.allows("Write", &serde_json::json!({"file_path":"LINGXI.md"}), &fs));
-        for path in [
-            ".",
-            "lib",
-            "index.html",
-            "vite.config.mjs",
-            "package.json",
-            "pnpm-lock.yaml",
-            "lib/device-context.js",
-            "lib/platform-adapter.js",
-            "node_modules/vite/bin/vite.js",
-        ] {
-            assert!(
-                !registry.allows("Write", &serde_json::json!({"file_path": path}), &fs),
-                "host-managed build infrastructure must not be writable: {path}"
-            );
-        }
-        assert!(registry.allows(
-            "Write",
-            &serde_json::json!({"file_path":"app/main.jsx"}),
-            &fs
-        ));
+        root
     }
 
     #[test]
-    fn host_owned_metadata_is_readable_but_never_writable() {
+    fn lease_allows_workspace_file_and_rejects_outside_and_host_owned() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("workspace");
-        std::fs::create_dir_all(root.join(".lingxi")).unwrap();
-        std::fs::write(root.join(".lingxi/settings.local.json"), b"{}\n").unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let _lease = registry.begin("app", root.clone());
+        let root = workspace(dir.path(), "a");
+        let registry = registry();
+        let _lease = registry.begin_unchecked("a", root.clone());
         let fs = roots(&root);
-        let settings = serde_json::json!({"file_path":".lingxi/settings.local.json"});
+        let write =
+            |path: &str| registry.allows("Write", &serde_json::json!({"file_path": path}), &fs);
+        assert!(write("src/main.txt"));
+        assert!(!write("../secret"));
+        assert!(!write("host.lock"));
+        assert!(!write(".host/state.json"));
+        assert!(!write("."), "the root itself is host-owned");
+    }
 
-        assert!(registry.allows("Read", &settings, &fs));
-        assert!(!registry.allows("Write", &settings, &fs));
-        assert!(registry.denies_host_owned("Write", &settings, &fs));
-        assert!(!registry.denies_host_owned("Read", &settings, &fs));
-        assert!(registry.denies_host_owned(
-            "Bash",
-            &serde_json::json!({"command":"echo x > .lingxi/settings.local.json"}),
-            &fs
-        ));
-        assert!(registry.denies_host_owned(
-            "Bash",
-            &serde_json::json!({"command":"rm -rf .lingxi"}),
-            &fs
-        ));
-        for command in ["rm -rf .", "rm -rf lib", "mv lib lib.bak", "rm -rf *"] {
-            assert!(
-                registry.denies_host_owned("Bash", &serde_json::json!({"command": command}), &fs),
-                "destructive parent or glob must not bypass host ownership: {command}"
-            );
-        }
-        assert!(registry.denies_host_owned(
-            "Bash",
-            &serde_json::json!({"command":"printf x > package.json"}),
-            &fs
-        ));
-        for command in ["rm -rf app/old.jsx", "mkdir components"] {
-            assert!(
-                registry.denies_host_owned("Bash", &serde_json::json!({"command": command}), &fs),
-                "shell mutation must use structured file tools: {command}"
-            );
-        }
+    #[test]
+    fn host_owned_files_are_readable_but_never_writable() {
+        let dir = tempdir().unwrap();
+        let root = workspace(dir.path(), "a");
+        std::fs::create_dir_all(root.join(".host")).unwrap();
+        std::fs::write(root.join(".host/state.json"), b"{}\n").unwrap();
+        let registry = registry();
+        let _lease = registry.begin_unchecked("a", root.clone());
+        let fs = roots(&root);
+        let state = serde_json::json!({"file_path": ".host/state.json"});
+
+        assert!(registry.allows("Read", &state, &fs));
+        assert!(!registry.allows("Write", &state, &fs));
+        assert!(registry.denies_host_owned("Write", &state, &fs));
+        assert!(!registry.denies_host_owned("Read", &state, &fs));
+        // Shell redirects and anything that is not read-only inspection are
+        // never lease-authorized, whatever they touch.
         for command in [
-            "TARGET=. rm -rf \"$TARGET\"",
-            "env TARGET=. rm -rf \"$TARGET\"",
-            "rm -rf {package.json,app}",
-            "TARGET=package.json; echo x > \"$TARGET\"",
-            "python3 -c 'open(\"package.json\", \"w\").write(\"{}\")'",
-            "npm install",
-            "find . -fprint package.json",
-            "find . -fprintf package.json x",
-            "find . -files0-from list",
+            "echo x > host.lock",
+            "TARGET=host.lock; echo x > \"$TARGET\"",
+            "rm -rf src",
+            "find . -fprint host.lock",
         ] {
             assert!(
                 registry.denies_host_owned("Bash", &serde_json::json!({"command": command}), &fs),
-                "shell expansion must not bypass the structured mutation boundary: {command}"
+                "{command}"
             );
         }
+        assert!(!registry.denies_host_owned(
+            "Bash",
+            &serde_json::json!({"command": "cat src/main.txt"}),
+            &fs
+        ));
     }
 
     #[test]
     fn drop_revokes_lease() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
+        let root = workspace(dir.path(), "a");
+        let registry = registry();
         let fs = roots(&root);
-        let lease = registry.begin("app", root);
+        let lease = registry.begin_unchecked("a", root);
         assert!(!registry.active().is_empty());
         drop(lease);
         assert!(registry.active().is_empty());
-        assert!(!registry.allows(
-            "Write",
-            &serde_json::json!({"file_path":"src/App.jsx"}),
-            &fs
-        ));
+        assert!(!registry.allows("Write", &serde_json::json!({"file_path":"src/x"}), &fs));
     }
 
     #[test]
-    fn shell_lease_preserves_network_and_interpreter_approval() {
+    fn shell_lease_is_read_only_inspection() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let _lease = registry.begin("app", root.clone());
+        let root = workspace(dir.path(), "a");
+        let registry = registry();
+        let _lease = registry.begin_unchecked("a", root.clone());
         let fs = roots(&root);
-        assert!(!registry.allows(
-            "Bash",
-            &serde_json::json!({"command":"echo ok > out.txt"}),
-            &fs
-        ));
-        assert!(registry.allows(
-            "Bash",
-            &serde_json::json!({"command":"cat src/App.jsx"}),
-            &fs
-        ));
-        assert!(!registry.allows("Bash", &serde_json::json!({"command":"npm install"}), &fs));
-        assert!(!registry.allows(
-            "Bash",
-            &serde_json::json!({"command":"curl https://example.com"}),
-            &fs
-        ));
-        assert!(!registry.allows(
-            "Bash",
-            &serde_json::json!({"command":"node -e 'process.exit(0)'"}),
-            &fs
-        ));
-        assert!(!registry.allows(
-            "Bash",
-            &serde_json::json!({"command":"echo $(curl https://example.com)"}),
-            &fs
-        ));
-        assert!(!registry.allows(
-            "Bash",
-            &serde_json::json!({"command":"echo `curl https://example.com`"}),
-            &fs
-        ));
+        let shell =
+            |command: &str| registry.allows("Bash", &serde_json::json!({"command": command}), &fs);
+        assert!(shell("cat src/main.txt"));
+        assert!(shell("cd . && grep -rn foo src/"));
         for command in [
+            "echo ok > out.txt",
+            "npm install",
+            "curl https://example.com",
+            "node -e 'process.exit(0)'",
+            "echo $(curl https://example.com)",
+            "echo `curl https://example.com`",
             "find . -fprint out.txt",
             "find . -fprintf out.txt x",
             "find . -files0-from list",
+            "find . -exec curl https://example.com {} +",
+            "sed -n 'e curl https://example.com' README.md",
         ] {
-            assert!(
-                !registry.allows("Bash", &serde_json::json!({"command": command}), &fs),
-                "side-effecting or path-indirect find must not be lease-authorized: {command}"
-            );
+            assert!(!shell(command), "{command}");
         }
     }
 
     #[test]
-    fn production_lease_translates_only_the_bound_guest_workspace_alias() {
+    fn production_lease_translates_only_the_bound_guest_alias() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("apps/app-a/workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let lease = registry.begin_local_app("app-a", &root).unwrap();
+        let root = workspace(dir.path(), "a");
+        let registry = registry();
+        let lease = registry.begin_bound("a", &root).unwrap();
         let fs = roots(&root);
-
-        assert!(registry.allows_for_token(
-            Some(lease.token()),
+        let allows = |tool: &str, input: serde_json::Value| {
+            registry.allows_for_token(Some(lease.token()), tool, &input, &fs)
+        };
+        assert!(allows(
             "Write",
-            &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/App.jsx"}),
-            &fs
+            serde_json::json!({"file_path":"/guest/a/src/x.txt"})
         ));
-        assert!(!registry.allows_for_token(
-            Some(lease.token()),
-            "Bash",
-            &serde_json::json!({
-                "command":"echo ok > /workspace/local-app-app-a/src/out.txt"
-            }),
-            &fs
-        ));
-        assert!(registry.allows_for_token(
-            Some(lease.token()),
-            "Bash",
-            &serde_json::json!({
-                "command":"cat /workspace/local-app-app-a/src/out.txt"
-            }),
-            &fs
-        ));
-        assert!(!registry.allows_for_token(
-            Some(lease.token()),
+        assert!(!allows(
             "Write",
-            &serde_json::json!({"file_path":"/workspace/local-app-app-b/src/App.jsx"}),
-            &fs
+            serde_json::json!({"file_path":"/guest/b/src/x.txt"})
         ));
-    }
-
-    /// The host-owned HARD DENY is reachable only through a forwarded token.
-    ///
-    /// `denies_host_owned_for_token` had no test at all, and in production the
-    /// token never arrived: `DeferredToolInvoker` inherited the trait's
-    /// delegating default and dropped it, so the `let Some(token) = token else
-    /// { return false }` early return disabled this guard entirely. Forwarding
-    /// the token (engine-mobile `workflow_support.rs`, engine-desktop `lib.rs`)
-    /// turns it on for the first time — pin both polarities so the activation
-    /// is deliberate and a future pass-through wrapper cannot silently undo it.
-    #[test]
-    fn production_host_owned_deny_requires_the_forwarded_token() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("apps/app-a/workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let lease = registry.begin_local_app("app-a", &root).unwrap();
-        let fs = roots(&root);
-
-        // A host-owned file is denied outright when the token is present.
-        assert!(
-            registry.denies_host_owned_for_token(
-                Some(lease.token()),
-                "Write",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/package.json"}),
-                &fs
-            ),
-            "a leased workflow must not rewrite host-owned package.json"
-        );
-        assert!(
-            registry.denies_host_owned_for_token(
-                Some(lease.token()),
-                "Edit",
-                &serde_json::json!({
-                    "file_path":"/workspace/local-app-app-a/.lingxi-build-state/dependency-update-recovery.json"
-                }),
-                &fs
-            ),
-            "a leased workflow must not forge dependency recovery state"
-        );
-
-        // Generated source under the same lease stays writable.
-        assert!(
-            !registry.denies_host_owned_for_token(
-                Some(lease.token()),
-                "Write",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/App.jsx"}),
-                &fs
-            ),
-            "generated source is not host-owned"
-        );
-
-        // DOCUMENTS the `let Some(token) = token else { return false }` arm —
-        // it is NOT a regression anchor. This assertion stays green precisely
-        // WHEN the bug recurs, so it cannot catch a wrapper that drops the
-        // token again. The real guards are the forwarding tests in
-        // engine-mobile `workflow_support.rs` and engine-desktop `lib.rs`,
-        // which assert the token reaches the inner invoker.
-        assert!(
-            !registry.denies_host_owned_for_token(
-                None,
-                "Write",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/package.json"}),
-                &fs
-            ),
-            "a dropped token silently disables the host-owned deny"
-        );
-    }
-
-    #[test]
-    fn local_app_shell_path_escape_is_hard_denied_before_global_allow_rules() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("apps/app-a/workspace");
-        std::fs::create_dir_all(root.join("src")).unwrap();
-        let fs = roots(&root);
-
-        assert!(
-            !WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
-                "Bash",
-                &serde_json::json!({"command":"cat src/App.jsx"}),
-                &fs
-            )
-        );
-        assert!(
-            WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
-                "Bash",
-                &serde_json::json!({"command":"cat /etc/passwd"}),
-                &fs
-            )
-        );
-        assert!(
-            WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
-                "Bash",
-                &serde_json::json!({"command":"cd /tmp && cat src/App.jsx"}),
-                &fs
-            )
-        );
-    }
-
-    #[test]
-    fn local_app_tool_allowlist_is_app_scoped() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let _lease = registry.begin("app-a", root.clone());
-        let fs = roots(&root);
-        assert!(registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-a"}), &fs));
-        assert!(!registry.allows(
-            "LocalAppDeleteApp",
-            &serde_json::json!({"app_id":"app-a"}),
-            &fs
+        assert!(allows(
+            "Bash",
+            serde_json::json!({"command":"cat /guest/a/src/x.txt"})
         ));
-        assert!(!registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-b"}), &fs));
-    }
-
-    #[test]
-    fn local_app_layout_binds_mcp_lease_to_workspace_app_id() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("apps/app-a/workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let _lease = registry.begin("app-b", root.clone());
-        let fs = roots(&root);
-        assert!(!registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-b"}), &fs));
-        assert!(!registry.allows("LocalAppBuild", &serde_json::json!({"app_id":"app-a"}), &fs));
-    }
-
-    #[test]
-    fn guest_mount_root_binds_lease_to_exact_app_id() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("local-app-app-a");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let lease = registry.begin("app-b", root.clone());
-        let fs = roots(&root);
-        assert!(!registry.allows_for_token(
-            Some(lease.token()),
-            "LocalAppBuild",
-            &serde_json::json!({"app_id":"app-b"}),
-            &fs
-        ));
-        drop(lease);
-        let lease = registry.begin("app-a", root.clone());
-        assert!(registry.allows_for_token(
-            Some(lease.token()),
-            "LocalAppBuild",
-            &serde_json::json!({"app_id":"app-a"}),
-            &fs
+        assert!(!allows(
+            "Bash",
+            serde_json::json!({"command":"echo ok > /guest/a/src/x.txt"})
         ));
     }
 
     #[test]
-    fn production_local_app_lease_rejects_generic_or_mismatched_roots() {
+    fn the_workspace_root_is_derived_from_the_id_under_the_data_root() {
+        let registry = registry();
+        let data = Path::new("/profile");
+        assert_eq!(
+            registry.workspace_root_for(data, "a"),
+            PathBuf::from("/profile/spaces/ws-a")
+        );
+        assert_ne!(
+            registry.workspace_root_for(data, "a"),
+            registry.workspace_root_for(data, "b")
+        );
+        // A derived root is the profile's own canonical shape.
+        let derived = registry.workspace_root_for(data, "a");
+        assert!(TestProfile.is_exact_root(&derived, "a"));
+    }
+
+    #[test]
+    fn production_lease_rejects_generic_or_mismatched_roots() {
         let dir = tempdir().unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let generic = dir.path().join("workspace");
+        let registry = registry();
+        let generic = dir.path().join("plain");
         std::fs::create_dir_all(&generic).unwrap();
-        assert!(registry.begin_local_app("app-a", generic).is_err());
-
-        let wrong = dir.path().join("apps/app-b/workspace");
-        std::fs::create_dir_all(&wrong).unwrap();
-        assert!(registry.begin_local_app("app-a", wrong).is_err());
+        assert!(registry.begin_bound("a", generic).is_err());
+        let wrong = workspace(dir.path(), "b");
+        assert!(registry.begin_bound("a", wrong).is_err());
     }
 
     #[test]
-    fn production_local_app_lease_accepts_canonical_host_root() {
+    fn production_lease_accepts_the_canonical_root_and_records_it() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("apps/app-a/workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let lease = registry.begin_local_app("app-a", &root).unwrap();
+        let root = workspace(dir.path(), "a");
+        let registry = registry();
+        let lease = registry.begin_bound("a", &root).unwrap();
         assert_eq!(
             registry.active(),
             vec![WorkspaceLeaseInfo {
-                app_id: "app-a".into(),
+                workspace_id: "a".into(),
                 root: std::fs::canonicalize(root).unwrap(),
             }]
         );
@@ -1159,236 +871,74 @@ mod tests {
         assert!(registry.active().is_empty());
     }
 
-    /// The lease authorizes the local-app host operations under their BUILTIN
-    /// names. They used to be `mcp__local_apps__*`; that spelling gave them
-    /// third-party-MCP permission semantics they were never meant to have, so
-    /// they were moved to ordinary builtin tools.
-    ///
-    /// The `app_id` equality check is the scoping that makes this safe and
-    /// must survive the rename: a lease for app A must not authorize an
-    /// operation aimed at app B.
     #[test]
-    fn the_lease_authorizes_local_app_tools_by_their_builtin_names() {
+    fn a_profile_owned_tool_is_decided_by_the_profile_and_scoped_to_the_lease_id() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("apps/app-a/workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let lease = registry.begin_local_app("app-a", &root).unwrap();
+        let root = workspace(dir.path(), "a");
+        let registry = registry();
+        let lease = registry.begin_bound("a", &root).unwrap();
         let fs = roots(&root);
+        let allows = |input: serde_json::Value| {
+            registry.allows_for_token(Some(lease.token()), "TestOp", &input, &fs)
+        };
+        assert!(allows(serde_json::json!({"id": "a"})));
+        assert!(
+            !allows(serde_json::json!({"id": "b"})),
+            "a sibling is out of scope"
+        );
+        assert!(!allows(serde_json::json!({})));
+    }
 
-        for name in [
-            "LocalAppBuild",
-            "LocalAppLogs",
-            "LocalAppRuntime",
-            "LocalAppManifest",
-            "LocalAppQueryData",
-        ] {
-            assert!(
-                registry.allows_for_token(
-                    Some(lease.token()),
-                    name,
-                    &serde_json::json!({"app_id": "app-a"}),
-                    &fs
-                ),
-                "{name} must be lease-authorized for its own app"
-            );
-            assert!(
-                !registry.allows_for_token(
-                    Some(lease.token()),
-                    name,
-                    &serde_json::json!({"app_id": "app-b"}),
-                    &fs
-                ),
-                "{name} must NOT reach a sibling app"
-            );
-        }
-
-        // An operation outside the build loop is not lease-authorized.
+    #[test]
+    fn a_lease_whose_id_disagrees_with_the_root_authorizes_nothing() {
+        let dir = tempdir().unwrap();
+        let root = workspace(dir.path(), "a");
+        let registry = registry();
+        let lease = registry.begin_unchecked("b", root.clone());
+        let fs = roots(&root);
         assert!(!registry.allows_for_token(
             Some(lease.token()),
-            "LocalAppMutateData",
-            &serde_json::json!({"app_id": "app-a"}),
+            "TestOp",
+            &serde_json::json!({"id": "b"}),
+            &fs
+        ));
+        assert!(!registry.allows_for_token(
+            Some(lease.token()),
+            "Write",
+            &serde_json::json!({"file_path": "src/x"}),
             &fs
         ));
     }
 
-    /// `local_app_id_for_root` must recognise the GUEST spelling too.
-    ///
-    /// The same file's `guest_workspace_relative` already accepts both
-    /// `/workspace/local-app-<id>` and `/workspace/<id>`; this derivation
-    /// accepted neither bare form, so a caller handed a guest cwd — an
-    /// isolated subagent, say — would silently resolve to "no app" and any
-    /// binding built on it would be inert while looking correct.
     #[test]
-    fn the_app_id_derivation_accepts_host_and_guest_spellings() {
-        use std::path::Path;
-        // Host spellings.
-        assert_eq!(
-            local_app_id_for_root(Path::new("/data/apps/abcd1234/workspace")).as_deref(),
-            Some("abcd1234")
-        );
-        assert_eq!(
-            local_app_id_for_root(Path::new("/data/local-app-abcd1234")).as_deref(),
-            Some("abcd1234")
-        );
-        // Guest spellings, as measured on device.
-        assert_eq!(
-            local_app_id_for_root(Path::new("/workspace/local-app-abcd1234")).as_deref(),
-            Some("abcd1234")
-        );
-        assert_eq!(
-            local_app_id_for_root(Path::new("/workspace/abcd1234")).as_deref(),
-            Some("abcd1234")
-        );
-        // Not a local-app root.
-        assert_eq!(local_app_id_for_root(Path::new("/data/some/project")), None);
-        assert_eq!(local_app_id_for_root(Path::new("/workspace")), None);
-    }
-
-    /// Every Vite config SPELLING must be host-owned, not just the one the
-    /// template ships.
-    ///
-    /// Vite self-resolves its config from `DEFAULT_CONFIG_FILES`, and
-    /// `vite.config.js` is FIRST in that list — ahead of the `vite.config.mjs`
-    /// the host writes (verified against vite's own dist). A Vite config is
-    /// executed Node code, so a model that creates `vite.config.js` shadows the
-    /// host config and runs arbitrary code inside the build. `Edit` creates
-    /// files on a nonexistent path, so the existing `Edit(./**)` grant reaches
-    /// it without any new permission.
-    ///
-    /// `pnpm-workspace.yaml` is the same class: `prepare_dependency_staging`
-    /// copies it into the install staging directory, and the install runs with
-    /// the network ENABLED.
-    #[test]
-    fn every_host_config_spelling_is_host_owned() {
+    fn the_host_owned_deny_requires_the_forwarded_token() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("apps/app-a/workspace");
-        std::fs::create_dir_all(&root).unwrap();
+        let root = workspace(dir.path(), "a");
+        let registry = registry();
+        let lease = registry.begin_bound("a", &root).unwrap();
         let fs = roots(&root);
-
-        // Everything the generated LINGXI.md declares host-managed must
-        // actually BE host-owned. Four of these were declared to the agent but
-        // enforced nowhere, so the workspace's own `Edit(./**)` grant
-        // overwrote them and `restore_host_managed_files` silently reverted
-        // the edit — the model loops against a file it cannot change.
-        for name in [
-            ".gitignore",
-            "jsconfig.json",
-            "lib/lingxi-provider.jsx",
-            "lib/frame-loop.js",
-            "lib/phaser-runtime.js",
-            "lib/babylon-runtime.js",
-            "styles/foundation.css",
-            "vite.config.js",
-            "vite.config.mjs",
-            "vite.config.ts",
-            "vite.config.cjs",
-            "vite.config.mts",
-            "vite.config.cts",
-            "pnpm-workspace.yaml",
-            // PostCSS is the SAME hole as the Vite config: the template sets
-            // no `css.postcss` key and imports CSS, so Vite runs
-            // `lilconfig("postcss").search(root)` on every build and executes
-            // whatever it finds as Node code. `--config` pins only the Vite
-            // config and does not affect this search. Filenames read from
-            // vite's own `getDefaultSearchPlaces`.
-            "postcss.config.js",
-            "postcss.config.cjs",
-            "postcss.config.mjs",
-            ".postcssrc.js",
-            ".postcssrc.cjs",
-            ".postcssrc.mjs",
-            ".postcssrc.json",
-            ".config/postcssrc.js",
-            ".config/postcssrc.cjs",
-            ".config/postcssrc.mjs",
-        ] {
-            assert!(
-                WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
-                    "Write",
-                    &serde_json::json!({
-                        "file_path": format!("/workspace/local-app-app-a/{name}")
-                    }),
-                    &fs,
-                ),
-                "{name} must be host-owned"
-            );
-        }
-
-        // An ordinary source file with a similar name stays writable.
-        assert!(
-            !WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
-                "Write",
-                &serde_json::json!({
-                    "file_path": "/workspace/local-app-app-a/src/vite.config.helper.js"
-                }),
-                &fs,
-            ),
-            "app-owned source must stay writable"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn local_app_settings_and_symlink_escape_stay_denied_without_a_lease() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("apps/app-a/workspace");
-        let outside = dir.path().join("outside");
-        std::fs::create_dir_all(root.join(".lingxi")).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(root.join(".lingxi/settings.local.json"), b"{}\n").unwrap();
-        symlink(&outside, root.join("link")).unwrap();
-        let fs = roots(&root);
-
-        assert!(
-            WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
-                "Edit",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/.lingxi/settings.local.json"}),
-                &fs,
-            )
-        );
-        assert!(
-            WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
-                "Bash",
-                &serde_json::json!({"command":"npm install"}),
-                &fs,
-            )
-        );
-        assert!(
-            !WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
-                "Bash",
-                &serde_json::json!({"command":"cat src/App.jsx"}),
-                &fs,
-            )
-        );
-        assert!(
-            WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
-                "Edit",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/link/new.txt"}),
-                &fs,
-            )
-        );
-        assert!(
-            !WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
-                "Edit",
-                &serde_json::json!({"file_path":"/workspace/local-app-app-a/src/new.txt"}),
-                &fs,
-            )
-        );
+        let input = serde_json::json!({"file_path": "host.lock"});
+        assert!(registry.denies_host_owned_for_token(Some(lease.token()), "Write", &input, &fs));
+        assert!(!registry.denies_host_owned_for_token(
+            Some(lease.token()),
+            "Write",
+            &serde_json::json!({"file_path": "src/x"}),
+            &fs
+        ));
+        // Documents the `let Some(token) = token else { return false }` arm. It
+        // is not a regression anchor: it stays green precisely when a wrapper
+        // drops the token. The forwarding tests in the runtime guard that.
+        assert!(!registry.denies_host_owned_for_token(None, "Write", &input, &fs));
     }
 
     #[test]
     fn concurrent_leases_require_the_matching_token() {
         let dir = tempdir().unwrap();
-        let root_a = dir.path().join("workspace-a");
-        let root_b = dir.path().join("workspace-b");
-        std::fs::create_dir_all(&root_a).unwrap();
-        std::fs::create_dir_all(&root_b).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let lease_a = registry.begin("app-a", root_a.clone());
-        let lease_b = registry.begin("app-b", root_b.clone());
+        let root_a = workspace(dir.path(), "a");
+        let root_b = workspace(dir.path(), "b");
+        let registry = registry();
+        let lease_a = registry.begin_unchecked("a", root_a.clone());
+        let lease_b = registry.begin_unchecked("b", root_b);
         let fs_a = roots(&root_a);
         assert!(registry.allows_for_token(
             Some(lease_a.token()),
@@ -1405,30 +955,44 @@ mod tests {
     }
 
     #[test]
-    fn shell_lease_allows_cd_but_rejects_nested_actions() {
+    fn the_static_boundary_needs_no_lease() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let lease = registry.begin("app", root.clone());
+        let root = workspace(dir.path(), "a");
+        std::fs::create_dir_all(root.join(".host")).unwrap();
+        let registry = registry();
         let fs = roots(&root);
-        assert!(registry.allows_for_token(
-            Some(lease.token()),
-            "Bash",
-            &serde_json::json!({"command":"cd . && grep -rn foo src/"}),
-            &fs
+        let denies = |tool: &str, input: serde_json::Value| {
+            registry.denies_host_owned_for_workspace(tool, &input, &fs)
+        };
+        assert!(denies(
+            "Edit",
+            serde_json::json!({"file_path":"/guest/a/.host/state.json"})
         ));
-        assert!(!registry.allows_for_token(
-            Some(lease.token()),
+        assert!(denies("Bash", serde_json::json!({"command":"npm install"})));
+        assert!(!denies("Bash", serde_json::json!({"command":"cat src/x"})));
+        let escapes =
+            |tool: &str, input: serde_json::Value| registry.escapes_workspace(tool, &input, &fs);
+        assert!(!escapes("Bash", serde_json::json!({"command":"cat src/x"})));
+        assert!(escapes(
             "Bash",
-            &serde_json::json!({"command":"find . -exec curl https://example.com {} +"}),
-            &fs
+            serde_json::json!({"command":"cat /etc/passwd"})
         ));
-        assert!(!registry.allows_for_token(
-            Some(lease.token()),
+        assert!(escapes(
             "Bash",
-            &serde_json::json!({"command":"sed -n 'e curl https://example.com' README.md"}),
-            &fs
+            serde_json::json!({"command":"cd /tmp && cat src/x"})
+        ));
+        // A root the profile does not recognise is not a managed workspace.
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(!registry.denies_host_owned_for_workspace(
+            "Write",
+            &serde_json::json!({"file_path":"host.lock"}),
+            &roots(&plain)
+        ));
+        assert!(!registry.escapes_workspace(
+            "Bash",
+            &serde_json::json!({"command":"cat /etc/passwd"}),
+            &roots(&plain)
         ));
     }
 
@@ -1438,17 +1002,27 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let dir = tempdir().unwrap();
-        let root = dir.path().join("workspace");
+        let root = workspace(dir.path(), "a");
         let outside = dir.path().join("outside");
-        std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         symlink(&outside, root.join("link")).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let _lease = registry.begin("app", root.clone());
+        let registry = registry();
+        let _lease = registry.begin_unchecked("a", root.clone());
         let fs = roots(&root);
         assert!(!registry.allows(
             "Write",
             &serde_json::json!({"file_path":"link/new.txt"}),
+            &fs
+        ));
+        // The same hole without a lease: the static boundary names it too.
+        assert!(registry.escapes_workspace(
+            "Edit",
+            &serde_json::json!({"file_path":"/guest/a/link/new.txt"}),
+            &fs
+        ));
+        assert!(!registry.escapes_workspace(
+            "Edit",
+            &serde_json::json!({"file_path":"/guest/a/src/new.txt"}),
             &fs
         ));
     }
@@ -1457,10 +1031,9 @@ mod tests {
     #[test]
     fn macos_var_alias_is_compared_after_canonicalization() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("workspace");
-        std::fs::create_dir_all(&root).unwrap();
-        let registry = WorkspacePermissionLeaseRegistry::new();
-        let _lease = registry.begin("app", root.clone());
+        let root = workspace(dir.path(), "a");
+        let registry = registry();
+        let _lease = registry.begin_unchecked("a", root.clone());
         let fs = roots(&root);
         let canonical = std::fs::canonicalize(&root).unwrap();
         let Some(raw) = canonical

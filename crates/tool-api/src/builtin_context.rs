@@ -14,13 +14,19 @@ use crate::worktree_session::WorktreeSessionCell;
 use lingxi_core::host::agent_name_registry::AgentNameRegistry;
 use lingxi_core::host::audio::{AudioRecordingHandle, AudioService};
 use lingxi_core::host::budget::BudgetEnforcerHandle;
+use lingxi_core::host::calendar::CalendarProvider;
 use lingxi_core::host::camera::CameraControl;
 use lingxi_core::host::clipboard::Clipboard;
 use lingxi_core::host::clock::Clock;
 use lingxi_core::host::computer_control::ComputerControl;
+use lingxi_core::host::contacts::ContactsProvider;
 use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
+use lingxi_core::host::deep_link::DeepLinkOpener;
+use lingxi_core::host::device_status::DeviceStatusProvider;
 use lingxi_core::host::filesystem::FileSystem;
+use lingxi_core::host::haptics::HapticService;
 use lingxi_core::host::http::HttpTransport;
+use lingxi_core::host::location::LocationProvider;
 use lingxi_core::host::mailbox::MailboxRouterHandle;
 use lingxi_core::host::notification::NotificationService;
 use lingxi_core::host::permission_gate::PermissionGate;
@@ -229,7 +235,7 @@ pub struct BuiltinToolContext {
     /// desktop; mobile composition roots wire `platform.camera()` (a Swift /
     /// Kotlin impl via UniFFI).
     pub camera: Option<Arc<dyn CameraControl>>,
-    /// Unified per-device audio service. The audio tools, Local App adapter,
+    /// Unified per-device audio service. The audio tools, the app adapter,
     /// and Computer Use audio routes share this app-scoped service.
     pub audio: Option<Arc<dyn AudioService>>,
     /// Host-managed recording handles for public voice start/stop actions.
@@ -249,6 +255,18 @@ pub struct BuiltinToolContext {
     /// Native system clipboard — `tool-clipboard`'s `ClipboardTool` routes
     /// here. `None` on desktop; mobile wires `platform.clipboard()`.
     pub clipboard: Option<Arc<dyn Clipboard>>,
+    /// One-shot native location for the location tool.
+    pub location: Option<Arc<dyn LocationProvider>>,
+    /// Bounded battery and connectivity status for the device_status tool.
+    pub device_status: Option<Arc<dyn DeviceStatusProvider>>,
+    /// Native bounded feedback for the haptics tool.
+    pub haptics: Option<Arc<dyn HapticService>>,
+    /// Validated external URL launching for the open_url tool.
+    pub deep_link: Option<Arc<dyn DeepLinkOpener>>,
+    /// Read-only native calendar for bounded calendar queries.
+    pub calendar: Option<Arc<dyn CalendarProvider>>,
+    /// Read-only native contacts for bounded contacts searches.
+    pub contacts: Option<Arc<dyn ContactsProvider>>,
     /// Screen-capture + input automation — the device-control tools
     /// (`computer`/`android_use`/`ios_use`) route here. `None` unless a
     /// desktop automation backend or a mobile UniFFI impl is wired.

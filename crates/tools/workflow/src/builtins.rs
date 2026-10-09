@@ -2,7 +2,7 @@
 //!
 //! Built-ins are resolved after project/user/plugin workflows. The remaining
 //! binary-owned surface is the generic manual `deep-research` workflow only;
-//! Local App workflows are plugin-owned in Phase 9 and must not be duplicated
+//! Product workflows are plugin-owned and must not be duplicated
 //! here.
 
 /// A workflow whose source is compiled into the binary.

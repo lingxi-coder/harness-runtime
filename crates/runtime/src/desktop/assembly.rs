@@ -1544,7 +1544,8 @@ pub async fn build_with_credential_stack(
     // arms below (the full union when enforcing; `--add-dir` only otherwise), so
     // it is always initialized before its later reads.
     let boot_additional_working_dirs: Vec<std::path::PathBuf>;
-    let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
+    crate::local_app_tool_policy::install();
+    let workspace_leases = crate::local_app_workspace_profile::LocalAppWorkspaceProfile::registry();
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →
         // project → local (3c: settings.local.json read after project so a
@@ -3296,6 +3297,12 @@ pub async fn build_with_credential_stack(
         share: None,
         notifications: None,
         clipboard: None,
+        location: None,
+        device_status: None,
+        haptics: None,
+        deep_link: None,
+        calendar: None,
+        contacts: None,
         computer_control: platform_macos_computer_control::new_if_supported(),
         android_shell: None,
         android_git: None,

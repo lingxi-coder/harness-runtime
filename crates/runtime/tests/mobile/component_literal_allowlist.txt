@@ -7,10 +7,11 @@
 # `literal`. No globs, no directory entries, no prefixes.
 #
 # Scan surface (component_literal_scan.rs's SCAN_ROOTS):
-#   runtime/src/mobile, tasks/src, tools/workflow/src, workflow/src
-# — the latter two because design doc §19.3's last bullet and P-1.9's
+#   runtime/src/mobile, tasks/src, tools/workflow/src, workflow/src, local-app-builder-service/src
+# — `tools/workflow/src` and `workflow/src` because design doc §19.3's last bullet and P-1.9's
 # completion condition are stated over exactly those directories, so a scanner
-# rooted only at the mobile host could never gate them.
+# rooted only at the mobile host could never gate them; `local-app-builder-service/src`
+# because the Local App broker, build pipeline and MCP server live there now.
 #
 # Within those roots EVERY file type is scanned except the known-binary
 # extensions in SKIPPED_EXTENSIONS: the filter is a deny-list, so an unknown
@@ -28,7 +29,7 @@
 # They used to be, and that made every unrelated edit above an allowlisted
 # line produce a spurious "leak" whose cheapest fix is re-typing line numbers
 # with the count unchanged — the re-baseline reflex this gate exists to
-# prevent. P-1.2/P-1.4 edit local_apps_host.rs, P-1.3 edits
+# prevent. P-1.2/P-1.4 edit the Host broker (now local-app-builder-service/src/broker.rs), P-1.3 edits
 # workflow_support.rs, P-1.5 edits lib.rs; all of them would have paid it.
 # The FAILURE OUTPUT is still line-numbered ("name the file and the line" is a
 # requirement on what the gate says, not on how the allowlist is keyed).
@@ -68,7 +69,7 @@
 # appear as source literals in this file any more; this file has no entries
 # here.
 
-# local_apps_host.rs — P-1.4 removed the Host's two prose sentences naming
+# local-app-builder-service/src/broker.rs (was runtime/src/mobile/local_apps_host.rs) — P-1.4 removed the Host's two prose sentences naming
 # which build workflow the app's surface requires (§19.3: the Host contract
 # carries no workflow/skill/agent names). The Host still selects and enforces
 # the build WORKFLOW itself via LocalAppPluginBinding::resolve/enforce
@@ -94,13 +95,10 @@
 # `skill_loader.rs::resolve_agent_skill_name` serves agent-frontmatter
 # preloading, NOT the tool). Host prose naming the bare form would send the
 # model to `Unknown skill: create-local-app`.
-runtime/src/mobile/local_apps_host.rs:lingxi-local-app:create-local-app:2
 #
 # The on-demand testing hand-off prose names the two plugin test SKILLS so the
 # model can invoke them: testing is never host-initiated, so the only way to
 # reach the app's on-device use-test path is by name.
-runtime/src/mobile/local_apps_host.rs:frontend-qa:1
-runtime/src/mobile/local_apps_host.rs:local-app-test:1
 
 # host.rs — the ONE place the three plugin-owned entry routers are kept visible
 # in a global/project conversation. Every other `lingxi-local-app:` skill is
@@ -130,7 +128,7 @@ runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-build:
 runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-mcp-authoring:1
 runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-use-test:1
 
-# local_apps_mcp.rs — same WP8 exception as local_apps_host.rs above, on the
+# local-app-builder-service/src/mcp_server.rs (was runtime/src/mobile/local_apps_mcp.rs) — same WP8 exception as broker.rs above, on the
 # two model-visible error copies that tell an agent stuck on an unscaffolded
 # shell how to proceed: the pre-scaffold operation gate's refusal message and
 # `create`'s `runtime_profile`/`surface` rejection message. Both name only the
@@ -141,9 +139,8 @@ runtime/src/mobile/local_app_plugin_binding.rs:lingxi-local-app:local-app-use-te
 # reason the gate cannot live at transport level (the local-apps MCP server is
 # connected unconditionally with `disabled: false, always_load: true`). Naming
 # the component the gate protects is the point of the comment; 2 -> 3.
-runtime/src/mobile/local_apps_mcp.rs:lingxi-local-app:create-local-app:3
 
-# local_apps_build.rs — the same WP8 exception, on the one refusal an agent
+# local-app-builder-service/src/app_build.rs (was runtime/src/mobile/local_apps_build.rs) — the same WP8 exception, on the one refusal an agent
 # meets when it tries to build an app that is still an empty shell. It used to
 # tell the reader to "call LocalAppScaffold" — an operation the create flow
 # refuses without a Host-issued receipt — so the copy now names the guided flow
@@ -151,7 +148,6 @@ runtime/src/mobile/local_apps_mcp.rs:lingxi-local-app:create-local-app:3
 # the two entries above: the bare `create-local-app` does not resolve, so the
 # copy has to carry the qualified form or it sends the reader to
 # `Unknown skill: create-local-app`.
-runtime/src/mobile/local_apps_build.rs:lingxi-local-app:create-local-app:1
 
 # --- tasks/src -------------------------------------------------------------
 

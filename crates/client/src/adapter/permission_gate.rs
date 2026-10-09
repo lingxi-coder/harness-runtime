@@ -108,6 +108,8 @@ struct ParkedRequest {
 struct PermissionOwnerScope {
     id: u64,
     wire: PermissionOwnerDto,
+    // Runtime ownership is independent of worker attribution on the wire.
+    background_owned: bool,
 }
 
 /// Cancel-safety guard for [`AdapterPermissionGate::check_with_context_impl`]
@@ -257,8 +259,14 @@ impl AdapterPermissionGate {
         let id = self.next_owner_id.fetch_add(1, Ordering::Relaxed);
         let owner = PermissionOwnerScope {
             id,
+            background_owned: false,
             wire: PermissionOwnerDto {
-                session_id,
+                session_id: session_id.or_else(|| {
+                    self.current_session_id
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone()
+                }),
                 turn_id,
                 worker_name: None,
             },
@@ -279,6 +287,27 @@ impl AdapterPermissionGate {
         if active.as_ref().is_some_and(|owner| owner.id == owner_id) {
             *active = None;
         }
+    }
+
+    /// Query the immutable execution scope of a still-parked request.
+    /// `None` means the request has already resolved, expired, or been cancelled.
+    pub async fn request_is_background(&self, request_id: u64) -> Option<bool> {
+        self.pending.lock().await.get(&request_id).map(|request| {
+            request
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.background_owned)
+        })
+    }
+
+    /// Query the private cancellation owner captured when the request began.
+    /// Unowned and retired requests return `None`.
+    pub async fn request_owner_id(&self, request_id: u64) -> Option<u64> {
+        self.pending
+            .lock()
+            .await
+            .get(&request_id)
+            .and_then(|request| request.owner.as_ref().map(|owner| owner.id))
     }
 
     async fn emit_resolution(&self, request_id: u64, resolution: PermissionResolutionDto) {
@@ -413,7 +442,8 @@ impl AdapterPermissionGate {
         true
     }
 
-    /// Cancel only requests owned by one main turn, preserving child agents.
+    /// Cancel requests belonging to one execution owner, preserving independent
+    /// background executions. Foreground workers share their main turn's owner.
     pub async fn cancel_owner(&self, owner_id: u64) -> Vec<u64> {
         let removed = {
             let mut pending = self.pending.lock().await;
@@ -489,9 +519,39 @@ impl AdapterPermissionGate {
         name: &str,
         input: &serde_json::Value,
         worker: Option<PromptWorker>,
+        background_owned: bool,
         suppress_always_allow_rule: bool,
         auto_mode_prompt: Option<AutoModePrompt>,
     ) -> PermissionOutcome {
+        // Capture the owner before the first await: a queued rule lookup must
+        // not attach a call from a completed turn to its replacement turn.
+        let mut owner = if background_owned {
+            None
+        } else {
+            self.active_main_owner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        };
+        if owner.is_none() && (background_owned || worker.is_some()) {
+            owner = Some(PermissionOwnerScope {
+                id: self.next_owner_id.fetch_add(1, Ordering::Relaxed),
+                background_owned,
+                wire: PermissionOwnerDto {
+                    session_id: self
+                        .current_session_id
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone(),
+                    turn_id: None,
+                    worker_name: None,
+                },
+            });
+        }
+        if let Some(owner) = owner.as_mut() {
+            owner.wire.worker_name = worker.as_ref().map(|worker| worker.name.clone());
+        }
+
         // Step 1: consult session rules (identical to the TUI gate; content-aware
         // so a narrowed AllowAlways rule only short-circuits a matching call).
         // A requiresUserInteraction tool must not be bypassed by an older rule.
@@ -509,26 +569,6 @@ impl AdapterPermissionGate {
                 };
             }
         }
-
-        let owner = if let Some(worker) = worker.as_ref() {
-            Some(PermissionOwnerScope {
-                id: self.next_owner_id.fetch_add(1, Ordering::Relaxed),
-                wire: PermissionOwnerDto {
-                    session_id: self
-                        .current_session_id
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                    turn_id: None,
-                    worker_name: Some(worker.name.clone()),
-                },
-            })
-        } else {
-            self.active_main_owner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        };
 
         // Step 2: build the request DTO. ExitPlanMode carries a real plan body
         // and must use its dedicated wire kind; every other tool keeps the
@@ -700,7 +740,7 @@ impl PermissionGate for AdapterPermissionGate {
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
         match self
-            .check_with_context_impl(name, input, worker, false, None)
+            .check_with_context_impl(name, input, worker, false, false, None)
             .await
         {
             PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
@@ -721,6 +761,7 @@ impl PermissionGate for AdapterPermissionGate {
                 name,
                 input,
                 ctx.worker.clone(),
+                ctx.background_owned,
                 ctx.suppress_always_allow_rule,
                 ctx.auto_mode_prompt,
             )
@@ -1136,14 +1177,18 @@ mod tests {
         let worker_gate = gate.clone();
         let worker = tokio::spawn(async move {
             worker_gate
-                .check_with_worker(
+                .check_with_context(
                     "Write",
                     &json!({"file_path": "/tmp/x"}),
-                    Some(PromptWorker {
-                        name: "design".to_string(),
-                        team: None,
-                        is_async: true,
-                    }),
+                    &PermissionCheckContext {
+                        worker: Some(PromptWorker {
+                            name: "design".to_string(),
+                            team: None,
+                            is_async: false,
+                        }),
+                        background_owned: true,
+                        ..Default::default()
+                    },
                 )
                 .await
         });
@@ -1198,7 +1243,7 @@ mod tests {
         );
         assert!(matches!(
             worker.await.unwrap(),
-            PermissionDecision::Deny { .. }
+            PermissionOutcome::Deny { .. }
         ));
         let terminal = events.events().await;
         assert!(terminal.iter().any(|event| matches!(
@@ -1211,6 +1256,124 @@ mod tests {
             ClientEvent::PermissionRequestResolved { request_id, resolution: PermissionResolutionDto::Denied }
                 if *request_id == worker_request.request_id
         )));
+    }
+
+    #[tokio::test]
+    async fn foreground_worker_shares_main_owner_regardless_of_display_async_flag() {
+        let requests = MockRequestSink::arc();
+        let gate = Arc::new(AdapterPermissionGate::new(requests.clone()));
+        gate.set_session_id(Some("mounted-session".into()));
+        let owner = gate.begin_main_turn(None, Some(11));
+        let g = gate.clone();
+        let worker = tokio::spawn(async move {
+            g.check_with_worker(
+                "Write",
+                &json!({"file_path": "/tmp/foreground"}),
+                Some(PromptWorker {
+                    name: "main_workflow".into(),
+                    team: None,
+                    is_async: true,
+                }),
+            )
+            .await
+        });
+        wait_for_pending(&gate, 1).await;
+        let request = requests.last().await;
+        assert_eq!(gate.request_owner_id(request.request_id).await, Some(owner));
+        assert_eq!(
+            gate.request_is_background(request.request_id).await,
+            Some(false)
+        );
+        let wire = request.owner.unwrap();
+        assert_eq!(wire.session_id.as_deref(), Some("mounted-session"));
+        assert_eq!(wire.turn_id, Some(11));
+        assert_eq!(wire.worker_name.as_deref(), Some("main_workflow"));
+        assert_eq!(gate.cancel_owner(owner).await, vec![request.request_id]);
+        assert!(matches!(
+            worker.await.unwrap(),
+            PermissionDecision::Deny { .. }
+        ));
+        assert_eq!(gate.request_is_background(request.request_id).await, None);
+        assert_eq!(gate.request_owner_id(request.request_id).await, None);
+    }
+
+    #[tokio::test]
+    async fn unnamed_background_request_survives_main_retirement_and_resolves_while_idle() {
+        let requests = MockRequestSink::arc();
+        let gate = Arc::new(AdapterPermissionGate::new(requests.clone()));
+        gate.set_session_id(Some("session-a".into()));
+        let main_owner = gate.begin_main_turn(None, Some(7));
+        let g = gate.clone();
+        let background = tokio::spawn(async move {
+            g.check_with_context(
+                "Write",
+                &json!({"file_path": "/tmp/background"}),
+                &PermissionCheckContext {
+                    background_owned: true,
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+        wait_for_pending(&gate, 1).await;
+        let request = requests.last().await;
+        assert!(request.worker.is_none());
+        assert_eq!(
+            gate.request_is_background(request.request_id).await,
+            Some(true)
+        );
+        assert_ne!(
+            gate.request_owner_id(request.request_id).await,
+            Some(main_owner)
+        );
+        assert_eq!(
+            request.owner.as_ref().unwrap().session_id.as_deref(),
+            Some("session-a")
+        );
+        assert!(gate.cancel_owner(main_owner).await.is_empty());
+        gate.end_main_turn(main_owner);
+        assert_eq!(gate.pending_count().await, 1);
+        assert!(
+            gate.resolve(request.request_id, PermissionResponseDto::AllowAlways, "")
+                .await
+        );
+        assert!(matches!(
+            background.await.unwrap(),
+            PermissionOutcome::Allow { .. }
+        ));
+        assert_eq!(gate.request_is_background(request.request_id).await, None);
+        assert_eq!(gate.session_allow_rules.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn permission_owner_is_captured_before_a_contended_rule_lookup() {
+        let requests = MockRequestSink::arc();
+        let gate = Arc::new(AdapterPermissionGate::new(requests.clone()));
+        let old_owner = gate.begin_main_turn(Some("old-session".into()), Some(1));
+        let rules = gate.session_allow_rules.lock().await;
+        let g = gate.clone();
+        let mut check = Box::pin(async move { g.check("Write", &json!({})).await });
+        let first_poll = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(check.as_mut(), cx))
+        })
+        .await;
+        assert!(first_poll.is_pending());
+        gate.end_main_turn(old_owner);
+        let new_owner = gate.begin_main_turn(Some("new-session".into()), Some(2));
+        drop(rules);
+        let task = tokio::spawn(check);
+        wait_for_pending(&gate, 1).await;
+        let request = requests.last().await;
+        assert_eq!(
+            gate.request_owner_id(request.request_id).await,
+            Some(old_owner)
+        );
+        assert!(gate.cancel_owner(new_owner).await.is_empty());
+        assert_eq!(gate.cancel_owner(old_owner).await, vec![request.request_id]);
+        assert!(matches!(
+            task.await.unwrap(),
+            PermissionDecision::Deny { .. }
+        ));
     }
 
     /// `drop_resolves_deny` — draining the parked map drops the sender ⇒ the

@@ -1,8 +1,8 @@
 //! Compiled-in builtin skill templates.
 //!
-//! Local App skills are file-backed Plugin components. Keeping only the
+//! The mobile product's skills are file-backed Plugin components. Keeping only the
 //! unrelated desktop catalog here prevents a second mobile body/reference
-//! source from drifting away from `plugins/lingxi-local-app/`.
+//! source from drifting away from the plugin tree.
 
 /// A compiled-in skill template and its registry-only discovery phrases.
 pub(crate) struct BundledSkill {
@@ -32,6 +32,6 @@ pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[BundledSkill {
     references: &[],
 }];
 
-/// Mobile has no bundled Local App skills. They are registered from the
+/// Mobile has no bundled skills of its own. They are registered from the
 /// verified Plugin package by the mobile composition root.
 pub(crate) const BUILTIN_MOBILE: &[BundledSkill] = &[];

@@ -1,4 +1,4 @@
-//! `tool-mobile` — the device-capability builtin tools.
+//! `tool-mobile` — native device services exposed as typed builtin tools.
 //!
 //! Folds the former one-crate-per-tool split (`tool-share` / `tool-camera` /
 //! `tool-voice` / `tool-notification` / `tool-clipboard` / `tool-speech`) into a
@@ -7,8 +7,8 @@
 //!
 //! ## Two composition roots, two entry points
 //!
-//! - `engine-mobile` calls [`register_all`] — all six tools. Their capabilities
-//!   are the Swift / Kotlin implementations injected via `UniFFI`.
+//! - `engine-mobile` calls [`register_all`] — tools backed by its Swift / Kotlin
+//!   services injected via `UniFFI`, including device state and personal data.
 //! - `engine-desktop` calls [`register_audio`] — ONLY `voice` + `speech`. Their
 //!   capabilities are `bridge_server::audio_bridge::AudioBridge`, which proxies
 //!   each trait call to the connected Electron client over the wire. The desktop
@@ -22,21 +22,34 @@
 #![forbid(unsafe_code)]
 
 mod audio_support;
+pub mod calendar;
 pub mod camera;
 pub mod clipboard;
+pub mod contacts;
+pub mod device_status;
+mod device_support;
+pub mod haptics;
+pub mod location;
 pub mod notification;
+pub mod open_url;
 pub mod share;
 pub mod speech;
 pub mod voice;
 
+pub use calendar::CalendarTool;
 pub use camera::CameraTool;
 pub use clipboard::ClipboardTool;
+pub use contacts::ContactsTool;
+pub use device_status::DeviceStatusTool;
+pub use haptics::HapticsTool;
+pub use location::LocationTool;
 pub use notification::NotificationTool;
+pub use open_url::OpenUrlTool;
 pub use share::ShareTool;
 pub use speech::SpeechTool;
 pub use voice::VoiceTool;
 
-/// Register every device-capability builtin tool into `reg`.
+/// Register the typed device tools backed by this host into `reg`.
 ///
 /// Replaces the former per-crate `tool_<name>::register_all` calls the
 /// composition root made; the ordering matches the previous wiring.
@@ -44,11 +57,39 @@ pub use voice::VoiceTool;
 /// Audio actions are projected from supported operations. Readiness such as
 /// permission, model installation, or device busy state does not remove them.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
-    camera::register_all(reg, ctx.clone());
+    use std::sync::Arc;
+
+    if ctx.camera.is_some() {
+        camera::register_all(reg, ctx.clone());
+    }
     register_audio(reg, &ctx);
-    notification::register_all(reg, ctx.clone());
-    clipboard::register_all(reg, ctx.clone());
-    share::register_all(reg, ctx);
+    if ctx.notifications.is_some() {
+        notification::register_all(reg, ctx.clone());
+    }
+    if ctx.clipboard.is_some() {
+        clipboard::register_all(reg, ctx.clone());
+    }
+    if ctx.share.is_some() {
+        share::register_all(reg, ctx.clone());
+    }
+    if ctx.location.is_some() {
+        reg.register_builtin(Arc::new(LocationTool::new(ctx.clone())));
+    }
+    if ctx.device_status.is_some() {
+        reg.register_builtin(Arc::new(DeviceStatusTool::new(ctx.clone())));
+    }
+    if ctx.haptics.is_some() {
+        reg.register_builtin(Arc::new(HapticsTool::new(ctx.clone())));
+    }
+    if ctx.deep_link.is_some() {
+        reg.register_builtin(Arc::new(OpenUrlTool::new(ctx.clone())));
+    }
+    if ctx.calendar.is_some() {
+        reg.register_builtin(Arc::new(CalendarTool::new(ctx.clone())));
+    }
+    if ctx.contacts.is_some() {
+        reg.register_builtin(Arc::new(ContactsTool::new(ctx)));
+    }
 }
 
 /// Register audio tools whenever an audio service is wired. Their per-request
@@ -58,7 +99,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
 /// This is the desktop composition root's entry point. It is narrower than
 /// [`register_all`] in two deliberate ways:
 ///
-/// 1. **Two tools, not six.** The desktop's audio comes from the Electron
+/// 1. **Only audio tools.** The desktop's audio comes from the Electron
 ///    client's microphone and speaker; it has no device camera, share sheet,
 ///    push-notification service or mobile clipboard behind the other four, and
 ///    registering them would widen the desktop tool surface with tools that
@@ -179,20 +220,16 @@ mod register_audio_tests {
         );
     }
 
-    /// Non-audio mobile tools remain registered without any audio support.
     #[test]
-    fn register_all_omits_unsupported_audio_actions() {
+    fn register_all_omits_every_tool_without_a_backend() {
         let mut reg = ToolRegistry::new();
         super::register_all(&mut reg, bare_ctx());
-        assert_eq!(
-            reg.all_names(),
-            vec![
-                "camera".to_string(),
-                "notification".to_string(),
-                "clipboard".to_string(),
-                "share".to_string(),
-            ],
-            "mobile keeps its non-audio tools without advertising unsupported audio"
+        assert!(
+            reg.all_names().is_empty(),
+            "unwired native services must not be advertised"
         );
     }
 }
+
+#[cfg(test)]
+mod device_tools_tests;

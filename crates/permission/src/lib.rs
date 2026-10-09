@@ -129,7 +129,10 @@ pub use dangerous_perms::{
     is_dangerous_task_permission, DangerousPermissionInfo,
 };
 pub use dangerous_removal::{check_dangerous_removal, is_dangerous_removal_path, DangerousRemoval};
-pub use defaults_per_tool::{tool_default, tool_default_names, tool_default_row};
+pub use defaults_per_tool::{
+    install_tool_default_extension, is_divergence_tool, tool_default, tool_default_names,
+    tool_default_row, ToolDefaultExtension,
+};
 pub use filesystem::FsRoots;
 pub use gate::{
     PermissionDecision, PermissionGate, PermissionRequest, PermissionResponse, PromptDecision,
@@ -193,8 +196,8 @@ pub use working_dirs::{
     network_working_directory_message, AdditionalWorkingDirs, WorkingDirectory,
 };
 pub use workspace_lease::{
-    local_app_id_for_root, WorkspaceLeaseInfo, WorkspacePermissionLease,
-    WorkspacePermissionLeaseRegistry,
+    WorkspaceLeaseInfo, WorkspacePermissionLease, WorkspacePermissionLeaseRegistry,
+    WorkspaceProfile,
 };
 
 pub use model_path::{FileSystemPathTranslator, ModelPathOutcome, ModelPathTranslator};

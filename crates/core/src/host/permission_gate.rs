@@ -255,7 +255,7 @@ pub struct PermissionCheckContext {
     /// context rather than stored process-globally so synchronous and async
     /// subagents can inherit the correct owner semantics without races.
     pub is_non_interactive_session: bool,
-    /// Ephemeral local-app workspace lease used to bind automatic filesystem
+    /// Ephemeral host-managed workspace lease used to bind automatic filesystem
     /// authorization to the workflow that owns the call. `None` for ordinary
     /// session and main-loop dispatches.
     pub workspace_lease_token: Option<u64>,

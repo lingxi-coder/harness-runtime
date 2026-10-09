@@ -157,7 +157,7 @@ mod tests {
 
     /// The measured device bug: the model names files in GUEST coordinates
     /// while every permission root is a HOST path, so `Edit(./**)` — the rule
-    /// the host itself writes into a local app's workspace — matches nothing
+    /// the host itself writes into a managed workspace — matches nothing
     /// and every single write prompts.
     #[tokio::test]
     async fn guest_path_matches_an_allow_rule_through_its_host_twin() {
@@ -373,49 +373,42 @@ mod tests {
         );
     }
 
-    /// A per-app ALLOW rule must actually grant.
+    /// A per-target ALLOW rule on a product's own tool must actually grant.
     ///
-    /// The whole justification for moving these off `mcp__local_apps__*` was
-    /// that a builtin can be content-matched, so a user can grant one app
-    /// without granting every app on the device. `tool_content_key` only knew
-    /// WebFetch/Agent/Task, so `LocalAppBuild(app-a)` silently matched nothing
-    /// and the only working grant was the tool-wide one — exactly the
-    /// limitation the move was supposed to remove.
+    /// A builtin can be content-matched, so a user can grant one target
+    /// without granting every target on the device. `tool_content_key` only knew
+    /// WebFetch/Agent/Task until a product could say what its rules are keyed
+    /// on; without that, `Tool(target)` silently matched nothing and the only
+    /// working grant was the tool-wide one.
     #[tokio::test]
-    async fn a_per_app_allow_rule_grants_only_that_app() {
-        let policy = local_settings_policy(
-            r#"{ "permissions": { "allow": ["LocalAppMutateData(app-a)"] } }"#,
-        );
+    async fn a_per_target_allow_rule_grants_only_that_target() {
+        crate::defaults_per_tool::install_test_extension();
+        let policy =
+            local_settings_policy(r#"{ "permissions": { "allow": ["ExtMutate(app-a)"] } }"#);
         let inner = RecordingInner::new(PermissionDecision::Deny {
             reason: "prompted".into(),
         });
         let gate = PolicyPermissionGate::new(policy, inner.clone());
 
         assert_eq!(
-            gate.check(
-                "LocalAppMutateData",
-                &serde_json::json!({"app_id": "app-a"})
-            )
-            .await,
+            gate.check("ExtMutate", &serde_json::json!({"id": "app-a"}))
+                .await,
             PermissionDecision::Allow,
-            "the named app must be granted"
+            "the named target must be granted"
         );
         assert_eq!(inner.calls(), 0, "a matching allow rule must not prompt");
 
-        // A sibling app is NOT covered by that grant. `LocalAppMutateData` is
+        // A sibling target is NOT covered by that grant. `ExtMutate` is
         // DenyByDefault, so this genuinely exercises the rule — on an
         // AllowByDefault tool the default would allow the sibling regardless
         // and the assertion would prove nothing.
         assert!(
             matches!(
-                gate.check(
-                    "LocalAppMutateData",
-                    &serde_json::json!({"app_id": "app-b"})
-                )
-                .await,
+                gate.check("ExtMutate", &serde_json::json!({"id": "app-b"}))
+                    .await,
                 PermissionDecision::Deny { .. }
             ),
-            "a per-app grant must not cover a sibling app"
+            "a per-target grant must not cover a sibling target"
         );
     }
 
@@ -453,12 +446,13 @@ mod tests {
 
     /// Plan mode must not be short-circuited by a convenience auto-allow.
     ///
-    /// `AllowByDefault` skips the Plan backstop, so `LocalAppBuild` would run
-    /// a 30-minute build and `LocalAppRuntime {action:"open"}` would put an app
-    /// on screen while the user believes they are only planning. Neither is in
-    /// `PLAN_SAFE_TOOLS`, which is the existing statement of what may run.
+    /// `AllowByDefault` skips the Plan backstop, so a product's long build
+    /// would run while the user believes they are only planning. It is in
+    /// neither `PLAN_SAFE_TOOLS` nor the product's own plan-safe list, which
+    /// are the existing statement of what may run.
     #[tokio::test]
-    async fn plan_mode_still_gates_a_mutating_local_app_tool() {
+    async fn plan_mode_still_gates_a_mutating_product_tool() {
+        crate::defaults_per_tool::install_test_extension();
         let rules = crate::loader::permission_rules_from_settings_json(
             r#"{ "permissions": {} }"#,
             PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Local),
@@ -472,7 +466,7 @@ mod tests {
 
         assert!(
             matches!(
-                gate.check("LocalAppBuild", &serde_json::json!({"app_id": "app-a"}))
+                gate.check("ExtBuild", &serde_json::json!({"id": "app-a"}))
                     .await,
                 PermissionDecision::Deny { .. }
             ),
@@ -481,9 +475,9 @@ mod tests {
 
         // A genuinely read-only one is still frictionless while planning.
         assert_eq!(
-            gate.check("LocalAppList", &serde_json::json!({})).await,
+            gate.check("ExtList", &serde_json::json!({})).await,
             PermissionDecision::Allow,
-            "reading the app list is plan-safe"
+            "reading the list is plan-safe"
         );
     }
 

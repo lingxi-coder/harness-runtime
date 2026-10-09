@@ -10,7 +10,7 @@
 //!
 //! That is not hypothetical. Before this module existed only the main loop
 //! derived image blocks; the subagent runner hardcoded `content_blocks: None`.
-//! `LocalAppCaptureUi` therefore worked in a normal conversation and returned
+//! The app view-capture tool therefore worked in a normal conversation and returned
 //! ~230 KB of base64 as plain TEXT to the `frontend-qa` verify subagent, which
 //! is the only caller the capture tool exists for. The subagent then reported
 //! `render_check.status = "passed"` — honestly, from metadata — for a frame it
@@ -35,7 +35,7 @@ pub fn media_content_blocks(data: &Value) -> Option<Vec<Value>> {
 }
 
 /// The `{type:"image", file:{base64, type}}` shape: `Read` on an image file, a
-/// rendered PDF page, and the local-app view capture.
+/// rendered PDF page, and the app view capture.
 #[must_use]
 pub fn image_content_blocks(data: &Value) -> Option<Vec<Value>> {
     if data.get("type").and_then(Value::as_str) != Some("image") {

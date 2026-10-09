@@ -169,17 +169,7 @@ fn base_tool_name(value: &str) -> &str {
 }
 
 fn chat_safe_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "AskUserQuestion"
-            | "Glob"
-            | "Grep"
-            | "Read"
-            | "Skill"
-            | "StructuredOutput"
-            | "WebFetch"
-            | "WebSearch"
-    )
+    super::MOBILE_CHAT_TOOL_ALLOWLIST.contains(&name)
 }
 
 fn chat_compatible(frontmatter: &CommandFrontmatter) -> bool {
@@ -478,10 +468,7 @@ mod tests {
     const LOCAL_APP_PLUGIN: &str = "lingxi-local-app";
 
     fn local_app_plugin_root() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("plugins")
-            .join(LOCAL_APP_PLUGIN)
+        local_app_builder_plugin::root().to_path_buf()
     }
 
     async fn loaded_local_app_skill_registry() -> MobileDiskSkillLoader {

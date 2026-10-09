@@ -17,7 +17,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::mobile::local_apps_mcp::LocalAppsMcpTransport;
+use local_app_builder_service::mcp_server::LocalAppsMcpTransport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route {

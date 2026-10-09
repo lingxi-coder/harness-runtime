@@ -919,7 +919,7 @@ pub(crate) fn ensure_verified_builtin_root_with_fault_injection(
 }
 
 // P1.10 (§6.1/§6.2): `build.rs` runs `local_apps::pack` against the checked-in
-// `builtin-plugin-inventory.txt`, and Cargo embeds its deterministic archive
+// `lingxi-local-app.inventory.txt` (beside the plugin tree), and Cargo embeds its deterministic archive
 // and descriptor here. Runtime boot must consume these constants directly:
 // rebuilding a scratch source tree and re-running the packer on every launch
 // would make the cached-root fast path pay a full read/sort/hash pass before it

@@ -10,20 +10,15 @@
 //! defaults to `{behavior:"allow"}`) = 46 tools, plus one synthetic
 //! `<unknown>` fallback.
 //!
-//! LINGXI DIVERGENCE: 37 further rows with no oracle counterpart, reported by
-//! [`is_divergence_tool`]. 36 are the `LocalApp*` first-party local-app host
-//! operations (`harness_runtime::mobile::local_apps_tools`) — claude-code has no
-//! host-owned local-app surface. The 37th is `Workflow`: claude-code gates it
-//! behind the `WORKFLOW_SCRIPTS` feature and it is absent from external builds
-//! (see `mode_policy`'s module doc), so the M5-05 table has no row for it and
-//! its default here is a LingXi decision, NOT oracle parity.
+//! LINGXI DIVERGENCE: `Workflow`, a row with no oracle counterpart, reported by
+//! [`is_divergence_tool`]. claude-code gates it behind the `WORKFLOW_SCRIPTS`
+//! feature and it is absent from external builds (see `mode_policy`'s module
+//! doc), so the M5-05 table has no row for it and its default here is a LingXi
+//! decision, NOT oracle parity. It is `AllowByDefault` (the hand-off).
 //!
-//! The divergence rows are split by REVERSIBILITY: 14 `AllowByDefault`
-//! (read-only, plus the network-disabled build, the restartable local preview
-//! runtime, the shell-scaffolding commit, guarded Create coordination, and the
-//! `Workflow` hand-off), 23 `DenyByDefault` (user data, UI actuation, view
-//! capture, checkpoint restore, network, and the MCP
-//! proposal / dependency-review lifecycle).
+//! A product that ships host-owned tools of its own adds their rows with
+//! [`install_tool_default_extension`]; those rows are divergence rows too, and
+//! the product keeps its own counts and its own split by reversibility.
 //!
 //! 🚨 `AllowByDefault` is not merely a prompt default: it also short-circuits
 //! the Plan-mode mutation backstop and the `DontAsk` ask→deny transform. Every
@@ -31,10 +26,9 @@
 //! is plan-safe — see `policy_gate::read_only_default_auto_allows`, which keys
 //! that carve-out on [`is_divergence_tool`].
 //!
-//! Both splits are asserted in
-//! `tests::the_counts_in_this_module_doc_are_the_counts_in_the_table` — this
-//! paragraph's four counts are asserted so additions cannot silently desync
-//! the documentation from the table.
+//! The base counts are asserted in
+//! `tests::the_counts_in_this_module_doc_are_the_counts_in_the_table`, so
+//! additions cannot silently desync the documentation from the table.
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -44,9 +38,41 @@ use crate::gate::PromptDefault;
 
 static TOOL_DEFAULTS: OnceLock<HashMap<&'static str, PromptDefault>> = OnceLock::new();
 
+/// What a product adds to the table: rows for its own host-owned tools, the ones of those that are safe to
+/// run while the user is only planning, and how a permission rule's content is read from a call.
+///
+/// Installed once at boot ([`install_tool_default_extension`]); the table itself is already process-wide.
+/// A tool the product never installed is an unknown tool, and an unknown tool is `DenyByDefault`.
+pub struct ToolDefaultExtension {
+    /// The product's rows, keyed by tool name.
+    pub rows: HashMap<&'static str, PromptDefault>,
+    /// The rows that may run in Plan mode.
+    pub plan_safe: &'static [&'static str],
+    /// The content a permission rule is matched against for one of the product's tools
+    /// (`Tool(content)`); `None` for any other tool and for a call that names none.
+    pub rule_content: fn(tool_name: &str, input: &serde_json::Value) -> Option<String>,
+}
+
+static EXTENSION: OnceLock<ToolDefaultExtension> = OnceLock::new();
+
+/// Install the product's rows. The first call wins; later calls are ignored and report `false`, so
+/// every composition root may call it.
+pub fn install_tool_default_extension(extension: ToolDefaultExtension) -> bool {
+    EXTENSION.set(extension).is_ok()
+}
+
+pub(crate) fn extension() -> Option<&'static ToolDefaultExtension> {
+    EXTENSION.get()
+}
+
+/// The content a rule is matched against for an installed product tool.
+pub(crate) fn extension_rule_content(name: &str, input: &serde_json::Value) -> Option<String> {
+    (extension()?.rule_content)(name, input)
+}
+
 fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     use PromptDefault::{AllowByDefault, DenyByDefault};
-    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(85);
+    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(48);
 
     // Allow-by-default tools ([Y/n]) — 32 entries. (It said 20 while there
     // were 21, from before `ListAgents` was added; the count is asserted in
@@ -154,124 +180,17 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // [`is_divergence_tool`] keeps Plan mode prompting for it.
     m.insert("Workflow", AllowByDefault);
 
-    // ---- MOBILE DIVERGENCE: first-party local-app host operations ----------
-    // No oracle counterpart — claude-code has no host-owned local-app surface.
-    // These are BUILTIN tools (see `harness_runtime::mobile::local_apps_tools`), not a
-    // user-configured MCP server; while they were spelled `mcp__local_apps__*`
-    // they matched nothing here and fell through to `DenyByDefault`, so the
-    // create flow prompted on every step.
-    //
-    // Split by REVERSIBILITY, not read/write. The allow-by-default operations
-    // still refine to Ask in `LocalAppTool::check_permissions` when a session
-    // is not bound to an app workspace.
-    m.insert("LocalAppList", AllowByDefault);
-    m.insert("LocalAppGet", AllowByDefault);
-    // Read-only: the tool table (`local_apps_tools::LOCAL_APP_TOOLS`) marks
-    // its `read_only` column `true`.
-    m.insert("LocalAppRuntimeProfiles", AllowByDefault);
-    m.insert("LocalAppTemplateCatalog", AllowByDefault);
-    m.insert("LocalAppLogs", AllowByDefault);
-    m.insert("LocalAppCheckpointList", AllowByDefault);
-    // Contract reads/staging are Host-bound to the current app workspace and
-    // are part of the authoring loop; the tool still fails closed when the
-    // session has no bound app.
-    m.insert("LocalAppContract", AllowByDefault);
-    // NOT auto-allowed: `read_app_events` DRAINS the unread queue and advances
-    // a persisted cursor by default, so a speculative call permanently
-    // consumes what the user's running app posted. `peek=true` is the
-    // non-destructive form, but the defaults table is per-NAME, not per-input.
-    m.insert("LocalAppEvents", DenyByDefault);
-    m.insert("LocalAppBackgroundList", AllowByDefault);
-    m.insert("LocalAppBackgroundStatus", AllowByDefault);
-    // Writes, but app-local and trivially reversible: the build runs with the
-    // network DISABLED into the app's own `dist/`, and the runtime is a local
-    // preview server. These two are the hot loop of the create flow.
-    m.insert("LocalAppBuild", AllowByDefault);
-    m.insert("LocalAppRuntime", AllowByDefault);
-    // The ONE way out of an app the "+" button created as an empty shell:
-    // until it succeeds, every build/dependency/runtime/UI operation on that
-    // app refuses. Allowed by default because the user has just confirmed the
-    // name, brief and shape IN THE CONVERSATION — a permission sheet on top of
-    // that confirmation asks the same question twice. The scope check is not
-    // waived, only the policy prompt: `LocalAppTool::check_permissions` still
-    // refines this to Ask in a session that is not bound to an app workspace,
-    // which is the case where the target id comes from the model rather than
-    // from the user's own workspace.
-    m.insert("LocalAppScaffold", AllowByDefault);
-    // The library's create sheet does NOT come through this gate: it sends
-    // `ClientCommand::CreateApp` and creates the app outright, before any
-    // conversation exists (see `client::protocol::version`). So the ONLY caller
-    // this row governs is an agent reaching `LocalAppCreate` from a global or
-    // project chat — which is exactly the case the deny exists for, and the
-    // user is right there in that chat to answer.
-    //
-    // This was briefly `AllowByDefault` while the create sheet ran an intake
-    // conversation and needed the agent to commit the create without a prompt.
-    // That flow is gone; the exemption went with it.
-    m.insert("LocalAppCreate", DenyByDefault);
-    // The plan-driven create/modify step. It asks NOTHING here because it asks
-    // everything of the plan: the user approved the exact name, brief, spec and
-    // template that this call lands, and the Host re-reads that approval record
-    // itself rather than trusting anything the caller sends (see
-    // `plan_approval`). A policy prompt on top would be the duplicate create
-    // confirmation the plan flow exists to remove. In a session NOT bound to an
-    // app workspace `LocalAppTool::check_permissions` still refines this to Ask,
-    // which is the create case — a global chat naming an app id.
-    m.insert("LocalAppPrepare", AllowByDefault);
-    // MCP proposal lifecycle — the ONLY path by which network-reaching MCP
-    // server configuration gets authored onto an app and promoted into its
-    // live catalog, so every step of it asks. `approve_mcp_proposal` asks even
-    // in its `create_without_mcp=true` branch, which authors no tools: that
-    // branch still seals and persists a signed candidate + journal for the
-    // app and drives the same approval surface, and the row is per-NAME, not
-    // per-input, so it cannot be split by that flag.
-    m.insert("LocalAppValidateMcpProposal", DenyByDefault);
-    m.insert("LocalAppApproveMcpProposal", DenyByDefault);
-    m.insert("LocalAppQaMcpCandidate", DenyByDefault);
-    m.insert("LocalAppPromoteMcpCandidate", DenyByDefault);
-    // r2-never-wired-02: newly wired into `local_apps_tools::LOCAL_APP_TOOLS`.
-    // Same posture as the MCP proposal lifecycle above: a native confirmation
-    // sheet already gates the actual dependency change/apply inside the
-    // handler, but the row here is the POLICY prompt in front of that sheet,
-    // and network-reaching dependency resolution is not trivially undone.
-    m.insert("LocalAppConfirmDependencyChange", DenyByDefault);
-    m.insert("LocalAppUpdateDependencies", DenyByDefault);
-    // Effects the user cannot trivially undo, or that reach the network.
-    // These two expose an app's CONTENT — user records and the live WebView
-    // DOM. Binding scopes them inside an app workspace, but a GLOBAL
-    // conversation has no binding and can name any app, so they ask.
-    m.insert("LocalAppQueryData", DenyByDefault);
-    m.insert("LocalAppInspectUi", DenyByDefault);
-    // Strictly more revealing than `LocalAppInspectUi`, which is already
-    // DenyByDefault: the DOM snapshot nulls out `password`/`hidden` input
-    // values and a pixel capture cannot redact anything it renders.
-    m.insert("LocalAppCaptureUi", DenyByDefault);
-    // QA evidence can contain user data and screenshots. Beginning or
-    // finalizing a run mutates Host QA state; reading evidence exposes it.
-    m.insert("LocalAppQaBegin", DenyByDefault);
-    m.insert("LocalAppQaReadEvidence", DenyByDefault);
-    m.insert("LocalAppQaFinalize", DenyByDefault);
-    m.insert("LocalAppManifest", DenyByDefault);
-    m.insert("LocalAppMutateData", DenyByDefault);
-    m.insert("LocalAppActOnUi", DenyByDefault);
-    m.insert("LocalAppCheckpointCreate", DenyByDefault);
-    m.insert("LocalAppCheckpointRestore", DenyByDefault);
-    m.insert("LocalAppInstallDeps", DenyByDefault);
-    m.insert("LocalAppBackgroundSchedule", DenyByDefault);
-    m.insert("LocalAppBackgroundCancel", DenyByDefault);
-    m.insert("LocalAppBackgroundRetry", DenyByDefault);
-
-    // 46 oracle-parity tools + 37 LingXi divergence rows (36 local-app
-    // builtins + `Workflow`).
-    debug_assert_eq!(m.len(), 83, "tool defaults table must list all 83 tools");
+    // 46 oracle-parity tools + the `Workflow` divergence row. A product adds its own rows through
+    // `install_tool_default_extension`; they are not counted here.
+    debug_assert_eq!(m.len(), 47, "tool defaults table must list all 47 tools");
     m
 }
 
 /// Does this row have NO claude-code counterpart?
 ///
-/// True for the mobile `LocalApp*` family and for `Workflow` (gated behind
-/// `WORKFLOW_SCRIPTS` upstream, absent from external builds). The oracle-parity
-/// split in `tests::table_splits_into_the_parity_set_and_the_mobile_divergence`
+/// True for `Workflow` (gated behind `WORKFLOW_SCRIPTS` upstream, absent from
+/// external builds) and for every row a product installed. The oracle-parity
+/// split in `tests::table_splits_into_the_parity_set_and_the_divergence`
 /// keys on this, and so does the Plan-mode carve-out in
 /// `policy_gate::read_only_default_auto_allows`: a divergence row that is not
 /// plan-safe must not be auto-allowed while the user believes they are only
@@ -280,7 +199,7 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
 /// change rather than a fix.
 #[must_use]
 pub fn is_divergence_tool(name: &str) -> bool {
-    name.starts_with("LocalApp") || name == "Workflow"
+    name == "Workflow" || extension().is_some_and(|ext| ext.rows.contains_key(name))
 }
 
 /// Look up the row for a tool name, distinguishing "no row" from "a row that
@@ -290,7 +209,11 @@ pub fn is_divergence_tool(name: &str) -> bool {
 /// guard test) must use this instead.
 #[must_use]
 pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
-    TOOL_DEFAULTS.get_or_init(init_defaults).get(name).copied()
+    TOOL_DEFAULTS
+        .get_or_init(init_defaults)
+        .get(name)
+        .copied()
+        .or_else(|| extension().and_then(|ext| ext.rows.get(name).copied()))
 }
 
 /// Every tool name that has a row in this table, sorted.
@@ -299,27 +222,31 @@ pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
 /// [`tool_default_row`]. That answers "does THIS tool have a row"; nothing
 /// could answer "does this ROW name a tool that still exists", because
 /// `TOOL_DEFAULTS` is a private `static` and only single-key lookups were
-/// exported. THREE guards do constrain this table's composition, not one:
-/// `init_defaults`'s own `debug_assert_eq!(m.len(), 83, "tool defaults table
-/// must list all 83 tools")`, the test
-/// `table_splits_into_the_parity_set_and_the_mobile_divergence`'s
-/// `oracle == 46` / `divergence == 37`, and the test
-/// `the_counts_in_this_module_doc_are_the_counts_in_the_table`'s four
-/// hand-bumped bucket counts (14/32/14/23). NONE of those seven numbers moves
-/// for the orphan this function exists for, because every one of them counts
-/// `TOOL_DEFAULTS` alone: delete a tool from a CONSUMER crate's table, leave
-/// its row here, and all seven still hold. They also fail by naming a NUMBER
-/// rather than the orphaned row, and they cannot see a consumer crate's tool
-/// table in any case, since `permission` depends on none of them.
+/// exported. Three guards constrain the BASE table's composition:
+/// `init_defaults`'s own `debug_assert_eq!(m.len(), 47, …)`, the test
+/// `table_splits_into_the_parity_set_and_the_divergence`'s `oracle == 46` /
+/// `divergence == 1`, and the test
+/// `the_counts_in_this_module_doc_are_the_counts_in_the_table`'s hand-bumped
+/// bucket counts. None of those numbers moves for the orphan this function
+/// exists for, because every one of them counts the base table alone: delete a
+/// tool from a CONSUMER crate's table, leave its installed row, and they all
+/// still hold. They also fail by naming a NUMBER rather than the orphaned row,
+/// and they cannot see a consumer crate's tool table in any case, since
+/// `permission` depends on none of them.
 ///
-/// The consumer-side guard this exists for is
-/// `harness_runtime::mobile::local_apps_tools::tests::every_local_app_permission_row_names_a_real_tool`.
+/// The guard for an installed extension therefore lives with its owner: it
+/// compares this list with the owner's own tool table.
 #[must_use]
 pub fn tool_default_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = TOOL_DEFAULTS
         .get_or_init(init_defaults)
         .keys()
         .copied()
+        .chain(
+            extension()
+                .into_iter()
+                .flat_map(|ext| ext.rows.keys().copied()),
+        )
         .collect();
     names.sort_unstable();
     names
@@ -334,67 +261,6 @@ pub fn tool_default(name: &str) -> PromptDefault {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The local-app host operations are FIRST-PARTY builtin tools, not a
-    /// user-configured MCP server. The split stays based on reversibility; the
-    /// tool-level permission refinement adds the missing session-scope check
-    /// for every allow-by-default operation that targets an app.
-    #[test]
-    fn local_app_tools_split_by_reversibility() {
-        for name in [
-            "LocalAppList",
-            "LocalAppGet",
-            "LocalAppTemplateCatalog",
-            "LocalAppPrepare",
-            "LocalAppLogs",
-            "LocalAppCheckpointList",
-            "LocalAppBackgroundList",
-            "LocalAppBackgroundStatus",
-            "LocalAppBuild",
-            "LocalAppRuntime",
-            // The shell's only way out; the user confirmed it in the chat.
-            "LocalAppScaffold",
-        ] {
-            assert_eq!(
-                tool_default(name),
-                PromptDefault::AllowByDefault,
-                "{name} should reach its tool-level scope refinement without a policy prompt"
-            );
-        }
-
-        for name in [
-            // The library's create sheet bypasses tools entirely; the only
-            // caller here is an agent creating an app from a global or project
-            // chat, with the user present to answer.
-            "LocalAppCreate",
-            // Expose app CONTENT; a global chat can name any app.
-            "LocalAppQueryData",
-            "LocalAppInspectUi",
-            // Renders what inspect_ui redacts.
-            "LocalAppCaptureUi",
-            // Drains the unread queue and advances a persisted cursor.
-            "LocalAppEvents",
-            // Mutates the user's own records.
-            "LocalAppMutateData",
-            // Drives the app UI on the user's behalf.
-            "LocalAppActOnUi",
-            // Can discard uncommitted work.
-            "LocalAppCheckpointRestore",
-            "LocalAppCheckpointCreate",
-            "LocalAppManifest",
-            // Opens the network.
-            "LocalAppInstallDeps",
-            "LocalAppBackgroundSchedule",
-            "LocalAppBackgroundCancel",
-            "LocalAppBackgroundRetry",
-        ] {
-            assert_eq!(
-                tool_default(name),
-                PromptDefault::DenyByDefault,
-                "{name} must still ask"
-            );
-        }
-    }
 
     #[test]
     fn read_is_allow_by_default() {
@@ -540,15 +406,16 @@ mod tests {
     }
 
     #[test]
-    fn table_splits_into_the_parity_set_and_the_mobile_divergence() {
+    fn table_splits_into_the_parity_set_and_the_divergence() {
         let m = init_defaults();
         // Splitting the count is strictly stronger than asserting the total:
-        // it catches BOTH a dropped oracle tool and a mobile tool added
-        // without being recorded as a divergence, which a single total hides.
-        let oracle = m.keys().filter(|k| !is_divergence_tool(k)).count();
-        let divergence = m.keys().filter(|k| is_divergence_tool(k)).count();
+        // it catches BOTH a dropped oracle tool and a tool added without being
+        // recorded as a divergence, which a single total hides. The base table
+        // is counted directly: an installed extension must not move these.
+        let oracle = m.keys().filter(|k| **k != "Workflow").count();
+        let divergence = m.keys().filter(|k| **k == "Workflow").count();
         assert_eq!(oracle, 46, "oracle-parity tool count changed");
-        assert_eq!(divergence, 37, "divergence row count changed");
+        assert_eq!(divergence, 1, "divergence row count changed");
         assert_eq!(m.len(), oracle + divergence);
         // `Workflow` must be booked as a divergence, never as oracle parity:
         // the M5-05 table has no row for it.
@@ -556,14 +423,14 @@ mod tests {
         assert!(!is_divergence_tool("Agent"));
     }
 
-    /// The module doc states four counts. Assert each one so the documentation
-    /// and table stay synchronized as local-app tools evolve.
+    /// The module doc states the base counts. Assert each one so the
+    /// documentation and table stay synchronized.
     #[test]
     fn the_counts_in_this_module_doc_are_the_counts_in_the_table() {
         let m = init_defaults();
         let count = |divergence: bool, want: PromptDefault| {
             m.iter()
-                .filter(|(name, value)| is_divergence_tool(name) == divergence && **value == want)
+                .filter(|(name, value)| (**name == "Workflow") == divergence && **value == want)
                 .count()
         };
         assert_eq!(
@@ -578,13 +445,68 @@ mod tests {
         );
         assert_eq!(
             count(true, PromptDefault::AllowByDefault),
-            14,
+            1,
             "divergence allow"
         );
         assert_eq!(
             count(true, PromptDefault::DenyByDefault),
-            23,
+            0,
             "divergence deny"
         );
     }
+
+    /// An installed extension adds rows and divergence status, nothing else.
+    #[test]
+    fn an_installed_extension_adds_rows_and_leaves_the_base_alone() {
+        install_test_extension();
+        assert_eq!(tool_default("ExtList"), PromptDefault::AllowByDefault);
+        assert_eq!(tool_default("ExtMutate"), PromptDefault::DenyByDefault);
+        assert_eq!(
+            tool_default_row("ExtBuild"),
+            Some(PromptDefault::AllowByDefault)
+        );
+        assert_eq!(tool_default_row("ExtNope"), None);
+        assert!(is_divergence_tool("ExtList"));
+        assert!(!is_divergence_tool("ExtNope"));
+        let names = tool_default_names();
+        assert!(names.contains(&"ExtBuild") && names.contains(&"Read"));
+        // The base table's own counts are untouched by the extension.
+        assert_eq!(init_defaults().len(), 47);
+        assert!(crate::mode_policy::is_plan_safe_tool("ExtList"));
+        assert!(!crate::mode_policy::is_plan_safe_tool("ExtBuild"));
+        assert_eq!(
+            extension_rule_content("ExtMutate", &serde_json::json!({"id": "x"})).as_deref(),
+            Some("x")
+        );
+        assert_eq!(
+            extension_rule_content("Read", &serde_json::json!({"id": "x"})),
+            None
+        );
+        assert_eq!(
+            extension_rule_content("ExtMutate", &serde_json::json!({})),
+            None
+        );
+    }
+}
+
+/// A small product of this crate's own, for tests of everything that reads the extension. It is
+/// installed process-wide, like a real one, and every test that needs it calls this first.
+///
+/// `ExtList` is read-only and plan-safe, `ExtBuild` is an allow-by-default write (not plan-safe),
+/// `ExtMutate` is a deny-by-default write whose rules are keyed by the call's `id`.
+#[cfg(test)]
+pub(crate) fn install_test_extension() {
+    let mut rows = HashMap::new();
+    rows.insert("ExtList", PromptDefault::AllowByDefault);
+    rows.insert("ExtBuild", PromptDefault::AllowByDefault);
+    rows.insert("ExtMutate", PromptDefault::DenyByDefault);
+    let _ = install_tool_default_extension(ToolDefaultExtension {
+        rows,
+        plan_safe: &["ExtList"],
+        rule_content: |name, input| {
+            name.starts_with("Ext")
+                .then(|| input.get("id")?.as_str().map(str::to_string))
+                .flatten()
+        },
+    });
 }

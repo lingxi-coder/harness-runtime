@@ -64,9 +64,11 @@ impl AndroidProotRuntime {
 
 fn product_build_profile() -> mobile_linux_android::IsolatedBuildProfile {
     mobile_linux_android::IsolatedBuildProfile {
-        guest_root: lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_ROOT.into(),
-        project_directory: lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),
-        dependency_store: lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.into(),
+        guest_root: local_app_builder_contracts::guest_paths::LOCAL_APP_BUILD_ROOT.into(),
+        project_directory: local_app_builder_contracts::guest_paths::LOCAL_APP_BUILD_PROJECT_DIR
+            .into(),
+        dependency_store: local_app_builder_contracts::guest_paths::LOCAL_APP_DEPENDENCY_STORE
+            .into(),
         state_directory: ".lingxi-build-state".into(),
         host_apps_directory: "apps".into(),
         host_build_directory: "build".into(),
@@ -256,6 +258,32 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
 mod tests {
     use super::*;
     use mobile_linux_api::RootfsState;
+
+    /// Byte-pins the atlas atoms. The Swift twin (`LXISHGuestPaths`) pins the
+    /// SAME literals — drift on either side fails one of the twins.
+    #[test]
+    fn atlas_atoms_are_pinned() {
+        use local_app_builder_contracts::guest_paths as product;
+        use mobile_linux_api::guest_paths as sdk;
+        assert_eq!(sdk::HOME, "/root");
+        assert_eq!(sdk::SCRATCH, &["/tmp", "/var/tmp"]);
+        assert_eq!(sdk::WORKSPACE_ROOT, "/workspace");
+        assert_eq!(product::LOCAL_APP_BUILD_ROOT, "/var/lingxi/local-app-build");
+        assert_eq!(
+            product::LOCAL_APP_DEPENDENCY_STORE,
+            "/var/lingxi/local-app-dependency-store"
+        );
+        assert_eq!(product::LOCAL_APP_BUILD_PROJECT_DIR, "project");
+        assert_eq!(sdk::workspace("abc-123"), "/workspace/abc-123");
+        assert_eq!(
+            product::local_app_build_project("abc-123", "store"),
+            "/var/lingxi/local-app-build/abc-123/store/project"
+        );
+        assert_eq!(
+            sdk::writable_roots(),
+            ["/root", "/tmp", "/var/tmp", "/workspace"]
+        );
+    }
 
     #[test]
     fn product_profile_keeps_existing_paths() {

@@ -4960,7 +4960,7 @@ async fn find_running_workflow_by_run_id_matches_only_running_same_id() {
 }
 
 #[tokio::test]
-async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
+async fn find_nonterminal_managed_workflows_matches_only_the_requested_app() {
     use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
 
     let (_d, registry) = make_registry();
@@ -4970,7 +4970,7 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
                 id: id.into(),
                 task_type: TaskType::LocalWorkflow,
                 status,
-                description: "local app build".into(),
+                description: "app build".into(),
                 tool_use_id: None,
                 start_time: SystemTime::now(),
                 end_time: None,
@@ -4984,7 +4984,7 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
                 creator_agent_id: None,
             },
             session_uuid: None,
-            workflow_id: "lingxi-local-app:local-app-build".into(),
+            workflow_id: "acme:app-build".into(),
             script: String::new(),
             resume_from_run_id: None,
             args: None,
@@ -4994,7 +4994,7 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
             current_step: 0,
             outcome: Default::default(),
             scope: Some(
-                crate::scope::LocalAppWorkflowTaskScope::for_build(app_id).expect("valid app id"),
+                crate::scope::ManagedWorkflowScope::for_build(app_id).expect("valid app id"),
             ),
         })
     };
@@ -5010,11 +5010,11 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
         .await;
 
     assert_eq!(
-        registry.find_nonterminal_local_app_workflows("app-a").await,
+        registry.find_nonterminal_managed_workflows("app-a").await,
         vec!["w-app-a1"]
     );
     assert_eq!(
-        registry.find_nonterminal_local_app_workflows("app-b").await,
+        registry.find_nonterminal_managed_workflows("app-b").await,
         vec!["w-app-b1"]
     );
 }
@@ -5026,7 +5026,7 @@ async fn find_nonterminal_local_app_workflows_matches_only_the_requested_app() {
 /// workflow does not block, regardless of how convincing its `workflow_id`
 /// looks.
 #[tokio::test]
-async fn find_nonterminal_local_app_workflows_ignores_workflow_id() {
+async fn find_nonterminal_managed_workflows_ignores_workflow_id() {
     use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
 
     let (_d, registry) = make_registry();
@@ -5036,7 +5036,7 @@ async fn find_nonterminal_local_app_workflows_ignores_workflow_id() {
                 id: id.into(),
                 task_type: TaskType::LocalWorkflow,
                 status: TaskStatus::Running,
-                description: "local app build".into(),
+                description: "app build".into(),
                 tool_use_id: None,
                 start_time: SystemTime::now(),
                 end_time: None,
@@ -5069,10 +5069,9 @@ async fn find_nonterminal_local_app_workflows_ignores_workflow_id() {
     registry_two
         .insert_state_for_test(mk(
             "w-canvas",
-            "retired-local-app-alias",
+            "retired-app-alias",
             Some(
-                crate::scope::LocalAppWorkflowTaskScope::for_build("canvas-app")
-                    .expect("valid app id"),
+                crate::scope::ManagedWorkflowScope::for_build("canvas-app").expect("valid app id"),
             ),
         ))
         .await;
@@ -5081,13 +5080,13 @@ async fn find_nonterminal_local_app_workflows_ignores_workflow_id() {
             "w-canvas-2",
             "totally-unrelated-workflow-name",
             Some(
-                crate::scope::LocalAppWorkflowTaskScope::for_use_test("canvas-app")
+                crate::scope::ManagedWorkflowScope::for_use_test("canvas-app")
                     .expect("valid app id"),
             ),
         ))
         .await;
     let blockers = registry_two
-        .find_nonterminal_local_app_workflows("canvas-app")
+        .find_nonterminal_managed_workflows("canvas-app")
         .await;
     assert_eq!(blockers.len(), 2, "{blockers:?}");
     assert!(blockers.contains(&"w-canvas".to_string()));
@@ -5096,11 +5095,11 @@ async fn find_nonterminal_local_app_workflows_ignores_workflow_id() {
     // The REAL namespaced build id with NO scope must not block -- the id carries
     // no authority any more.
     registry
-        .insert_state_for_test(mk("w-other", "lingxi-local-app:local-app-build", None))
+        .insert_state_for_test(mk("w-other", "acme:app-build", None))
         .await;
     assert!(
         registry
-            .find_nonterminal_local_app_workflows("canvas-app")
+            .find_nonterminal_managed_workflows("canvas-app")
             .await
             .is_empty(),
         "workflow_id alone -- even the real namespaced build id -- must not block delete"
@@ -5110,8 +5109,8 @@ async fn find_nonterminal_local_app_workflows_ignores_workflow_id() {
 /// §8.1: a custom workflow that reuses a REAL build workflow's exact name and
 /// forges the victim's app id into its (caller-supplied) `args` must get
 /// NOTHING -- not the workspace lease, not the App delete guard's
-/// protection. Before this migration, `find_nonterminal_local_app_workflows`
-/// matched on `workflow_id` membership in `LOCAL_APP_BUILD_WORKFLOWS` PLUS a
+/// protection. Before this migration, `find_nonterminal_managed_workflows`
+/// matched on `workflow_id` membership in the (since-deleted) build-workflow name list PLUS a
 /// JSON-parsed `args.app_id` -- both caller-supplied -- so this EXACT shape
 /// used to block the victim's delete. `requires_workspace_lease` matched the
 /// same `workflow_id` alone. Both guards now read `scope`, which nothing but
@@ -5149,7 +5148,7 @@ async fn a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_d
         },
         session_uuid: None,
         // Reuses the REAL namespaced build workflow id...
-        workflow_id: "lingxi-local-app:local-app-build".into(),
+        workflow_id: "acme:app-build".into(),
         script: String::new(),
         resume_from_run_id: None,
         // ...and forges the victim's app id into args, exactly as §8.1 and
@@ -5168,7 +5167,7 @@ async fn a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_d
 
     assert_eq!(
         registry
-            .find_nonterminal_local_app_workflows("victim-app")
+            .find_nonterminal_managed_workflows("victim-app")
             .await,
         Vec::<String>::new(),
         "a scope-less row must not block deleting an app, even one named in \
@@ -5176,7 +5175,7 @@ async fn a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_d
     );
 }
 
-/// Design: `LocalAppWorkflowTaskScope::blocks_delete()` is `true` for ALL
+/// Design: `ManagedWorkflowScope::blocks_delete()` is `true` for ALL
 /// THREE purposes, not just `Build` -- a `UseTest`/`McpAuthoring` scope never
 /// takes the workspace lease (only `Build` does -- see `scope.rs`'s
 /// `only_build_purpose_requires_a_workspace_lease`) but must still block the
@@ -5185,7 +5184,7 @@ async fn a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_d
 /// The three tests below are GUARD-level, and that is the whole point:
 /// `scope.rs`'s `every_purpose_blocks_delete` proves the PREDICATE answers
 /// `true` for a purpose, which is a different claim from
-/// `find_nonterminal_local_app_workflows` actually CONSULTING it for that
+/// `find_nonterminal_managed_workflows` actually CONSULTING it for that
 /// purpose. One test per purpose over this one shared body, so a guard that
 /// silently narrowed back to `Build` fails once per purpose it dropped and
 /// each failure names which purpose it was.
@@ -5203,7 +5202,7 @@ async fn a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_d
 /// again or hand any caller a delete block on any app. See
 /// `LocalWorkflowTaskState::scope`'s doc comment.
 async fn assert_scope_blocks_delete_at_the_guard(
-    scope: crate::scope::LocalAppWorkflowTaskScope,
+    scope: crate::scope::ManagedWorkflowScope,
     task_id: &str,
 ) {
     use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
@@ -5248,9 +5247,9 @@ async fn assert_scope_blocks_delete_at_the_guard(
     registry.insert_state_for_test(row).await;
 
     assert_eq!(
-        registry.find_nonterminal_local_app_workflows(&app_id).await,
+        registry.find_nonterminal_managed_workflows(&app_id).await,
         vec![task_id],
-        "find_nonterminal_local_app_workflows must report a non-terminal \
+        "find_nonterminal_managed_workflows must report a non-terminal \
          {purpose:?}-purpose run as blocking {app_id}'s delete"
     );
 }
@@ -5259,7 +5258,7 @@ async fn assert_scope_blocks_delete_at_the_guard(
 /// narrowing `blocks_delete()` to `Build` alone leaves THIS one green.
 #[tokio::test]
 async fn a_build_purpose_blocks_delete_at_the_guard() {
-    let scope = crate::scope::LocalAppWorkflowTaskScope::for_build("app-1").expect("valid");
+    let scope = crate::scope::ManagedWorkflowScope::for_build("app-1").expect("valid");
     assert!(
         scope.requires_workspace_lease(),
         "control: `Build` is the one purpose that also takes the workspace lease"
@@ -5270,7 +5269,7 @@ async fn a_build_purpose_blocks_delete_at_the_guard() {
 /// Guard-level coverage for `UseTest`: no workspace lease, still blocks.
 #[tokio::test]
 async fn a_use_test_purpose_still_blocks_delete_at_the_guard() {
-    let scope = crate::scope::LocalAppWorkflowTaskScope::for_use_test("app-1").expect("valid");
+    let scope = crate::scope::ManagedWorkflowScope::for_use_test("app-1").expect("valid");
     assert!(
         !scope.requires_workspace_lease(),
         "a use-test scope has no lease-granting -- i.e. no workspace-lease -- authority"
@@ -5283,7 +5282,7 @@ async fn a_use_test_purpose_still_blocks_delete_at_the_guard() {
 /// test, which cannot see whether the guard reads the predicate at all.
 #[tokio::test]
 async fn an_mcp_authoring_purpose_still_blocks_delete_at_the_guard() {
-    let scope = crate::scope::LocalAppWorkflowTaskScope::for_mcp_authoring("app-1").expect("valid");
+    let scope = crate::scope::ManagedWorkflowScope::for_mcp_authoring("app-1").expect("valid");
     assert!(
         !scope.requires_workspace_lease(),
         "an mcp-authoring scope has no lease-granting -- i.e. no workspace-lease -- authority"
@@ -5292,7 +5291,7 @@ async fn an_mcp_authoring_purpose_still_blocks_delete_at_the_guard() {
 }
 
 /// The `tasks` half of the P-1.7 R1 fix, pinned inside the crate that owns
-/// the contract: a `LocalAppWorkflowTaskScope` handed to
+/// the contract: a `ManagedWorkflowScope` handed to
 /// [`crate::task_trait::TaskSpawnInput::LocalWorkflow`] is what reaches the
 /// task row, so a Host that mints one gets a real delete block -- and a
 /// `None` on the same input stays authority-free.
@@ -5314,32 +5313,30 @@ async fn a_spawned_workflows_scope_is_what_blocks_its_apps_delete() {
         RecordingHandler::new(TaskType::LocalWorkflow, "wscoped01"),
     );
 
-    let input =
-        |scope: Option<crate::scope::LocalAppWorkflowTaskScope>| TaskSpawnInput::LocalWorkflow {
-            session_uuid: None,
-            workflow_id: "identical-workflow-id".into(),
-            script: "return true".into(),
-            resume_from_run_id: None,
-            args: Some(serde_json::json!({"app_id": "scoped-app"}).to_string()),
-            run_id: Some("wf_scoped".into()),
-            invocation_mode: Some("named".into()),
-            workflow_source: Some("built-in".into()),
-            script_is_verbatim_builtin: Some(true),
-            transcript_subdir: None,
-            launched_from_subagent: false,
-            tool_use_id: None,
-            creator_teammate_name: None,
-            creator_team_name: None,
-            creator_agent_id: None,
-            scope,
-        };
+    let input = |scope: Option<crate::scope::ManagedWorkflowScope>| TaskSpawnInput::LocalWorkflow {
+        session_uuid: None,
+        workflow_id: "identical-workflow-id".into(),
+        script: "return true".into(),
+        resume_from_run_id: None,
+        args: Some(serde_json::json!({"app_id": "scoped-app"}).to_string()),
+        run_id: Some("wf_scoped".into()),
+        invocation_mode: Some("named".into()),
+        workflow_source: Some("built-in".into()),
+        script_is_verbatim_builtin: Some(true),
+        transcript_subdir: None,
+        launched_from_subagent: false,
+        tool_use_id: None,
+        creator_teammate_name: None,
+        creator_team_name: None,
+        creator_agent_id: None,
+        scope,
+    };
 
     let scoped = registry
         .spawn(
             TaskType::LocalWorkflow,
             input(Some(
-                crate::scope::LocalAppWorkflowTaskScope::for_build("scoped-app")
-                    .expect("valid app id"),
+                crate::scope::ManagedWorkflowScope::for_build("scoped-app").expect("valid app id"),
             )),
             "in-flight build".into(),
         )
@@ -5348,7 +5345,7 @@ async fn a_spawned_workflows_scope_is_what_blocks_its_apps_delete() {
 
     assert_eq!(
         registry
-            .find_nonterminal_local_app_workflows("scoped-app")
+            .find_nonterminal_managed_workflows("scoped-app")
             .await,
         vec![scoped.clone()],
         "the scope the Host put on the spawn input must reach the task row"
@@ -5367,7 +5364,7 @@ async fn a_spawned_workflows_scope_is_what_blocks_its_apps_delete() {
     assert_eq!(unscoped, scoped, "the stub handler reuses one task id");
     assert!(
         registry
-            .find_nonterminal_local_app_workflows("scoped-app")
+            .find_nonterminal_managed_workflows("scoped-app")
             .await
             .is_empty(),
         "an identical row WITHOUT a scope must not block: the authority is the \
@@ -5384,12 +5381,12 @@ async fn adopted_workflow_is_registered_as_paused_and_keeps_resume_metadata() {
         .register_adopted_workflow(crate::registry::AdoptedWorkflow {
             task_id: "wabc12345".into(),
             session_uuid: Some("session-1".into()),
-            workflow_id: "lingxi-local-app:local-app-build".into(),
+            workflow_id: "acme:app-build".into(),
             run_id: "wf_abcdef".into(),
             script_path: "/workspace/.lingxi/workflows/build.js".into(),
             args: Some(r#"{"app_id":"demo"}"#.into()),
             transcript_dir: "/sessions/s1/subagents/workflows/wf_abcdef".into(),
-            description: "Build local app".into(),
+            description: "Build app".into(),
             start_time: started,
         })
         .await

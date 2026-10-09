@@ -97,7 +97,7 @@ use std::collections::HashMap;
 /// `oDi = "refs/claude/checkpoint-"` — the ref namespace a checkpoint commit is
 /// parked under, one ref per session (`<prefix><first 8 chars of session id>`).
 ///
-/// Rebranded to the `refs/lingxi/` namespace. Distinct from `local-apps`'
+/// Rebranded to the `refs/lingxi/` namespace. Distinct from the app checkpoints'
 /// `refs/lingxi/checkpoints` (plural, a directory of refs) — the two cannot
 /// collide.
 pub const CHECKPOINT_REF_PREFIX: &str = "refs/lingxi/checkpoint-";

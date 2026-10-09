@@ -18,6 +18,7 @@ use tool_api::tool_trait::{
     DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     ValidationError,
 };
+use tool_api::util::image_budget::{process_image, IMAGE_MAX_DIM};
 use tool_api::BuiltinToolContext;
 
 /// Tool name byte-lock.
@@ -67,7 +68,7 @@ impl Tool for CameraTool {
         &INPUT_SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        true
+        self.ctx.camera.is_some()
     }
     fn max_result_size_chars(&self) -> usize {
         4096
@@ -98,7 +99,7 @@ impl Tool for CameraTool {
     }
 
     async fn prompt(&self, _: &PromptOptions) -> String {
-        "Capture a photo or pick one from the device photo library.".into()
+        "Capture a photo or let the user pick one from the device photo library. The image is attached for visual analysis. A cancelled picker returns cancelled=true without an image.".into()
     }
 
     async fn validate_input(
@@ -129,11 +130,8 @@ impl Tool for CameraTool {
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or("capture");
-        let image = if action == "pick_from_library" {
-            camera
-                .pick_from_library()
-                .await
-                .map_err(|e| map_camera_err(&e))?
+        let captured = if action == "pick_from_library" {
+            camera.pick_from_library_sized(IMAGE_MAX_DIM, 0.8).await
         } else {
             let position = match input.get("position").and_then(Value::as_str) {
                 Some("front") => CameraPosition::Front,
@@ -144,22 +142,62 @@ impl Tool for CameraTool {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             camera
-                .capture_photo(CapturePhotoOpts {
-                    position,
-                    allow_editing,
-                })
+                .capture_photo_sized(
+                    CapturePhotoOpts {
+                        position,
+                        allow_editing,
+                    },
+                    IMAGE_MAX_DIM,
+                    0.8,
+                )
                 .await
-                .map_err(|e| map_camera_err(&e))?
         };
+        let image = match captured {
+            Ok(image) => image,
+            Err(CameraError::Cancelled) => {
+                return Ok(ToolCallResult::from_data(json!({
+                    "captured": false,
+                    "cancelled": true,
+                })));
+            }
+            Err(error) => return Err(map_camera_err(&error)),
+        };
+
+        let original_size = image.jpeg_bytes.len();
+        // Native sizing keeps the transfer small; the shared processor also
+        // validates bytes and enforces the model image budget for backends
+        // whose default sized implementation returns the original image.
+        let processed = process_image(image.jpeg_bytes).map_err(ToolError::Internal)?;
+        let (width, height) = processed.dimensions;
+        let mut file = json!({
+            "base64": processed.base64,
+            "type": processed.media_type,
+            "originalSize": original_size,
+        });
+        if let Some((original_width, original_height, display_width, display_height)) =
+            processed.resized
+        {
+            file["dimensions"] = json!({
+                "originalWidth": original_width,
+                "originalHeight": original_height,
+                "displayWidth": display_width,
+                "displayHeight": display_height,
+            });
+        }
 
         Ok(ToolCallResult {
             data: json!({
+                "type": "image",
+                "file": file,
                 "captured": true,
-                "width": image.width,
-                "height": image.height,
-                "jpeg_bytes_len": image.jpeg_bytes.len(),
+                "cancelled": false,
+                "width": width,
+                "height": height,
+                "jpeg_bytes_len": original_size,
             }),
-            model_content: None,
+            // Both main and subagent dispatch convert the image data shape
+            // into a real image block; avoid duplicating base64 as model text.
+            model_content: Some("[Camera image attached for visual analysis.]".into()),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
@@ -173,3 +211,7 @@ pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinTool
     use std::sync::Arc;
     reg.register_builtin(Arc::new(CameraTool::new(ctx)));
 }
+
+#[cfg(test)]
+#[path = "camera_tests.rs"]
+mod tests;
