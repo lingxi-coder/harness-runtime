@@ -227,10 +227,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     //     the device supplies these; the host test supplies a portable shim).
     let main_session_id = lingxi_core::types::SessionId::new();
     let main_session_uuid = main_session_id.as_uuid().to_string();
-    // v3 Phase 3 (MCP create 收权): the LIVE current-session uuid, updated on
-    // every New/Resume/Clear retarget. The local-apps MCP `create` stamps an
-    // app's origin `conversation_id` from THIS cell — model input is never
-    // trusted for it.
+    // The LIVE current-session uuid, updated on every New/Resume/Clear
+    // retarget. Model input is never trusted for it.
     let active_session_uuid = Arc::new(std::sync::Mutex::new(main_session_uuid.clone()));
     // The plans directory derivation is shared with the orchestrator's plan-mode
     // reminder rather than re-derived here, so the path the model is told to
@@ -883,13 +881,11 @@ pub(super) async fn build_mobile_inner_with_ask(
             let cwd_canon = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
             // Which root the rules resolve against.
             //
-            // A WIDER root is not "more deny coverage": both local-app write
+            // A WIDER root is not "more deny coverage": the workspace write
             // guards are all-or-nothing on the profile recognising
-            // `roots.cwd`, and that is false for any directory that is not
-            // itself `.../apps/<id>/workspace`. Widening turns them OFF.
+            // `roots.cwd`. Widening turns them OFF.
             if cwd_canon == host_canon {
-                // Identical — `.project` / `.localApp`, where cwd already IS
-                // the workspace. No-op.
+                // Identical — cwd already IS the workspace. No-op.
                 cwd.clone()
             } else if cwd_canon.starts_with(&host_canon) {
                 // cwd is INSIDE the mount. Re-rooting would move the rule root
@@ -900,7 +896,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                 // diagnostic printed) or cwd is an ANCESTOR of the mount. Both
                 // re-root onto the workspace: it is the directory the model
                 // actually writes into, and it is the only spelling under which
-                // the local-app guards engage at all.
+                // the workspace guards engage at all.
                 mount.host_path.clone()
             }
         }

@@ -390,9 +390,8 @@ pub struct MobileRuntime {
     /// The same launcher used by the Workflow tool. Keeping one instance here
     /// makes explicit UI resume use the identical validation/checkpoint path.
     pub(crate) workflow_launcher: Arc<crate::mobile::workflow_support::MobileWorkflowLauncher>,
-    /// v3 Phase 3: the live current-session uuid the local-apps MCP `create`
-    /// reads as the app's origin conversation. Updated by
-    /// `retarget_session_writer` on every session change.
+    /// The live current-session uuid. Updated by `retarget_session_writer` on
+    /// every session change.
     pub(crate) active_session_uuid: Arc<std::sync::Mutex<String>>,
     /// 2.1.266 `Zl`/`ay`: the session's plan-file identity, shared with the boot
     /// permission policy. Re-published by `retarget_session_writer` on every
@@ -1058,8 +1057,8 @@ impl MobileRuntime {
         ) {
             tracing::error!(%error, %session_id, "mobile session transcript authority was not prepared");
         }
-        // Keep the local-apps MCP origin-conversation source in lockstep with
-        // the session every retarget (New/Resume/Clear).
+        // Keep the live session uuid in lockstep with the session on every
+        // retarget (New/Resume/Clear).
         let session_uuid = next_session_id;
         {
             let mut guard = self
@@ -3938,15 +3937,10 @@ impl MobileEngineHandle {
     /// affected.
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
         // A questionnaire parks work that can itself be holding the transition
-        // lock (for example, a Local App verification workflow). Its answer is
+        // lock (for example, a long-running workflow). Its answer is
         // connection-scoped and only resolves the broker's oneshot, so waiting
         // behind that lock turns the native sheet's submit spinner into a
-        // deadlock. Resolve these two commands before serializing session state.
-        //
-        // The Local App approval answers are the same kind of command: a page
-        // bridge request parks on a capability or UI sheet INSIDE `submit_impl`
-        // (see `execute_bridge`), still holding the lock, and the answer that
-        // would release it must not queue behind it.
+        // deadlock. Resolve these commands before serializing session state.
         match command {
             ClientCommand::AnswerAskUserQuestion {
                 request_id,
@@ -6562,10 +6556,6 @@ fn command_source_string(source: command_api::model::CommandSource) -> &'static 
         command_api::model::CommandSource::Bundled => "bundled",
     }
 }
-
-// Local-app build/install tools have their own multi-minute budgets. A 30s
-// MCP deadline can expire while the build is still progressing, causing the
-// caller to retry and duplicate the expensive work.
 
 // ───────────────────────────────────────────────────────────────────────────
 // Cron firing — the Android background-scheduler bridge.

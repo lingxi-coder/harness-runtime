@@ -6,7 +6,7 @@ session-modes: [chat, code]
 
 # Mobile device
 
-Use the available native tools below to fulfill a device request directly. No Local App, manifest, app identifier, JavaScript bridge, or generated application is needed. The available tool schema is authoritative for arguments and current support.
+Use the available native tools below to fulfill a device request directly. No manifest, app identifier, JavaScript bridge, or generated application is needed. The available tool schema is authoritative for arguments and current support.
 
 Call only the operations needed for the user's request. Read returned data before reporting completion. If the OS denies permission, the user cancels, or a service is unavailable, report that result and stop the affected operation; do not retry through a different device interface.
 

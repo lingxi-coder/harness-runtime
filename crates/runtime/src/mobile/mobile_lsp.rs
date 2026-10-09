@@ -32,7 +32,7 @@ pub(crate) fn global_typescript_lsp_plugin_id() -> lingxi_core::types::PluginId 
 }
 
 /// Host-owned, immutable TypeScript 7 descriptor. Keeping this out of the
-/// Local App manifest makes the global setting independent of that plugin's
+/// plugin manifests makes the global setting independent of any plugin's
 /// enable/disable lifecycle while still using the registry's plugin-only
 /// registration boundary.
 pub(crate) fn global_typescript_lsp_config() -> LspServerConfig {

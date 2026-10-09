@@ -161,14 +161,11 @@ platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git
 # `branding.workspace = true` regardless of its own depth.
 branding = { path = "crates/branding" }
 
-# The Local App project's crates, in a repository of their own. One revision for every crate of it, here and in the
-# product.
+# Shared library crates published from the local-app-builder repository. They are generic libraries (device API,
+# JSON projection, MCP wire types, rooted filesystem); the engine carries no Local App feature code. One revision for
+# every crate of it, here and in the product.
 device-api = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
 json-projection = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
-local-app-builder-contracts = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
-local-app-builder-plugin = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
-local-app-builder-service = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
-local-apps = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
 mcp-wire = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
 rooted-fs = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
 serde = { version = "1", features = ["derive"] }
@@ -367,8 +364,8 @@ lingxi-llm-client = { path = "../llm-client" }
 [profile.release]
 lto = "thin"
 
-# `local-apps` asks crates.io for git2 so that it does not depend on where a workspace keeps libgit2. This workspace
-# already carries a patched copy (SSH and TLS through mbedTLS) that `plugin` and `tools/git-mobile` use by path, and it
-# is the one place that decides: a package may link libgit2 once.
+# This workspace carries a patched git2 (SSH and TLS through mbedTLS) that `plugin` and `tools/git-mobile` use by path,
+# and it is the one place that decides: a package may link libgit2 once, so any crates.io request for git2 is
+# redirected to it.
 [patch.crates-io]
 git2 = { path = "third_party/git2-rs/git2" }
