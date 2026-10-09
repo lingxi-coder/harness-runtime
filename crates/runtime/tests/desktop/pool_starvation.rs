@@ -80,7 +80,8 @@ impl SubagentApiClient for ScriptedApiClient {
                 model: "scripted".into(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "done".into(),
-                    cache_control: None, citations: None,
+                    cache_control: None,
+                    citations: None,
                 }],
                 stop_reason: Some("end_turn".into()),
                 stop_details: None,

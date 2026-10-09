@@ -3,10 +3,10 @@ use super::*;
 use async_trait::async_trait;
 use lingxi_core::host::{SecureStorage, SecureStorageBackend, SecureStorageError};
 use llm_runtime::{Credential, CredentialProvider};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
 };
 
 const WORKER: &str = "HARNESS_ENVIRONMENT_OAUTH_WORKER";
@@ -27,10 +27,8 @@ fn environmental_oauth_reaches_factory_and_physical_drivers() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("environment OAuth: 1744 capture rows, 14 factory/driver scenarios OK")
-    );
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("environment OAuth: 1744 capture rows, 14 factory/driver scenarios OK"));
 }
 struct Store {
     inner: Arc<dyn SecureStorage>,
@@ -165,13 +163,11 @@ async fn environment_oauth_worker() {
             assert!(
                 matches!(credential, Credential::AnthropicOAuth {ref access_token, ..} if access_token == expected["access_token"].as_str().unwrap())
             );
-            assert!(
-                provider
-                    .refresh(&scope, &credential)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(provider
+                .refresh(&scope, &credential)
+                .await
+                .unwrap()
+                .is_none());
             assert!(format!("{provider:?}").contains("access_token: \"[REDACTED]\""));
         } else {
             assert!(provider.is_none());
@@ -255,16 +251,14 @@ async fn environment_oauth_worker() {
                 if stream {
                     assert!(service.stream_request(request).await.is_err());
                 } else {
-                    assert!(
-                        service
-                            .execute_non_stream_request(
-                                request,
-                                llm_runtime::NonStreamingRequestClass::Auxiliary,
-                                Default::default()
-                            )
-                            .await
-                            .is_err()
-                    );
+                    assert!(service
+                        .execute_non_stream_request(
+                            request,
+                            llm_runtime::NonStreamingRequestClass::Auxiliary,
+                            Default::default()
+                        )
+                        .await
+                        .is_err());
                 }
                 let calls = capture.0.lock().unwrap();
                 assert_eq!(calls.len(), 1 + usize::from(admitted));

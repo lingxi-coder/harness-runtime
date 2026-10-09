@@ -1,7 +1,7 @@
 #[cfg(windows)]
-use platform_windows::WindowsMcpTransport;
-#[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
+#[cfg(windows)]
+use platform_windows::WindowsMcpTransport;
 
 use super::DesktopConfig;
 

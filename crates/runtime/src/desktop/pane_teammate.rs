@@ -1,13 +1,12 @@
 //! Session-owned transport for persistent teammates in terminal panes.
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use coordinator::{CoordinatorStatusSink, SendMessageTool, TeamRegistry};
-use lingxi_core::host::OutputStream;
 use lingxi_core::host::runtime::RuntimeSpawner;
 use lingxi_core::host::subagent_spawn::{SubagentInheritance, SubagentSpawnRequest};
 use lingxi_core::host::swarm::{PaneId, PanePosition, SwarmBackend};
@@ -15,6 +14,7 @@ use lingxi_core::host::team_spawn::{
     PaneLaunchMetadata, TeamSpawnError, TeamSpawnSeam, TeammateModelSelection,
 };
 use lingxi_core::host::teammate_worker::{PaneTeammateManifest, ParentToWorker, WorkerToParent};
+use lingxi_core::host::OutputStream;
 use lingxi_core::types::{AgentId, SessionId};
 use tasks::handlers::TaskStatusSink;
 use tasks::registry::TaskRegistry;
@@ -937,7 +937,8 @@ mod tests {
             _: &lingxi_core::types::ToolUseId,
             _: &str,
             _: &serde_json::Value,
-         _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
+            _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        ) {
         }
         async fn emit_tool_result(
             &self,
@@ -945,7 +946,8 @@ mod tests {
             _: &str,
             _: &str,
             _: &serde_json::Value,
-         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
+            _projection: Option<&lingxi_core::host::ToolResultProjection>,
+        ) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
     }
@@ -962,7 +964,8 @@ mod tests {
             _: &lingxi_core::types::ToolUseId,
             _: &str,
             _: &serde_json::Value,
-         _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
+            _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        ) {
         }
         async fn emit_tool_result(
             &self,
@@ -970,7 +973,8 @@ mod tests {
             _: &str,
             _: &str,
             _: &serde_json::Value,
-         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
+            _projection: Option<&lingxi_core::host::ToolResultProjection>,
+        ) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
         async fn emit_coordinator_worker(

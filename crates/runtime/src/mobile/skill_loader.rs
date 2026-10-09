@@ -466,7 +466,10 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         Ok(Some(SkillLoad {
             display_name: skill_name.to_string(),
             progress_message: None,
-            content: vec![ContentBlock::Text { text: body, citations: None }],
+            content: vec![ContentBlock::Text {
+                text: body,
+                citations: None,
+            }],
         }))
     }
 }
@@ -479,9 +482,7 @@ mod tests {
 
     /// A namespaced Plugin skill registered the way `PluginManager` does it,
     /// with an in-memory body so the loader tests need no installed plugin.
-    async fn loaded_fixture_plugin_loader(
-        skills: &[(&str, &str)],
-    ) -> MobileDiskSkillLoader {
+    async fn loaded_fixture_plugin_loader(skills: &[(&str, &str)]) -> MobileDiskSkillLoader {
         let plugin_id = lingxi_core::types::PluginId::new();
         let commands = skills
             .iter()
@@ -653,8 +654,7 @@ mod tests {
     /// short name, through the mobile preload path.
     #[tokio::test]
     async fn namespaced_plugin_skill_loads_its_body_over_short_name_collision() {
-        let loader =
-            loaded_fixture_plugin_loader(&[("apple-design", "PLUGIN-OWNED-BODY")]).await;
+        let loader = loaded_fixture_plugin_loader(&[("apple-design", "PLUGIN-OWNED-BODY")]).await;
         let registry = loader.registry.clone();
         registry.write().await.register_command(SlashCommand {
             name: "apple-design".into(),

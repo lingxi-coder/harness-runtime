@@ -9,7 +9,7 @@
 
 use command_api::model::BuiltinCommandHandler;
 use command_api::{CommandResult, ParsedSlashCommand};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tool_api::{BuiltinToolContext, Tool, ToolCallResult, ToolUseContext};
 
 const USAGE: &str = "Usage: /cron <schedule or action>\n\

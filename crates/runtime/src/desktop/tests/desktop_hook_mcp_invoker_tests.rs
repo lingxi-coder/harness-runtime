@@ -1,5 +1,5 @@
 use super::{
-    DesktopHookMcpInvoker, hook_mcp_full_name, map_hook_mcp_tool_error, map_hook_mcp_tool_result,
+    hook_mcp_full_name, map_hook_mcp_tool_error, map_hook_mcp_tool_result, DesktopHookMcpInvoker,
 };
 use hooks::HookMcpInvoker;
 use lingxi_core::host::{
@@ -10,8 +10,8 @@ use lingxi_core::host::{
 };
 use lingxi_core::types::McpConnectionId;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Default)]

@@ -284,7 +284,10 @@ mod tests {
             crate::headless::io::Output::new(tokio::io::sink()),
         ));
         let orch = orchestrator::ConversationOrchestrator::new_with_streaming(
-            orchestrator::OrchestratorConfig { bare: true, ..Default::default() },
+            orchestrator::OrchestratorConfig {
+                bare: true,
+                ..Default::default()
+            },
             Arc::new(MockApiClient::new(vec![])),
             api.clone(),
             Arc::new(tool_api::registry::ToolRegistry::new()),

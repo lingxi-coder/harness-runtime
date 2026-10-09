@@ -612,14 +612,12 @@ mod tests {
         let mut resume = request("resume");
         resume.id = Some(before.id);
         apply(&mut doc, resume).unwrap();
-        assert!(
-            doc.tasks[0]
-                .automation
-                .as_ref()
-                .unwrap()
-                .status_reason
-                .is_none()
-        );
+        assert!(doc.tasks[0]
+            .automation
+            .as_ref()
+            .unwrap()
+            .status_reason
+            .is_none());
     }
 
     #[test]
@@ -729,12 +727,10 @@ mod tests {
             apply(&mut doc, create).unwrap();
         }
         let old_loop_tasks = doc.tasks.clone();
-        assert!(
-            old_loop_tasks
-                .iter()
-                .all(|task| task.creator.created_by_session_id.is_none()
-                    && task.creator.created_by_pid.is_none())
-        );
+        assert!(old_loop_tasks
+            .iter()
+            .all(|task| task.creator.created_by_session_id.is_none()
+                && task.creator.created_by_pid.is_none()));
         apply(&mut doc, request("create")).unwrap();
         let ordinary_id = doc.tasks.last().unwrap().id.clone();
         cron::tasks_file::write_automation_tasks_body(
@@ -923,12 +919,10 @@ mod tests {
         assert_eq!(jobs[0].prompt, "Changed");
         let mut delete = request("delete");
         delete.id = Some(id);
-        assert!(
-            manage(&fs, temp.path(), delete, &registry, "session-test")
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(manage(&fs, temp.path(), delete, &registry, "session-test")
+            .await
+            .unwrap()
+            .is_empty());
         let jobs = manage(
             &fs,
             temp.path(),
@@ -946,17 +940,15 @@ mod tests {
         );
         let path = cron::scheduled_tasks_path(temp.path());
         std::fs::write(&path, "broken JSON").unwrap();
-        assert!(
-            manage(
-                &fs,
-                temp.path(),
-                request("create"),
-                &registry,
-                "session-test"
-            )
-            .await
-            .is_err()
-        );
+        assert!(manage(
+            &fs,
+            temp.path(),
+            request("create"),
+            &registry,
+            "session-test"
+        )
+        .await
+        .is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "broken JSON");
         scheduler.stop().await.unwrap();
     }
@@ -969,17 +961,15 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), temp.path().join(".lingxi")).unwrap();
         let fs = platform_posix::PosixFileSystem::new(temp.path().into());
         let (registry, scheduler) = live_scheduler(temp.path()).await;
-        assert!(
-            manage(
-                &fs,
-                temp.path(),
-                request("create"),
-                &registry,
-                "session-test"
-            )
-            .await
-            .is_err()
-        );
+        assert!(manage(
+            &fs,
+            temp.path(),
+            request("create"),
+            &registry,
+            "session-test"
+        )
+        .await
+        .is_err());
         assert!(!outside.path().join("scheduled_tasks.json").exists());
         scheduler.stop().await.unwrap();
     }
@@ -989,17 +979,15 @@ mod tests {
         let fs = platform_posix::PosixFileSystem::new(temp.path().into());
         let (registry, scheduler) = live_scheduler(temp.path()).await;
         scheduler.stop().await.unwrap();
-        assert!(
-            manage(
-                &fs,
-                temp.path(),
-                request("create"),
-                &registry,
-                "session-test"
-            )
-            .await
-            .is_err()
-        );
+        assert!(manage(
+            &fs,
+            temp.path(),
+            request("create"),
+            &registry,
+            "session-test"
+        )
+        .await
+        .is_err());
         assert!(!cron::scheduled_tasks_path(temp.path()).exists());
     }
     #[test]

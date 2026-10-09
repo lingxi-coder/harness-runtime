@@ -5,14 +5,14 @@ use lingxi_core::host::panel_pool::PanelPoolDrain;
 use lingxi_core::host::subagent_spawn::SubagentInheritance;
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use lingxi_core::host::*;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
     StrictStructuredQueryRequest, StrictStructuredQueryResponse,
 };
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 use std::time::Duration;
 
@@ -90,7 +90,8 @@ impl agent::SubagentApiClient for Api {
         let response = llm_runtime::HistoryResponse {
             id: "fake-panel".into(),
             model: "mock".into(),
-            content: vec![llm_runtime::ContentBlock::ToolCall { input_projection: None,
+            content: vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: "report".into(),
                 name: "StructuredOutput".into(),
                 input: json!({"schema_version":1,"summary":"summary","candidate_answer":"answer","claims":[],"evidence":[],"assumptions":[],"risks":[],"unresolved_questions":[]}),

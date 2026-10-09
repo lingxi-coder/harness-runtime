@@ -30,19 +30,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use coordinator::mailbox::{MailboxRouter, TeammateMailbox};
 use coordinator::run_teammate_pump;
-use hooks::HookRegistry;
 use hooks::mods::{ModAgentSpawnAdmission, ModAgentSpawnStart};
-use lingxi_core::host::RuntimeSpawner;
+use hooks::HookRegistry;
 use lingxi_core::host::subagent_spawn::{
     AgentSpawnAdmission, AgentSpawnStart, AsyncLaunch, SelectedAgentMeta, SubagentInheritance,
     SubagentListingEntry, SubagentResult, SubagentSpawnError, SubagentSpawnRequest,
     SubagentSpawner,
 };
 use lingxi_core::host::team_spawn::TeamSpawnSeam;
+use lingxi_core::host::RuntimeSpawner;
 use lingxi_core::types::AgentId;
-use tasks::TaskType;
 use tasks::registry::TaskRegistry;
 use tasks::task_trait::TaskSpawnInput;
+use tasks::TaskType;
 use tokio::sync::RwLock;
 
 struct DesktopModSpawnStart(ModAgentSpawnStart);
@@ -536,9 +536,9 @@ mod tests {
     use std::future::Future;
     use std::path::PathBuf;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
     use lingxi_core::host::tool_invoker::{
@@ -547,9 +547,9 @@ mod tests {
     use lingxi_core::host::{BackgroundTaskHandle, OutputStream, RuntimeError};
     use platform_posix::PosixFileSystem;
     use serde_json::json;
-    use tasks::TaskType;
     use tasks::output_manager::TaskOutputManager;
     use tasks::task_trait::{Task, TaskContext, TaskError, TaskHandle};
+    use tasks::TaskType;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::task::JoinHandle;
 
@@ -953,7 +953,8 @@ mod tests {
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
             _input: &serde_json::Value,
-         _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>) {
+            _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        ) {
         }
 
         async fn emit_tool_result(
@@ -962,7 +963,8 @@ mod tests {
             _tool: &str,
             _model_text: &str,
             _result: &serde_json::Value,
-         _projection: Option<&lingxi_core::host::ToolResultProjection>) {
+            _projection: Option<&lingxi_core::host::ToolResultProjection>,
+        ) {
         }
 
         async fn emit_end_turn(&self, _stop_reason: &str, _cost: &lingxi_core::host::CostSnapshot) {
@@ -1375,12 +1377,7 @@ export function register(on) {
             frozen_command_denies: Vec::new(),
         };
         invoker
-            .invoke_detailed(
-                "Read",
-                json!({"file_path":"original.txt"}),
-                invocation,
-                None,
-            )
+            .invoke_detailed("Read", json!({"file_path":"original.txt"}), invocation)
             .await
             .unwrap();
 

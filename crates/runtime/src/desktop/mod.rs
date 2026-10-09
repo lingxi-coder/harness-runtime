@@ -63,11 +63,11 @@ mod skill_loader;
 mod watcher_test_support;
 
 use client::adapter::AdapterPermissionGate;
-pub use command_api::builtins::{BuildInfo, runtime_build_info};
+pub use command_api::builtins::{runtime_build_info, BuildInfo};
 use command_api::model::BuiltinCommandHandler;
 use command_api::{
-    CommandRegistry, CommandResult, ParsedSlashCommand, RegistrySlashDispatcher,
-    parse_slash_command,
+    parse_slash_command, CommandRegistry, CommandResult, ParsedSlashCommand,
+    RegistrySlashDispatcher,
 };
 
 use command_api::builtins::{
@@ -76,8 +76,8 @@ use command_api::builtins::{
 };
 
 use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream};
-pub use orchestrator::native_computer::VerifiedComputerProfile;
 pub use lingxi_llm_client::protocol::computer::NativeComputerProvider;
+pub use orchestrator::native_computer::VerifiedComputerProfile;
 use orchestrator::{ConversationOrchestrator, ProviderApiAdapter};
 use permission::gate::PermissionGate;
 
@@ -530,11 +530,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         lingxi_core::host::tool_invoker::ToolInvokerError,
     > {
         match self.inner.get() {
-            Some(invoker) => {
-                invoker
-                    .invoke_detailed(name, input, ctx)
-                    .await
-            }
+            Some(invoker) => invoker.invoke_detailed(name, input, ctx).await,
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
@@ -815,7 +811,7 @@ fn teammate_backend_selector(
     is_tty: bool,
 ) -> Arc<dyn Fn() -> pane_teammate::PaneBackendSelection + Send + Sync> {
     use platform_posix::swarm::detection::{
-        BackendChoice, TeammateMode, detect_terminal_env, select_backend,
+        detect_terminal_env, select_backend, BackendChoice, TeammateMode,
     };
     let backends = std::sync::Mutex::new(std::collections::HashMap::<
         &'static str,
@@ -2584,16 +2580,29 @@ impl DesktopRuntime {
     pub async fn agent_session_statistics(
         &self,
     ) -> Option<lingxi_core::host::agent_statistics::AgentSessionStatisticsSnapshot> {
-        if !self.orchestrator.tool_names().iter().any(|name| name == "Agent") {
+        if !self
+            .orchestrator
+            .tool_names()
+            .iter()
+            .any(|name| name == "Agent")
+        {
             return None;
         }
         let session_id = self.orchestrator.current_session_id().await;
-        Some(self.task_registry.agent_session_statistics(session_id).snapshot())
+        Some(
+            self.task_registry
+                .agent_session_statistics(session_id)
+                .snapshot(),
+        )
     }
 
     pub(crate) async fn stage_fork_history(&self, messages: Vec<session::jsonl::JsonlMessage>) {
         if self.fork_writer.is_some() {
-            *self.pending_fork_history.lock().await = Some(PendingForkHistory { messages, next: 0, prompt_id: None });
+            *self.pending_fork_history.lock().await = Some(PendingForkHistory {
+                messages,
+                next: 0,
+                prompt_id: None,
+            });
         }
     }
 
@@ -2602,9 +2611,18 @@ impl DesktopRuntime {
     /// The ordinary writer owns bytes, identity indexes, and durable retries.
     pub async fn flush_prepared_fork_history(&self) -> Result<(), String> {
         let mut pending = self.pending_fork_history.lock().await;
-        let Some(history) = pending.as_mut() else { return Ok(()) };
-        let Some(writer) = self.fork_writer.as_ref() else { return Ok(()) };
-        let session_id = self.orchestrator.current_session_id().await.as_uuid().to_string();
+        let Some(history) = pending.as_mut() else {
+            return Ok(());
+        };
+        let Some(writer) = self.fork_writer.as_ref() else {
+            return Ok(());
+        };
+        let session_id = self
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
         let prompt_id = match history.prompt_id.as_ref() {
             Some(prompt_id) => prompt_id.clone(),
             None => {
@@ -2628,10 +2646,16 @@ impl DesktopRuntime {
         if !startup.sdk_mcp_configs.is_empty() {
             self.mcp_registry.connect_all(startup.sdk_mcp_configs).await;
             let registered = tool_mcp::build_registered_mcp_tools(
-                self.mcp_registry.as_ref(), startup.mcp_tool_context,
-            ).await;
+                self.mcp_registry.as_ref(),
+                startup.mcp_tool_context,
+            )
+            .await;
             self.tools.replace_mcp_tools(registered);
-            assembly::reconcile_mcp_prompt_catalog(self.mcp_registry.as_ref(), &self.shared_command_registry).await;
+            assembly::reconcile_mcp_prompt_catalog(
+                self.mcp_registry.as_ref(),
+                &self.shared_command_registry,
+            )
+            .await;
         }
         activate_startup_producers(&self.orchestrator, &startup.async_hook_responses).await;
     }
@@ -4602,12 +4626,8 @@ impl PluginRuntime {
     /// the remaining plugins in their actual discovery/enable order.
     pub async fn loaded_plugins(&self) -> Vec<(plugin::PluginManifest, std::path::PathBuf)> {
         let _refresh_guard = self.refresh_lock.lock().await;
-        let live: std::collections::HashSet<_> = self
-            .manager
-            .loaded_plugin_ids()
-            .await
-            .into_iter()
-            .collect();
+        let live: std::collections::HashSet<_> =
+            self.manager.loaded_plugin_ids().await.into_iter().collect();
         let mut result = Vec::new();
         for id in self
             .load_order
@@ -4618,8 +4638,16 @@ impl PluginRuntime {
         {
             match self.manager.plugin_state(id).await {
                 Some(
-                    plugin::PluginState::Loaded { manifest, install_dir, .. }
-                    | plugin::PluginState::DisablingFailed { manifest, install_dir, .. },
+                    plugin::PluginState::Loaded {
+                        manifest,
+                        install_dir,
+                        ..
+                    }
+                    | plugin::PluginState::DisablingFailed {
+                        manifest,
+                        install_dir,
+                        ..
+                    },
                 ) => {
                     result.push((manifest, install_dir));
                 }
@@ -4633,8 +4661,7 @@ impl PluginRuntime {
                 .iter()
                 .position(|configured| {
                     dir.starts_with(configured)
-                        || (!configured.is_absolute()
-                            && dir.starts_with(self.cwd.join(configured)))
+                        || (!configured.is_absolute() && dir.starts_with(self.cwd.join(configured)))
                 })
                 .unwrap_or(usize::MAX)
         });
@@ -4797,8 +4824,7 @@ struct PendingAsyncHookResponse {
 struct AsyncHookResponseBuffer {
     responses: Arc<std::sync::Mutex<Vec<PendingAsyncHookResponse>>>,
     rewake_target: Arc<std::sync::OnceLock<std::sync::Weak<dyn OrchestratorHandle>>>,
-    pending_rewakes:
-        Arc<std::sync::Mutex<Vec<Option<lingxi_core::host::CancellationToken>>>>,
+    pending_rewakes: Arc<std::sync::Mutex<Vec<Option<lingxi_core::host::CancellationToken>>>>,
 }
 
 struct DeferredDesktopStartup {
@@ -4814,14 +4840,22 @@ struct PendingForkHistory {
 }
 
 impl PendingForkHistory {
-    async fn flush(&mut self, writer: &session::JsonlWriter, session_id: &str, prompt_id: &str) -> Result<(), String> {
+    async fn flush(
+        &mut self,
+        writer: &session::JsonlWriter,
+        session_id: &str,
+        prompt_id: &str,
+    ) -> Result<(), String> {
         while let Some(message) = self.messages.get(self.next) {
             let mut message = message.clone();
             message.session_id = session_id.to_owned();
             if message.message_type == "user" {
                 message.prompt_id = Some(prompt_id.to_owned());
             }
-            writer.append_native_message_once(&message).await.map_err(|error| error.to_string())?;
+            writer
+                .append_native_message_once(&message)
+                .await
+                .map_err(|error| error.to_string())?;
             self.next += 1;
         }
         Ok(())
@@ -4849,25 +4883,62 @@ mod pending_fork_history_tests {
         let (messages, _) = session::jsonl::build_conversation_chain(&loaded, source_id);
         let target_id = lingxi_core::types::SessionId::new();
         let target_path = directory.path().join("fork.jsonl");
-        let writer = session::JsonlWriter::new(target_path.clone(), Arc::new(platform::DesktopFileSystem::new(directory.path().to_path_buf())))
-            .with_durable_lock(Arc::new(session::jsonl::DurableTranscriptWriter::open(directory.path().join("ledger")).unwrap()));
-        writer.activate_session_target(target_id, target_path.clone(), directory.path().to_path_buf()).unwrap();
-        let mut pending = PendingForkHistory { messages: messages.clone(), next: 0, prompt_id: Some("current".into()) };
-        pending.flush(&writer, &target_id.as_uuid().to_string(), "current").await.unwrap();
+        let writer = session::JsonlWriter::new(
+            target_path.clone(),
+            Arc::new(platform::DesktopFileSystem::new(
+                directory.path().to_path_buf(),
+            )),
+        )
+        .with_durable_lock(Arc::new(
+            session::jsonl::DurableTranscriptWriter::open(directory.path().join("ledger")).unwrap(),
+        ));
+        writer
+            .activate_session_target(
+                target_id,
+                target_path.clone(),
+                directory.path().to_path_buf(),
+            )
+            .unwrap();
+        let mut pending = PendingForkHistory {
+            messages: messages.clone(),
+            next: 0,
+            prompt_id: Some("current".into()),
+        };
+        pending
+            .flush(&writer, &target_id.as_uuid().to_string(), "current")
+            .await
+            .unwrap();
         // A new waiter replaying the same descriptor after an uncertain ack
         // uses the same ordinary UUID-only transaction, never duplicates rows.
-        let mut retry = PendingForkHistory { messages, next: 0, prompt_id: Some("current".into()) };
-        retry.flush(&writer, &target_id.as_uuid().to_string(), "current").await.unwrap();
+        let mut retry = PendingForkHistory {
+            messages,
+            next: 0,
+            prompt_id: Some("current".into()),
+        };
+        retry
+            .flush(&writer, &target_id.as_uuid().to_string(), "current")
+            .await
+            .unwrap();
         let copied = tokio::fs::read_to_string(&target_path).await.unwrap();
         let loaded = session::jsonl::route_lines(&copied);
         assert_eq!(loaded.messages_in_order.len(), 2);
         assert_eq!(loaded.messages_in_order[0].uuid, "first");
-        assert_eq!(loaded.messages_in_order[1].parent_uuid.as_deref(), Some("first"));
-        assert!(loaded.messages_in_order.iter().all(|row| row.prompt_id.as_deref() == Some("current") && row.session_id == target_id.as_uuid().to_string()));
+        assert_eq!(
+            loaded.messages_in_order[1].parent_uuid.as_deref(),
+            Some("first")
+        );
+        assert!(loaded
+            .messages_in_order
+            .iter()
+            .all(|row| row.prompt_id.as_deref() == Some("current")
+                && row.session_id == target_id.as_uuid().to_string()));
         assert!(copied.contains(r#""\ud800":"\udc00""#));
         assert!(!copied.contains("forkedFrom"));
         assert!(!copied.contains("deliveryId"));
-        assert_eq!(tokio::fs::read_to_string(source_path).await.unwrap(), original);
+        assert_eq!(
+            tokio::fs::read_to_string(source_path).await.unwrap(),
+            original
+        );
     }
 }
 
@@ -4910,7 +4981,8 @@ impl AsyncHookResponseBuffer {
 
     fn attach_rewake_handle(&self, target: &Arc<dyn OrchestratorHandle>) {
         let pending = {
-            let mut pending = self.pending_rewakes
+            let mut pending = self
+                .pending_rewakes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = self.rewake_target.set(Arc::downgrade(target));
@@ -4922,11 +4994,15 @@ impl AsyncHookResponseBuffer {
     }
 
     fn schedule_rewake(&self, generation_cancel: Option<lingxi_core::host::CancellationToken>) {
-        if generation_cancel.as_ref().is_some_and(|cancel| cancel.is_cancelled()) {
+        if generation_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
             return;
         }
         let target = {
-            let mut pending = self.pending_rewakes
+            let mut pending = self
+                .pending_rewakes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match self.rewake_target.get().and_then(std::sync::Weak::upgrade) {
@@ -5046,7 +5122,11 @@ mod async_hook_response_buffer_tests {
             Arc::new(orchestrator::test_support::MockOrchestratorHandle::default());
         buffer.attach_rewake_handle(&target);
         assert!(buffer.pending_rewakes.lock().unwrap().is_empty());
-        assert!(buffer.rewake_target.get().and_then(std::sync::Weak::upgrade).is_some());
+        assert!(buffer
+            .rewake_target
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some());
         buffer.schedule_rewake(None);
         assert!(buffer.pending_rewakes.lock().unwrap().is_empty());
         tokio::task::yield_now().await;
@@ -5501,7 +5581,9 @@ async fn apply_worktree_launch(
                 // stderr, matching 206's `console.error`) in addition to the
                 // structured `tracing::warn!`.
                 if let Some(diagnostics) = diagnostics {
-                    diagnostics.stderr_line(&format!("Warning: Failed to create tmux session: {e}")).await;
+                    diagnostics
+                        .stderr_line(&format!("Warning: Failed to create tmux session: {e}"))
+                        .await;
                 }
                 tracing::warn!(
                     error = %e,
@@ -5533,7 +5615,6 @@ mod environment_oauth_tests;
 #[cfg(test)]
 #[path = "tests/connected_fallback_tests.rs"]
 mod connected_fallback_tests;
-
 
 /// Round-5 review item 11's class member (1), handed to the gate by that
 /// fixer's `needs_other_file`: the connect LOOP inside
@@ -5577,22 +5658,19 @@ mod shutdown;
 pub use assembly::build;
 pub use assembly::build_with_credential_stack;
 pub use assembly::build_with_host_automation;
-use configuration::ApiProvider;
-pub use configuration::CustomizationGates;
-pub use configuration::DesktopConfig;
-pub use configuration::DesktopDiagnosticSink;
-pub use configuration::DesktopRequestIdentity;
-pub use configuration::DesktopMcpServices;
-pub use configuration::DesktopSessionResumeSnapshot;
-pub use configuration::DesktopEngineConfig;
-pub use configuration::DesktopSessionComposition;
 use configuration::api_provider;
 use configuration::is_env_truthy;
 pub use configuration::model_deprecation_warning;
 use configuration::resolve_memory_feature_gates;
-use credentials::CredentialStoreAuthProvider;
-pub use credentials::LlmStack;
-pub use credentials::SharedCredentialStack;
+use configuration::ApiProvider;
+pub use configuration::CustomizationGates;
+pub use configuration::DesktopConfig;
+pub use configuration::DesktopDiagnosticSink;
+pub use configuration::DesktopEngineConfig;
+pub use configuration::DesktopMcpServices;
+pub use configuration::DesktopRequestIdentity;
+pub use configuration::DesktopSessionComposition;
+pub use configuration::DesktopSessionResumeSnapshot;
 pub use credentials::api_service_from_stack;
 use credentials::aws_auth_refresher;
 pub use credentials::build_api_service;
@@ -5603,17 +5681,9 @@ use credentials::capture_legacy_opening_balance;
 use credentials::managed_settings_raw_tiers_sync;
 pub use credentials::resolve_llm_stack;
 use credentials::resolve_llm_stack_with_credentials;
-use fusion_services::DesktopFusionConfigSource;
-use fusion_services::DesktopFusionExecutor;
-use fusion_services::DesktopFusionPriceBook;
-use fusion_services::FusionCatalogClearingAuth;
-use fusion_services::FusionCatalogModelSource;
-pub use fusion_services::FusionCatalogRefresher;
-use fusion_services::FusionCatalogRefreshingChatGptConnect;
-use fusion_services::FusionCatalogRefreshingCopilotConnect;
-use fusion_services::FusionCatalogRefreshingCredentialWriter;
-use fusion_services::FusionCatalogRefreshingOAuthConnect;
-pub use fusion_services::FusionCatalogRegistry;
+use credentials::CredentialStoreAuthProvider;
+pub use credentials::LlmStack;
+pub use credentials::SharedCredentialStack;
 use fusion_services::desktop_fusion_attempts;
 use fusion_services::desktop_fusion_catalog_row;
 use fusion_services::desktop_fusion_runtime_config;
@@ -5625,8 +5695,18 @@ pub use fusion_services::refresh_fusion_catalog_after_credential_delete;
 pub use fusion_services::refresh_fusion_catalog_after_credential_write;
 pub use fusion_services::register_fusion_catalog_refresher;
 pub use fusion_services::spawn_fusion_catalog_refresh;
+use fusion_services::DesktopFusionConfigSource;
+use fusion_services::DesktopFusionExecutor;
+use fusion_services::DesktopFusionPriceBook;
+use fusion_services::FusionCatalogClearingAuth;
+use fusion_services::FusionCatalogModelSource;
+pub use fusion_services::FusionCatalogRefresher;
+use fusion_services::FusionCatalogRefreshingChatGptConnect;
+use fusion_services::FusionCatalogRefreshingCopilotConnect;
+use fusion_services::FusionCatalogRefreshingCredentialWriter;
+use fusion_services::FusionCatalogRefreshingOAuthConnect;
+pub use fusion_services::FusionCatalogRegistry;
 pub use orchestrator::config::ModRenderSurface;
-use permission_config::BootPermissionTiers;
 use permission_config::append_mcp_permission_rules;
 use permission_config::append_restricted_builtin_denies;
 use permission_config::apple_events_override;
@@ -5651,13 +5731,14 @@ use permission_config::sandbox_auto_allow_from_settings_tiers;
 use permission_config::sandbox_runtime_config_from_settings_tiers;
 use permission_config::should_enforce_permissions;
 use permission_config::strict_allowlist_override;
-pub use shutdown::DESKTOP_SHUTDOWN_BUDGET;
-pub use shutdown::DesktopSessionLifecycle;
-pub use shutdown::DesktopSessionShutdownReport;
-use shutdown::ProcessSessionActivationObserver;
+use permission_config::BootPermissionTiers;
 pub use shutdown::refresh_process_session_presence;
 #[cfg(any(unix, windows))]
 pub use shutdown::supervisor_exit_sink;
+pub use shutdown::DesktopSessionLifecycle;
+pub use shutdown::DesktopSessionShutdownReport;
+use shutdown::ProcessSessionActivationObserver;
+pub use shutdown::DESKTOP_SHUTDOWN_BUDGET;
 
 #[cfg(test)]
 use assembly::resolve_workspace_trust;

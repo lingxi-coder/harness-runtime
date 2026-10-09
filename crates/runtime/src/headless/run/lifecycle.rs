@@ -91,7 +91,10 @@ pub(super) async fn wind_down_print_tasks(
                 .orchestrator
                 .run_task_notification_rewake(runtime.task_registry.as_ref(), cancel)
                 .await;
-            runtime.execution_interrupted.store(matches!(&result, Ok(orchestrator::TurnOutcome::Cancelled)), std::sync::atomic::Ordering::Release);
+            runtime.execution_interrupted.store(
+                matches!(&result, Ok(orchestrator::TurnOutcome::Cancelled)),
+                std::sync::atomic::Ordering::Release,
+            );
             if let Some(plane) = control_plane {
                 plane.clear_active_turn().await;
             }
@@ -219,7 +222,9 @@ impl PrintAuxTaskGroup {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
-            if tasks.is_empty() { break; }
+            if tasks.is_empty() {
+                break;
+            }
             for task in &tasks {
                 task.abort();
             }
@@ -239,7 +244,9 @@ impl PrintAuxTaskGroup {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner),
             );
-            if tasks.is_empty() { break; }
+            if tasks.is_empty() {
+                break;
+            }
             for task in tasks {
                 let _ = task.await;
             }
