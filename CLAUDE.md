@@ -11,7 +11,7 @@ A multi-platform Rust runtime extracted from LingXi (agent execution, model host
 Rust 1.94 is pinned by `rust-toolchain.toml`. Always pass `--locked`.
 
 ```sh
-git submodule update --init --recursive           # deps/llm-client is required to build
+# ../llm-client (a sibling llm-client checkout) is required to build
 
 # Feature-combination checks (each must pass independently)
 cargo check --locked -p harness-runtime --no-default-features
@@ -25,18 +25,18 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 
 ./scripts/check-all.sh                             # every repo gate (see below)
-cargo test --manifest-path deps/llm-client/Cargo.toml --locked   # SDK's own tests
+cargo test --manifest-path ../llm-client/Cargo.toml --locked   # SDK's own tests
 ```
 
 ## Architecture
 
 - **Composition root.** `crates/runtime` (package `harness-runtime`) is the only place that makes shipping choices; it re-exports `api`, `models`, `desktop`, `mobile` modules. Features: `engine` (default: orchestrator, agent, session, permission, hooks, mcp, compaction, tools APIs…), `desktop` (adds branding, cron, memory, migrations, provider-config…), `mobile`, plus `uniffi` for native bindings. Hosts inject product build info through Rust config; `runtime_build_info()` reports the runtime's own identity.
 - **Dependency direction is enforced** by `scripts/check-deps.sh` (reads `cargo metadata`): library crates flow strictly "downhill". Tools (`crates/tools/*`) may not depend on other tools or platforms; platforms (`crates/platforms/*`) may not depend on tools; engine crates at `crates/<x>` may not depend on tools/platforms. Fix the layering rather than adding an exemption.
-- **Model networking goes only through `llm-client`.** `scripts/check_llm_boundary.py` rejects provider/model endpoint construction anywhere else (general HTTP — web fetch, OAuth, MCP, telemetry — stays host-owned). The SDK lives in the `deps/llm-client` submodule, wired in via a root `[patch]`; the canonical Git URL + full rev is in root `[workspace.dependencies]`. The patch does not propagate downstream: commit and push SDK changes in the submodule repo first, then bump the submodule and the pinned rev here. See `docs/llm-client-upgrade.md`.
+- **Model networking goes only through `llm-client`.** `scripts/check_llm_boundary.py` rejects provider/model endpoint construction anywhere else (general HTTP — web fetch, OAuth, MCP, telemetry — stays host-owned). During development the root `[patch]` builds the SDK from the sibling `../llm-client` checkout (CI checks out the pinned rev there via `.github/actions/llm-client`); the canonical Git URL + full rev is in root `[workspace.dependencies]`. The patch does not propagate downstream: commit and push SDK changes in the llm-client repo first, then bump the pinned rev here. See `docs/llm-client-upgrade.md`.
 - **Branding.** Brand-specific names/paths live in `crates/branding`. `scripts/check-brand-leaks.sh` compares a violation set against `scripts/brand_leak_baseline.txt` (both additions and disappearances fail); use `python3 scripts/check_brand_leaks.py --list` to see violations.
 - **Unsafe code:** workspace lint is `deny`; every crate adds `#![forbid(unsafe_code)]` in `lib.rs`, except the one `platform-posix` module that needs `setsid()`. New crates must follow this.
 - Workspace `default-members` excludes test fixtures (e.g. `mock_stdio_mcp`); keep new fixtures out of it.
-- `third_party/` holds vendored, patched sources with their own licenses; `deps/llm-client` and those are excluded from the workspace.
+- `third_party/` holds vendored, patched sources with their own licenses; they are excluded from the workspace.
 - `skills/` are plugin skills; `check-skill-frontmatter.sh` caps `description` at 180 **display columns** (CJK counts double — `len()` is wrong).
 
 ## Gates

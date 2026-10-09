@@ -569,6 +569,7 @@ async fn auto_kept_tail_places_missing_native_announcements_before_summary_and_s
             consecutive_rapid_refills: 0,
             compaction_usage: None,
             compaction_model: None,
+            compaction_profile: None,
         };
         orch.apply_post_compact(
             result,

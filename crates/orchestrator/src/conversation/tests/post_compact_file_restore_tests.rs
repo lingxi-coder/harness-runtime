@@ -921,6 +921,7 @@ async fn cancelled_compact_keeps_model_visible_read_state_untouched() {
         media_analysis_to_preserve: Vec::new(),
         compaction_usage: None,
         compaction_model: None,
+        compaction_profile: None,
         raw_summary_text: "test summary".to_string(),
     };
 
@@ -975,6 +976,7 @@ async fn apply_post_compact_clears_cached_git_status() {
         media_analysis_to_preserve: Vec::new(),
         compaction_usage: None,
         compaction_model: None,
+        compaction_profile: None,
         raw_summary_text: "test summary".to_string(),
     };
 

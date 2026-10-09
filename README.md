@@ -8,15 +8,16 @@
 
 ## 快速开始
 
-仓库固定使用 Rust 1.94。首次检出时获取 `llm-client` 子模块：
+仓库固定使用 Rust 1.94。首次检出时在同级目录获取 `llm-client`：
 
 ```sh
-git clone --recurse-submodules https://github.com/lingxi-coder/harness-runtime.git
+git clone https://github.com/lingxi-coder/llm-client.git
+git clone https://github.com/lingxi-coder/harness-runtime.git
 cd harness-runtime
 cargo check --locked -p harness-runtime
 ```
 
-已有 checkout 或切换提交后，执行 `git submodule update --init --recursive`。从仓库根运行 Cargo 命令；根 workspace 的 `[patch]` 会将固定的 `lingxi-llm-client` Git 依赖指向 `deps/llm-client` 本地源码。
+两个仓库需并排放置。从仓库根运行 Cargo 命令；根 workspace 的 `[patch]` 会将固定的 `lingxi-llm-client` Git 依赖指向同级目录 `../llm-client` 的源码。
 
 ## 在宿主项目中接入
 
@@ -114,7 +115,7 @@ async fn run_turn(harness: &Harness, prompt: String) -> Result<TurnOutcome, Hand
 | [`crates/agent`](crates/agent)、[`crates/orchestrator`](crates/orchestrator)、[`crates/session`](crates/session) | 各领域拥有自己的执行逻辑和状态。 |
 | [`crates/client`](crates/client) | 客户端协议、展示与运行时适配。 |
 | [`crates/tools`](crates/tools)、[`crates/platforms`](crates/platforms) | 工具实现与平台能力。 |
-| [`deps/llm-client`](deps/llm-client)、[`third_party`](third_party) | 独立 SDK 子模块及带各自补丁和许可证的第三方源码。 |
+| [`third_party`](third_party) | 带各自补丁和许可证的第三方源码。 |
 | [`scripts`](scripts)、[`docs`](docs) | 构建/边界检查及设计、迁移文档。 |
 
 宿主通过 `harness-runtime` 的公开 API 接入；仓库内部组件依赖 `core` 的共享类型和契约。依赖方向由 `scripts/check-deps.sh` 检查；模型提供方通信由 `llm-client` 负责，宿主保留凭证、会话、权限、工具执行和持久化职责。移动 Linux 资源供应链及宿主接口见 [运行时来源契约](docs/mobile-linux/RUNTIME-SOURCE-CONTRACT.md)。
@@ -131,10 +132,10 @@ cargo test --locked --workspace --all-features --no-fail-fast
 
 这些命令分别检查最小、桌面、移动绑定组合、workspace 测试和仓库门禁；原生设备、完整产品打包与签名需在宿主项目中另行验证。迁移时已完成的验证及已知限制见 [验证记录](docs/migration/validation.md)。
 
-修改 `deps/llm-client` 时，根 workspace 构建会立即使用子模块改动；SDK 自身的测试需要单独运行：
+修改 `../llm-client` 时，根 workspace 构建会立即使用这些改动；SDK 自身的测试需要单独运行：
 
 ```sh
-cargo test --manifest-path deps/llm-client/Cargo.toml --locked
+cargo test --manifest-path ../llm-client/Cargo.toml --locked
 ```
 
-发布联合修改时，先在 SDK 仓库验证、提交并推送，再更新本仓库的子模块提交、根 `[workspace.dependencies]` 固定 revision 和 `Cargo.lock`。具体流程见 [子模块联合开发](docs/llm-client-upgrade.md#子模块联合开发)。迁移来源可查阅 [来源清单](docs/migration/source-manifest.json)。
+发布联合修改时，先在 SDK 仓库验证、提交并推送，再更新本仓库根 `[workspace.dependencies]` 固定 revision 和 `Cargo.lock`。具体流程见 [联合开发](docs/llm-client-upgrade.md#联合开发)。迁移来源可查阅 [来源清单](docs/migration/source-manifest.json)。

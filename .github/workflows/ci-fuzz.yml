@@ -22,8 +22,7 @@ jobs:
           - tengu_payload_deserialize
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - uses: ./.github/actions/llm-client
       - uses: dtolnay/rust-toolchain@nightly
         # cargo-fuzz requires nightly for libFuzzer integration.
       - name: Install cargo-fuzz

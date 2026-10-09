@@ -2737,6 +2737,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                             media_analysis_to_preserve: vec![],
                             compaction_usage: None,
                             compaction_model: None,
+                            compaction_profile: None,
                         },
                         compaction::CompactTrigger::Auto,
                         100,

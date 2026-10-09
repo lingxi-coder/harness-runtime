@@ -62,6 +62,7 @@ fn compact_result() -> compaction::IterationCompactionResult {
         media_analysis_to_preserve: Vec::new(),
         compaction_usage: None,
         compaction_model: None,
+        compaction_profile: None,
         raw_summary_text: "test summary".into(),
     }
 }

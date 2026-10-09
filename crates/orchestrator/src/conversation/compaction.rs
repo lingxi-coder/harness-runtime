@@ -864,6 +864,7 @@ impl ConversationOrchestrator {
                     media_analysis_to_preserve: Vec::new(),
                     compaction_usage: None,
                     compaction_model: None,
+                    compaction_profile: None,
                 };
                 apply_session_compact_result(
                     &mut replacement,
@@ -2895,7 +2896,8 @@ impl ConversationOrchestrator {
         ) else {
             return None;
         };
-        let model_ref = crate::cost_wiring::model_ref_from_string(model, None);
+        let model_ref =
+            crate::cost_wiring::model_ref_from_string(model, result.compaction_profile.as_deref());
         Some(scope.submit_model_response(cost::CostModelResponse {
             model_ref,
             usage,
@@ -3652,6 +3654,7 @@ mod session_compact_mod_tests {
             media_analysis_to_preserve: Vec::new(),
             compaction_usage: None,
             compaction_model: None,
+            compaction_profile: None,
         }
     }
 

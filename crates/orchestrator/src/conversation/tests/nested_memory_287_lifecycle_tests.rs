@@ -430,6 +430,7 @@ async fn compact(root: &ConversationOrchestrator, messages_to_preserve: Vec<Conv
         consecutive_rapid_refills: 0,
         compaction_usage: None,
         compaction_model: None,
+        compaction_profile: None,
     };
     assert!(root
         .apply_post_compact(

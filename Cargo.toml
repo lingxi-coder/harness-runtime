@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["deps/llm-client", "third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys", "third_party/syntect"]
+exclude = ["third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys", "third_party/syntect"]
 resolver = "2"
 members = [
     "crates/runtime",
@@ -153,7 +153,7 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi-coder/harness-runtime"
 
 [workspace.dependencies]
-lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "add97960700a78385b81852f42120066e96a267f", default-features = false }
+lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "e9fd8d809fe8f65870428abad87e5422b2037b69", default-features = false }
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
 mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9" }
 mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9" }
@@ -353,7 +353,7 @@ unnecessary_filter_map = "allow"        #  1
 debug = 1
 split-debuginfo = "unpacked"
 
-# Develop the shared SDK in its own Git submodule. Downstream workspaces keep
+# Develop the shared SDK in the sibling ../llm-client checkout. Downstream workspaces keep
 # using the immutable Git dependency above because root patches do not propagate.
 [patch."https://github.com/lingxi-coder/llm-client.git"]
 lingxi-llm-client = { path = "../llm-client" }

@@ -120,6 +120,9 @@ pub struct IterationCompactionResult {
     /// Model configured for the summary side-query, paired with
     /// [`Self::compaction_usage`] for cost attribution.
     pub compaction_model: Option<String>,
+    /// Profile the summary side-query was routed through, completing
+    /// [`Self::compaction_model`]'s cost attribution.
+    pub compaction_profile: Option<String>,
 }
 
 /// Owns one instance of each layer + the autocompact threshold.
@@ -291,6 +294,7 @@ impl CompactionOrchestrator {
             media_analysis_to_preserve,
             compaction_usage: result.compaction_usage,
             compaction_model: Some(result.summary_model),
+            compaction_profile: result.summary_profile,
         })
     }
 
@@ -342,6 +346,7 @@ impl CompactionOrchestrator {
             media_analysis_to_preserve,
             compaction_usage: result.compaction_usage,
             compaction_model: Some(result.summary_model),
+            compaction_profile: result.summary_profile,
         })
     }
 
@@ -370,6 +375,7 @@ impl CompactionOrchestrator {
                 media_analysis_to_preserve: Vec::new(),
                 compaction_usage: None,
                 compaction_model: None,
+                compaction_profile: None,
             });
         }
         let media_analysis_to_preserve = media_analysis_messages(&messages);
@@ -404,6 +410,7 @@ impl CompactionOrchestrator {
             media_analysis_to_preserve,
             compaction_usage: result.compaction_usage,
             compaction_model: Some(result.summary_model),
+            compaction_profile: result.summary_profile,
         })
     }
 
@@ -567,6 +574,7 @@ impl CompactionOrchestrator {
         let mut was_compacted = false;
         let mut compaction_usage = None;
         let mut compaction_model = None;
+        let mut compaction_profile = None;
         let mut raw_summary_text = String::new();
         // #58: the preserved tail the autocompact layer carries out, if any.
         // Empty unless autocompact fires AND `DRn` selected a preservable tail.
@@ -614,6 +622,7 @@ impl CompactionOrchestrator {
                     raw_summary_text = result.raw_summary_text;
                     compaction_usage = result.compaction_usage;
                     compaction_model = Some(result.summary_model.clone());
+                    compaction_profile = result.summary_profile;
                     messages.clone_from(&result.summary_messages);
                     // #58: carry the preserved tail out separately (NOT folded
                     // into `messages`, which is the leading summary set).
@@ -658,6 +667,7 @@ impl CompactionOrchestrator {
             media_analysis_to_preserve,
             compaction_usage,
             compaction_model,
+            compaction_profile,
         })
     }
 }
