@@ -475,53 +475,32 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
 mod tests {
     use super::*;
 
-    const LOCAL_APP_PLUGIN: &str = "lingxi-local-app";
+    const FIXTURE_PLUGIN: &str = "acme-plugin";
 
-    fn local_app_plugin_root() -> std::path::PathBuf {
-        local_app_builder_plugin::root().to_path_buf()
-    }
-
-    async fn loaded_local_app_skill_registry() -> MobileDiskSkillLoader {
-        let plugin_root = local_app_plugin_root();
+    /// A namespaced Plugin skill registered the way `PluginManager` does it,
+    /// with an in-memory body so the loader tests need no installed plugin.
+    async fn loaded_fixture_plugin_loader(
+        skills: &[(&str, &str)],
+    ) -> MobileDiskSkillLoader {
         let plugin_id = lingxi_core::types::PluginId::new();
-        let mut commands = Vec::new();
-        let skills_root = plugin_root.join("skills");
-        let entries = std::fs::read_dir(&skills_root).expect("read Local App skills");
-        for entry in entries {
-            let root = entry.expect("read skill entry").path();
-            let skill_file = root.join("SKILL.md");
-            if !skill_file.is_file() {
-                continue;
-            }
-            let raw = std::fs::read_to_string(&skill_file).expect("read skill");
-            let file = command_api::parse_skill_command_markdown(
-                &raw,
-                skill_file.clone(),
-                root.clone(),
-                CommandSource::Plugin,
-            );
-            let base = command_api::build_skill_command(&file, CommandSource::Plugin);
-            let (frontmatter, prompt_template) = match &base.kind {
-                SlashCommandKind::Markdown {
-                    frontmatter,
-                    prompt_template,
-                    ..
-                } => (frontmatter.clone(), prompt_template.clone()),
-                _ => unreachable!("skill parser must produce markdown command"),
-            };
-            commands.push(SlashCommand {
-                name: format!("{LOCAL_APP_PLUGIN}:{}", base.name),
-                source: CommandSource::Plugin,
-                kind: SlashCommandKind::Plugin {
-                    plugin_id,
-                    file_path: skill_file,
-                    frontmatter,
-                    prompt_template,
-                },
-                loaded_from: Some("plugin".to_owned()),
-                ..base
-            });
-        }
+        let commands = skills
+            .iter()
+            .map(|(name, body)| {
+                let file = std::path::PathBuf::from(format!("plugin/skills/{name}/SKILL.md"));
+                SlashCommand {
+                    name: format!("{FIXTURE_PLUGIN}:{name}"),
+                    source: CommandSource::Plugin,
+                    kind: SlashCommandKind::Plugin {
+                        plugin_id,
+                        file_path: file,
+                        frontmatter: CommandFrontmatter::default(),
+                        prompt_template: (*body).to_owned(),
+                    },
+                    loaded_from: Some("plugin".to_owned()),
+                    ..SlashCommand::default()
+                }
+            })
+            .collect();
         let registry = Arc::new(RwLock::new(CommandRegistry::new()));
         registry
             .write()
@@ -535,10 +514,10 @@ mod tests {
         use tool_api::test_support::{fresh_ctx, shell_test_ctx};
         use tool_api::tool_trait::Tool;
 
-        let loader = Arc::new(loaded_local_app_skill_registry().await);
-        let canonical = "lingxi-local-app:canvas-2d-local-app";
+        let loader = Arc::new(loaded_fixture_plugin_loader(&[("canvas-skill", "Draw.")]).await);
+        let canonical = "acme-plugin:canvas-skill";
         assert!(loader.list_names().await.contains(&canonical.to_owned()));
-        assert!(loader.load("canvas-2d-local-app").await.unwrap().is_none());
+        assert!(loader.load("canvas-skill").await.unwrap().is_none());
         let tool = tool_skill::skill::SkillTool::with_loader(
             shell_test_ctx(mobile_linux_api::ProcessOutput {
                 stdout: String::new(),
@@ -550,7 +529,7 @@ mod tests {
         );
         let error = tool
             .validate_input(
-                &serde_json::json!({ "skill": "canvas-2d-local-app" }),
+                &serde_json::json!({ "skill": "canvas-skill" }),
                 &fresh_ctx(),
             )
             .await
@@ -633,7 +612,7 @@ mod tests {
         .unwrap();
         let plugin_id = lingxi_core::types::PluginId::new();
         let command = SlashCommand {
-            name: "lingxi-local-app:frontend-design".into(),
+            name: "acme-plugin:frontend-design".into(),
             source: CommandSource::Plugin,
             skill_root: Some(skill_root.clone()),
             kind: SlashCommandKind::Plugin {
@@ -654,7 +633,7 @@ mod tests {
         let preload = AgentSkillLoader::resolve_and_load(
             &loader,
             "frontend-design",
-            "lingxi-local-app:designer",
+            "acme-plugin:designer",
             None,
             None,
         )
@@ -671,11 +650,11 @@ mod tests {
     }
 
     /// A namespaced Plugin skill must win over a user command with the same
-    /// short name. This exercises the real checked-in Apple Design body and
-    /// the mobile preload path, rather than a static skill-name list.
+    /// short name, through the mobile preload path.
     #[tokio::test]
-    async fn namespaced_apple_design_loads_product_body_over_short_name_collision() {
-        let loader = loaded_local_app_skill_registry().await;
+    async fn namespaced_plugin_skill_loads_its_body_over_short_name_collision() {
+        let loader =
+            loaded_fixture_plugin_loader(&[("apple-design", "PLUGIN-OWNED-BODY")]).await;
         let registry = loader.registry.clone();
         registry.write().await.register_command(SlashCommand {
             name: "apple-design".into(),
@@ -690,14 +669,14 @@ mod tests {
 
         let loaded = AgentSkillLoader::resolve_and_load(
             &loader,
-            "lingxi-local-app:apple-design",
-            "lingxi-local-app:designer",
+            "acme-plugin:apple-design",
+            "acme-plugin:designer",
             None,
             None,
         )
         .await
         .expect("checked skill preload")
-        .expect("installed namespaced Apple Design skill must resolve");
+        .expect("installed namespaced skill must resolve");
         let body = loaded
             .content
             .iter()
@@ -705,14 +684,10 @@ mod tests {
                 ContentBlock::Text { text, .. } => Some(text),
                 _ => None,
             })
-            .expect("Apple Design preload must be text");
+            .expect("plugin skill preload must be text");
 
-        assert!(body.contains("LingXi Local App contract"));
-        assert!(body.contains("85e8e2363b713506e1d5b6e07a0eb2da66be1bc3"));
-        assert!(body.contains("Ionic React and React"));
+        assert!(body.contains("PLUGIN-OWNED-BODY"));
         assert!(!body.contains("USER SHORT-NAME SKILL"));
-        assert!(!body.contains("## Initial Response"));
-        println!("APPLE_DESIGN_LOADED_BYTES={}", body.len());
     }
 
     #[tokio::test]

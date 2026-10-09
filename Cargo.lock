@@ -1900,18 +1900,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fallible-iterator"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
-
-[[package]]
-name = "fallible-streaming-iterator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
-
-[[package]]
 name = "fancy-regex"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2485,10 +2473,6 @@ dependencies = [
  "jsonrpc",
  "lingxi-llm-client",
  "llm-runtime",
- "local-app-builder-contracts",
- "local-app-builder-plugin",
- "local-app-builder-service",
- "local-apps",
  "lsp",
  "lsp-types",
  "mcp",
@@ -2561,9 +2545,6 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-dependencies = [
- "ahash",
-]
 
 [[package]]
 name = "hashbrown"
@@ -2585,15 +2566,6 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash",
-]
-
-[[package]]
-name = "hashlink"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
-dependencies = [
- "hashbrown 0.14.5",
 ]
 
 [[package]]
@@ -3253,17 +3225,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libsqlite3-sys"
-version = "0.30.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
-dependencies = [
- "cc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
 name = "libssh2-sys"
 version = "0.3.1"
 dependencies = [
@@ -3484,56 +3445,6 @@ version = "0.12.0"
 source = "git+https://github.com/lingxi-coder/local-app-builder?rev=fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8#fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "local-app-builder-plugin"
-version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8#fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8"
-
-[[package]]
-name = "local-app-builder-service"
-version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8#fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "device-api",
- "futures-core",
- "futures-util",
- "local-app-builder-contracts",
- "local-apps",
- "mcp-wire",
- "reqwest",
- "rooted-fs",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "local-apps"
-version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8#fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8"
-dependencies = [
- "async-trait",
- "git2",
- "local-app-builder-contracts",
- "mcp-wire",
- "rand 0.9.4",
- "rooted-fs",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -5826,20 +5737,6 @@ checksum = "cee271d0eeba64f0915b846cb7ae02e16faf3dfdffdca91731101d9d30fe3423"
 dependencies = [
  "bindgen 0.72.1",
  "cc",
-]
-
-[[package]]
-name = "rusqlite"
-version = "0.32.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7753b721174eb8ff87a9a0e799e2d7bc3749323e773db92e0984debb00019d6e"
-dependencies = [
- "bitflags 2.13.2",
- "fallible-iterator",
- "fallible-streaming-iterator",
- "hashlink",
- "libsqlite3-sys",
- "smallvec",
 ]
 
 [[package]]

@@ -65,12 +65,5 @@ pub use desktop::build_harness;
 #[cfg(feature = "mobile")]
 pub mod mobile;
 
-/// The Local App rows for the permission crate's per-tool table.
-#[cfg(any(feature = "mobile", feature = "desktop"))]
-pub(crate) mod local_app_tool_policy;
-/// The Local App workspace profile for the permission crate's leases; both compositions install it.
-#[cfg(any(feature = "mobile", feature = "desktop"))]
-pub(crate) mod local_app_workspace_profile;
-
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();

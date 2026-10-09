@@ -3,7 +3,7 @@
 
 use super::MobileEngineHandle;
 use ::configuration_admin::{
-    config_admin, hook_admin, mcp_admin, plugin_admin, settings_bridge, skills_admin,
+    config_admin, hook_admin, mcp_admin, plugin_admin, skills_admin,
 };
 use client::adapter::ClientEventSink;
 use client::protocol::commands::{
@@ -375,29 +375,7 @@ impl MobileEngineHandle {
         };
         match plugin_admin::catalog_json(settings, Some(self.inner.credentials.as_ref())).await {
             Ok(catalog_json) => {
-                let mut catalog: Value = match serde_json::from_str(&catalog_json) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        config_admin::emit_error(sink, error.to_string()).await;
-                        return;
-                    }
-                };
-                if let Some(installed) = catalog.get_mut("installed").and_then(Value::as_array_mut)
-                {
-                    if !installed.iter().any(|row| {
-                        row.get("id").and_then(Value::as_str)
-                            == Some(crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME)
-                    }) {
-                        installed.push(json!({"id":crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME,"name":crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME,
-                            "display_name":crate::mobile::builtin_bundle::COMPILED_PLUGIN_DISPLAY_NAME,
-                            "version":crate::mobile::builtin_bundle::COMPILED_PLUGIN_VERSION,"source":"builtin",
-                            "default_enabled":crate::mobile::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,"description":"Compiled mobile Local App plugin.",
-                            "config_schema_json":"{}","secret_configured":{},"dependencies":[]}));
-                    }
-                }
-                sink.emit(ClientEvent::PluginCatalog {
-                    catalog_json: catalog.to_string(),
-                })
+                sink.emit(ClientEvent::PluginCatalog { catalog_json })
                 .await;
             }
             Err(message) => config_admin::emit_error(sink, message).await,
@@ -425,32 +403,8 @@ impl MobileEngineHandle {
             config_admin::emit_error(sink, "Settings context is unavailable.").await;
             return;
         };
-        let parsed_payload: Value = match serde_json::from_str(payload) {
-            Ok(value) => value,
-            Err(_) => {
-                protocol_error(sink, "Invalid plugin payload JSON.").await;
-                return;
-            }
-        };
-        let builtin = parsed_payload.get("plugin").and_then(Value::as_str)
-            == Some(crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME);
-        if builtin
-            && !matches!(
-                parsed_payload.get("action").and_then(Value::as_str),
-                Some("enable" | "disable")
-            )
-        {
-            finish(
-                sink,
-                Domain::Plugin,
-                id,
-                Err(
-                    "The compiled mobile plugin cannot be installed, upgraded or uninstalled here."
-                        .into(),
-                ),
-                Effect::NotApplicable,
-            )
-            .await;
+        if serde_json::from_str::<Value>(payload).is_err() {
+            protocol_error(sink, "Invalid plugin payload JSON.").await;
             return;
         }
         if ["enabledPlugins", "pluginConfigs", "extraKnownMarketplaces"]
@@ -480,38 +434,6 @@ impl MobileEngineHandle {
                 .await
                 .map(Some),
                 "apply_operation" => match command.revision.as_deref() {
-                    Some(revision) if builtin => {
-                        let scope = parsed_payload
-                            .get("scope")
-                            .and_then(Value::as_str)
-                            .unwrap_or("user");
-                        let snapshot = settings_bridge::build_snapshot(
-                            &settings.paths,
-                            settings.active_snapshot(),
-                            settings.managed.clone(),
-                        );
-                        let mut enabled = snapshot
-                            .layers
-                            .get(scope)
-                            .and_then(|layer| layer.get("enabledPlugins"))
-                            .and_then(Value::as_object)
-                            .cloned()
-                            .unwrap_or_default();
-                        enabled.insert(
-                            crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.into(),
-                            json!(
-                                parsed_payload.get("action").and_then(Value::as_str)
-                                    == Some("enable")
-                            ),
-                        );
-                        plugin_admin::save_config(
-                            settings,
-                            revision,
-                            &json!({"scope":scope,"enabledPlugins":enabled}).to_string(),
-                        )
-                        .await
-                        .map(|()| None)
-                    }
                     Some(revision) => plugin_admin::apply_operation(settings, revision, payload)
                         .await
                         .map(Some),

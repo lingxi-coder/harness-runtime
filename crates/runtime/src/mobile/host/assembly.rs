@@ -1,6 +1,4 @@
 use crate::mobile::{
-    local_apps_llm::{ApiServiceModel, LocalAppsLlm},
-    local_apps_profile::profile_apps,
     mcp_transport::MobileMcpTransport,
     mobile_command_registry, register_android_ui_automation,
     turn_durability::DurableTurnStore,
@@ -19,10 +17,8 @@ use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use llm_runtime::auth::anthropic::{OAuthCredentialProvider, OAuthHandle, RefreshDriver};
 use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::{CredentialProvider, ModelRuntime, Transport};
-use local_app_builder_service::broker::{LocalAppsAgentExecutor, LocalAppsHostBroker};
-use local_app_builder_service::mcp_server::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY};
 use mcp::registry::OAuthDeps;
-use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
+use mcp::{McpRegistry, RawConnectionProvider};
 use orchestrator::model::user_agent::UserAgentEnv;
 use orchestrator::provider_adapter::SubscriberState;
 use orchestrator::test_support::StaticMemoryProvider;
@@ -42,21 +38,20 @@ use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 
 use super::{
-    anthropic_models, apply_mobile_profile_allowlist, boot_backfill_sweep_should_run,
+    anthropic_models, apply_mobile_profile_allowlist, 
     build_mobile_runtime_environment, build_mobile_subagent_env_renderer, fast_mode_preference,
-    gate_mobile_git_ctx, gate_mobile_shell_ctx, mint_app_init_session, mobile_apps_data_root,
-    mobile_builtin_plugin_enabled_from_settings, mobile_launch_is_interactive,
-    mobile_local_app_scope_id, mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight,
+    gate_mobile_git_ctx, gate_mobile_shell_ctx, mobile_launch_is_interactive,
+    mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight,
     mobile_mcp_record_reload_intent, mobile_mcp_run_reload_job, mobile_provider_settings,
     mobile_reload_skills_handler, mobile_settings_write_lock,
     mobile_skill_listing_provider_with_settings, mobile_typescript_lsp_mode,
     mobile_typescript_lsp_ready, model_listings, model_preference, model_visible_mobile_cwd,
     permission_preference, provider_model_catalog_from_listings, resolve_default_model_ref,
-    run_app_boot_backfill_sweep, settings_commands, settle_mobile_loop_turn, ActiveTurn,
-    MobileAppAgentExecutor, MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle,
+    settings_commands, settle_mobile_loop_turn, ActiveTurn,
+    MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle,
     MobileMcpReloadJob, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
     MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener,
-    LOCAL_APPS_MCP_TIMEOUT_MS, MOBILE_CRON_HANDLES,
+    MOBILE_CRON_HANDLES,
 };
 
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
@@ -146,24 +141,11 @@ pub(super) async fn build_mobile_inner_with_ask(
         .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
     let oauth_supported = lingxi_core::host::SecureStorage::is_encrypted(storage.as_ref());
 
-    let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
     let projects_session_host = Arc::new(mcp::projects_session::ProjectsSessionHostContext::new(
         cfg.projects_session_startup_url.clone(),
     ));
-    let _ = local_apps_mcp.attach_init_session_discarder({
-        let lingxi_home = cfg.lingxi_home.clone();
-        let data_root = mobile_apps_data_root(&cfg);
-        Arc::new(move |record, session_id| {
-            crate::mobile::local_apps_sessions::remove_app_session_file(
-                &lingxi_home,
-                &data_root,
-                record,
-                session_id,
-            )
-        })
-    });
     let remote_mcp = Arc::new(platform_common::RemoteMcpTransport::new());
-    let mobile_mcp = Arc::new(MobileMcpTransport::new(local_apps_mcp.clone(), remote_mcp));
+    let mobile_mcp = Arc::new(MobileMcpTransport::new(remote_mcp));
     let mcp_auth_url = Arc::new(StdMutex::new(None::<String>));
     let mcp_auth_callback =
         mobile_mcp_oauth_authorization_callback(mcp_auth_url.clone(), platform.deep_link());
@@ -186,40 +168,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         });
     }
     let mcp_registry = Arc::new(mcp_registry);
-    local_apps_mcp
-        .attach_publisher(
-            crate::mobile::local_apps_adapters::RegistryPublisher::publisher(Arc::downgrade(
-                &mcp_registry,
-            )),
-        )
-        .map_err(|_| {
-            MobileBuildError::Orchestrator(
-                "local apps MCP registry was already attached during bootstrap".into(),
-            )
-        })?;
-    // Subscribe before connecting so initialization-time catalog notifications
-    // are retained until the shared ToolRegistry is ready below.
+    // Subscribe before any server connects so initialization-time catalog
+    // notifications are retained until the shared ToolRegistry is ready below.
     let mut mcp_catalog_changes = mcp_registry.subscribe_catalog_changes();
-    mcp_registry
-        .connect(McpServerConfig {
-            name: LOCAL_APPS_REGISTRY_KEY.into(),
-            spec: lingxi_core::host::McpTransportSpec::InProcess {
-                registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
-            },
-            scope: McpConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
-            disabled: false,
-            timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
-            always_load: true,
-            discovery_cache: None,
-            tools: Vec::new(),
-            tool_permissions: std::collections::BTreeMap::new(),
-            config_error: None,
-            metadata: Default::default(),
-        })
-        .await
-        .map_err(|error| {
-            MobileBuildError::Orchestrator(format!("local apps MCP bootstrap failed: {error}"))
-        })?;
     // Keep iOS/Android MCP discovery on the same parser and precedence rules
     // as desktop. The app-private settings file is the mobile equivalent of
     // the user global config; `.mcp.json` remains project-scoped.
@@ -256,9 +207,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         .collect();
     // Remote startup, especially an interactive OAuth flow, may legitimately
     // wait for the user for several minutes. Never hold the mobile engine
-    // constructor open for that interaction: Local Apps is ready synchronously
-    // above, while configured MCP connections continue on the owned runtime and
-    // publish their catalog through the subscription below.
+    // constructor open for that interaction: configured MCP connections
+    // continue on the owned runtime and publish their catalog through the
+    // subscription below.
     let configured_mcp_registry = mcp_registry.clone();
     let startup_generations = mcp_reload_generations.clone();
     tokio::spawn(async move {
@@ -301,50 +252,6 @@ pub(super) async fn build_mobile_inner_with_ask(
             workshop_enabled: false,
         },
     ));
-    {
-        let cell = active_session_uuid.clone();
-        let _ = local_apps_mcp.attach_session_provider(Arc::new(move || {
-            cell.lock().ok().map(|guard| guard.clone())
-        }));
-    }
-    // ── Plan-approval record ───────────────────────────────────────────────
-    // `LocalAppPrepare` may only land a template for a plan the USER approved,
-    // and the engine's only writer of "approved" is `ExitPlanMode`'s success
-    // branch. That branch's structured result reaches this listener as a
-    // `ToolUseResult`, so the observation rides the same connection-scoped
-    // listener the adapter sinks already use — no permission-gate decorator, no
-    // second session read. See `crate::mobile::plan_approval`.
-    let plan_approval_log =
-        Arc::new(local_app_builder_service::plan_approval::PlanApprovalLog::default());
-    let observed_listener: Arc<dyn ClientEventListener> =
-        Arc::new(crate::mobile::plan_approval::PlanApprovalWatcher::new(
-            listener.clone(),
-            plan_approval_log.clone(),
-            active_session_uuid.clone(),
-        ));
-    {
-        let log = plan_approval_log.clone();
-        let _ = local_apps_mcp.attach_plan_approval_log(log);
-    }
-    // v3 Phase 4: the connection-scoped init-session minter — forks the
-    // origin chat (this connection's cwd catalog) into the new app's
-    // workspace catalog, or anchors an empty session.
-    let _ = local_apps_mcp.attach_origin_cwd(cwd.to_string_lossy().to_string());
-    {
-        let minter_home = cfg.lingxi_home.clone();
-        let minter_source_cwd = cwd.to_string_lossy().to_string();
-        let minter_data_root = mobile_apps_data_root(&cfg);
-        let minter_fs = fs.clone();
-        let _ = local_apps_mcp.attach_init_session_minter(Arc::new(move |record| {
-            let lingxi_home = minter_home.clone();
-            let source_cwd = minter_source_cwd.clone();
-            let data_root = minter_data_root.clone();
-            let fs = minter_fs.clone();
-            Box::pin(async move {
-                mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record).await
-            })
-        }));
-    }
     let transcript_sessions = Arc::new(
         crate::mobile::transcript::MobileTranscriptSessionSwitcher::new(cfg.lingxi_home.clone()),
     );
@@ -751,23 +658,6 @@ pub(super) async fn build_mobile_inner_with_ask(
             })
         }),
     );
-    // Task 9: the local-app generator's three LLM calls (author/plan/write
-    // source) ride the SAME `api_service` — routing, auth, retry — as the
-    // main conversation, via `ApiService::messages_create_side_query`
-    // (the same forced-tool-call mechanism `sidequery::ProviderSideQueryClient`
-    // uses below). `default_model_id`/`default_model_profile` are the bare
-    // model id and provider profile `orch_cfg.model` itself is set from a few
-    // lines down — the local-app generator has no separate model selection of
-    // its own.
-    let local_apps_llm = Arc::new(LocalAppsLlm::new(Arc::new(
-        ApiServiceModel::new(
-            api_service.clone(),
-            default_model_id.clone(),
-            default_model_profile.clone(),
-            vision_delegation_enabled,
-        )
-        .with_cost_tracking(cost_tracker.clone(), api_calls_recorded.clone()),
-    )));
     let fast_flag = Arc::new(AtomicBool::new(saved_fast_mode.unwrap_or(false)));
     let provider_adapter =
         Arc::new(ProviderApiAdapter::new(api_service.clone()).with_fast_mode(fast_flag.clone()));
@@ -855,7 +745,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     //     - the `permission_sink` receives the gate's outbound requests.
     //     Mobile binds the `AdapterPermissionGate` (no always-allow mode), then
     //     wraps it with a local `PolicyPermissionGate` so the core policy binds.
-    let event_sink = ListenerSink::arc(observed_listener.clone());
+    let event_sink = ListenerSink::arc(listener.clone());
     let message_output = AdapterOutputStream::new(event_sink.clone());
     let output: Arc<dyn OutputStream> = Arc::new(message_output.clone());
 
@@ -937,8 +827,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         restricted: false,
     };
     let mut requested_permission_mode;
-    crate::local_app_tool_policy::install();
-    let workspace_leases = crate::local_app_workspace_profile::LocalAppWorkspaceProfile::registry();
     // ONE derivation of the (host, guest) workspace pairing. `model_cwd` below
     // is rebuilt from THIS binding rather than re-scanning the mount table —
     // two derivations of one root is exactly how the guest/host split forked
@@ -1205,7 +1093,6 @@ pub(super) async fn build_mobile_inner_with_ask(
             .with_roots(roots)
             .with_working_dirs(additional_working_dirs)
             .with_block_reads_outside_working_directories(block_reads_outside_working_directories)
-            .with_workspace_leases(workspace_leases.clone())
             .with_plan_files(plan_files.clone());
         // Audit fix (#1): honor the bypassPermissions killswitch resolved above.
         policy.bypass_killswitch_active = bypass_disabled;
@@ -1584,15 +1471,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         }
         None => false,
     };
-    let app_data_root = mobile_apps_data_root(&cfg);
-    let auto_workspace_root = app_data_root.clone();
-    let auto_workspace_predicate: Arc<dyn Fn(&std::path::Path) -> bool + Send + Sync> =
-        Arc::new(move |workspace| {
-            crate::mobile::mobile_lsp::is_managed_local_app_workspace(
-                &auto_workspace_root,
-                workspace,
-            )
-        });
     let (plugin_lsp_registry, mobile_lsp_path_mapper) =
         match (mobile_linux.clone(), mobile_lsp_ready) {
             (Some(runtime), true) => {
@@ -1609,7 +1487,6 @@ pub(super) async fn build_mobile_inner_with_ask(
                             ),
                         ))
                         .with_path_mapper(mapper.clone())
-                        .with_workspace_activation_predicate(auto_workspace_predicate.clone())
                         .with_diagnostics(lsp_diagnostics.clone()),
                     ),
                     Some(mapper),
@@ -1620,7 +1497,6 @@ pub(super) async fn build_mobile_inner_with_ask(
                     lsp::LspRegistry::new(Arc::new(
                         crate::mobile::mobile_lsp::MobileLinuxLspTransport::unavailable(),
                     ))
-                    .with_workspace_activation_predicate(auto_workspace_predicate)
                     .with_diagnostics(lsp_diagnostics.clone()),
                 ),
                 None,
@@ -1795,7 +1671,6 @@ pub(super) async fn build_mobile_inner_with_ask(
             as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
         .with_output_pool_cell(local_workflow_output_pool.clone())
         .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
-        .with_workspace_permission_leases(workspace_leases.clone(), mobile_apps_data_root(&cfg))
         .with_plugin_workflows(plugin_workflow_registry.clone())
         .with_status_sink(
             local_workflow_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
@@ -2000,21 +1875,6 @@ pub(super) async fn build_mobile_inner_with_ask(
     //     stay fresh and inert by design, while `lsp_registry` is now the
     //     same live registry shared by plugin loading, file-write sync,
     //     diagnostics, and the builtin `LSP` tool.
-    // P1.10 (§19.2): the compiled-in plugin's manifest USED to declare zero
-    // components (`lib.rs`'s `mobile_builtin_plugin_manifest`), which made
-    // registering it below a no-op over live state — a manifest with nothing
-    // behind it, indistinguishable from "registration failed" from outside
-    // this crate. `register_mobile_builtin_plugins_materialized` below
-    // instead first materializes the packer's compiled-in bundle to a
-    // verified, digest-checked on-disk root (`builtin_bundle::
-    // materialize_compiled_in_plugin_bundle`) and builds the manifest's
-    // `components` from THAT root's own resolved inventory, so the plugin
-    // this boot registers actually contributes its real agents/skills/
-    // workflows into the live registries wired above. The plugin-manager
-    // tests below additionally materialize a SEPARATE fixture plugin through
-    // `wired_plugin_manager.enable(..)` to prove the registries are shared by
-    // identity, not merely seeded with equal content — that property does not
-    // depend on which plugin is registered.
     // Share Desktop's canonical layer merge and userConfig/secure-secret resolver.
     // File-backed plugin changes take effect when the native client reconnects.
     let plugin_settings = mobile_provider_settings(&cfg)
@@ -2090,17 +1950,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     // itself — so handing either surface a registry other than
     // `shared_command_registry` fails that test instead of silently emptying
     // the model's skill listing on device.
-    // One Host-bounded scope decision drives both Local App model surfaces.
-    // the lease profile's root detection (`LocalAppWorkspaceProfile`) intentionally
-    // also understands guest/legacy spellings for isolated runtimes, but using
-    // that broader detector directly at this main-session composition root would let an
-    // ordinary project whose path merely ends in `apps/<id>/workspace` inherit
-    // the full app authoring surface.
-    let local_app_scope_id = mobile_local_app_scope_id(&cwd, &mobile_apps_data_root(&cfg));
     let wired_skill_listing_provider = mobile_skill_listing_provider_with_settings(
         shared_command_registry.clone(),
         cfg.session_mode,
-        local_app_scope_id.is_some(),
         Some(read_state_map.clone()),
         super::mobile_code_review_suggestion_provider(cfg.clone()),
     );
@@ -2140,7 +1992,6 @@ pub(super) async fn build_mobile_inner_with_ask(
     let workflow_launcher = Arc::new(crate::mobile::workflow_support::MobileWorkflowLauncher {
         registry: task_registry.clone(),
         project_cwd: cwd.clone(),
-        app_data_root: mobile_apps_data_root(&cfg),
         current_cwd: workflow_cwd.clone(),
         lingxi_home: cfg.lingxi_home.clone(),
         session_uuid: active_session_uuid.clone(),
@@ -2183,17 +2034,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         ),
     );
     tools.register_builtin(workflow_tool.clone());
-    // First-party local-app host operations as ORDINARY builtins. Registered
-    // here, while `tools` is still `&mut` — `register_builtin` cannot run once
-    // the registry is `Arc`-wrapped below. The DYNAMIC per-app tools stay on
-    // the MCP transport (their namespace binds `app_id` host-side, and they
-    // must be added at runtime, which only `register_mcp_tools(&self, …)` does).
-    for tool in crate::mobile::local_apps_tools::local_app_builtin_tools(
-        &local_apps_mcp,
-        local_app_scope_id.clone(),
-    ) {
-        tools.register_builtin(tool);
-    }
     crate::mobile::apply_mobile_session_tool_policy(&mut tools, cfg.session_mode);
     let device_skill_tools = tools
         .available_tools(&tool_api::tool_trait::ToolStaticContext::default())
@@ -2202,7 +2042,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         .collect::<Vec<_>>();
     let live_mcp_tool_ctx = tool_ctx.clone();
     let initial_mcp_tool_ctx = live_mcp_tool_ctx.clone();
-    let app_agent_mcp_tool_context = live_mcp_tool_ctx.clone();
     if cfg.session_mode == session::jsonl::SessionMode::Code {
         for (connection_id, mcp_tools) in
             tool_mcp::build_registered_mcp_tools(&mcp_registry, tool_ctx).await
@@ -2404,21 +2243,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         )
         .with_model_derived_threshold(),
     );
-    let app_agent_executor: Arc<dyn LocalAppsAgentExecutor> =
-        Arc::new(MobileAppAgentExecutor::new(
-            orch_cfg.clone(),
-            default_model_profile.clone(),
-            model_resolution_context_provider.clone(),
-            api_client.clone(),
-            streaming_api.clone(),
-            hooks.clone(),
-            perms.clone(),
-            cfg.lingxi_home.clone(),
-            mobile_apps_data_root(&cfg),
-            local_apps_mcp.clone(),
-            projects_session_host.clone(),
-            app_agent_mcp_tool_context,
-        ));
 
     let mut orch_inner = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
@@ -2713,35 +2537,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         .write()
         .await
         .set_session_skill_allowlist(cfg.session_skill_allowlist.clone());
-    // P1.10 (§19.2): read the activation bit BEFORE materializing the
-    // compiled-in bundle. A disabled boot keeps its inventory/status available
-    // from compiled metadata but performs no bundle filesystem work; enabling
-    // later takes the existing verified materialization + registration path.
-    let enabled = mobile_builtin_plugin_enabled_from_settings(
-        &plugin_settings,
-        crate::mobile::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
-    );
-    if enabled {
-        // The plugin manager writes into this shared Arc; registering earlier
-        // would be overwritten by the composition-root assignment above and
-        // silently drop the plugin's skills/commands.
-        let builtin_plugin_bundle_root = cfg.lingxi_home.join("builtin-plugin-bundle");
-        if let Err(error) = crate::mobile::register_mobile_builtin_plugins_materialized(
-            &plugin_manager,
-            &builtin_plugin_bundle_root,
-            None,
-        )
-        .await
-        {
-            tracing::warn!(
-                %error,
-                "failed to materialize/register the compiled-in mobile plugin; any \
-                 commands/skills/agents it would have contributed are unavailable this boot"
-            );
-        }
-    } else {
-        tracing::debug!("mobile builtin plugin disabled; deferring bundle materialization");
-    }
     // Recorded installs are the same canonical manifests used by Desktop.
     // Register after the command registry assignment so materialized commands
     // and skills remain visible to the live dispatcher. Discovery resolves
@@ -2749,38 +2544,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     for (id, manifest, install_dir) in
         plugin::discover_effective_plugins(&cfg.lingxi_home.join("plugins"), &enabled_plugins).await
     {
-        if manifest.name == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME {
-            continue;
-        }
         if let Err(error) = plugin_manager.enable(&id, manifest, install_dir).await {
             tracing::warn!(%error,"installed mobile plugin could not be loaded");
         }
-    }
-    // r2-critic-1 (coverage half): the agent-facing `LocalAppCreate` MCP tool
-    // is a SECOND live create entry point — it never enters
-    // `handle_create_app`, so that handler's plugin gate does not cover it, and
-    // the local-apps transport itself stays connected while the plugin is
-    // disabled (`disabled: false, always_load: true` above;
-    // `set_builtin_plugin_enabled` only calls `PluginManager::disable`). Hand
-    // the transport THIS manager — the same one `handle_create_app` and
-    // `PluginCommand::SetEnabled` read and mutate — so both create paths answer
-    // one question from one source of truth. Attached here, in the function
-    // that owns both halves, so every runtime this composition root builds has
-    // it; the probe is fail-closed, so a future root that drops this call
-    // refuses creates loudly instead of reopening the hole.
-    {
-        let manager = plugin_manager.clone();
-        let _ = local_apps_mcp.attach_plugin_availability(Arc::new(move || {
-            let manager = manager.clone();
-            Box::pin(async move {
-                matches!(
-                    manager
-                        .plugin_state(&crate::mobile::mobile_builtin_plugin_id())
-                        .await,
-                    Some(plugin::PluginState::Loaded { .. })
-                )
-            })
-        }));
     }
     let prompt_paths_orch = orch.clone();
     let bundled_prompt_model_orch = orch.clone();
@@ -2941,16 +2707,12 @@ pub(super) async fn build_mobile_inner_with_ask(
         mcp_oauth_authorization_url: mcp_auth_url,
         routable_listings: default_listings.clone(),
         provider_model_catalog: full_provider_model_catalog,
-        local_apps_mcp,
-        local_apps_llm,
         task_registry,
-        workspace_leases,
         workflow_checkpoints,
         workflow_status_sink: local_workflow_status_sink,
         workflow_launcher,
         active_session_uuid,
         plan_files,
-        app_agent_executor,
         parked_agent_restore_inheritance,
         agent_resume_gate,
         main_report_waker,
@@ -3133,233 +2895,6 @@ pub fn build_mobile_engine_inner(
     {
         let broker = ask_user_question_broker.clone();
         runtime.spawn(async move { broker.run(ask_user_question_rx).await });
-    }
-
-    // LOCAL-APPS: one process-wide service per profile root. Conversation or
-    // provider source changes only add/remove event subscribers; they do not
-    // open a second SQLite/Git/generation owner for the same application data.
-    let app_emissions = crate::mobile::local_apps_bridge::AppEmissionQueue::spawn(
-        runtime.handle(),
-        event_sink.clone(),
-        mobile_apps_data_root(&firer_cfg),
-    );
-    let loaded_profile = runtime.block_on(profile_apps(
-        mobile_apps_data_root(&firer_cfg),
-        Arc::new(crate::mobile::local_apps_profile::PlatformClock(
-            firer_platform.clock(),
-        )),
-        inner.mobile_linux.clone(),
-        firer_cfg.local_apps_full_runtime,
-        firer_cfg.local_apps_runtime_root.clone(),
-        firer_cfg.physical_memory_bytes,
-        inner.local_apps_llm.clone(),
-        local_app_builder_service::device_capabilities::DeviceCapabilities {
-            camera: firer_platform.camera(),
-            audio: firer_platform.audio_service(),
-            location: firer_platform.location(),
-            notifications: firer_platform.notifications(),
-            clipboard: firer_platform.clipboard(),
-            share: firer_platform.share(),
-            device_status: firer_platform.device_status(),
-            haptics: firer_platform.haptics(),
-            deep_link: firer_platform.deep_link(),
-            calendar: firer_platform.calendar(),
-            contacts: firer_platform.contacts(),
-        },
-    ));
-    let (
-        local_apps,
-        local_apps_host,
-        retained_profile,
-        app_client_subscription,
-        app_domain_subscription,
-        app_domain_observer,
-    ) = match loaded_profile {
-        Ok(profile) => {
-            let client_subscription = profile.client_events.subscribe(event_sink.clone());
-            let observer = Arc::new(crate::mobile::local_apps_bridge::SinkAppEventObserver::new(
-                app_emissions.clone(),
-            ));
-            let domain_subscription = profile.domain_events.subscribe(observer.clone());
-            (
-                Ok(profile.service.clone()),
-                profile.host.clone(),
-                Some(profile),
-                Some(client_subscription),
-                Some(domain_subscription),
-                Some(observer),
-            )
-        }
-        Err(error) => {
-            // Preserve the established failure contract: a corrupt store does
-            // not brick the conversation engine; every app command returns the
-            // typed load error. This unattached fallback can only report that
-            // same unavailable state and never mutate data.
-            let host = LocalAppsHostBroker::new_with_physical_memory(
-                mobile_apps_data_root(&firer_cfg),
-                crate::mobile::local_apps_wire::ClientSinkAdapter::sink(event_sink.clone()),
-                inner
-                    .mobile_linux
-                    .clone()
-                    .map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::executor),
-                firer_cfg.local_apps_full_runtime,
-                firer_cfg.local_apps_runtime_root.clone(),
-                firer_cfg.physical_memory_bytes,
-            );
-            let _ = host.attach_plugin_bundle(Arc::new(
-                crate::mobile::local_apps_adapters::CompiledPluginBundle,
-            ));
-            (Err(error), host, None, None, None, None)
-        }
-    };
-    if inner
-        .local_apps_mcp
-        .attach_host(local_apps_host.clone())
-        .is_err()
-    {
-        tracing::warn!("local-apps MCP host was already attached");
-    }
-    // Terminal Local App build/use-test outcomes are revalidated by the
-    // Host-owned QA boundary before the workflow sink publishes completion.
-    // Keep this as a weak, one-time composition attachment: the sink must not
-    // retain the profile broker or create a broker↔workflow ownership cycle.
-    if inner
-        .workflow_status_sink
-        .attach_local_apps_host(Arc::downgrade(&local_apps_host))
-        .is_err()
-    {
-        tracing::warn!("local-apps workflow status sink was already attached");
-    }
-    if local_apps_host
-        .attach_publisher(
-            crate::mobile::local_apps_adapters::RegistryPublisher::publisher(Arc::downgrade(
-                &inner.mcp_registry,
-            )),
-        )
-        .is_err()
-    {
-        tracing::warn!("local-apps MCP registry was already attached");
-    }
-    if local_apps_host
-        .attach_diagnostics(
-            crate::mobile::local_apps_adapters::LspDiagnostics::provider(Arc::downgrade(
-                &inner.lsp_registry,
-            )),
-        )
-        .is_err()
-    {
-        tracing::warn!("local-apps LSP registry was already attached");
-    }
-    if local_apps_host
-        .attach_agent_executor(inner.app_agent_executor.clone())
-        .is_err()
-    {
-        tracing::warn!("local-apps Agent executor was already attached");
-    }
-    // The same host facts that render the mobile runtime reminder. A local
-    // app's device context is derived from these, never declared by the
-    // agent — the reminder's `Device class: phone` is not an iOS form factor,
-    // so an agent reading it could only produce a rejected pair.
-    if let Some(host_environment) = firer_cfg.host_environment.clone() {
-        if local_apps_host
-            .attach_device_context(crate::mobile::local_apps_adapters::device_context_of(
-                &host_environment,
-            ))
-            .is_err()
-        {
-            tracing::warn!("local-apps host environment was already attached");
-        }
-    }
-    // Where an app's pinned init session lives, so `LocalAppScaffold` can
-    // rename it out of the shell placeholder the moment the app is formed.
-    // The broker already knows the apps data root; `lingxi_home` and the
-    // filesystem are the composition root's to hand over.
-    if local_apps_host
-        .attach_conversations(crate::mobile::local_apps_sessions::SessionTitles::host(
-            crate::mobile::local_apps_sessions::SessionCatalog {
-                lingxi_home: firer_cfg.lingxi_home.clone(),
-                fs: fs.clone(),
-            },
-            mobile_apps_data_root(&firer_cfg),
-        ))
-        .is_err()
-    {
-        tracing::warn!("local-apps session catalog was already attached");
-    }
-    match &local_apps {
-        Ok(service) => {
-            if inner
-                .local_apps_mcp
-                .attach_service(service.clone())
-                .is_err()
-            {
-                tracing::warn!("local-apps MCP service was already attached");
-            }
-            // A freshly-built handle has not passed through
-            // `retarget_session_writer`, which is the normal New/Resume/Clear
-            // activation boundary. Restore the INITIAL app conversation here
-            // so an already-published MCP is usable immediately after a cold
-            // boot. This is deliberately bounded to the current Host-owned app
-            // cwd: global/project startup performs no all-app publication
-            // sweep, and the Local App authoring plugin's enabled bit does not
-            // suppress an independently enabled published app MCP.
-            let apps_data_root = mobile_apps_data_root(&firer_cfg);
-            if let Some(app_id) = mobile_local_app_scope_id(&firer_cfg.cwd, &apps_data_root) {
-                match runtime.block_on(local_apps_host.expose_managed_mcp_for_conversation(
-                    &initial_session_key,
-                    &app_id,
-                    false,
-                )) {
-                    Ok(true) => {
-                        // The registry listener is asynchronous. Rebuild the
-                        // already-connected partitions here as well so the
-                        // freshly returned engine cannot race its first turn
-                        // against delivery of the connect notification.
-                        let refreshed = runtime.block_on(tool_mcp::build_registered_mcp_tools(
-                            &inner.mcp_registry,
-                            inner.mcp_tool_context.clone(),
-                        ));
-                        inner.mcp_tool_registry.replace_mcp_tools(refreshed);
-                    }
-                    Ok(false) => {}
-                    Err(error) => tracing::warn!(
-                        session_id = %initial_session_key,
-                        %app_id,
-                        %error,
-                        "failed to expose initial managed Local App MCP tools"
-                    ),
-                }
-            }
-            // v3 Phase 4: repair init-session pins, drifted catalogs and
-            // placeholder titles for every app. Runs as a background sweep on
-            // the shared worker runtime (this builder is sync); see
-            // `run_app_boot_backfill_sweep` for what it repairs and why each
-            // repair is retried rather than rolled back.
-            //
-            // r1-backlog-engine-create-11: `boot_backfill_sweep_should_run`
-            // keeps this call matching the function's own "once per launch"
-            // doc — this builder re-runs on every scope switch/reconnect
-            // within the same process, and without the guard the sweep would
-            // re-walk every app record on each one.
-            if boot_backfill_sweep_should_run(&apps_data_root) {
-                crate::mobile::local_apps_profile::worker_runtime().spawn(
-                    run_app_boot_backfill_sweep(
-                        firer_cfg.lingxi_home.clone(),
-                        firer_cfg.cwd.to_string_lossy().to_string(),
-                        apps_data_root,
-                        fs.clone(),
-                        service.clone(),
-                        local_apps_host.clone(),
-                    ),
-                );
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "local-apps store failed to load; app commands will report the failure"
-            );
-        }
     }
 
     let settings_write_lock = mobile_settings_write_lock(&lingxi_home.join("settings.json"));
@@ -3660,13 +3195,6 @@ pub fn build_mobile_engine_inner(
         fs,
         firer_cfg,
         firer_platform,
-        local_apps,
-        app_emissions,
-        local_apps_host,
-        profile_apps: retained_profile,
-        app_client_subscription,
-        app_domain_subscription,
-        app_domain_observer,
     });
     {
         // This runs on every scope switch / reconnect within one process, not

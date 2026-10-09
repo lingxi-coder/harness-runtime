@@ -104,11 +104,7 @@ mobile = [
     "dep:tool-workflow",
     "workflow",
     "dep:provider-config",
-    "dep:local-apps",
-    "dep:local-app-builder-contracts",
-    "dep:local-app-builder-plugin",
     "dep:mcp-wire",
-    "dep:local-app-builder-service",
     "dep:rooted-fs",
     "dep:jsonrpc",
     "dep:tool-mcp",
@@ -201,10 +197,6 @@ futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
-local-app-builder-contracts = { workspace = true, optional = true }
-local-app-builder-plugin = { workspace = true, optional = true }
-local-app-builder-service = { workspace = true, optional = true }
-local-apps = { workspace = true, optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }
 mcp = { path = "../mcp", optional = true }
@@ -263,11 +255,6 @@ uniffi = { workspace = true, optional = true }
 url = { version = "2", optional = true }
 uuid = { version = "1.10", optional = true }
 workflow = { path = "../workflow", optional = true }
-
-[build-dependencies]
-local-app-builder-plugin = { workspace = true, optional = true }
-local-apps = { workspace = true, optional = true }
-serde_json = { workspace = true }
 
 [target."cfg(unix)".dependencies]
 nix = { version = "0.27", default-features = false, features = ["user"], optional = true }
@@ -344,16 +331,6 @@ required-features = ["desktop"]
 [[test]]
 name = "component_literal_scan"
 path = "tests/mobile/component_literal_scan.rs"
-required-features = ["mobile"]
-
-[[test]]
-name = "local_app_image_read"
-path = "tests/mobile/local_app_image_read.rs"
-required-features = ["mobile"]
-
-[[test]]
-name = "local_app_role_schemas"
-path = "tests/mobile/local_app_role_schemas.rs"
 required-features = ["mobile"]
 
 [[test]]

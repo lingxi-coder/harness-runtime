@@ -1960,8 +1960,6 @@ pub async fn build_with_credential_stack(
     // arms below (the full union when enforcing; `--add-dir` only otherwise), so
     // it is always initialized before its later reads.
     let boot_additional_working_dirs: Vec<std::path::PathBuf>;
-    crate::local_app_tool_policy::install();
-    let workspace_leases = crate::local_app_workspace_profile::LocalAppWorkspaceProfile::registry();
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →
         // project → local (3c: settings.local.json read after project so a
@@ -2130,7 +2128,6 @@ pub async fn build_with_credential_stack(
                 .with_block_reads_outside_working_directories(
                     block_reads_outside_working_directories,
                 )
-                .with_workspace_leases(workspace_leases.clone())
                 .with_sandbox_runtime(sandbox_auto_allow)
                 .with_managed_permission_rules_only(allow_managed_permission_rules_only)
                 .with_restricted(cfg.restricted)
@@ -3053,7 +3050,6 @@ pub async fn build_with_credential_stack(
     .with_token_budget(orch_cfg.token_budget)
     .with_output_pool_cell(local_workflow_output_pool.clone())
     .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
-    .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
     .with_worktree_manager(worktree_manager.clone())
     .with_status_sink(local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>)
     .with_workflow_progress_sink(local_workflow_event_sink.clone()
