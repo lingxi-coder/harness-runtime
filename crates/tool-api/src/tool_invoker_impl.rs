@@ -1106,7 +1106,7 @@ mod tests {
         let invoker = RegistryToolInvoker::new(registry_with_echo());
         for failed in [false, true] {
             let result = invoker
-                .invoke_detailed("TestEcho", json!({"fail": failed}), no_ctx(), None)
+                .invoke_detailed("TestEcho", json!({"fail": failed}), no_ctx())
                 .await
                 .expect("a tool-reported failure is still a completed invocation");
             assert_eq!(result.is_error, failed);
@@ -1195,7 +1195,7 @@ mod tests {
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
         let result = invoker
-            .invoke_detailed("TurnEndProbe", input.clone(), no_ctx(), None)
+            .invoke_detailed("TurnEndProbe", input.clone(), no_ctx())
             .await
             .expect("probe invocation completes");
         assert_eq!(result.data, input);
@@ -2600,7 +2600,7 @@ mod tests {
         let mut invocation = ctx_with_tool_use_id("toolu_exact");
         invocation.input_projection = Some(original.clone());
         let result = invoker
-            .invoke_detailed("TestEcho", original.value.clone(), invocation, None)
+            .invoke_detailed("TestEcho", original.value.clone(), invocation)
             .await
             .unwrap();
         assert_eq!(
@@ -2628,7 +2628,7 @@ mod tests {
         });
         let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
         let result = invoker
-            .invoke_detailed("TestEcho", json!({}), no_ctx(), None)
+            .invoke_detailed("TestEcho", json!({}), no_ctx())
             .await
             .unwrap();
         let retained = result
@@ -2647,14 +2647,14 @@ mod tests {
         let mut first = no_ctx();
         first.input_projection = Some(exact.clone());
         let result = invoker
-            .invoke_detailed("TestEcho", exact.value.clone(), first, None)
+            .invoke_detailed("TestEcho", exact.value.clone(), first)
             .await
             .unwrap();
         let mut next = no_ctx();
         next.tool_context_state = result.context_state;
         // Equal display strings do not establish physical-call ownership.
         let result = invoker
-            .invoke_detailed("TestEcho", exact.value.clone(), next, None)
+            .invoke_detailed("TestEcho", exact.value.clone(), next)
             .await
             .unwrap();
         let retained = result
@@ -2688,7 +2688,7 @@ mod tests {
         invocation.input_projection =
             Some(Utf16JsonProjection::parse(r#"{"text":"\ud800"}"#).unwrap());
         let result = invoker
-            .invoke_detailed("TestEcho", json!({"text":"different"}), invocation, None)
+            .invoke_detailed("TestEcho", json!({"text":"different"}), invocation)
             .await;
         assert!(matches!(result, Err(ToolInvokerError::InvalidInput(_))));
         assert!(seen.lock().unwrap().is_none());
@@ -3003,7 +3003,7 @@ mod tests {
                 .is_err()
         );
         let result = invoker
-            .invoke_detailed("Write", input.clone(), plan_probe_context(id), None)
+            .invoke_detailed("Write", input.clone(), plan_probe_context(id))
             .await
             .unwrap();
         assert_eq!(result.data, json!({"written":true}));

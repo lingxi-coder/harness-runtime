@@ -2032,7 +2032,6 @@ impl lingxi_core::host::ToolInvoker for RouteChangingCleanupInvoker {
         _: &str,
         _: serde_json::Value,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        _: Option<u64>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
         lingxi_core::host::tool_invoker::ToolInvokerError,
@@ -11617,7 +11616,6 @@ async fn tool_reported_error_and_context_reach_model_history() {
             _: &str,
             _: serde_json::Value,
             _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-            _: Option<u64>,
         ) -> Result<
             lingxi_core::host::tool_invoker::ToolInvocationResult,
             lingxi_core::host::tool_invoker::ToolInvokerError,
@@ -11697,7 +11695,6 @@ async fn child_tool_context_is_one_plugin_attachment_in_the_model_snapshot() {
             _: &str,
             _: serde_json::Value,
             _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-            _: Option<u64>,
         ) -> Result<
             lingxi_core::host::tool_invoker::ToolInvocationResult,
             lingxi_core::host::tool_invoker::ToolInvokerError,
