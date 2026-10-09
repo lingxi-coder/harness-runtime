@@ -112,7 +112,8 @@ pub fn check_fragment(fragment: &str) -> FragmentReport {
     for tag in ["!doctype", "html", "head", "body"] {
         if tag_present(&lower, tag) {
             report.errors.push(format!(
-                "Remove the <{tag}> element: write only the fragment; LingXi wraps it in the document itself."
+                "Remove the <{tag}> element: write only the fragment; {} wraps it in the document itself.",
+                branding::PRODUCT_NAME
             ));
         }
     }
@@ -180,7 +181,7 @@ pub fn check_fragment(fragment: &str) -> FragmentReport {
     for api in STORAGE_APIS {
         if fragment.contains(api) {
             report.warnings.push(format!(
-                "{api} throws inside the sandbox; keep widget state with window.lingxi.saveState instead."
+                "{api} throws inside the sandbox; keep widget state with the lingxi.saveState API instead."
             ));
         }
     }

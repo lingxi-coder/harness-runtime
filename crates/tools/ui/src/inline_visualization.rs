@@ -37,7 +37,7 @@ const DESCRIPTION: &str = "Publish an interactive HTML widget (chart, simulation
 
 const PROMPT: &str = r#"Publish a self-contained HTML fragment as an inline visualization in this conversation. The widget renders offline in a sandboxed frame inside the chat; nothing is uploaded anywhere.
 
-Load the `visualize` skill first unless you already have it in context: it covers when a widget is worth it, the sandbox rules, the theme variables and controls, and the `window.lingxi` state API.
+Load the `visualize` skill first unless you already have it in context: it covers when a widget is worth it, the sandbox rules, the theme variables and controls, and the `lingxi` global state API.
 
 - Pass the fragment in `html`, or pass `file_path` for a fragment you wrote to an `.html` file (for example to check it with a shell first). Give exactly one.
 - The fragment has no `<!doctype>`, `<html>`, `<head>` or `<body>`, loads nothing from the network, and is at most 2 MiB. `d3`, `lucide` and Floating UI tooltips are already loaded.

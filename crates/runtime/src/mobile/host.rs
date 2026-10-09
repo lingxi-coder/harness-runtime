@@ -8462,6 +8462,28 @@ impl MobileEngineHandle {
 /// deliberately use the same profile-owned LocalAppsHostBroker as foreground
 /// bridge/MCP calls, so a scheduler wake-up cannot create a second storage or
 /// permission boundary.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl MobileEngineHandle {
+    /// Inline-visualization host for a dedicated native WebView answering for
+    /// `origin` (`lingxi-viz://visualization` on iOS,
+    /// `https://lingxi-visualization.invalid` on Android). It shares this
+    /// engine's store, so widgets the agent publishes are mountable at once.
+    /// `None` for an origin that is not `scheme://host`.
+    #[must_use]
+    pub fn visualization_host(
+        &self,
+        origin: String,
+    ) -> Option<Arc<crate::mobile::visualization_host::VisualizationHost>> {
+        crate::mobile::visualization_host::VisualizationHost::for_config_home(
+            self.fs.clone(),
+            &self.lingxi_home,
+            &origin,
+            self.runtime.handle().clone(),
+        )
+        .map(Arc::new)
+    }
+}
+
 #[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
 impl MobileEngineHandle {
     pub async fn run_due_local_app_background_tasks(

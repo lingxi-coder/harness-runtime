@@ -71,15 +71,28 @@ pub fn find(path: &str) -> Option<&'static Asset> {
 /// Third-party notices every host must ship with the runtime.
 #[must_use]
 pub fn third_party_notices() -> String {
+    let modified = format!(
+        "OpenAI Codex inline visualization assets (Apache-2.0); visualize.html modified by {}",
+        branding::PRODUCT_NAME
+    );
     let sections: [(&str, &str); 6] = [
+        (modified.as_str(), include_str!("../vendor/codex/LICENSE")),
         (
-            "OpenAI Codex inline visualization assets (Apache-2.0); visualize.html modified by LingXi",
-            include_str!("../vendor/codex/LICENSE"),
+            "OpenAI Codex NOTICE",
+            include_str!("../vendor/codex/NOTICE"),
         ),
-        ("OpenAI Codex NOTICE", include_str!("../vendor/codex/NOTICE")),
-        ("@floating-ui/core 1.7.3 (MIT)", include_str!("../vendor/floating-ui-core/LICENSE")),
-        ("@floating-ui/dom 1.7.4 (MIT)", include_str!("../vendor/floating-ui-dom/LICENSE")),
-        ("lucide 1.17.0 (ISC; Feather-derived icons MIT)", include_str!("../vendor/lucide/LICENSE")),
+        (
+            "@floating-ui/core 1.7.3 (MIT)",
+            include_str!("../vendor/floating-ui-core/LICENSE"),
+        ),
+        (
+            "@floating-ui/dom 1.7.4 (MIT)",
+            include_str!("../vendor/floating-ui-dom/LICENSE"),
+        ),
+        (
+            "lucide 1.17.0 (ISC; Feather-derived icons MIT)",
+            include_str!("../vendor/lucide/LICENSE"),
+        ),
         ("d3 7.9.0 (ISC)", include_str!("../vendor/d3/LICENSE")),
     ];
     let mut notices = String::new();

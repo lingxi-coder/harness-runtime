@@ -46,7 +46,7 @@ Use the host theme so the widget matches light and dark mode without hard-coded 
 
 ## State and follow-up questions
 
-`window.lingxi` connects the widget to the conversation:
+The `lingxi` global connects the widget to the conversation:
 
 - `lingxi.state` — the last saved `{ version, modelContent, privateContent }`; restored whenever the widget is shown again.
 - `await lingxi.saveState({ modelContent, privateContent })` — save JSON-serializable values, at most 16 KiB together. Save the user's meaningful choices (selected scenario, filters, inputs), not every animation frame. `modelContent` is what you receive if the user continues the conversation from the widget; `privateContent` stays inside the widget.

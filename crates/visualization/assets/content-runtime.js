@@ -2,7 +2,7 @@
 //
 // The document runs in an opaque-origin sandbox. Its only channel out is the
 // MessagePort the parent shell transfers once; this file exposes that channel
-// as `window.lingxi` and reports the document height for auto-sizing.
+// as the `lingxi` global and reports the document height for auto-sizing.
 (() => {
   "use strict";
 

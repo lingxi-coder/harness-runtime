@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "note": "Every file in this directory is stored byte-identical to its source. build.rs rewrites the CDN script URLs in codex/visualize.html into the LingXi asset base; that derived file is generated into OUT_DIR, never written here. tests/vendor_manifest_test.rs recomputes every input digest.",
+  "note": "Every file in this directory is stored byte-identical to its source. build.rs rewrites the CDN script URLs in codex/visualize.html into the local asset base; that derived file is generated into OUT_DIR, never written here. tests/vendor_manifest_test.rs recomputes every input digest.",
   "sources": [
     {
       "path": "codex/visualize.css",
@@ -77,7 +77,7 @@
     },
     {
       "path": "d3/d3.min.js",
-      "origin": "npm:d3@7.9.0 dist/d3.min.js (added by LingXi; upstream does not ship D3)",
+      "origin": "npm:d3@7.9.0 dist/d3.min.js (added for this runtime; upstream does not ship D3)",
       "integrity": "sha512-e1U46jVP+w7Iut8Jt8ri1YsPOvFpg46k+K8TpCb0P+zjCkjkPnV7WzfDJzMHy1LnA+wj5pLT1wjO901gLXeEhA==",
       "license": "ISC",
       "sha256": "f2094bbf6141b359722c4fe454eb6c4b0f0e42cc10cc7af921fc158fceb86539",

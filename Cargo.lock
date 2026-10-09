@@ -6224,6 +6224,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "visualization",
  "zstd",
 ]
 

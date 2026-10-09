@@ -290,6 +290,11 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "te
 tool-api = { path = "../tool-api", features = ["test-support"] }
 
 [[test]]
+name = "visualization_host"
+path = "tests/mobile/visualization_host.rs"
+required-features = ["mobile", "desktop"]
+
+[[test]]
 name = "inline_visualization"
 path = "tests/inline_visualization.rs"
 required-features = ["desktop"]

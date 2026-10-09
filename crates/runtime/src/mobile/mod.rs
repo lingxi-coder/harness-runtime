@@ -55,6 +55,8 @@ mod skill_loader;
 
 #[cfg(feature = "mobile")]
 mod device_skills;
+#[cfg(feature = "mobile")]
+pub mod visualization_host;
 // v3 Phase 1: workflow-on-mobile composition pieces (launcher + deferred
 // invoker), consumed by the `host` build path.
 #[cfg(feature = "mobile")]
