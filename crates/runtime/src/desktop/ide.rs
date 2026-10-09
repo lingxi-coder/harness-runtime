@@ -7,7 +7,7 @@
 //! transport spec and are never included in a status snapshot or log line.
 
 use async_trait::async_trait;
-use bridge::lockfile::{IdeLockfile, discover_all};
+use bridge::lockfile::{discover_all, IdeLockfile};
 use lingxi_core::host::{IdeEndpointInfo, IdeHandle, IdeStatus, IdeTransport, McpTransportSpec};
 use mcp::{ConfigScope, McpConnectionState, McpRegistry, McpServerConfig, McpServerMetadata};
 use serde_json::json;
@@ -281,7 +281,9 @@ impl DesktopIdeHandle {
             .call_tool_with_auth_retry(
                 IDE_SERVER_NAME,
                 &full_name,
-                lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({ "filePath": cwd.to_string_lossy() })),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                    json!({ "filePath": cwd.to_string_lossy() }),
+                ),
                 None,
                 None,
             )

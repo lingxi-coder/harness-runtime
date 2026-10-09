@@ -16,7 +16,7 @@
 //! without a network, and the part that needs credentials stays at the edge.
 
 use llm_runtime::{HistoryContentDelta, HistoryEvent, LlmError};
-use permission::auto_mode_pregather::{GatherOptions, build_recon_block};
+use permission::auto_mode_pregather::{build_recon_block, GatherOptions};
 use permission::auto_mode_propose::{ProposeAnswers, ProposeGather, QueryOutcome};
 
 /// Stop reasons that mean "the model ran out of room", across providers.
@@ -133,7 +133,8 @@ pub fn propose_messages_to_conversation(
                 MessageId::new(),
                 m.content.clone(),
             )),
-            "assistant" => Some(ConversationMessage::Assistant { per_turn_effort: None,
+            "assistant" => Some(ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: m.content.clone(),
@@ -497,8 +498,8 @@ mod tests {
         };
         use permission::auto_mode_propose::ProposeQuery;
         use std::sync::{
-            Arc,
             atomic::{AtomicBool, Ordering},
+            Arc,
         };
         struct Establishing {
             entered: tokio::sync::Notify,

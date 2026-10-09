@@ -7,19 +7,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use client::adapter::AdapterOutputStream;
 use client::adapter::test_support::MockSink;
+use client::adapter::AdapterOutputStream;
 use client::protocol::events::ClientEvent;
 use lingxi_core::host::filesystem::FileSystem;
 use lingxi_core::host::team_spawn::TeamSpawnSeam;
 use lingxi_core::host::{OutputStream, RuntimeSpawner};
 use lingxi_core::types::AgentId;
 use platform_posix::{PosixFileSystem, PosixRuntime};
-use tasks::TaskType;
 use tasks::handlers::InProcessTeammateHandler;
 use tasks::output_manager::TaskOutputManager;
 use tasks::registry::TaskRegistry;
 use tasks::task_trait::TaskSpawnInput;
+use tasks::TaskType;
 
 // ---------------------------------------------------------------------------
 // Scripted SubagentApiClient — one round-trip per `stream(request)`, returning
@@ -65,7 +65,8 @@ impl agent::api::SubagentApiClient for ScriptedApiClient {
                 model: "scripted".into(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "done".into(),
-                    cache_control: None, citations: None,
+                    cache_control: None,
+                    citations: None,
                 }],
                 stop_reason: Some("end_turn".into()),
                 stop_details: None,
@@ -674,10 +675,8 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
         )
         .await
         .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("is not running (status: killed)")
-    );
+    assert!(error
+        .to_string()
+        .contains("is not running (status: killed)"));
     assert!(mailbox.drain().is_empty());
 }

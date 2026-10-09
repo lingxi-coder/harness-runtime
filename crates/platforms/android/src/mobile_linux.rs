@@ -55,7 +55,6 @@ impl AndroidProotRuntime {
                     rootfs_version: config.rootfs_version,
                     archive_sha256: config.archive_sha256,
                     native_library_dir,
-                    isolated_build_profile: None,
                 },
             ),
         }
@@ -110,13 +109,6 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
         request: LinuxCommandRequest,
     ) -> Result<LinuxCommandResult, MobileLinuxError> {
         self.inner.run(request).await
-    }
-
-    async fn run_isolated(
-        &self,
-        request: LinuxCommandRequest,
-    ) -> Result<LinuxCommandResult, MobileLinuxError> {
-        self.inner.run_isolated(request).await
     }
 
     async fn run_streaming(

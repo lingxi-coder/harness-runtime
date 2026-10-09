@@ -1,6 +1,5 @@
 use crate::mobile::{
-    mcp_transport::MobileMcpTransport,
-    mobile_command_registry, register_android_ui_automation,
+    mcp_transport::MobileMcpTransport, mobile_command_registry, register_android_ui_automation,
     turn_durability::DurableTurnStore,
 };
 use client::adapter::{
@@ -38,20 +37,18 @@ use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 
 use super::{
-    anthropic_models, apply_mobile_profile_allowlist, 
-    build_mobile_runtime_environment, build_mobile_subagent_env_renderer, fast_mode_preference,
-    gate_mobile_git_ctx, gate_mobile_shell_ctx, mobile_launch_is_interactive,
-    mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight,
-    mobile_mcp_record_reload_intent, mobile_mcp_run_reload_job, mobile_provider_settings,
-    mobile_reload_skills_handler, mobile_settings_write_lock,
+    anthropic_models, apply_mobile_profile_allowlist, build_mobile_runtime_environment,
+    build_mobile_subagent_env_renderer, fast_mode_preference, gate_mobile_git_ctx,
+    gate_mobile_shell_ctx, mobile_launch_is_interactive, mobile_mcp_oauth_authorization_callback,
+    mobile_mcp_preflight, mobile_mcp_record_reload_intent, mobile_mcp_run_reload_job,
+    mobile_provider_settings, mobile_reload_skills_handler, mobile_settings_write_lock,
     mobile_skill_listing_provider_with_settings, mobile_typescript_lsp_mode,
     mobile_typescript_lsp_ready, model_listings, model_preference, model_visible_mobile_cwd,
     permission_preference, provider_model_catalog_from_listings, resolve_default_model_ref,
-    settings_commands, settle_mobile_loop_turn, ActiveTurn,
-    MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle,
-    MobileMcpReloadJob, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
-    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener,
-    MOBILE_CRON_HANDLES,
+    settings_commands, settle_mobile_loop_turn, ActiveTurn, MobileBuildError, MobileConfig,
+    MobileEngineError, MobileEngineHandle, MobileMcpReloadJob, MobileMsgQueueInput,
+    MobileOAuthManager, MobileRuntime, MobileSessionAgentObserver, MobileWakeupDelivery,
+    TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
 
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic

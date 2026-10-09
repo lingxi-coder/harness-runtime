@@ -123,7 +123,7 @@ async fn bash_description(orchestrator: &ConversationOrchestrator) -> String {
 #[tokio::test]
 async fn actual_bash_wire_description_tracks_reload_settings_and_offered_skill_tool() {
     use orchestrator::test_support::{
-        MockApiClient, MockOutputStream, StaticMemoryProvider, noop_hook_executor,
+        noop_hook_executor, MockApiClient, MockOutputStream, StaticMemoryProvider,
     };
     struct RestorePrecommitFlag;
     impl Drop for RestorePrecommitFlag {
@@ -183,11 +183,9 @@ async fn actual_bash_wire_description_tracks_reload_settings_and_offered_skill_t
     )
     .with_skill_listing(provider);
 
-    assert!(
-        !bash_description(&orchestrator)
-            .await
-            .contains("right before the `commit`")
-    );
+    assert!(!bash_description(&orchestrator)
+        .await
+        .contains("right before the `commit`"));
     // The first description already latched true, even with no custom skills.
     // Changing the underlying flag within this session must not rewrite it.
     telemetry::test_set_flag("tengu_polished_tulip", false);
@@ -223,11 +221,9 @@ async fn actual_bash_wire_description_tracks_reload_settings_and_offered_skill_t
     assert!(bash_description(&orchestrator).await.contains(expected));
 
     gate.0.store(true, Ordering::Relaxed);
-    assert!(
-        !bash_description(&orchestrator)
-            .await
-            .contains("right before the `commit`")
-    );
+    assert!(!bash_description(&orchestrator)
+        .await
+        .contains("right before the `commit`"));
     gate.0.store(false, Ordering::Relaxed);
     assert!(bash_description(&orchestrator).await.contains(expected));
 
@@ -235,11 +231,9 @@ async fn actual_bash_wire_description_tracks_reload_settings_and_offered_skill_t
         .write()
         .await
         .set_session_skill_allowlist(Some(Vec::new()));
-    assert!(
-        !bash_description(&orchestrator)
-            .await
-            .contains("right before the `commit`")
-    );
+    assert!(!bash_description(&orchestrator)
+        .await
+        .contains("right before the `commit`"));
     registry.write().await.set_session_skill_allowlist(None);
     assert!(bash_description(&orchestrator).await.contains(expected));
 

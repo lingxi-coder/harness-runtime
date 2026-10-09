@@ -8,8 +8,8 @@ use super::io::{Input, Output};
 use super::queued_commands::QueueLifecycle;
 use super::stream_json::StreamJsonStream;
 use super::stream_json_input::{
-    spawn_stdin_router, InputError, StdinChannels, StdinControlFrame, StdinReaderControl,
-    StdinReaderStatus, StreamInput, PendingInputQueue,
+    spawn_stdin_router, InputError, PendingInputQueue, StdinChannels, StdinControlFrame,
+    StdinReaderControl, StdinReaderStatus, StreamInput,
 };
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};

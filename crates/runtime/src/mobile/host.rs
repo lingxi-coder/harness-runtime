@@ -97,6 +97,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
+use crate::session_agent_transcript::{
+    parse_main_session_agent_message_rows, parse_session_agent_message_rows,
+    read_session_agent_next_message_index, session_agent_conversation_is_visible,
+    session_identity_snapshot_for_path,
+};
 use async_trait::async_trait;
 use client::adapter::controls::{decode_reasoning_selection, lower_conversation_controls};
 use client::adapter::lowering::lower_status_snapshot;
@@ -104,11 +109,10 @@ use client::adapter::{
     AdapterOutputStream, AdapterPermissionGate, ClientEventListener, TurnEventEmitter,
 };
 use client::protocol::commands::{
-    ClientCommand, ImageRefDto, ListingKindDto as ProtocolListingKind,
-    PromptModeDto, ProviderCredentialSecretDto,
+    ClientCommand, ImageRefDto, ListingKindDto as ProtocolListingKind, PromptModeDto,
+    ProviderCredentialSecretDto,
 };
 use client::protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
-use crate::session_agent_transcript::{parse_session_agent_message_rows, parse_main_session_agent_message_rows, session_identity_snapshot_for_path, read_session_agent_next_message_index, session_agent_conversation_is_visible};
 use client::protocol::error::ClientError;
 use client::protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoveryStateDto};
 use client::protocol::listings::{
@@ -1257,7 +1261,10 @@ mod session_identity_import_tests {
             .await
             .unwrap();
         assert_eq!(empty, SessionMessageIdentitySnapshot::default());
-        let sidecar = transcript_path.with_file_name(format!("session.jsonl{}-message-identities", branding::DOT_DIR));
+        let sidecar = transcript_path.with_file_name(format!(
+            "session.jsonl{}-message-identities",
+            branding::DOT_DIR
+        ));
         assert!(!sidecar.exists());
     }
 }
@@ -1295,11 +1302,9 @@ mod session_agent_exact_utf16_tests {
         ]);
         let raw = format!("{}\n", row.to_json_string().unwrap());
 
-        assert!(
-            parse_session_agent_message_rows(raw.as_bytes())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(parse_session_agent_message_rows(raw.as_bytes())
+            .unwrap()
+            .is_empty());
         assert_eq!(session_agent_transcript_revision(raw.as_bytes()), 1);
     }
 }
@@ -3188,10 +3193,7 @@ impl MobileEngineHandle {
                     .await?;
                 self.inner
                     .workflow_checkpoints
-                    .adopt_session(
-                        &uuid.to_string(),
-                        self.inner.task_registry.as_ref(),
-                    )
+                    .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
                     .await;
                 let messages = client::adapter::lowering::lower_transcript_with_tool_results(
                     &replayed.display_history,
@@ -3291,10 +3293,7 @@ impl MobileEngineHandle {
                     .await?;
                 self.inner
                     .workflow_checkpoints
-                    .adopt_session(
-                        &uuid.to_string(),
-                        self.inner.task_registry.as_ref(),
-                    )
+                    .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
                     .await;
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
@@ -5253,11 +5252,7 @@ impl MobileEngineHandle {
                     // workflow's validated recovery checkpoint remains durable.
                     self.inner
                         .workflow_checkpoints
-                        .adopt_task(
-                            &resume_session,
-                            &task_id,
-                            self.inner.task_registry.as_ref(),
-                        )
+                        .adopt_task(&resume_session, &task_id, self.inner.task_registry.as_ref())
                         .await;
                     workflow = registry
                         .list_workflows()
@@ -6092,11 +6087,10 @@ impl MobileEngineHandle {
                     .map_err(|error| ClientError::Rejected {
                         message: format!("load main transcript identity import failed: {error}"),
                     })?;
-            let rows = parse_main_session_agent_message_rows(&replayed, &identity_snapshot).map_err(
-                |message| ClientError::Rejected {
+            let rows = parse_main_session_agent_message_rows(&replayed, &identity_snapshot)
+                .map_err(|message| ClientError::Rejected {
                     message: format!("load main transcript rows failed: {message}"),
-                },
-            )?;
+                })?;
             (
                 rows,
                 session_agent_transcript_revision(&raw),

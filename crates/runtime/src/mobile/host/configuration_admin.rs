@@ -2,9 +2,7 @@
 //! Mutations report RestartRequired until this handle can prove a live registry reload.
 
 use super::MobileEngineHandle;
-use ::configuration_admin::{
-    config_admin, hook_admin, mcp_admin, plugin_admin, skills_admin,
-};
+use ::configuration_admin::{config_admin, hook_admin, mcp_admin, plugin_admin, skills_admin};
 use client::adapter::ClientEventSink;
 use client::protocol::commands::{
     HookAdminCommandDto, McpAdminCommandDto, PluginAdminCommandDto, SkillAdminCommandDto,
@@ -375,8 +373,7 @@ impl MobileEngineHandle {
         };
         match plugin_admin::catalog_json(settings, Some(self.inner.credentials.as_ref())).await {
             Ok(catalog_json) => {
-                sink.emit(ClientEvent::PluginCatalog { catalog_json })
-                .await;
+                sink.emit(ClientEvent::PluginCatalog { catalog_json }).await;
             }
             Err(message) => config_admin::emit_error(sink, message).await,
         }
@@ -592,7 +589,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(home.join("plugins/installed_plugins.json"),json!({"version":2,"plugins":{"fixture@tests":[{"scope":"user","installPath":plugin_dir,"version":"1.0.0"}]}}).to_string()).unwrap();
-        std::fs::write(home.join("settings.json"),json!({"enabledPlugins":{"fixture@tests":false}}).to_string()).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            json!({"enabledPlugins":{"fixture@tests":false}}).to_string(),
+        )
+        .unwrap();
         let mut cfg = test_config(&workspace);
         cfg.lingxi_home = home.clone();
         let storage = Arc::new(lingxi_core::host::InMemorySecureStorage::new());

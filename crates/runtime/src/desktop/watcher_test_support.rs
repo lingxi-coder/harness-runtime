@@ -9,8 +9,8 @@ use platform_posix::PosixFileSystem;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 use std::task::{Context, Poll};
 use std::time::SystemTime;

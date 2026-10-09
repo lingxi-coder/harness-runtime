@@ -797,11 +797,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         lingxi_core::host::tool_invoker::ToolInvokerError,
     > {
         match self.inner.get() {
-            Some(invoker) => {
-                invoker
-                    .invoke_detailed(name, input, ctx)
-                    .await
-            }
+            Some(invoker) => invoker.invoke_detailed(name, input, ctx).await,
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
@@ -1230,10 +1226,7 @@ mod run_id_tests {
             panic!("expected workflow")
         };
         assert_eq!(workflow.run_id.as_deref(), Some("wf_abcdef"));
-        assert_eq!(
-            workflow.workflow_id,
-            "build-workflow"
-        );
+        assert_eq!(workflow.workflow_id, "build-workflow");
         assert_eq!(workflow.script_path.as_deref(), script_path.to_str());
 
         store.remove_task("wabc12345");
@@ -1272,10 +1265,7 @@ mod run_id_tests {
             serde_json::from_slice(&std::fs::read(store.path(session)).expect("read adopt file"))
                 .expect("parse adopt file");
         let workflow = &value["workflows"][0];
-        assert_eq!(
-            workflow["workflowId"],
-            "build-workflow"
-        );
+        assert_eq!(workflow["workflowId"], "build-workflow");
         assert!(workflow.get("scriptSha256").is_none());
         assert!(workflow.get("argsJson").is_none());
         assert!(workflow.get("startTime").is_none());
@@ -1594,7 +1584,10 @@ mod deferred_invoker_tests {
             _ctx: SubagentInvocationContext,
         ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError>
         {
-            Ok(lingxi_core::host::tool_invoker::ToolInvocationResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
+            Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+                mcp_meta_projection: None,
+                model_content_projection: None,
+                data_projection: None,
                 is_error: true,
                 data: serde_json::json!({"error": "contract validation failed"}),
                 model_content: Some("contract validation failed".into()),

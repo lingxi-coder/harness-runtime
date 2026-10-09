@@ -200,7 +200,8 @@ async fn replay_case(block: bool) {
     );
     let id = lingxi_core::types::ToolUseId::new();
     runtime.orchestrator.session().lock().await.history.push(
-        lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+        lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::ToolUse {
                 input_projection: None,
@@ -220,7 +221,13 @@ async fn replay_case(block: bool) {
     feed.send(Some(format!("{replay}\n").into_bytes())).unwrap();
     let lifecycle = Arc::new(crate::headless::queued_commands::QueueLifecycle::new(
         stream.outbound_tx(),
-        runtime.orchestrator.session().lock().await.session_id.to_string(),
+        runtime
+            .orchestrator
+            .session()
+            .lock()
+            .await
+            .session_id
+            .to_string(),
     ));
     let channels = spawn_stdin_router_from_reader(
         Feed {
@@ -342,7 +349,13 @@ async fn typed_bash_interrupt_keeps_cwd_owner_until_native_child_is_reaped() {
     feed.send(Some(format!("{frame}\n").into_bytes())).unwrap();
     let lifecycle = Arc::new(crate::headless::queued_commands::QueueLifecycle::new(
         stream.outbound_tx(),
-        runtime.orchestrator.session().lock().await.session_id.to_string(),
+        runtime
+            .orchestrator
+            .session()
+            .lock()
+            .await
+            .session_id
+            .to_string(),
     ));
     let channels = spawn_stdin_router_from_reader(
         Feed {

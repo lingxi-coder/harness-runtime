@@ -384,7 +384,8 @@ pub fn process_line(
                 seen_uuids.insert(identity);
             }
 
-            Ok(FrameAction::UserTurn(UserTurn { queue_delivery: None,
+            Ok(FrameAction::UserTurn(UserTurn {
+                queue_delivery: None,
                 content_projection: projection
                     .subprojection("/message/content")
                     .unwrap_or_else(|_| Utf16JsonProjection::plain(content.clone())),
@@ -432,7 +433,8 @@ fn parse_history_frame(projection: &Utf16JsonProjection) -> Option<HistoryInput>
             let content_projection = projection.subprojection("/message/content").ok();
             let content = parse_assistant_content(content_projection.as_ref());
             Some(HistoryInput {
-                message: ConversationMessage::Assistant { per_turn_effort: None,
+                message: ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: message_id,
                     content,
                     stop_reason: message
@@ -927,7 +929,10 @@ pub(crate) fn spawn_stdin_router_from_reader<R: tokio::io::AsyncRead + Send + 's
         let mut outcome = StdinReaderStatus::Eof;
         let mut ended = false;
         'reader: loop {
-            let has_pending = !pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty();
+            let has_pending = !pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty();
             if ended && !has_pending {
                 break;
             }

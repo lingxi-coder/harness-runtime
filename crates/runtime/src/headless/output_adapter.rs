@@ -65,7 +65,8 @@ impl OutputStream for SinkAdapter {
         tool: &str,
         _model_text: &str,
         result: &serde_json::Value,
-     _projection: Option<&lingxi_core::host::ToolResultProjection>) {
+        _projection: Option<&lingxi_core::host::ToolResultProjection>,
+    ) {
         self.sink.tool_result(tool, result).await;
     }
     async fn emit_tool_heartbeat(

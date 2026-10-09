@@ -62,12 +62,16 @@
 //! forwarded into the runtime wrap config.
 
 use sandbox::runtime_config::SandboxRuntimeConfig as EngineConfig;
-use sandbox_runtime::SandboxRuntimeConfig as RuntimeConfig;
 use sandbox_runtime::config::{FilesystemConfig, NetworkConfig, RipgrepConfig};
+use sandbox_runtime::SandboxRuntimeConfig as RuntimeConfig;
 
 /// `Some(v)` when the vector is non-empty, else `None`.
 fn some_if_nonempty(v: Vec<String>) -> Option<Vec<String>> {
-    if v.is_empty() { None } else { Some(v) }
+    if v.is_empty() {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 /// Convert the engine's sandbox config into the `sandbox-runtime` config the
@@ -352,11 +356,9 @@ mod tests {
             rt.allow_pty.is_none(),
             "allow_pty must stay None to match CC (adapter never forwards allowPty)"
         );
-        assert!(
-            to_runtime_config(&EngineConfig::default())
-                .allow_pty
-                .is_none()
-        );
+        assert!(to_runtime_config(&EngineConfig::default())
+            .allow_pty
+            .is_none());
     }
 
     #[test]

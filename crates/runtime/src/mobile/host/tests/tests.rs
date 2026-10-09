@@ -31,9 +31,11 @@ use super::{
     mobile_mcp_reload_requires_replacement, mobile_mcp_run_reload_job,
     mobile_mcp_state_is_transitional, mobile_skill_listing_provider,
     session_agent_conversation_is_visible, session_agent_transcript_event,
-    session_agent_transcript_revision, McpConfigScope, McpRegistry, McpServerConfig, MobileConfig,
+    session_agent_transcript_revision, McpRegistry, McpServerConfig, MobileConfig,
     MobileCronStoreHandle, MobileMcpReloadJob, MobileRuntime, MobileSessionAgentObserver,
 };
+
+use mcp::ConfigScope as McpConfigScope;
 
 #[test]
 fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
@@ -203,17 +205,21 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
 
 #[test]
 fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
-    let visible = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+    let visible = lingxi_core::types::ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "visible".to_string(), citations: None,
+            text: "visible".to_string(),
+            citations: None,
         }],
         stop_reason: None,
     };
-    let compact = lingxi_core::types::ConversationMessage::User { api_message_override: None,
+    let compact = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "replacement summary".to_string(), citations: None,
+            text: "replacement summary".to_string(),
+            citations: None,
         }],
         is_meta: false,
         is_compact_summary: true,
@@ -241,10 +247,12 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         "declined fallback",
         "2026-10-04T00:00:00.000Z".into(),
     );
-    let first_message = ConversationMessage::Assistant { per_turn_effort: None,
+    let first_message = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: first_id,
         content: vec![ContentBlock::Text {
-            text: "kept main row".into(), citations: None,
+            text: "kept main row".into(),
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
     };
@@ -353,30 +361,35 @@ fn session_agent_id_from_nested_transcript_path_requires_agent_jsonl_shape() {
 
 #[test]
 fn session_agent_index_excludes_hidden_transcript_records() {
-    let hidden_meta = lingxi_core::types::ConversationMessage::User { api_message_override: None,
+    let hidden_meta = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "<runtime-reminder>internal</runtime-reminder>".to_string(), citations: None,
+            text: "<runtime-reminder>internal</runtime-reminder>".to_string(),
+            citations: None,
         }],
         is_meta: true,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
     };
-    let hidden_summary = lingxi_core::types::ConversationMessage::User { api_message_override: None,
+    let hidden_summary = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: true,
         is_visible_in_transcript_only: false,
     };
-    let hidden_transcript_only = lingxi_core::types::ConversationMessage::User { api_message_override: None,
+    let hidden_transcript_only = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: true,
     };
-    let visible = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+    let visible = lingxi_core::types::ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         stop_reason: None,
@@ -426,10 +439,12 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+            message: lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "working".to_string(), citations: None,
+                    text: "working".to_string(),
+                    citations: None,
                 }],
                 stop_reason: None,
             },
@@ -509,7 +524,8 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::System { api_system: None,
+            message: lingxi_core::types::ConversationMessage::System {
+                api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 subtype: Some("agent_idle".to_string()),
                 content: "idle".to_string(),
@@ -543,10 +559,12 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::User { api_message_override: None,
+            message: lingxi_core::types::ConversationMessage::User {
+                api_message_override: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "follow-up".to_string(), citations: None,
+                    text: "follow-up".to_string(),
+                    citations: None,
                 }],
                 is_meta: true,
                 is_compact_summary: false,
@@ -571,10 +589,12 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+            message: lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "resumed".to_string(), citations: None,
+                    text: "resumed".to_string(),
+                    citations: None,
                 }],
                 stop_reason: None,
             },
@@ -1350,7 +1370,6 @@ async fn listing_and_invocation_share_one_registry() {
              spawner's own catalog handle: {invocation_names:?}"
     );
 }
-
 
 /// House-defect guard for the test above: prove the discriminating
 /// assertions above are actually discriminating. Two catalogs built from
@@ -3708,7 +3727,8 @@ fn submit_lists_and_loads_nested_workflow_agents() {
                 model: "claude-sonnet-5".into(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "nested workflow child".into(),
-                    cache_control: None, citations: None,
+                    cache_control: None,
+                    citations: None,
                 }],
                 stop_reason: Some("end_turn".into()),
                 stop_details: None,
@@ -6636,7 +6656,6 @@ fn submit_list_sessions_empty_when_no_catalog() {
     });
 }
 
-
 /// SESSIONS/HISTORY: `submit(NewSession)` clears the session (minting a fresh
 /// id) and confirms with a `SessionStarted` carrying the new connection
 /// session id — proving the command drives the real orchestrator handle, not
@@ -7586,7 +7605,6 @@ fn new_session_rejects_a_foreign_cwd() {
             .expect("the source's own cwd is honored");
     });
 }
-
 
 /// Index of the first event matching `pred`, or a panic naming what was
 /// expected and the whole batch. The app surface delivers through ONE

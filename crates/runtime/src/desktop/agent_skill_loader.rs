@@ -312,13 +312,11 @@ mod tests {
     async fn unknown_skill_is_none() {
         let reg = CommandRegistry::new();
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
-        assert!(
-            loader
-                .resolve_and_load("nope", "a", None, None)
-                .await
-                .expect("checked skill preload")
-                .is_none()
-        );
+        assert!(loader
+            .resolve_and_load("nope", "a", None, None)
+            .await
+            .expect("checked skill preload")
+            .is_none());
     }
 
     #[tokio::test]
@@ -334,13 +332,11 @@ mod tests {
             ..SlashCommand::default()
         });
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
-        assert!(
-            loader
-                .resolve_and_load("help", "a", None, None)
-                .await
-                .expect("checked skill preload")
-                .is_none()
-        );
+        assert!(loader
+            .resolve_and_load("help", "a", None, None)
+            .await
+            .expect("checked skill preload")
+            .is_none());
     }
 
     #[tokio::test]
