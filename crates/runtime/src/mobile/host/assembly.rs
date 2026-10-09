@@ -1467,6 +1467,10 @@ pub(super) async fn build_mobile_inner_with_ask(
         }
         None => false,
     };
+    // `Auto` has no trusted workspace shape to key on any more: the setting only
+    // takes effect once the user picks `On`.
+    let auto_workspace_predicate: Arc<dyn Fn(&std::path::Path) -> bool + Send + Sync> =
+        Arc::new(|_| false);
     let (plugin_lsp_registry, mobile_lsp_path_mapper) =
         match (mobile_linux.clone(), mobile_lsp_ready) {
             (Some(runtime), true) => {
@@ -1483,6 +1487,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                             ),
                         ))
                         .with_path_mapper(mapper.clone())
+                        .with_workspace_activation_predicate(auto_workspace_predicate.clone())
                         .with_diagnostics(lsp_diagnostics.clone()),
                     ),
                     Some(mapper),
@@ -1493,6 +1498,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                     lsp::LspRegistry::new(Arc::new(
                         crate::mobile::mobile_lsp::MobileLinuxLspTransport::unavailable(),
                     ))
+                    .with_workspace_activation_predicate(auto_workspace_predicate)
                     .with_diagnostics(lsp_diagnostics.clone()),
                 ),
                 None,
