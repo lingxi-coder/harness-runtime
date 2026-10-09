@@ -19,6 +19,7 @@
 pub mod artifact;
 pub mod ask_user_question;
 pub mod brief;
+pub mod inline_visualization;
 pub mod list_agents;
 pub mod observer_report;
 pub mod push_notification;
@@ -51,6 +52,7 @@ pub(crate) fn process_globals_lock() -> &'static std::sync::Mutex<()> {
 pub use artifact::ArtifactTool;
 pub use ask_user_question::AskUserQuestionTool;
 pub use brief::BriefTool;
+pub use inline_visualization::VisualizationTool;
 pub use list_agents::ListAgentsTool;
 pub use push_notification::PushNotificationTool;
 pub use report_findings::ReportFindingsTool;

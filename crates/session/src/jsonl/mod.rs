@@ -16,7 +16,9 @@
 /// Persisted capability profile for one immutable session transcript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionMode {
-    /// Read-only conversational profile.
+    /// Conversational profile: device, read, web and inline-visualization
+    /// tools plus `Write` and `Shell`, each call confirmed through the
+    /// permission prompt. Skills never get shell expansion here.
     Chat,
     /// Full development profile and legacy fallback.
     Code,

@@ -45,23 +45,27 @@ pub fn lower_conversation_message_with(
                         .filter_map(|block| {
                             crate::adapter::turn::lower_content_block_with(block, index)
                         })
-                        .filter(|block| {
-                            // The runtime-written follow-up block is model
-                            // context; replay shows it as an attachment chip.
-                            let MessageBlockDto::Text { text } = block else {
-                                return true;
+                        .filter_map(|block| {
+                            // A follow-up from a widget starts with the
+                            // runtime-written context block; replay shows it
+                            // as an attachment chip and keeps the typed text.
+                            let MessageBlockDto::Text { text } = &block else {
+                                return Some(block);
                             };
-                            match visualization::context::parse_context_block(text) {
-                                Some(attachment) if visualization_context.is_none() => {
-                                    visualization_context = Some(VisualizationContextDto {
-                                        id: attachment.reference.id.as_str().to_string(),
-                                        revision: attachment.reference.revision,
-                                        title: attachment.title,
-                                    });
-                                    false
-                                }
-                                _ => true,
+                            if visualization_context.is_some() {
+                                return Some(block);
                             }
+                            let split = visualization::context::split_context(text)
+                                .map(|(attachment, typed)| (attachment, typed.to_string()));
+                            let Some((attachment, typed)) = split else {
+                                return Some(block);
+                            };
+                            visualization_context = Some(VisualizationContextDto {
+                                id: attachment.reference.id.as_str().to_string(),
+                                revision: attachment.reference.revision,
+                                title: attachment.title,
+                            });
+                            (!typed.is_empty()).then_some(MessageBlockDto::Text { text: typed })
                         })
                         .collect()
                 },
@@ -425,16 +429,10 @@ mod identity_projection_tests {
         let mut message =
             ConversationMessage::user(lingxi_core::types::MessageId::new(), String::new());
         if let ConversationMessage::User { content, .. } = &mut message {
-            *content = vec![
-                lingxi_core::types::ContentBlock::Text {
-                    text: block,
-                    citations: None,
-                },
-                lingxi_core::types::ContentBlock::Text {
-                    text: "Why is EU flat?".into(),
-                    citations: None,
-                },
-            ];
+            *content = vec![lingxi_core::types::ContentBlock::Text {
+                text: format!("{block}\n\nWhy is EU flat?"),
+                citations: None,
+            }];
         }
         let dto = lower_conversation_message(&message);
         assert_eq!(

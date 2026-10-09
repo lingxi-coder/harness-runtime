@@ -5433,8 +5433,22 @@ impl MobileEngineHandle {
                 prompt_mode,
                 images,
                 turn_id,
-                visualization_context: _,
+                visualization_context,
             } => {
+                let root_session = self
+                    .inner
+                    .active_session_uuid
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let text = crate::inline_visualization::followup_text(
+                    self.fs.clone(),
+                    &self.lingxi_home,
+                    &root_session,
+                    visualization_context.as_ref(),
+                    text,
+                )
+                .await;
                 self.start_streaming_turn(text, prompt_mode, images, turn_id, true)
                     .await
             }

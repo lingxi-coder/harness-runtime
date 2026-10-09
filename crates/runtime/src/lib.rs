@@ -33,6 +33,9 @@ mod fast_settings;
 mod skill_prompt;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod inline_visualization;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
 mod parked_agent_restore;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]

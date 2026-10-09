@@ -747,7 +747,17 @@ pub(crate) const MOBILE_CHAT_TOOL_ALLOWLIST: &[&str] = &[
     "StructuredOutput",
     "WebFetch",
     "WebSearch",
+    // Chat may write files and run commands; every call still goes through
+    // the permission prompt, and skills keep their shell-expansion ban.
+    "Write",
+    "Shell",
+    "Visualization",
 ];
+
+/// Chat tools that only ever run behind a per-call permission prompt. A
+/// Chat-visible skill may not pre-authorize them through `allowed-tools`.
+#[cfg(feature = "mobile")]
+pub(crate) const MOBILE_CHAT_PROMPTED_TOOLS: &[&str] = &["Write", "Shell"];
 
 #[cfg(feature = "mobile")]
 pub(crate) fn apply_mobile_session_tool_policy(
