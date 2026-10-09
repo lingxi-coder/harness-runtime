@@ -59,18 +59,6 @@
       ]
     },
     {
-      "id": "local-app-runtime",
-      "kind": "divergence",
-      "finding": "LingXi creates and runs Local Apps with their own runtime profiles and grants.",
-      "reason": "The 2026-09-30 latest-Claude parity goal explicitly preserves create Local App. This includes the runtime and app permission boundary, in addition to the Workflow description exception below.",
-      "decided_on": "2026-09-30",
-      "decided_by": "user",
-      "status": "active",
-      "anchors": [
-        { "kind": "present", "path": "crates/local-apps/src/types.rs", "text": "pub struct AppRecord" }
-      ]
-    },
-    {
       "id": "own-web-tooling",
       "kind": "divergence",
       "finding": "Claude Code ships its own web search stack.",
@@ -104,18 +92,6 @@
       "status": "active",
       "anchors": [
         { "kind": "present", "path": "crates/branding/src/lib.rs", "text": "pub const ENV_PREFIX" }
-      ]
-    },
-    {
-      "id": "workflow-description-sixth-clause",
-      "kind": "divergence",
-      "finding": "The Workflow tool description enumerates five EXHAUSTIVE opt-in clauses and closes with 'For any other task ... do NOT call this tool.'",
-      "reason": "None of the five covers the local-app create flow, where the MODEL self-invokes the create skill and that skill specifies the Workflow call. Without a sixth clause every create is a call the model has been told not to make. The edit itself is registered byte-for-byte next door.",
-      "decided_on": "2026-09-05",
-      "decided_by": "user",
-      "status": "active",
-      "anchors": [
-        { "kind": "present", "path": "crates/workflow/src/workflow_description_divergences.json", "text": "local-app-create-handoff" }
       ]
     },
     {

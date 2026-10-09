@@ -1,4 +1,4 @@
 {
   "type": "plugin_catalog",
-  "catalog_json": "{\"installed\":[{\"name\":\"lingxi-local-app\",\"version\":\"2.0.0\"}]}"
+  "catalog_json": "{\"installed\":[{\"name\":\"example-plugin\",\"version\":\"2.0.0\"}]}"
 }

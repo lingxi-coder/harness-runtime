@@ -30,14 +30,5 @@
     "    inserts, so an unregistered edit to either file still trips a length",
     "    check the way the old single number did."
   ],
-  "divergences": [
-    {
-      "id": "local-app-create-handoff",
-      "target": "description",
-      "finding": "r4-backlog-01",
-      "reason": "The oracle enumerates five EXHAUSTIVE opt-in clauses and closes with 'For any other task ... do NOT call this tool.' None of the five covers the local-app create flow, so the tool description forbids that flow's only hand-off. The nearest clause requires that the USER invoked the skill; in this flow the Host's guided contract has the MODEL self-invoke `lingxi-local-app:create-local-app` (local_apps_host.rs), and that skill then specifies the Workflow call (skills/create-local-app/SKILL.md). Verified: `grep -i 'local.app' workflow_description.txt` returns zero, so no carve-out exists, and the description is live on the mobile surface (host.rs constructs WorkflowTool::new over this text). Without this clause every create is a call the model is told not to make.",
-      "anchor": "- The user asked you to run a specific named or saved workflow.\n",
-      "text": "- A Host-owned guided contract the user started hands off to a registered skill whose instructions specify the call. Today that is only the local-app create flow: the user asks for an app, the Host contract hands off to `lingxi-local-app:create-local-app`, and that skill names the `Workflow` call as a required step. The opt-in is the flow the user started, not the tool name.\n"
-    }
-  ]
+  "divergences": []
 }

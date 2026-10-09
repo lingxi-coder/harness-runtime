@@ -598,12 +598,6 @@ fn current_contract_index() -> ContractIndex {
         "Vec<SlashCommandDto>",
     );
 
-
-
-
-
-
-
     put("ClientEvent::CoordinatorStatus", "coordinator_status");
     put("ClientEvent::CoordinatorStatus.active_workers", "u32");
     put("ClientEvent::CoordinatorStatus.team", "Option<String>");
@@ -1011,19 +1005,6 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::TaskMessage", "task_message");
     put("ClientCommand::TaskMessage.task_id", "String");
     put("ClientCommand::TaskMessage.message", "String");
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     put("ClientCommand::RequestExit", "request_exit");
 
@@ -1739,51 +1720,6 @@ fn current_contract_index() -> ContractIndex {
     put("CoordinatorWorkerDto.name", "String");
     put("CoordinatorWorkerDto.agent_type", "String");
     put("CoordinatorWorkerDto.status", "String");
-
-    // ── Local-apps DTOs (local_apps.rs) ───────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-    // Pre-existing omission, closed here so the struct this change edits is
-    // covered field-for-field: a partially indexed record is worse than an
-    // unindexed one, because the rows that ARE present imply the rest are too.
-    // These records remain part of the v10 contract after Phase 9 removed the
-    // obsolete runtime-profile selector. Omitting them here would leave the
-    // guard blind to a later `runtimeProfile` rename or `contract_sha256`
-    // retype: both are BREAKING wire changes even though profile selection is
-    // now Host-owned rather than a client command/event exchange.
-
-    // ── AppRuntimeProfileDto / bindings (local_apps.rs) ───────────────────
-
-    // Only the stable target pair: viewport, safe area, color scheme,
-    // reduced motion and input mode were removed because they are live values
-    // the page reads from `window.lingxi.v2.deviceContext`, and the host that
-    // writes this record has none of them.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     ix
 }
@@ -2752,25 +2688,6 @@ fn contract_index_covers_every_dto() {
             status: String::new(),
         },
     );
-
-    // The local-app surface added after the initial freeze. Every field is
-    // named explicitly (no `..Default::default()`, no positional construction)
-    // so a RENAMED or REMOVED field breaks THIS compile — which is the whole
-    // point of the anchor, and is what `_apps` above already did for the
-    // original twelve DTOs.
-    // One value per `AppRuntimeProfileDto` variant. Nothing else in this file
-    // forces these tags to exist, so without this list a wire rename of a
-    // family is a breaking change the guard cannot see.
-    // One value per `AppEventDto` variant — FOURTEEN of them; count against the
-    // enum in `local_apps.rs`, not against this comment. The envelope is a
-    // single `ClientEvent::AppEvent`, so nothing else in this file forces these
-    // tags to exist, and a variant omitted here is a variant whose rename the
-    // guard cannot see: the hand table would keep `put`-ing the old key, the
-    // checked-in index would still carry it, `breaking_entries` would be empty,
-    // and a BREAKING wire rename would ship green. This list already drifted
-    // once — it said "ten" while `AppBackgroundTaskChanged` and `AppCreated`
-    // were missing, `AppCreated` being the variant carrying the create-flow
-    // correlation key. Add the arm here whenever you add a variant.
 
     // Sanity: the index is non-empty and contains a known anchor key.
     let ix = current_contract_index();

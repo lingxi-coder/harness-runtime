@@ -775,7 +775,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
         (
             "event/plugin_catalog.json",
             ClientEvent::PluginCatalog {
-                catalog_json: r#"{"installed":[{"name":"lingxi-local-app","version":"2.0.0"}]}"#
+                catalog_json: r#"{"installed":[{"name":"example-plugin","version":"2.0.0"}]}"#
                     .to_string(),
             },
         ),
@@ -1615,7 +1615,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                     scope: None,
                     revision: Some("c".repeat(64)),
                     payload_json: Some(
-                        r#"{"action":"install","plugin_id":"lingxi-local-app"}"#.to_string(),
+                        r#"{"action":"install","plugin_id":"example-plugin"}"#.to_string(),
                     ),
                 },
             },
