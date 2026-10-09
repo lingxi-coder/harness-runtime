@@ -71,7 +71,7 @@ pub struct IosPlatformInputs {
     /// (it cannot persist tokens). Inject a real store to enable subscription login.
     pub secure_storage: Option<Arc<dyn SecureStorage>>,
     /// Native one-shot location (Swift impl), when wired. `None` keeps the
-    /// local-apps location bridge reporting "unavailable".
+    /// app location bridge reporting "unavailable".
     pub location: Option<Arc<dyn LocationProvider>>,
     /// Mobile Linux runtime bridge (iSH path). `None` keeps the legacy
     /// unavailable shell behavior in place.

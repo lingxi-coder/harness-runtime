@@ -1,5 +1,11 @@
 # Local App plugin 实施 harness
 
+> **Moved (2026-10):** `template-migration-manifest.json`, `tasks-phase-2.json` and `tasks-phase-7.json` now live in the
+> Local App repository (`docs/local-apps/harness/`), with the gates that read them (`check-phase2-plugin`,
+> `check-phase6-plugin`, `check-phase7-plugin`, `check-skill-frontmatter` for the plugin's own skills). What remains here
+> is the history of the other phases and the `lap-gate` review tooling.
+
+
 本目录是 `docs/local-apps/LOCAL-APP-PLUGIN-DESIGN-V2.md` 的**执行契约**：任务清单、
 测试基线，以及一批「今天就已经会骗人」的判据的实测记录。判据引擎在
 `scripts/checks/lap_gate.py`（驱动 `lap-gate.sh`）。

@@ -718,7 +718,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
         let result = tool
             .call(
                 json!({
-                    "subject": "Build local app",
+                    "subject": "Build app",
                     "description": "Use the host-owned task directory"
                 }),
                 fresh_ctx(),
@@ -732,7 +732,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             .get(id)
             .await
             .expect("task persisted under the host config home");
-        assert_eq!(stored.subject, "Build local app");
+        assert_eq!(stored.subject, "Build app");
         assert!(config_home.join("tasks/default").is_dir());
         let _ = std::fs::remove_dir_all(temp);
     }

@@ -43,93 +43,17 @@ use tool_api::tool_trait::{
     ToolStaticContext,
 };
 
-use crate::mobile::local_apps_mcp::LocalAppsMcpTransport;
+use local_app_builder_service::mcp_server::LocalAppsMcpTransport;
 
 /// `(builtin name, provider operation, read-only)` for every host operation.
+///
+/// The table itself lives with the service, which writes prose that names these
+/// tools; this crate only turns each row into an engine tool.
 ///
 /// `read_only` drives [`Tool::is_read_only`]/[`Tool::is_concurrency_safe`]; the
 /// PROMPT default for each name lives in `permission::defaults_per_tool` — one
 /// table for every tool in the product, rather than a second policy here.
-pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
-    // Read-only unless noted; the state-journaling entries below are `false`.
-    // `LocalAppValidateMcpProposal`, `LocalAppApproveMcpProposal`,
-    // `LocalAppQaMcpCandidate` and `LocalAppPromoteMcpCandidate` journal Host
-    // state in the MCP-authoring pipeline; `LocalAppEvents` drains a
-    // queue (its own note below). The header groups by PIPELINE STAGE, not by
-    // the `is_read_only` flag each row carries; read the third column.
-    ("LocalAppList", "list", true),
-    ("LocalAppGet", "get", true),
-    ("LocalAppRuntimeProfiles", "runtime_profiles", true),
-    ("LocalAppTemplateCatalog", "template_catalog", true),
-    // The plan-driven create/modify step. It is the operation that LANDS a
-    // template (create) or stages a new authoring contract (modify), so it is
-    // emphatically not read-only — but the bytes it lands are the ones the user
-    // approved in the plan, not the ones this call names: `name`, `brief`,
-    // `spec` and `template_id` are read from the Host's own approval record.
-    ("LocalAppPrepare", "prepare", false),
-    ("LocalAppContract", "contract", false),
-    (
-        "LocalAppValidateMcpProposal",
-        "validate_mcp_proposal",
-        false,
-    ),
-    ("LocalAppApproveMcpProposal", "approve_mcp_proposal", false),
-    ("LocalAppQaMcpCandidate", "qa_mcp_candidate", false),
-    (
-        "LocalAppPromoteMcpCandidate",
-        "promote_mcp_candidate",
-        false,
-    ),
-    ("LocalAppLogs", "read_logs", true),
-    ("LocalAppQueryData", "query_data", true),
-    ("LocalAppCheckpointList", "list_checkpoints", true),
-    // NOT read-only: `read_app_events` DRAINS the unread queue and advances a
-    // persisted cursor unless `peek=true`. `is_read_only` reads the input to
-    // honour `peek`; this flag is the DEFAULT for a call that omits it.
-    ("LocalAppEvents", "read_app_events", false),
-    ("LocalAppBackgroundList", "background_list", true),
-    ("LocalAppBackgroundStatus", "background_status", true),
-    ("LocalAppInspectUi", "inspect_ui", true),
-    // Read-only in the same sense as `inspect_ui`: it observes the view and
-    // changes nothing. It is NOT equally cheap for privacy — a pixel capture
-    // shows what `inspect_ui` redacts — but that is a PROMPT question, and the
-    // prompt default lives in `permission::defaults_per_tool`, not here.
-    ("LocalAppCaptureUi", "capture_ui", true),
-    // Mutating.
-    ("LocalAppBuild", "build", false),
-    ("LocalAppQaBegin", "qa_begin", false),
-    ("LocalAppQaReadEvidence", "qa_read_evidence", true),
-    ("LocalAppQaFinalize", "qa_finalize", false),
-    ("LocalAppInstallDeps", "install_dependencies", false),
-    // r2-never-wired-02: these two had a full provider catalog entry,
-    // description and handler (host's native dependency-review confirmation
-    // flow) but no row here, so `AppDependencyChangeConfirmationRequested`
-    // had no reachable producer and both clients' dependency-review sheet
-    // was dead code.
-    (
-        "LocalAppConfirmDependencyChange",
-        "confirm_dependency_change",
-        false,
-    ),
-    ("LocalAppUpdateDependencies", "update_dependencies", false),
-    ("LocalAppRuntime", "manage_runtime", false),
-    ("LocalAppCreate", "create", false),
-    // Lands the scaffold into an app the "+" button created as an empty SHELL
-    // (`AppRecord::scaffolded == false`): it stamps the manifest surface,
-    // writes the whole workspace source tree and overwrites the bootstrap
-    // `LINGXI.md`. Emphatically NOT read-only — `is_read_only` answers "did
-    // this observe without changing anything", and every byte of an app's
-    // initial source is written here.
-    ("LocalAppScaffold", "scaffold", false),
-    ("LocalAppManifest", "update_manifest", false),
-    ("LocalAppMutateData", "mutate_data", false),
-    ("LocalAppActOnUi", "act_on_ui", false),
-    ("LocalAppCheckpointCreate", "create_checkpoint", false),
-    ("LocalAppCheckpointRestore", "restore_checkpoint", false),
-    ("LocalAppBackgroundSchedule", "background_schedule", false),
-    ("LocalAppBackgroundCancel", "background_cancel", false),
-    ("LocalAppBackgroundRetry", "background_retry", false),
-];
+pub use local_app_builder_service::tool_names::LOCAL_APP_TOOLS;
 
 /// One host operation exposed as a builtin tool.
 ///
@@ -341,7 +265,7 @@ impl Tool for LocalAppTool {
     /// (`recovery.rollback()` and the dependency-record restore), neither of
     /// which runs when the future is dropped instead of awaited to
     /// completion. (The receipt claim is the one piece that IS still released
-    /// on a drop, by `ReceiptClaim`'s `Drop` in `local_apps_host.rs` — the
+    /// on a drop, by `ReceiptClaim`'s `Drop` in `broker.rs` — the
     /// seeded workspace and the dependency record have no such guard.)
     /// `Block` routes the call through the
     /// `_ => tool_call.await` arm instead, so the transaction always reaches
@@ -631,7 +555,7 @@ fn envelope_to_tool_result(result: lingxi_core::host::McpToolResultDto) -> ToolC
     // empty payload would still satisfy `image_tool_result_blocks` and go out
     // as `source.data: ""`, which the provider rejects with a 400 for the WHOLE
     // request rather than for this one tool call. The producer already decided
-    // that case is an error (`local_apps_mcp.rs` answers `tool_error` for an
+    // that case is an error (`mcp_server.rs` answers `tool_error` for an
     // empty frame); falling through to the text path here agrees with it
     // instead of manufacturing a success.
     let image_blocks: Vec<(String, String)> = result
@@ -1084,6 +1008,7 @@ mod tests {
     /// create-flow prompt storm returns.
     #[test]
     fn every_tool_has_a_permission_default_row() {
+        crate::local_app_tool_policy::install();
         for &(name, _, _) in LOCAL_APP_TOOLS {
             // `permission::tool_default` collapses "no row" and "a row that
             // says Deny" to the same DenyByDefault value, so asserting
@@ -1146,6 +1071,7 @@ mod tests {
     /// for this test.
     #[test]
     fn every_local_app_permission_row_names_a_real_tool() {
+        crate::local_app_tool_policy::install();
         let declared: std::collections::BTreeSet<&str> =
             LOCAL_APP_TOOLS.iter().map(|&(name, _, _)| name).collect();
         let rows: Vec<&str> = permission::tool_default_names()
@@ -1215,9 +1141,9 @@ mod tests {
         let app_id = "app-lease-probe";
         let workspace = root.path().join("apps").join(app_id).join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace");
-        let registry = permission::WorkspacePermissionLeaseRegistry::new();
+        let registry = crate::local_app_workspace_profile::LocalAppWorkspaceProfile::registry();
         let lease = registry
-            .begin_local_app(app_id, &workspace)
+            .begin_bound(app_id, &workspace)
             .expect("canonical local-app layout must grant a lease");
         let token = Some(lease.token());
         // The `LocalApp*` branch of `allows_for_lease` returns before
@@ -1464,7 +1390,7 @@ mod tests {
         );
     }
 
-    /// NAMING BAN. `local_apps_mcp` asserts the whole catalog's schemas carry
+    /// NAMING BAN. `mcp_server` asserts the whole catalog's schemas carry
     /// no `template`; this pins the same ban on the tool the model actually
     /// sees, description included, so a description-only regression (which the
     /// schema-only assertion cannot see) still fails.

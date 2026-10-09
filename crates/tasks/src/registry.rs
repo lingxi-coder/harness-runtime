@@ -397,8 +397,8 @@ impl Drop for SpawnPublicationGuard {
 /// Deliberately carries no `scope` field. Every field here is read straight
 /// from the on-disk checkpoint (`adopt.json`), which records whatever the
 /// ORIGINAL caller supplied -- so `workflow_id` and `args` are exactly as
-/// untrustworthy for minting Local App authority as they are everywhere else
-/// in this crate (see [`crate::scope::LocalAppWorkflowTaskScope`]'s module
+/// untrustworthy for minting managed-app authority as they are everywhere else
+/// in this crate (see [`crate::scope::ManagedWorkflowScope`]'s module
 /// docs). Putting a `scope` field on this same struct would invite exactly
 /// the mistake this type exists to avoid: deriving authority from the
 /// checkpoint's own `workflow_id`/`args` instead of from state the Host
@@ -2868,13 +2868,13 @@ impl TaskRegistry {
         })
     }
 
-    /// Return non-terminal local-app workflow tasks that hold authority over
+    /// Return non-terminal managed-app workflow tasks that hold authority over
     /// `app_id`. Delete flows use this as a guard before removing the app
     /// directory.
     ///
-    /// Reads each task's typed [`crate::scope::LocalAppWorkflowTaskScope`]
+    /// Reads each task's typed [`crate::scope::ManagedWorkflowScope`]
     /// (design §18 Phase -1 step 8 / §8.1) instead of matching `workflow_id`
-    /// against this crate's (since-deleted) `LOCAL_APP_BUILD_WORKFLOWS` array
+    /// against this crate's (since-deleted) list of build-workflow names
     /// and then parsing `app_id` out of caller-supplied `args` JSON. That
     /// used to be a genuine forgery
     /// vector: a custom workflow could declare a `workflow_id` naming one of
@@ -2921,7 +2921,7 @@ impl TaskRegistry {
     /// live contract and dead traffic, exercised only by the tests named
     /// above. See `scope.rs`'s `blocks_delete` for the per-constructor
     /// line numbers.
-    pub async fn find_nonterminal_local_app_workflows(&self, app_id: &str) -> Vec<String> {
+    pub async fn find_nonterminal_managed_workflows(&self, app_id: &str) -> Vec<String> {
         let tasks = self.tasks.read().await;
         tasks
             .iter()
@@ -2962,7 +2962,7 @@ impl TaskRegistry {
     }
 
     /// Rebuild one workflow checkpoint without starting its script, with NO
-    /// Local App authority (`scope: None`). This is the mobile equivalent of
+    /// managed-app authority (`scope: None`). This is the mobile equivalent of
     /// Claude Code's `registerAdoptedWorkflowTask`, and it is what a caller
     /// that has not independently re-validated the checkpoint against
     /// Host-owned state should call -- it reproduces the exact behavior this
@@ -2994,7 +2994,7 @@ impl TaskRegistry {
     /// crate: they record whatever the ORIGINAL caller supplied, so a custom
     /// workflow's checkpoint carries a forged `args.app_id` just as
     /// faithfully as a real build's. An adopted row is `Paused` --
-    /// non-terminal -- so `scope: None` meant a Local App build in flight
+    /// non-terminal -- so `scope: None` meant a managed-app build in flight
     /// across an engine restart stopped blocking its app's delete, even
     /// though the pre-scope, name-matching guard this crate used to have DID
     /// block it. That is the gap this method closes.
@@ -3006,7 +3006,7 @@ impl TaskRegistry {
     /// `MobileWorkflowCheckpointStore::adopt_session`) is responsible for
     /// RE-DERIVING `scope` from state it re-resolves on load -- the same
     /// app-must-exist / must-be-scaffolded / must-be-pinned checks
-    /// `apply_materialized_local_app_collections_with_identity` applies to a
+    /// the runtime's materialization seam applies to a
     /// live launch, run again here against the checkpoint's persisted script
     /// bytes, with the checkpoint's `app_id` used only as a lookup key, never
     /// as authority by itself (see that function's doc comment for the full
@@ -3017,7 +3017,7 @@ impl TaskRegistry {
     pub async fn register_adopted_workflow_with_scope(
         &self,
         adopted: AdoptedWorkflow,
-        scope: Option<crate::scope::LocalAppWorkflowTaskScope>,
+        scope: Option<crate::scope::ManagedWorkflowScope>,
     ) -> Result<(), TaskError> {
         let valid_task_id = adopted.task_id.len() == 9
             && adopted
@@ -4237,7 +4237,7 @@ impl TaskRegistry {
         Ok(updated)
     }
 
-    /// Atomically commit a Host-validated Local App Build/UseTest success.
+    /// Atomically commit a Host-validated managed-app Build/UseTest success.
     ///
     /// This is intentionally not a generic workflow terminal primitive.  It
     /// accepts only a [`TaskState::LocalWorkflow`] row carrying an authenticated
@@ -4259,7 +4259,7 @@ impl TaskRegistry {
     /// this call committed the prepared publication; an already-terminal row
     /// is returned with false so callers cannot emit a success summary for a
     /// publication closure that never ran.
-    pub async fn commit_local_app_workflow_terminal<F, Fut>(
+    pub async fn commit_managed_workflow_terminal<F, Fut>(
         &self,
         task_id: &str,
         outcome: lingxi_core::host::task_registry::WorkflowTerminalOutcome,
@@ -4271,7 +4271,7 @@ impl TaskRegistry {
     {
         let canonical_result = outcome.result.clone().ok_or_else(|| {
             TaskError::Internal(
-                "Local App terminal commit requires a canonical result payload".into(),
+                "Managed workflow terminal commit requires a canonical result payload".into(),
             )
         })?;
         let task_id = self.canonical_or_raw(task_id).await;
@@ -4286,8 +4286,8 @@ impl TaskRegistry {
             let eligible = workflow.scope.as_ref().is_some_and(|scope| {
                 matches!(
                     scope.purpose(),
-                    crate::scope::LocalAppWorkflowPurpose::Build
-                        | crate::scope::LocalAppWorkflowPurpose::UseTest
+                    crate::scope::ManagedWorkflowPurpose::Build
+                        | crate::scope::ManagedWorkflowPurpose::UseTest
                 )
             });
             if !eligible {
@@ -4303,13 +4303,11 @@ impl TaskRegistry {
                 .validate_terminal_result(&output_file, &canonical_result)
                 .err()
                 .map(|error| {
-                    format!(
-                        "local_app_completion_unverified: terminal spool replacement failed: {error}"
-                    )
+                    format!("completion_unverified: terminal spool replacement failed: {error}")
                 });
             let publication_pending = serde_json::json!({
                 "ok": false,
-                "error": "local_app_completion_unverified: QA publication pending",
+                "error": "completion_unverified: QA publication pending",
                 "verified": false,
             })
             .to_string();
@@ -4335,17 +4333,17 @@ impl TaskRegistry {
                                 tracing::warn!(
                                     task_id = %task_id,
                                     %error,
-                                    "canonical Local App result is authoritative in memory; physical spool persistence failed after Host publication"
+                                    "canonical managed-app result is authoritative in memory; physical spool persistence failed after Host publication"
                                 );
                             }
                             None
                         }
                         Err(error) => Some(format!(
-                            "local_app_completion_unverified: QA publication failed: {error}"
+                            "completion_unverified: QA publication failed: {error}"
                         )),
                     },
                     Err(error) => Some(format!(
-                        "local_app_completion_unverified: terminal spool replacement failed: {error}"
+                        "completion_unverified: terminal spool replacement failed: {error}"
                     )),
                 },
             };
@@ -6280,7 +6278,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             // The Host's minted authority, carried through verbatim. There is
             // deliberately no derivation here from `workflow_id` or `args`:
             // both are caller-supplied, and reading either would re-open the
-            // forgery vector `find_nonterminal_local_app_workflows`' doc
+            // forgery vector `find_nonterminal_managed_workflows`' doc
             // comment describes. See `LocalWorkflowTaskState::scope`.
             scope: scope.clone(),
         }),
@@ -6663,7 +6661,7 @@ pub fn register_fusion_handler_with_recorder_factory(
 /// exactly `an_adopted_in_flight_build_still_blocks_its_apps_delete` and
 /// `an_adopted_forged_workflow_still_gets_no_scope` live in
 /// `engine-mobile`'s `workflow_support::run_id_tests` instead, where they
-/// exercise the real `resolve_adopted_local_app_build_scope` re-derivation
+/// exercise the real adoption re-derivation
 /// end to end against real checkpoint/manifest fixtures -- that is where the
 /// residual actually lived, so that is where the requested test names carry
 /// the load-bearing coverage.
@@ -7341,12 +7339,12 @@ mod adopted_workflow_scope_test {
             // A real build workflow's name -- exactly what a forged
             // checkpoint would also carry (see `AdoptedWorkflow`'s doc
             // comment). Both tests below prove the guard no longer cares.
-            workflow_id: "lingxi-local-app:local-app-build".to_string(),
+            workflow_id: "acme:app-build".to_string(),
             run_id: run_id.to_string(),
             script_path: "/workspace/.lingxi/workflows/build.js".to_string(),
             args: Some(format!(r#"{{"app_id":"{args_app_id}"}}"#)),
             transcript_dir: format!("/sessions/s1/subagents/workflows/{run_id}"),
-            description: "Build local app".to_string(),
+            description: "Build app".to_string(),
             start_time: SystemTime::now(),
         }
     }
@@ -7362,7 +7360,7 @@ mod adopted_workflow_scope_test {
     #[tokio::test]
     async fn an_adopted_in_flight_build_still_blocks_its_apps_delete_at_the_registry_api() {
         let (_dir, _fs, registry) = make_registry();
-        let scope = crate::scope::LocalAppWorkflowTaskScope::for_build("resumed-app")
+        let scope = crate::scope::ManagedWorkflowScope::for_build("resumed-app")
             .expect("well-formed app id");
 
         registry
@@ -7380,7 +7378,7 @@ mod adopted_workflow_scope_test {
         );
         assert_eq!(
             registry
-                .find_nonterminal_local_app_workflows("resumed-app")
+                .find_nonterminal_managed_workflows("resumed-app")
                 .await,
             vec!["wadopted1".to_string()],
             "a build re-validated on adoption must still block its app's delete"
@@ -7412,7 +7410,7 @@ mod adopted_workflow_scope_test {
         );
         assert!(
             registry
-                .find_nonterminal_local_app_workflows("victim-app")
+                .find_nonterminal_managed_workflows("victim-app")
                 .await
                 .is_empty(),
             "a forged workflow_id/args.app_id pair must never block another \
@@ -7423,17 +7421,17 @@ mod adopted_workflow_scope_test {
     async fn running_scoped_workflow(
         registry: &TaskRegistry,
         task_id: &str,
-        purpose: crate::scope::LocalAppWorkflowPurpose,
+        purpose: crate::scope::ManagedWorkflowPurpose,
     ) {
         let scope = match purpose {
-            crate::scope::LocalAppWorkflowPurpose::Build => {
-                crate::scope::LocalAppWorkflowTaskScope::for_build("qa-app")
+            crate::scope::ManagedWorkflowPurpose::Build => {
+                crate::scope::ManagedWorkflowScope::for_build("qa-app")
             }
-            crate::scope::LocalAppWorkflowPurpose::UseTest => {
-                crate::scope::LocalAppWorkflowTaskScope::for_use_test("qa-app")
+            crate::scope::ManagedWorkflowPurpose::UseTest => {
+                crate::scope::ManagedWorkflowScope::for_use_test("qa-app")
             }
-            crate::scope::LocalAppWorkflowPurpose::McpAuthoring => {
-                crate::scope::LocalAppWorkflowTaskScope::for_mcp_authoring("qa-app")
+            crate::scope::ManagedWorkflowPurpose::McpAuthoring => {
+                crate::scope::ManagedWorkflowScope::for_mcp_authoring("qa-app")
             }
         }
         .expect("well-formed app id");
@@ -7459,26 +7457,22 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
-    async fn local_app_terminal_commit_publishes_spool_metadata_and_state_together() {
+    async fn managed_terminal_commit_publishes_spool_metadata_and_state_together() {
         let (_dir, _fs, registry) = make_registry();
         running_scoped_workflow(
             &registry,
             "wcommit01",
-            crate::scope::LocalAppWorkflowPurpose::UseTest,
+            crate::scope::ManagedWorkflowPurpose::UseTest,
         )
         .await;
         let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = published.clone();
 
         let (actual, committed) = registry
-            .commit_local_app_workflow_terminal(
-                "wcommit01",
-                checked_outcome(),
-                move || async move {
-                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok(())
-                },
-            )
+            .commit_managed_workflow_terminal("wcommit01", checked_outcome(), move || async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
             .await
             .expect("commit success");
 
@@ -7497,12 +7491,12 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
-    async fn published_local_app_stays_completed_when_final_spool_write_fails() {
+    async fn published_managed_stays_completed_when_final_spool_write_fails() {
         let (_dir, fs, registry) = make_registry();
         running_scoped_workflow(
             &registry,
             "wcommit08",
-            crate::scope::LocalAppWorkflowPurpose::UseTest,
+            crate::scope::ManagedWorkflowPurpose::UseTest,
         )
         .await;
         registry
@@ -7523,14 +7517,10 @@ mod adopted_workflow_scope_test {
         let flag = published.clone();
 
         let (actual, committed) = registry
-            .commit_local_app_workflow_terminal(
-                "wcommit08",
-                checked_outcome(),
-                move || async move {
-                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok(())
-                },
-            )
+            .commit_managed_workflow_terminal("wcommit08", checked_outcome(), move || async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
             .await
             .expect("Host publication is the commit point");
 
@@ -7587,12 +7577,12 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
-    async fn killed_local_app_never_runs_the_prepared_publication_commit() {
+    async fn killed_managed_never_runs_the_prepared_publication_commit() {
         let (_dir, _fs, registry) = make_registry();
         running_scoped_workflow(
             &registry,
             "wcommit02",
-            crate::scope::LocalAppWorkflowPurpose::Build,
+            crate::scope::ManagedWorkflowPurpose::Build,
         )
         .await;
         registry
@@ -7603,14 +7593,10 @@ mod adopted_workflow_scope_test {
         let flag = published.clone();
 
         let (actual, committed) = registry
-            .commit_local_app_workflow_terminal(
-                "wcommit02",
-                checked_outcome(),
-                move || async move {
-                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok(())
-                },
-            )
+            .commit_managed_workflow_terminal("wcommit02", checked_outcome(), move || async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
             .await
             .expect("return authoritative terminal row");
 
@@ -7620,12 +7606,12 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
-    async fn prior_completed_local_app_does_not_claim_a_skipped_publication_commit() {
+    async fn prior_completed_managed_does_not_claim_a_skipped_publication_commit() {
         let (_dir, _fs, registry) = make_registry();
         running_scoped_workflow(
             &registry,
             "wcommit06",
-            crate::scope::LocalAppWorkflowPurpose::Build,
+            crate::scope::ManagedWorkflowPurpose::Build,
         )
         .await;
         registry
@@ -7636,14 +7622,10 @@ mod adopted_workflow_scope_test {
         let flag = published.clone();
 
         let (actual, committed) = registry
-            .commit_local_app_workflow_terminal(
-                "wcommit06",
-                checked_outcome(),
-                move || async move {
-                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok(())
-                },
-            )
+            .commit_managed_workflow_terminal("wcommit06", checked_outcome(), move || async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
             .await
             .expect("return authoritative completed row");
 
@@ -7653,17 +7635,17 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
-    async fn local_app_publication_failure_is_one_canonical_failed_terminal() {
+    async fn managed_publication_failure_is_one_canonical_failed_terminal() {
         let (_dir, _fs, registry) = make_registry();
         running_scoped_workflow(
             &registry,
             "wcommit03",
-            crate::scope::LocalAppWorkflowPurpose::Build,
+            crate::scope::ManagedWorkflowPurpose::Build,
         )
         .await;
 
         let (actual, committed) = registry
-            .commit_local_app_workflow_terminal("wcommit03", checked_outcome(), || async {
+            .commit_managed_workflow_terminal("wcommit03", checked_outcome(), || async {
                 Err("injected pointer commit failure".into())
             })
             .await
@@ -7697,12 +7679,12 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
-    async fn local_app_publication_failure_fails_closed_when_failure_spool_rewrite_fails() {
+    async fn managed_publication_failure_fails_closed_when_failure_spool_rewrite_fails() {
         let (_dir, fs, registry) = make_registry();
         running_scoped_workflow(
             &registry,
             "wcommit07",
-            crate::scope::LocalAppWorkflowPurpose::Build,
+            crate::scope::ManagedWorkflowPurpose::Build,
         )
         .await;
         registry
@@ -7722,7 +7704,7 @@ mod adopted_workflow_scope_test {
             .store(placeholder_write + 1, std::sync::atomic::Ordering::SeqCst);
 
         let (actual, committed) = registry
-            .commit_local_app_workflow_terminal("wcommit07", checked_outcome(), || async {
+            .commit_managed_workflow_terminal("wcommit07", checked_outcome(), || async {
                 Err("injected pointer commit failure".into())
             })
             .await
@@ -7822,12 +7804,12 @@ mod adopted_workflow_scope_test {
     }
 
     #[tokio::test]
-    async fn local_app_spool_failure_never_publishes_or_completes() {
+    async fn managed_spool_failure_never_publishes_or_completes() {
         let (_dir, fs, registry) = make_registry();
         running_scoped_workflow(
             &registry,
             "wcommit04",
-            crate::scope::LocalAppWorkflowPurpose::UseTest,
+            crate::scope::ManagedWorkflowPurpose::UseTest,
         )
         .await;
         fs.fail_writes
@@ -7836,14 +7818,10 @@ mod adopted_workflow_scope_test {
         let flag = published.clone();
 
         let (actual, committed) = registry
-            .commit_local_app_workflow_terminal(
-                "wcommit04",
-                checked_outcome(),
-                move || async move {
-                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok(())
-                },
-            )
+            .commit_managed_workflow_terminal("wcommit04", checked_outcome(), move || async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
             .await
             .expect("spool failure becomes task failure");
 
@@ -7877,21 +7855,17 @@ mod adopted_workflow_scope_test {
         running_scoped_workflow(
             &registry,
             "wcommit05",
-            crate::scope::LocalAppWorkflowPurpose::McpAuthoring,
+            crate::scope::ManagedWorkflowPurpose::McpAuthoring,
         )
         .await;
         let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = published.clone();
 
         let error = registry
-            .commit_local_app_workflow_terminal(
-                "wcommit05",
-                checked_outcome(),
-                move || async move {
-                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok(())
-                },
-            )
+            .commit_managed_workflow_terminal("wcommit05", checked_outcome(), move || async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
             .await
             .expect_err("only Build/UseTest may commit QA publication");
 

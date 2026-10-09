@@ -10,23 +10,7 @@ use tokio::time::Instant;
 /// Cancellation scope shared by the driver and locally registered handlers.
 pub use tokio_util::sync::CancellationToken;
 
-/// An SDK result error, retaining the native code and structured data.
-#[derive(Debug, Clone, PartialEq, Error)]
-#[error("{message}")]
-pub struct McpSdkError {
-    pub code: &'static str,
-    pub message: String,
-    pub data: Option<Value>,
-}
-impl McpSdkError {
-    fn new(code: &'static str, message: impl Into<String>, data: Option<Value>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            data,
-        }
-    }
-}
+pub use mcp_wire::transport::McpSdkError;
 
 #[derive(Debug, Error)]
 pub enum McpResultError {

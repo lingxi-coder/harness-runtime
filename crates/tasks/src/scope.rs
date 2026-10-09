@@ -1,89 +1,62 @@
-//! Typed Local App workflow authority (design §18 Phase -1 step 8).
+//! Typed workflow authority for host-managed apps.
 //!
 //! # The problem this type replaces
 //!
-//! Three things used to derive Local App authority from a workflow's NAME:
-//! `registry.rs`'s `find_nonterminal_local_app_workflows` (delete guard) and
-//! `handlers/local_workflow.rs`'s `requires_workspace_lease` both asked "is
-//! `workflow_id` a member of this crate's (now-deleted) `LOCAL_APP_BUILD_WORKFLOWS`?".
-//! A `workflow_id`/`meta.name` is a string a *caller* supplies when launching
-//! a workflow -- so any custom workflow that happens to reuse one of those
-//! names got the same answer as the real one. Both now read a scope instead.
+//! Authority over a managed app used to be derived from a workflow's NAME:
+//! the delete guard (`registry.rs`'s `find_nonterminal_managed_workflows`) and
+//! the workspace-lease check (`handlers/local_workflow.rs`'s
+//! `requires_workspace_lease`) both asked "is `workflow_id` one of the build
+//! workflows?". A `workflow_id`/`meta.name` is a string a *caller* supplies
+//! when launching a workflow, so any custom workflow that happened to reuse
+//! one of those names got the same answer as the real one. Both now read a
+//! scope instead.
 //!
-//! Design §18 Phase -1 step 9 additionally called for the app's stored
-//! `workflowModel` (`local_apps::types`'s `workflow_model` field, accepted on
-//! the `scaffold` MCP tool and persisted by `LocalAppsService::commit_scaffold`)
-//! to key a `workflowModel` default the same way. As of this correction that
-//! step is unimplemented: `workflow_model` is written and preserved across
-//! scaffold/update, but `git grep -n 'workflow_model\|workflowModel'` across
-//! the tree turns up no production reader of the persisted value, and
-//! `tool_workflow::BuiltinWorkflowDescriptor` (`tools/workflow/src/builtins.rs`)
-//! has no `is_local_app_build` field or method -- a name a stale copy of this
-//! very comment once claimed existed. Do not restate either "keyed on the
-//! script's identity" or "keys on the name" here until a real reader exists;
-//! today there is none.
-//!
-//! The three sibling comments in `apps/engine-mobile` that used to repeat the
-//! same non-existent symbol (`local_apps_build.rs`'s test-module tail,
-//! `tests/component_literal_scan.rs`'s module doc and
-//! `tests/component_literal_allowlist.txt`'s `tasks/src` section) have all
-//! been corrected; the scan one additionally named
-//! `BUILTIN_WORKFLOWS.local_app_build_workflow_names()`, which does not exist
-//! either. What replaced `tool_workflow`'s array is nothing: Phase 9 moved the
-//! Local App workflows into the plugin bundle, so `tool_workflow` no longer
-//! answers "which workflows build a Local App" at all, and the only surviving
-//! enumeration of those basenames is `component_literal_scan.rs`'s
-//! `local_app_workflow_basenames()`.
-//!
-//! [`LocalAppWorkflowTaskScope`] is the replacement authority token: the Host
-//! (the composition binding that just resolved a real `LocalAppPluginBinding`
-//! handle) mints one by calling the constructor for the capability slot it
-//! actually resolved, and the guards read the scope instead of a name.
+//! [`ManagedWorkflowScope`] is the replacement authority token: the Host (the
+//! composition binding that just resolved a real plugin-workflow binding)
+//! mints one by calling the constructor for the capability slot it actually
+//! resolved, and the guards read the scope instead of a name.
 //!
 //! # What this type guarantees
 //!
 //! 1. **Every construction path is a purpose constructor.** The only ways to
-//!    obtain a value are [`LocalAppWorkflowTaskScope::for_build`],
-//!    [`LocalAppWorkflowTaskScope::for_use_test`] and
-//!    [`LocalAppWorkflowTaskScope::for_mcp_authoring`]. There is no
-//!    `Default`, no `From`/`FromStr`/`TryFrom`, no `Deserialize` (see below),
-//!    no public field and no `&mut` accessor, and both fields are private --
-//!    so callers must choose a purpose explicitly at a constructor call and
-//!    cannot edit it after the fact. This type does not prove that the Host
-//!    made that choice; provenance remains the Host integration's obligation.
+//!    obtain a value are [`ManagedWorkflowScope::for_build`],
+//!    [`ManagedWorkflowScope::for_use_test`] and
+//!    [`ManagedWorkflowScope::for_mcp_authoring`]. There is no `Default`, no
+//!    `From`/`FromStr`/`TryFrom`, no `Deserialize` (see below), no public
+//!    field and no `&mut` accessor, and both fields are private -- so callers
+//!    must choose a purpose explicitly at a constructor call and cannot edit
+//!    it after the fact. This type does not prove that the Host made that
+//!    choice; provenance remains the Host integration's obligation.
 //! 2. **`app_id` is well formed.** Every constructor is fallible and rejects
-//!    an `app_id` that does not match `^[a-z0-9][a-z0-9-]{0,53}$` -- the same
-//!    grammar `local_apps::ids::is_valid_app_id` enforces before an id is
-//!    ever used in a path. `tasks` deliberately does NOT depend on
-//!    `local-apps` for this (see `MIRRORED GRAMMAR` below), so the check is a
-//!    local copy of a 6-line predicate, not a shared type.
+//!    an `app_id` that does not match `^[a-z0-9][a-z0-9-]{0,53}$` -- the grammar
+//!    an id must satisfy before it is ever used in a path. `tasks`
+//!    deliberately does NOT depend on the app service for this (see
+//!    `MIRRORED GRAMMAR` below), so the check is a local copy of a 6-line
+//!    predicate, not a shared type.
 //!
 //! # What this type does NOT guarantee
 //!
 //! **Ownership.** Well-formedness is not provenance. `for_build("victim")`
 //! succeeds for any well-formed id, including one belonging to somebody
 //! else's app, and the type has no way to know which app the caller is
-//! entitled to. Design §8.1 requires that a custom workflow get nothing
-//! "即使伪造 `meta.name` 或 `args.app_id`" -- the `meta.name` half is closed
-//! by construction (guarantee 1); the `args.app_id` half is the **Host's**
+//! entitled to. A custom workflow must get nothing even if it forges
+//! `meta.name` or `args.app_id`: the `meta.name` half is closed by
+//! construction (guarantee 1); the `args.app_id` half is the **Host's**
 //! obligation, and this type cannot discharge it. Passing `args.app_id`
 //! straight into a constructor hands a hostile app the victim's lease and
 //! delete guard, and nothing in this module will notice.
 //!
 //! What the Host owes is not "never let the string originate in `args`" --
-//! the app id has to be named somewhere, and a
-//! `LocalAppPluginBinding` handle names a WORKFLOW, not an app. What it owes
-//! is that the id be one it RESOLVED rather than one it was told: before
-//! minting, the Host must have established from its own state that the id
-//! names a real, fully scaffolded app whose materialized manifest and binding
-//! authorize exactly the workflow that is about to run, and that the script
-//! is that workflow rather than something wearing its name. `engine-mobile`'s
-//! `apply_materialized_local_app_collections_with_identity` is one seam that
-//! does this; its constructor call documents the checks that stand between
-//! `args` and this type. Live launch enrichment and
-//! `resolve_adopted_local_app_scope` mint Build/UseTest scopes only after
-//! verifying the plugin script and Host-owned app state. MCP authoring follows
-//! the same "resolved, not told" duty at its launch mint.
+//! the app id has to be named somewhere, and a plugin-workflow binding names
+//! a WORKFLOW, not an app. What it owes is that the id be one it RESOLVED
+//! rather than one it was told: before minting, the Host must have
+//! established from its own state that the id names a real, fully scaffolded
+//! app whose materialized manifest and binding authorize exactly the
+//! workflow that is about to run, and that the script is that workflow
+//! rather than something wearing its name. Live launch enrichment and
+//! restart adoption mint Build/UseTest scopes only after verifying the plugin
+//! script and Host-owned app state; MCP authoring follows the same "resolved,
+//! not told" duty at its launch mint.
 //!
 //! It also does not guarantee the id names an app that exists, or that the
 //! app is in a state where the purpose makes sense. Those are lookups, and
@@ -91,12 +64,12 @@
 //!
 //! # serde surface
 //!
-//! [`LocalAppWorkflowTaskScope`] implements `Serialize` and **not**
-//! `Deserialize`, and that asymmetry is deliberate:
+//! [`ManagedWorkflowScope`] implements `Serialize` and **not** `Deserialize`,
+//! and that asymmetry is deliberate:
 //!
 //! - `Serialize` is legitimate: persisting a task's scope alongside its state
-//!   is what step 8 asks for, and writing a scope out cannot create authority
-//!   that did not already exist.
+//!   is what the design asks for, and writing a scope out cannot create
+//!   authority that did not already exist.
 //! - `Deserialize` would be a public, name-accepting constructor. A
 //!   `#[derive(Deserialize)]` ignores field privacy: it builds the struct
 //!   from any `{"app_id": …, "purpose": …}` object, which is exactly the
@@ -117,43 +90,25 @@
 //! undo guarantee 1 for every present and future holder.
 //! The test `scope_type_does_not_implement_deserialize` below pins this.
 //!
-//! [`LocalAppWorkflowPurpose`] keeps `Deserialize`: a purpose on its own
+//! [`ManagedWorkflowPurpose`] keeps `Deserialize`: a purpose on its own
 //! carries no authority (it names no app), and the store side needs to read
 //! the discriminant back. It is the *pair* that is authority.
 //!
 //! # MIRRORED GRAMMAR
 //!
-//! `local_apps::ids::is_valid_app_id` is the original. `tasks` does not take
-//! a PRODUCTION dependency on `local-apps`: both crates classify as `engine`
-//! so `scripts/checks/check_deps.py` would permit the edge, but `local-apps` pulls
-//! bundled SQLite, vendored libgit2 and two tree-sitter grammars into
-//! `tasks`, and `tasks` has five dependents (including `cron` and
-//! `coordinator`, which build none of that today) for what is a six-line
-//! predicate. The copy is pinned by the test
-//! `app_id_grammar_matches_the_local_apps_corpus` below, whose corpus is
-//! the one from `local_apps::ids`'s own tests.
-//!
-//! A DEV-dependency is a different tradeoff: `check_deps.py` excludes
-//! dev-dependencies from its edge check, so it costs the five dependents
-//! nothing, and it lets `app_id_grammar_agrees_with_local_apps_ids` call the
-//! real `local_apps::ids::is_valid_app_id` directly instead of trusting that
-//! the copied corpus above was transcribed correctly -- so `tasks/Cargo.toml`
-//! carries that dev-dependency and both tests run.
-//!
-//! # Scope of this module
-//!
-//! This module only introduces the type. The two `tasks` call sites above now
-//! read a scope, which reaches a task row through
-//! [`crate::task_trait::TaskSpawnInput::LocalWorkflow`]'s `scope` field. The
-//! design §18 Phase -1 step 9 `workflowModel` default has no implementation
-//! to migrate onto a scope yet -- see the module-level note above.
+//! The app-id grammar's original lives in the app service's contracts crate.
+//! `tasks` has dependents (including `cron` and `coordinator`) that build
+//! none of what the service pulls in, so it keeps a six-line copy of the
+//! predicate instead of depending on it. The copy is pinned here by
+//! `app_id_grammar_matches_the_shared_corpus`; the composition root, which
+//! can see both sides, runs the same corpus through the original and this
+//! copy and fails if they ever disagree.
 
 use serde::{Deserialize, Serialize};
 
-/// Why a Local App workflow is running. The three purposes named by design
-/// §18 Phase -1 step 8 / §8.1's `LocalAppWorkflowTaskScope` sketch.
+/// Why a managed-app workflow is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum LocalAppWorkflowPurpose {
+pub enum ManagedWorkflowPurpose {
     /// Builds/updates the app's workspace. The only purpose that takes the
     /// exclusive workspace permission lease.
     Build,
@@ -164,12 +119,12 @@ pub enum LocalAppWorkflowPurpose {
 }
 
 /// Longest accepted app id -- the `{0,53}` tail plus the leading character,
-/// matching `local_apps::ids::APP_ID_MAX_LEN`.
+/// matching the service's own `APP_ID_MAX_LEN`.
 const APP_ID_MAX_LEN: usize = 54;
 
 /// True iff `id` matches `^[a-z0-9][a-z0-9-]{0,53}$`.
 ///
-/// A local mirror of `local_apps::ids::is_valid_app_id`; see the module docs'
+/// A local mirror of the service's id predicate; see the module docs'
 /// `MIRRORED GRAMMAR` section for why it is a copy and what pins it.
 fn is_well_formed_app_id(id: &str) -> bool {
     let bytes = id.as_bytes();
@@ -200,7 +155,7 @@ impl MalformedAppId {
     }
 }
 
-/// Caller-unsettable Local App workflow authority: which app, and why this
+/// Caller-unsettable managed-app workflow authority: which app, and why this
 /// workflow run is allowed to touch it.
 ///
 /// Read the module docs before using this: it guarantees that the *purpose*
@@ -208,18 +163,18 @@ impl MalformedAppId {
 /// formed. It deliberately guarantees neither that the Host minted it nor
 /// that the caller was entitled to that app id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-pub struct LocalAppWorkflowTaskScope {
+pub struct ManagedWorkflowScope {
     app_id: String,
-    purpose: LocalAppWorkflowPurpose,
+    purpose: ManagedWorkflowPurpose,
 }
 
-impl LocalAppWorkflowTaskScope {
+impl ManagedWorkflowScope {
     /// The single private mint. Every public constructor differs only in the
     /// purpose it hard-codes, so there is exactly one place where the
     /// grammar check can be forgotten.
     fn checked(
         app_id: impl Into<String>,
-        purpose: LocalAppWorkflowPurpose,
+        purpose: ManagedWorkflowPurpose,
     ) -> Result<Self, MalformedAppId> {
         let app_id = app_id.into();
         if !is_well_formed_app_id(&app_id) {
@@ -235,7 +190,7 @@ impl LocalAppWorkflowTaskScope {
     /// # Errors
     /// [`MalformedAppId`] if `app_id` does not match the app-id grammar.
     pub fn for_build(app_id: impl Into<String>) -> Result<Self, MalformedAppId> {
-        Self::checked(app_id, LocalAppWorkflowPurpose::Build)
+        Self::checked(app_id, ManagedWorkflowPurpose::Build)
     }
 
     /// Scope for `app_id`'s use-test workflow run.
@@ -243,7 +198,7 @@ impl LocalAppWorkflowTaskScope {
     /// # Errors
     /// [`MalformedAppId`] if `app_id` does not match the app-id grammar.
     pub fn for_use_test(app_id: impl Into<String>) -> Result<Self, MalformedAppId> {
-        Self::checked(app_id, LocalAppWorkflowPurpose::UseTest)
+        Self::checked(app_id, ManagedWorkflowPurpose::UseTest)
     }
 
     /// Scope for `app_id`'s MCP-authoring workflow run.
@@ -251,7 +206,7 @@ impl LocalAppWorkflowTaskScope {
     /// # Errors
     /// [`MalformedAppId`] if `app_id` does not match the app-id grammar.
     pub fn for_mcp_authoring(app_id: impl Into<String>) -> Result<Self, MalformedAppId> {
-        Self::checked(app_id, LocalAppWorkflowPurpose::McpAuthoring)
+        Self::checked(app_id, ManagedWorkflowPurpose::McpAuthoring)
     }
 
     /// The app this scope grants authority over.
@@ -260,7 +215,7 @@ impl LocalAppWorkflowTaskScope {
     }
 
     /// Why this workflow run is allowed to touch `app_id`.
-    pub fn purpose(&self) -> LocalAppWorkflowPurpose {
+    pub fn purpose(&self) -> ManagedWorkflowPurpose {
         self.purpose
     }
 
@@ -268,7 +223,7 @@ impl LocalAppWorkflowTaskScope {
     /// a `Build`-purpose scope should let its holder take the app's
     /// workspace permission lease.
     pub fn requires_workspace_lease(&self) -> bool {
-        matches!(self.purpose, LocalAppWorkflowPurpose::Build)
+        matches!(self.purpose, ManagedWorkflowPurpose::Build)
     }
 
     /// Design: "`tasks` 对所有三种 purpose 都让 App delete guard 按 app ID
@@ -287,7 +242,7 @@ impl LocalAppWorkflowTaskScope {
     ///
     /// So "every purpose blocks delete" is enforced and exercised for all
     /// three purposes; `registry.rs`'s
-    /// `find_nonterminal_local_app_workflows` carries the same note, and
+    /// `find_nonterminal_managed_workflows` carries the same note, and
     /// `registry_test.rs` pins each purpose at that guard.
     pub fn blocks_delete(&self) -> bool {
         true
@@ -347,10 +302,10 @@ mod tests {
     /// withhold. It must stay absent.
     ///
     /// The two controls are the point: `String` and
-    /// [`LocalAppWorkflowPurpose`] prove the probe can answer `true`, so a
+    /// [`ManagedWorkflowPurpose`] prove the probe can answer `true`, so a
     /// `false` for the scope is a measurement and not a probe that never
     /// fires. Re-add `#[derive(Deserialize)]` to
-    /// [`LocalAppWorkflowTaskScope`] and this test goes red.
+    /// [`ManagedWorkflowScope`] and this test goes red.
     #[test]
     fn scope_type_does_not_implement_deserialize() {
         assert!(
@@ -358,13 +313,13 @@ mod tests {
             "probe control: String does implement DeserializeOwned"
         );
         assert!(
-            implements_deserialize!(LocalAppWorkflowPurpose),
+            implements_deserialize!(ManagedWorkflowPurpose),
             "probe control: purpose keeps Deserialize on purpose (see module docs)"
         );
 
         assert!(
-            !implements_deserialize!(LocalAppWorkflowTaskScope),
-            "LocalAppWorkflowTaskScope must NOT implement Deserialize: a derive \
+            !implements_deserialize!(ManagedWorkflowScope),
+            "ManagedWorkflowScope must NOT implement Deserialize: a derive \
              would let `serde_json::from_str(r#\"{{\"app_id\":\"victim\",\
              \"purpose\":\"Build\"}}\"#)` mint a Build scope for any app. See the \
              module docs' `serde surface` section before changing this."
@@ -375,7 +330,7 @@ mod tests {
     /// and serialising a scope cannot create authority.
     #[test]
     fn scope_still_serializes_for_persistence() {
-        let scope = LocalAppWorkflowTaskScope::for_build("app-1").expect("well-formed id");
+        let scope = ManagedWorkflowScope::for_build("app-1").expect("well-formed id");
         let json = serde_json::to_string(&scope).expect("serializes");
         assert_eq!(json, r#"{"app_id":"app-1","purpose":"Build"}"#);
     }
@@ -393,11 +348,11 @@ mod tests {
     fn scope_purpose_is_explicit_not_derived_from_meta_name() {
         let workflow_looking_id = "plugin-build-name";
 
-        let scope = LocalAppWorkflowTaskScope::for_use_test(workflow_looking_id)
+        let scope = ManagedWorkflowScope::for_use_test(workflow_looking_id)
             .expect("workflow-looking strings that satisfy app-id grammar stay ordinary app ids");
 
         assert_eq!(scope.app_id(), workflow_looking_id);
-        assert_eq!(scope.purpose(), LocalAppWorkflowPurpose::UseTest);
+        assert_eq!(scope.purpose(), ManagedWorkflowPurpose::UseTest);
         assert!(!scope.requires_workspace_lease());
     }
 
@@ -424,9 +379,9 @@ mod tests {
             too_long.as_str(),
         ] {
             for made in [
-                LocalAppWorkflowTaskScope::for_build(bad),
-                LocalAppWorkflowTaskScope::for_use_test(bad),
-                LocalAppWorkflowTaskScope::for_mcp_authoring(bad),
+                ManagedWorkflowScope::for_build(bad),
+                ManagedWorkflowScope::for_use_test(bad),
+                ManagedWorkflowScope::for_mcp_authoring(bad),
             ] {
                 let err = made.expect_err(&format!("expected {bad:?} to be rejected"));
                 assert_eq!(err.app_id(), bad);
@@ -440,18 +395,17 @@ mod tests {
     /// resolved binding, never from caller-supplied args.
     #[test]
     fn a_well_formed_victim_app_id_is_still_accepted() {
-        let victim = LocalAppWorkflowTaskScope::for_build("victim-app")
+        let victim = ManagedWorkflowScope::for_build("victim-app")
             .expect("`victim-app` is well formed; ownership is the Host's to check");
         assert_eq!(victim.app_id(), "victim-app");
         assert!(victim.requires_workspace_lease());
     }
 
-    /// Pins the mirrored grammar against the corpus `local_apps::ids`'s own
-    /// tests use. `tasks` cannot reach that crate (module docs,
-    /// `MIRRORED GRAMMAR`), so drift shows up as a difference between these
-    /// two lists rather than as a link error.
+    /// Pins the mirrored grammar against the corpus the service's own id tests
+    /// use. `tasks` cannot reach the service (module docs, `MIRRORED
+    /// GRAMMAR`); the composition root runs this same corpus through both.
     #[test]
-    fn app_id_grammar_matches_the_local_apps_corpus() {
+    fn app_id_grammar_matches_the_shared_corpus() {
         let max_len = "a".repeat(APP_ID_MAX_LEN);
         for id in ["a", "0", "abc-123", "9-", max_len.as_str()] {
             assert!(is_well_formed_app_id(id), "expected valid: {id}");
@@ -476,80 +430,37 @@ mod tests {
         }
     }
 
-    /// Real cross-crate agreement, as a DEV-dependency (see module docs'
-    /// `MIRRORED GRAMMAR`): calls the ACTUAL `local_apps::ids::is_valid_app_id`
-    /// side by side with this module's mirrored `is_well_formed_app_id`
-    /// across one shared corpus, so a future edit to either grammar that
-    /// silently drifts from the other fails HERE, not by two independently
-    /// "passing" tests that quietly stopped agreeing.
-    #[test]
-    fn app_id_grammar_agrees_with_local_apps_ids() {
-        let max_len = "a".repeat(APP_ID_MAX_LEN);
-        let valid = ["a", "0", "abc-123", "9-", max_len.as_str()];
-        let too_long = "a".repeat(APP_ID_MAX_LEN + 1);
-        let invalid = [
-            "",
-            "-leading-dash",
-            "Upper",
-            "under_score",
-            "spa ce",
-            "..",
-            "../evil",
-            "a/b",
-            "a\\b",
-            "a.b",
-            "über",
-            too_long.as_str(),
-        ];
-        for id in valid {
-            assert_eq!(
-                is_well_formed_app_id(id),
-                local_apps::ids::is_valid_app_id(id),
-                "grammars disagree on {id:?} (expected both to accept)"
-            );
-            assert!(is_well_formed_app_id(id), "expected valid: {id}");
-        }
-        for id in invalid {
-            assert_eq!(
-                is_well_formed_app_id(id),
-                local_apps::ids::is_valid_app_id(id),
-                "grammars disagree on {id:?} (expected both to reject)"
-            );
-            assert!(!is_well_formed_app_id(id), "expected invalid: {id}");
-        }
-    }
-
     #[test]
     fn only_build_purpose_requires_a_workspace_lease() {
-        assert!(LocalAppWorkflowTaskScope::for_build("app-1")
+        assert!(ManagedWorkflowScope::for_build("app-1")
             .expect("valid")
             .requires_workspace_lease());
-        assert!(!LocalAppWorkflowTaskScope::for_use_test("app-1")
+        assert!(!ManagedWorkflowScope::for_use_test("app-1")
             .expect("valid")
             .requires_workspace_lease());
-        assert!(!LocalAppWorkflowTaskScope::for_mcp_authoring("app-1")
+        assert!(!ManagedWorkflowScope::for_mcp_authoring("app-1")
             .expect("valid")
             .requires_workspace_lease());
     }
 
     #[test]
     fn every_purpose_blocks_delete() {
-        assert!(LocalAppWorkflowTaskScope::for_build("app-1")
+        assert!(ManagedWorkflowScope::for_build("app-1")
             .expect("valid")
             .blocks_delete());
-        assert!(LocalAppWorkflowTaskScope::for_use_test("app-1")
+        assert!(ManagedWorkflowScope::for_use_test("app-1")
             .expect("valid")
             .blocks_delete());
-        assert!(LocalAppWorkflowTaskScope::for_mcp_authoring("app-1")
+        assert!(ManagedWorkflowScope::for_mcp_authoring("app-1")
             .expect("valid")
             .blocks_delete());
     }
 
     #[test]
     fn purpose_and_app_id_round_trip_distinct_apps() {
-        let build = LocalAppWorkflowTaskScope::for_build("app-a").expect("valid");
-        let use_test = LocalAppWorkflowTaskScope::for_use_test("app-b").expect("valid");
-        let mcp = LocalAppWorkflowTaskScope::for_mcp_authoring("app-c").expect("valid");
+        let build = ManagedWorkflowScope::for_build("app-a").expect("valid");
+        let use_test = ManagedWorkflowScope::for_use_test("app-b").expect("valid");
+        let mcp = ManagedWorkflowScope::for_mcp_authoring("app-c").expect("valid");
 
         assert_eq!(build.app_id(), "app-a");
         assert_eq!(use_test.app_id(), "app-b");

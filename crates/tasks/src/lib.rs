@@ -39,23 +39,10 @@ pub mod scope;
 pub mod state;
 pub mod task_trait;
 
-// `LOCAL_APP_BUILD_WORKFLOWS` (P-1.7 doc'd it as unable to delete this
-// const because `engine-mobile`'s `local_app_build_workflow_sets_agree`
-// twinned it against `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`) is gone as
-// of P-1.9: this crate's own guards already read a task's typed
-// `scope::LocalAppWorkflowTaskScope` instead of a workflow-name string (see
-// `registry::TaskRegistry::find_nonterminal_local_app_workflows` and
-// `handlers::local_workflow::requires_workspace_lease`), and the ONLY other
-// reader was that twin-agreement test, so there is no second list left
-// anywhere to twin this crate's (deleted) list against.
-//
-// NOTE: an earlier version of this comment additionally claimed
-// `tool_workflow::BuiltinWorkflowDescriptor` carries a typed
-// `is_local_app_build` field/method answering the same question over there.
-// It does not (`tools/workflow/src/builtins.rs`'s descriptor has only
-// `name`/`description`/`script`/`manual_only`); no such symbol exists
-// anywhere in the tree. Do not resurrect that claim without a grep proving
-// the symbol first.
+// This crate's guards read a task's typed `scope::ManagedWorkflowScope`, not a workflow-name
+// string (see `registry::TaskRegistry::find_nonterminal_managed_workflows` and
+// `handlers::local_workflow::requires_workspace_lease`). There is no list of workflow names
+// anywhere to keep in step with it.
 
 pub use handlers::{
     escape_xml, fusion_result_xml, DreamHandler, InProcessTeammateHandler, LocalAgentHandler,
@@ -66,7 +53,7 @@ pub use registry::{
     register_agent_handlers, register_dream_handler, register_fusion_handler,
     register_self_contained_handlers,
 };
-pub use scope::{LocalAppWorkflowPurpose, LocalAppWorkflowTaskScope, MalformedAppId};
+pub use scope::{MalformedAppId, ManagedWorkflowPurpose, ManagedWorkflowScope};
 pub use state::*;
 pub use task_trait::*;
 

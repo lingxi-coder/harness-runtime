@@ -105,11 +105,14 @@ mobile = [
     "workflow",
     "dep:provider-config",
     "dep:local-apps",
+    "dep:local-app-builder-contracts",
+    "dep:local-app-builder-plugin",
+    "dep:mcp-wire",
+    "dep:local-app-builder-service",
+    "dep:rooted-fs",
     "dep:jsonrpc",
     "dep:tool-mcp",
     "dep:futures-util",
-    "dep:reqwest",
-    "reqwest/rustls-tls",
     "dep:sha2",
     "dep:uuid",
     "dep:plugin",
@@ -198,10 +201,14 @@ futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
-local-apps = { path = "../local-apps", optional = true }
+local-app-builder-contracts = { workspace = true, optional = true }
+local-app-builder-plugin = { workspace = true, optional = true }
+local-app-builder-service = { workspace = true, optional = true }
+local-apps = { workspace = true, optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }
 mcp = { path = "../mcp", optional = true }
+mcp-wire = { workspace = true, optional = true }
 memory = { path = "../memory", optional = true }
 migrations = { path = "../migrations", optional = true }
 llm-runtime = { path = "../llm-runtime" }
@@ -215,7 +222,7 @@ platform-posix = { path = "../platforms/posix", optional = true }
 platform-posix-minimal = { path = "../platforms/posix-minimal", optional = true }
 plugin = { path = "../plugin", optional = true }
 provider-config = { path = "../provider-config", optional = true }
-reqwest = { version = "=0.12.28", default-features = false, optional = true }
+rooted-fs = { workspace = true, optional = true }
 sandbox = { path = "../sandbox", optional = true }
 sandbox-runtime = { path = "../sandbox-runtime", optional = true }
 secret = { path = "../secret", optional = true }
@@ -258,7 +265,8 @@ uuid = { version = "1.10", optional = true }
 workflow = { path = "../workflow", optional = true }
 
 [build-dependencies]
-local-apps = { path = "../local-apps", optional = true }
+local-app-builder-plugin = { workspace = true, optional = true }
+local-apps = { workspace = true, optional = true }
 serde_json = { workspace = true }
 
 [target."cfg(unix)".dependencies]
@@ -274,6 +282,9 @@ platform-ios = { path = "../platforms/ios", optional = true }
 platform-android = { path = "../platforms/android", optional = true }
 
 [dev-dependencies]
+permission = { path = "../permission", features = ["test-support"] }
+# the role-schema tests compile the plugin's JSON schemas the way the agent runner does
+boon = "0.6"
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 toml = "0.8"
 async-trait = { workspace = true }
@@ -338,6 +349,16 @@ required-features = ["mobile"]
 [[test]]
 name = "local_app_image_read"
 path = "tests/mobile/local_app_image_read.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "local_app_role_schemas"
+path = "tests/mobile/local_app_role_schemas.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "plugin_workflow_scripts"
+path = "tests/mobile/plugin_workflow_scripts.rs"
 required-features = ["mobile"]
 
 [[test]]

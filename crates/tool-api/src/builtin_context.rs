@@ -235,7 +235,7 @@ pub struct BuiltinToolContext {
     /// desktop; mobile composition roots wire `platform.camera()` (a Swift /
     /// Kotlin impl via UniFFI).
     pub camera: Option<Arc<dyn CameraControl>>,
-    /// Unified per-device audio service. The audio tools, Local App adapter,
+    /// Unified per-device audio service. The audio tools, the app adapter,
     /// and Computer Use audio routes share this app-scoped service.
     pub audio: Option<Arc<dyn AudioService>>,
     /// Host-managed recording handles for public voice start/stop actions.

@@ -423,8 +423,8 @@ pub struct SubagentSpawnRequest {
 /// response stream and to each `stream.next()` wait. A stream that continues to
 /// produce events may run longer than this duration. `max_retries` counts
 /// retries after the initial attempt (default: one initial attempt plus at most
-/// five retries). Response-body recovery is disabled unless a trusted Local App
-/// create workflow explicitly enables it.
+/// five retries). Response-body recovery is disabled unless a trusted host-managed
+/// creation workflow explicitly enables it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowQueryWatchdog {
@@ -432,7 +432,7 @@ pub struct WorkflowQueryWatchdog {
     pub stall_timeout_ms: u64,
     /// Retry limit for watchdog timeouts, also shared by opted-in body recovery.
     pub max_retries: u32,
-    /// Host-only opt-in for Local App creation. Ordinary workflows retain their
+    /// Host-only opt-in for host-managed app creation. Ordinary workflows retain their
     /// existing watchdog behavior, and serialized callers cannot enable it.
     #[serde(skip)]
     pub retry_response_body: bool,

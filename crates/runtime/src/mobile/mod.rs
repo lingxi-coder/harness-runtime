@@ -87,27 +87,25 @@ pub mod builtin_bundle;
 #[cfg(feature = "mobile")]
 mod local_app_plugin_binding;
 #[cfg(feature = "mobile")]
-mod local_app_runtime_profiles;
-#[cfg(feature = "mobile")]
-mod local_app_template_catalog;
-#[cfg(feature = "mobile")]
-mod local_apps_build;
-#[cfg(feature = "mobile")]
-mod local_apps_host;
+use local_app_builder_service::template_catalog as local_app_template_catalog;
 // Live per-connection device handles (camera / audio / location /
 // notifications) behind a SharedLlm-style swap cell — see the module doc for
 // why a bare OnceLock would pin a torn-down engine's Swift objects.
-#[cfg(feature = "mobile")]
-mod local_apps_device;
 // LOCAL-APPS (v3): the app-facing LLM seam — `LocalAppsModel` + the
 // `ApiService`-backed `chat` used by the `llm.chat` bridge operation. The
 // designer/generation pipeline that used to live behind this seam is gone.
 #[cfg(feature = "mobile")]
 mod local_apps_llm;
 #[cfg(feature = "mobile")]
-mod local_apps_mcp;
-#[cfg(feature = "mobile")]
 mod local_apps_profile;
+// The edge between the Local App service's vocabulary (`local_app_builder_contracts`)
+// and the client protocol DTOs. Every crossing goes through it.
+#[cfg(feature = "mobile")]
+mod local_apps_adapters;
+#[cfg(feature = "mobile")]
+mod local_apps_sessions;
+#[cfg(feature = "mobile")]
+mod local_apps_wire;
 #[cfg(feature = "mobile")]
 mod mcp_transport;
 #[cfg(feature = "mobile")]

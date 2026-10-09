@@ -32,9 +32,9 @@ mod mobile {
     }
 
     pub fn build() {
-        let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-        let inventory_path = manifest_dir.join("builtin-plugin-inventory.txt");
-        let plugin_root = manifest_dir.join("../plugins/lingxi-local-app");
+        // Where the plugin tree is comes from the crate that ships it, not from a path out of this one.
+        let inventory_path = local_app_builder_plugin::inventory_path().to_path_buf();
+        let plugin_root = local_app_builder_plugin::root().to_path_buf();
 
         // Watching the directory as well as the explicit descriptor is load-bearing:
         // a newly-added, undeclared file must rerun this build script so pack() can

@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::mobile::local_apps_mcp::LocalAppsMcpTransport;
 use async_trait::async_trait;
 use client::adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
 use client::protocol::events::ClientEvent;
@@ -21,6 +20,7 @@ use lingxi_core::host::subagent_spawn::{SubagentObservation, SubagentSpawnObserv
 use lingxi_core::host::{
     OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult,
 };
+use local_app_builder_service::mcp_server::LocalAppsMcpTransport;
 use tokio::sync::Notify;
 use tool_skill::skill::SkillCommandType;
 
@@ -6992,6 +6992,172 @@ fn submit_question_answer_bypasses_a_held_transition_lock() {
     });
 }
 
+/// The Local App approval answers only resolve the broker's oneshots, so like
+/// the `AskUserQuestion` answer they must not wait behind the transition lock.
+/// A page bridge request parks on a native capability sheet while `submit_impl`
+/// still holds that lock; the user's answer is the only thing that releases it.
+#[test]
+fn submit_local_app_approval_answers_bypass_a_held_transition_lock() {
+    use client::protocol::local_apps::{AppAuthorizationDecisionDto, PluginCommandDto};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (handle, _listener) = build_submit_handle(tmp.path());
+
+    handle.runtime().block_on(async {
+        let transition = handle.loop_transition.lock().await;
+        let answers = vec![
+            (
+                "ResolveAppCapabilityRequest",
+                ClientCommand::ResolveAppCapabilityRequest {
+                    request_id: "unknown".into(),
+                    decision: AppAuthorizationDecisionDto::Deny,
+                },
+            ),
+            (
+                "ResolveAppUiRequest",
+                ClientCommand::ResolveAppUiRequest {
+                    request_id: "unknown".into(),
+                    decision: AppAuthorizationDecisionDto::Deny,
+                    result_json: None,
+                    error: None,
+                },
+            ),
+            (
+                "ResolveAppDependencyChangeConfirmation",
+                ClientCommand::ResolveAppDependencyChangeConfirmation {
+                    request_id: "unknown".into(),
+                    approved: false,
+                },
+            ),
+            (
+                "ResolveMcpProposalApproval",
+                ClientCommand::PluginCommand {
+                    command: PluginCommandDto::ResolveMcpProposalApproval {
+                        request_id: "unknown".into(),
+                        approved: false,
+                    },
+                },
+            ),
+            (
+                "ResolveCreateConfirmation",
+                ClientCommand::PluginCommand {
+                    command: PluginCommandDto::ResolveCreateConfirmation {
+                        request_id: "unknown".into(),
+                        approved: false,
+                    },
+                },
+            ),
+        ];
+        for (name, command) in answers {
+            // An unknown id is a refusal or a no-op; what matters is that it
+            // is answered at all while the lock is held.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle.submit(command))
+                .await
+                .unwrap_or_else(|_| panic!("{name} must not wait for the transition lock"));
+        }
+        drop(transition);
+    });
+}
+
+/// The deadlock behind the test above, end to end. A page asks to read a file
+/// for which the user has not granted the capability: `ExecuteAppBridgeRequest`
+/// parks on the native sheet for up to five minutes. The answer is a second
+/// `submit`; if it queues behind the parked request on `loop_transition` only
+/// the approval timeout can end the wait, and `Cancel` is stuck with it.
+#[test]
+fn a_bridge_request_parked_on_a_capability_sheet_does_not_block_the_answer() {
+    use client::protocol::local_apps::{
+        AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (handle, listener) = build_submit_handle(tmp.path());
+
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::CreateApp {
+                name: "Sheet".into(),
+                origin: AppCreateOriginDto::Library,
+                brief: "capability sheet".into(),
+                git_enabled: true,
+                workflow_model: None,
+                conversation_id: None,
+                surface: None,
+                mode: AppCreateModeDto::Shell,
+                request_id: None,
+            })
+            .await
+            .expect("submit(CreateApp)");
+        let events = drain_events(&handle, &listener).await;
+        let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
+        let app_id = record.id;
+        let layout = local_apps::AppLayout::new(tmp.path(), app_id.clone()).expect("layout");
+        let mut manifest = local_apps::load_manifest(&layout).expect("manifest");
+        manifest
+            .capabilities
+            .push(local_apps::AppCapability::FilesRead);
+        local_apps::save_manifest(&layout, &manifest).expect("declare files.read");
+
+        let engine = handle.clone();
+        let bridge_app = app_id.clone();
+        let bridge = tokio::spawn(async move {
+            engine
+                .submit(ClientCommand::ExecuteAppBridgeRequest {
+                    request: AppBridgeRequestDto {
+                        request_id: "bridge-1".into(),
+                        app_id: bridge_app,
+                        operation: AppBridgeOperationDto::FileRead,
+                        payload_json: Some(serde_json::json!({"path": "note.txt"}).to_string()),
+                    },
+                })
+                .await
+        });
+
+        let request_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                for event in listener.received.lock().await.iter() {
+                    if let Ev::AppEvent {
+                        event: AppEventDto::AppCapabilityRequested { request },
+                    } = event
+                    {
+                        return request.request_id.clone();
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the parked bridge request must raise the capability sheet");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle.submit(ClientCommand::ResolveAppCapabilityRequest {
+                request_id,
+                decision: AppAuthorizationDecisionDto::Deny,
+            }),
+        )
+        .await
+        .expect("the sheet's answer must reach the host while the bridge request is parked on it")
+        .expect("the answer is accepted");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), bridge)
+            .await
+            .expect("the denied bridge request finishes")
+            .expect("the bridge task joins")
+            .expect("submit(ExecuteAppBridgeRequest) resolves Ok");
+        let events = drain_events(&handle, &listener).await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                Ev::AppEvent {
+                    event: AppEventDto::AppBridgeResponse { response }
+                } if response.request_id == "bridge-1" && !response.ok
+            )),
+            "a denied capability answers the page with a failed bridge response, got {events:?}"
+        );
+    });
+}
+
 /// Mod UI control responses are session-bound but not turn-owned. They must
 /// remain correlated and answerable while an unrelated turn holds the normal
 /// command transition lock.
@@ -9010,7 +9176,7 @@ async fn mint_forks_from_the_recorded_origin_cwd_not_the_callers_cwd() {
         .await
         .expect("mint");
 
-    let workspace_cwd = crate::mobile::local_apps_host::canonical_cwd_string(
+    let workspace_cwd = local_app_builder_service::broker::canonical_cwd_string(
         &data_root.join(&record.workspace_rel),
     );
     let forked = std::fs::read_to_string(orchestrator::transcript_paths::main_transcript_path(
@@ -9096,7 +9262,7 @@ async fn chat_origin_mint_forks_the_source_conversation() {
     // disagreed on where the catalog lived. Now it always canonicalises the
     // nearest existing ancestor, so on a symlink-split platform this is
     // `/private/var/...` where the raw join says `/var/...`.
-    let workspace_cwd = crate::mobile::local_apps_host::canonical_cwd_string(
+    let workspace_cwd = local_app_builder_service::broker::canonical_cwd_string(
         &data_root.join(&record.workspace_rel),
     );
     let fork_path = orchestrator::transcript_paths::main_transcript_path(
@@ -9454,8 +9620,13 @@ async fn boot_backfill_adopts_an_existing_unpinned_conversation_instead_of_minti
     )
     .expect("seed orphan conversation");
 
-    let broker =
-        super::LocalAppsHostBroker::new(backfill_root.clone(), MockSink::arc(), None, false, None);
+    let broker = crate::mobile::local_apps_wire::broker_with_client_sink(
+        backfill_root.clone(),
+        MockSink::arc(),
+        None,
+        false,
+        None,
+    );
 
     super::run_app_boot_backfill_sweep(
         backfill_home.clone(),
@@ -9542,7 +9713,7 @@ fn new_session_rejects_a_foreign_cwd() {
 /// name.
 ///
 /// Mirrors `create_persists_the_caller_supplied_brief_and_does_not_
-/// overwrite_a_supplied_name` in `local_apps_mcp.rs` (Task 10's side of
+/// overwrite_a_supplied_name` in `mcp_server.rs` (Task 10's side of
 /// this same fix): `name` and `brief` are asserted UNEQUAL and both
 /// checked, so this cannot pass by conflating them back together. The
 /// `NAME` fixture stays longer than `AppService::create_app`'s 24-char
@@ -9805,7 +9976,9 @@ fn initial_app_cold_boot_exposes_only_its_enabled_managed_mcp() {
     let (app_id, workspace) = seed_runtime.block_on(async {
         let service = local_apps::AppService::load(
             tmp.path().to_path_buf(),
-            Arc::new(platform_posix_minimal::PosixClock::new()),
+            Arc::new(crate::mobile::local_apps_profile::PlatformClock(Arc::new(
+                platform_posix_minimal::PosixClock::new(),
+            ))),
             Arc::new(local_apps::NoopAppEventObserver),
         )
         .await
@@ -9957,7 +10130,7 @@ fn delete_app_removes_the_apps_session_catalog() {
         // Derived independently of the production helper, and while the
         // workspace still exists, so this test cannot agree with the code
         // by simply calling the same function.
-        let workspace_cwd = crate::mobile::local_apps_host::canonical_cwd_string(
+        let workspace_cwd = local_app_builder_service::broker::canonical_cwd_string(
             &tmp.path().join("apps").join(&app_id).join("workspace"),
         );
         let catalog_dir = tmp

@@ -23,7 +23,7 @@
 //! compares the strings itself (Phase -1's original point) and in the sense
 //! that no name lives outside this file (§18 Phase -1 step 4 / §19.3's gate).
 
-use crate::mobile::local_apps_build::LocalAppBuildTarget;
+use local_app_builder_service::app_build::LocalAppBuildTarget;
 
 /// Canonical Plugin-qualified workflow identities.  Keeping these reserved
 /// names in the composition binding lets the workflow launcher avoid a second
@@ -191,8 +191,8 @@ mod tests {
             //
             // So cross the column against a source that is not itself.
             // `LocalAppBuildTarget::template_id` is the PRODUCTION target ->
-            // scaffold-id map (`local_apps_build`, the id reported back to the
-            // model and serialized by `local_apps_host`), and
+            // scaffold-id map (`app_build`, the id reported back to the
+            // model and serialized by `broker`), and
             // `AppRuntimeProfile::as_str` is the production family -> wire
             // spelling (`local-apps`). Neither is derived from this table, and
             // the expected value is DERIVED — the kebab-cased wire spelling —
@@ -203,7 +203,7 @@ mod tests {
             //
             // Not `LocalAppBuildTarget::runtime_profile()`, the obvious second
             // map: it is a module-private `#[cfg(test)]` method of
-            // `local_apps_build` and is unreachable from this module. Not the
+            // `app_build` and is unreachable from this module. Not the
             // `current_binding_for_family` + `from_runtime_binding` round trip
             // either: `available_contracts()` publishes four families, so that
             // path cannot reach `Babylon3dR1` at all — the one row this suite
@@ -304,6 +304,27 @@ mod tests {
              lingxi-local-app:local-app-build; refusing caller-selected workflow \
              lingxi-local-app:local-app-use-test",
             "refusal message must be byte-identical to the pinned form: {message}"
+        );
+    }
+    /// The service tests that its prose names none of the workflows the host
+    /// reserves, against a list of its own
+    /// (`local_app_builder_plugin::WORKFLOW_IDS`, the plugin crate's list of its workflow
+    /// ids). That list mirrors this module's registry, so a workflow added here
+    /// and not there would be a name the service's prose could start using
+    /// without any test noticing.
+    #[test]
+    fn the_service_test_list_of_reserved_workflow_ids_is_this_registry() {
+        let mut registry = vec![
+            PLUGIN_BUILD_WORKFLOW_ID,
+            PLUGIN_USE_TEST_WORKFLOW_ID,
+            PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
+        ];
+        let mut listed = local_app_builder_plugin::WORKFLOW_IDS.to_vec();
+        registry.sort_unstable();
+        listed.sort_unstable();
+        assert_eq!(
+            listed, registry,
+            "the service's list must name exactly the workflows this registry reserves"
         );
     }
 }

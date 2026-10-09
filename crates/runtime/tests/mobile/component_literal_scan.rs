@@ -176,7 +176,7 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// 3 → 5 (WP8, 2026-09-02 create-flow audit): two new entries name the
 /// create skill by its PLUGIN-QUALIFIED registration
 /// `lingxi-local-app:create-local-app` — never a build workflow id — in
-/// `local_apps_host.rs` and `local_apps_mcp.rs`, the only way left for a
+/// `broker.rs` and `mcp_server.rs`, the only way left for a
 /// model stuck on an unscaffolded shell to find the create flow now that
 /// steps 4-5 of the guided workspace contract no longer send it to a
 /// "runtime confirmation tool" that does not exist. See the allowlist file's
@@ -198,10 +198,10 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// identity — the same id still gates the named/scriptPath UPDATE and VERIFY
 /// resumes through `apply_materialized_local_app_collections_with_identity`,
 /// so `local_app_plugin_binding.rs`'s entry is RESTORED — and the on-demand
-/// testing hand-off prose in `local_apps_host.rs` names the `frontend-qa` /
+/// testing hand-off prose in `broker.rs` names the `frontend-qa` /
 /// `local-app-test` plugin skills, which is the only way the model can reach
 /// the app's use-test path (testing is never host-initiated).
-const ALLOWLIST_BASELINE_COUNT: usize = 13;
+const ALLOWLIST_BASELINE_COUNT: usize = 8;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is
@@ -559,7 +559,7 @@ fn code_view(src: &str) -> Vec<String> {
 ///
 /// The end of an opened range is found by BRACE DEPTH over [`code_view`], not
 /// by string-matching a closing line, so a `}` at column 0 inside a raw string
-/// (`local_apps_mcp.rs`'s `br#"{ ... }"#` fixtures) can no longer terminate the
+/// (`mcp_server.rs`'s `br#"{ ... }"#` fixtures) can no longer terminate the
 /// range hundreds of lines early and leave real test code being scanned as
 /// production.
 fn test_skip_ranges(src: &str) -> Vec<(usize, usize)> {
@@ -726,9 +726,9 @@ fn out_of_line_mod_decls(src: &str, file: &Path) -> Vec<ModDecl> {
 ///
 /// The `ONLY` is load-bearing: a file is excluded when it has at least one
 /// declaration pointing at it AND every such declaration is test-gated. So
-/// dropping an extra `#[cfg(test)] #[path = "local_apps_host.rs"] mod evil;`
-/// somewhere does NOT remove `local_apps_host.rs` from the scan — the real,
-/// ungated `mod local_apps_host;` still counts.
+/// dropping an extra `#[cfg(test)] #[path = "broker.rs"] mod evil;`
+/// somewhere does NOT remove `broker.rs` from the scan — the real,
+/// ungated `mod broker;` still counts.
 fn cfg_test_only_module_files(files: &[PathBuf]) -> BTreeSet<PathBuf> {
     let present: BTreeSet<&PathBuf> = files.iter().collect();
     let mut refs: BTreeMap<PathBuf, (usize, usize)> = BTreeMap::new();

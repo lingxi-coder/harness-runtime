@@ -1,7 +1,5 @@
 use crate::mobile::{
-    local_apps_host::{LocalAppsAgentExecutor, LocalAppsHostBroker},
     local_apps_llm::{ApiServiceModel, LocalAppsLlm},
-    local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::profile_apps,
     mcp_transport::MobileMcpTransport,
     mobile_command_registry, register_android_ui_automation,
@@ -21,6 +19,8 @@ use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
 use llm_runtime::auth::anthropic::{OAuthCredentialProvider, OAuthHandle, RefreshDriver};
 use llm_runtime::auth::openai as openai_oauth;
 use llm_runtime::{CredentialProvider, ModelRuntime, Transport};
+use local_app_builder_service::broker::{LocalAppsAgentExecutor, LocalAppsHostBroker};
+use local_app_builder_service::mcp_server::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY};
 use mcp::registry::OAuthDeps;
 use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use orchestrator::model::user_agent::UserAgentEnv;
@@ -147,10 +147,21 @@ pub(super) async fn build_mobile_inner_with_ask(
     let oauth_supported = lingxi_core::host::SecureStorage::is_encrypted(storage.as_ref());
 
     let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
-    let _ = local_apps_mcp.attach_lingxi_home(cfg.lingxi_home.clone());
     let projects_session_host = Arc::new(mcp::projects_session::ProjectsSessionHostContext::new(
         cfg.projects_session_startup_url.clone(),
     ));
+    let _ = local_apps_mcp.attach_init_session_discarder({
+        let lingxi_home = cfg.lingxi_home.clone();
+        let data_root = mobile_apps_data_root(&cfg);
+        Arc::new(move |record, session_id| {
+            crate::mobile::local_apps_sessions::remove_app_session_file(
+                &lingxi_home,
+                &data_root,
+                record,
+                session_id,
+            )
+        })
+    });
     let remote_mcp = Arc::new(platform_common::RemoteMcpTransport::new());
     let mobile_mcp = Arc::new(MobileMcpTransport::new(local_apps_mcp.clone(), remote_mcp));
     let mcp_auth_url = Arc::new(StdMutex::new(None::<String>));
@@ -176,7 +187,11 @@ pub(super) async fn build_mobile_inner_with_ask(
     }
     let mcp_registry = Arc::new(mcp_registry);
     local_apps_mcp
-        .attach_registry(Arc::downgrade(&mcp_registry))
+        .attach_publisher(
+            crate::mobile::local_apps_adapters::RegistryPublisher::publisher(Arc::downgrade(
+                &mcp_registry,
+            )),
+        )
         .map_err(|_| {
             MobileBuildError::Orchestrator(
                 "local apps MCP registry was already attached during bootstrap".into(),
@@ -299,7 +314,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     // `ToolUseResult`, so the observation rides the same connection-scoped
     // listener the adapter sinks already use — no permission-gate decorator, no
     // second session read. See `crate::mobile::plan_approval`.
-    let plan_approval_log = Arc::new(crate::mobile::plan_approval::PlanApprovalLog::default());
+    let plan_approval_log =
+        Arc::new(local_app_builder_service::plan_approval::PlanApprovalLog::default());
     let observed_listener: Arc<dyn ClientEventListener> =
         Arc::new(crate::mobile::plan_approval::PlanApprovalWatcher::new(
             listener.clone(),
@@ -921,7 +937,8 @@ pub(super) async fn build_mobile_inner_with_ask(
         restricted: false,
     };
     let mut requested_permission_mode;
-    let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
+    crate::local_app_tool_policy::install();
+    let workspace_leases = crate::local_app_workspace_profile::LocalAppWorkspaceProfile::registry();
     // ONE derivation of the (host, guest) workspace pairing. `model_cwd` below
     // is rebuilt from THIS binding rather than re-scanning the mount table —
     // two derivations of one root is exactly how the guest/host split forked
@@ -960,8 +977,8 @@ pub(super) async fn build_mobile_inner_with_ask(
             // three tests go false, and a NESTED pair takes the disjoint arm —
             // re-rooting the permission root upward (the case the comment below
             // says must be refused) and turning
-            // `is_local_app_workspace_root(&roots.cwd)` false, which disables
-            // `denies_host_owned_for_workspace` and `escapes_local_app_workspace`
+            // the profile no longer recognising `roots.cwd`, which disables
+            // `denies_host_owned_for_workspace` and `escapes_workspace`
             // outright.
             // Canonical forms are used ONLY to decide. BOTH returned values are
             // raw, and that is load-bearing: `translate_model_path` resolves a
@@ -979,8 +996,8 @@ pub(super) async fn build_mobile_inner_with_ask(
             // Which root the rules resolve against.
             //
             // A WIDER root is not "more deny coverage": both local-app write
-            // guards are all-or-nothing on `is_local_app_workspace_root(
-            // &roots.cwd)`, and that is false for any directory that is not
+            // guards are all-or-nothing on the profile recognising
+            // `roots.cwd`, and that is false for any directory that is not
             // itself `.../apps/<id>/workspace`. Widening turns them OFF.
             if cwd_canon == host_canon {
                 // Identical — `.project` / `.localApp`, where cwd already IS
@@ -2074,9 +2091,9 @@ pub(super) async fn build_mobile_inner_with_ask(
     // `shared_command_registry` fails that test instead of silently emptying
     // the model's skill listing on device.
     // One Host-bounded scope decision drives both Local App model surfaces.
-    // `permission::local_app_id_for_root` intentionally also understands
-    // guest/legacy spellings for isolated runtimes, but using that broader
-    // detector directly at this main-session composition root would let an
+    // the lease profile's root detection (`LocalAppWorkspaceProfile`) intentionally
+    // also understands guest/legacy spellings for isolated runtimes, but using
+    // that broader detector directly at this main-session composition root would let an
     // ordinary project whose path merely ends in `apps/<id>/workspace` inherit
     // the full app authoring surface.
     let local_app_scope_id = mobile_local_app_scope_id(&cwd, &mobile_apps_data_root(&cfg));
@@ -3128,13 +3145,15 @@ pub fn build_mobile_engine_inner(
     );
     let loaded_profile = runtime.block_on(profile_apps(
         mobile_apps_data_root(&firer_cfg),
-        firer_platform.clock(),
+        Arc::new(crate::mobile::local_apps_profile::PlatformClock(
+            firer_platform.clock(),
+        )),
         inner.mobile_linux.clone(),
         firer_cfg.local_apps_full_runtime,
         firer_cfg.local_apps_runtime_root.clone(),
         firer_cfg.physical_memory_bytes,
         inner.local_apps_llm.clone(),
-        crate::mobile::local_apps_device::DeviceCapabilities {
+        local_app_builder_service::device_capabilities::DeviceCapabilities {
             camera: firer_platform.camera(),
             audio: firer_platform.audio_service(),
             location: firer_platform.location(),
@@ -3178,12 +3197,18 @@ pub fn build_mobile_engine_inner(
             // same unavailable state and never mutate data.
             let host = LocalAppsHostBroker::new_with_physical_memory(
                 mobile_apps_data_root(&firer_cfg),
-                event_sink.clone(),
-                inner.mobile_linux.clone(),
+                crate::mobile::local_apps_wire::ClientSinkAdapter::sink(event_sink.clone()),
+                inner
+                    .mobile_linux
+                    .clone()
+                    .map(crate::mobile::local_apps_adapters::MobileLinuxExecutor::executor),
                 firer_cfg.local_apps_full_runtime,
                 firer_cfg.local_apps_runtime_root.clone(),
                 firer_cfg.physical_memory_bytes,
             );
+            let _ = host.attach_plugin_bundle(Arc::new(
+                crate::mobile::local_apps_adapters::CompiledPluginBundle,
+            ));
             (Err(error), host, None, None, None, None)
         }
     };
@@ -3206,13 +3231,21 @@ pub fn build_mobile_engine_inner(
         tracing::warn!("local-apps workflow status sink was already attached");
     }
     if local_apps_host
-        .attach_mcp_registry(Arc::downgrade(&inner.mcp_registry))
+        .attach_publisher(
+            crate::mobile::local_apps_adapters::RegistryPublisher::publisher(Arc::downgrade(
+                &inner.mcp_registry,
+            )),
+        )
         .is_err()
     {
         tracing::warn!("local-apps MCP registry was already attached");
     }
     if local_apps_host
-        .attach_lsp_registry(Arc::downgrade(&inner.lsp_registry))
+        .attach_diagnostics(
+            crate::mobile::local_apps_adapters::LspDiagnostics::provider(Arc::downgrade(
+                &inner.lsp_registry,
+            )),
+        )
         .is_err()
     {
         tracing::warn!("local-apps LSP registry was already attached");
@@ -3229,7 +3262,9 @@ pub fn build_mobile_engine_inner(
     // so an agent reading it could only produce a rejected pair.
     if let Some(host_environment) = firer_cfg.host_environment.clone() {
         if local_apps_host
-            .attach_host_environment(host_environment)
+            .attach_device_context(crate::mobile::local_apps_adapters::device_context_of(
+                &host_environment,
+            ))
             .is_err()
         {
             tracing::warn!("local-apps host environment was already attached");
@@ -3240,10 +3275,13 @@ pub fn build_mobile_engine_inner(
     // The broker already knows the apps data root; `lingxi_home` and the
     // filesystem are the composition root's to hand over.
     if local_apps_host
-        .attach_session_catalog(crate::mobile::local_apps_host::SessionCatalog {
-            lingxi_home: firer_cfg.lingxi_home.clone(),
-            fs: fs.clone(),
-        })
+        .attach_conversations(crate::mobile::local_apps_sessions::SessionTitles::host(
+            crate::mobile::local_apps_sessions::SessionCatalog {
+                lingxi_home: firer_cfg.lingxi_home.clone(),
+                fs: fs.clone(),
+            },
+            mobile_apps_data_root(&firer_cfg),
+        ))
         .is_err()
     {
         tracing::warn!("local-apps session catalog was already attached");

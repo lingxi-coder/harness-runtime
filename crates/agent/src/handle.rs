@@ -157,7 +157,7 @@ pub struct PoolSubagentSpawner {
         std::sync::Weak<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
     >,
     /// Creates one independent passive-diagnostics cursor per spawn. The cwd
-    /// lets a host scope the cursor to the child workspace (Local App builders
+    /// lets a host scope the cursor to the child workspace (host-managed app builders
     /// must never observe another app's diagnostics).
     new_diagnostics_source_factory: Option<
         Arc<
