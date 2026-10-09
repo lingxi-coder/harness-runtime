@@ -769,7 +769,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         name: &str,
         input: serde_json::Value,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
         supplied: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
@@ -778,7 +777,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
-                    .invoke_supplied_detailed(name, input, ctx, workspace_lease_token, supplied)
+                    .invoke_supplied_detailed(name, input, ctx, supplied)
                     .await
             }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
@@ -793,7 +792,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         name: &str,
         input: serde_json::Value,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
         lingxi_core::host::tool_invoker::ToolInvokerError,
@@ -801,7 +799,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
-                    .invoke_detailed(name, input, ctx, workspace_lease_token)
+                    .invoke_detailed(name, input, ctx)
                     .await
             }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
@@ -819,34 +817,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
-            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
-                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
-                    .to_string(),
-            )),
-        }
-    }
-
-    /// Forward the lease token instead of inheriting the trait's delegating
-    /// default. This wrapper sits between the lease PRODUCER
-    /// (`WorkspaceLeaseToolInvoker`) and the CONSUMER (`RegistryToolInvoker`,
-    /// which folds the token into `PermissionCheckContext`), so the default —
-    /// which drops the token and calls `invoke` — left
-    /// `workspace_lease_token` permanently `None` in production: the lease
-    /// ALLOW never fired, and neither did the paired `denies_host_owned_for_token`
-    /// hard deny.
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: serde_json::Value,
-        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
-        match self.inner.get() {
-            Some(invoker) => {
-                invoker
-                    .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
-                    .await
-            }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
@@ -1128,7 +1098,6 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                             .creator_agent_id
                             .as_deref()
                             .and_then(lingxi_core::types::AgentId::parse_prefixed),
-                        scope: None,
                     },
                     task_description,
                 )
@@ -1583,17 +1552,15 @@ mod run_id_tests {
 }
 
 #[cfg(test)]
-mod workspace_lease_forwarding_tests {
-    use std::sync::{Arc, Mutex as StdMutex};
+mod deferred_invoker_tests {
+    use std::sync::Arc;
 
     use lingxi_core::host::tool_invoker::{
         SubagentInvocationContext, ToolInvoker, ToolInvokerError,
     };
 
-    /// Terminal invoker that records the lease token it was dispatched with.
-    struct RecordingInvoker {
-        seen: Arc<StdMutex<Option<Option<u64>>>>,
-    }
+    /// Terminal invoker whose results the deferred wrapper must forward intact.
+    struct RecordingInvoker;
 
     #[async_trait::async_trait]
     impl ToolInvoker for RecordingInvoker {
@@ -1606,7 +1573,6 @@ mod workspace_lease_forwarding_tests {
             name: &str,
             input: serde_json::Value,
             ctx: SubagentInvocationContext,
-            workspace_lease_token: Option<u64>,
             supplied: Arc<dyn std::any::Any + Send + Sync>,
         ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError>
         {
@@ -1614,9 +1580,7 @@ mod workspace_lease_forwarding_tests {
                 supplied.downcast_ref::<String>().map(String::as_str),
                 Some("private child tool")
             );
-            let mut result = self
-                .invoke_detailed(name, input, ctx, workspace_lease_token)
-                .await?;
+            let mut result = self.invoke_detailed(name, input, ctx).await?;
             result.turn_end = Some(lingxi_core::host::tool_invoker::ToolResultTurnEnd {
                 source: lingxi_core::host::tool_invoker::ToolResultTurnEndSource::Tool,
             });
@@ -1628,10 +1592,8 @@ mod workspace_lease_forwarding_tests {
             _name: &str,
             _input: serde_json::Value,
             _ctx: SubagentInvocationContext,
-            workspace_lease_token: Option<u64>,
         ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError>
         {
-            *self.seen.lock().unwrap() = Some(workspace_lease_token);
             Ok(lingxi_core::host::tool_invoker::ToolInvocationResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
                 is_error: true,
                 data: serde_json::json!({"error": "contract validation failed"}),
@@ -1653,18 +1615,6 @@ mod workspace_lease_forwarding_tests {
             _input: serde_json::Value,
             _ctx: SubagentInvocationContext,
         ) -> Result<serde_json::Value, ToolInvokerError> {
-            *self.seen.lock().unwrap() = Some(None);
-            Ok(serde_json::json!({}))
-        }
-
-        async fn invoke_with_workspace_lease(
-            &self,
-            _name: &str,
-            _input: serde_json::Value,
-            _ctx: SubagentInvocationContext,
-            workspace_lease_token: Option<u64>,
-        ) -> Result<serde_json::Value, ToolInvokerError> {
-            *self.seen.lock().unwrap() = Some(workspace_lease_token);
             Ok(serde_json::json!({}))
         }
 
@@ -1674,17 +1624,11 @@ mod workspace_lease_forwarding_tests {
     }
 
     #[tokio::test]
-    async fn deferred_invoker_preserves_error_content_and_workspace_lease() {
-        let seen = Arc::new(StdMutex::new(None));
+    async fn deferred_invoker_preserves_error_content() {
         let deferred = super::DeferredToolInvoker::new();
-        deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
+        deferred.set(Arc::new(RecordingInvoker));
         let result = deferred
-            .invoke_detailed(
-                "Read",
-                serde_json::json!({}),
-                bare_ctx(),
-                Some(77),
-            )
+            .invoke_detailed("Read", serde_json::json!({}), bare_ctx())
             .await
             .unwrap();
         assert!(result.is_error);
@@ -1696,21 +1640,18 @@ mod workspace_lease_forwarding_tests {
             result.model_content.as_deref(),
             Some("contract validation failed")
         );
-        assert_eq!(*seen.lock().unwrap(), Some(Some(77)));
     }
 
     #[tokio::test]
     async fn deferred_invoker_preserves_private_child_tool_and_live_mode() {
-        let seen = Arc::new(StdMutex::new(None));
         let deferred = super::DeferredToolInvoker::new();
-        deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
+        deferred.set(Arc::new(RecordingInvoker));
         assert_eq!(deferred.permission_mode().as_deref(), Some("plan"));
         let result = deferred
             .invoke_supplied_detailed(
                 "SubagentHandback",
                 serde_json::json!({}),
                 bare_ctx(),
-                Some(91),
                 Arc::new("private child tool".to_string()),
             )
             .await
@@ -1719,7 +1660,6 @@ mod workspace_lease_forwarding_tests {
             result.turn_end.unwrap().source,
             lingxi_core::host::tool_invoker::ToolResultTurnEndSource::Tool
         );
-        assert_eq!(*seen.lock().unwrap(), Some(Some(91)));
     }
 
     fn bare_ctx() -> SubagentInvocationContext {
@@ -1753,28 +1693,5 @@ mod workspace_lease_forwarding_tests {
             request_source: None,
             frozen_command_denies: Vec::new(),
         }
-    }
-
-    /// A lease token handed to the deferred invoker must reach the real
-    /// invoker underneath it. The trait's delegating default drops it, which
-    /// left `PermissionCheckContext.workspace_lease_token` permanently `None`
-    /// in production: the lease ALLOW never fired, and the paired
-    /// `denies_host_owned_for_token` hard deny never fired either.
-    #[tokio::test]
-    async fn deferred_invoker_forwards_the_workspace_lease_token() {
-        let seen = Arc::new(StdMutex::new(None));
-        let deferred = super::DeferredToolInvoker::new();
-        deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
-
-        deferred
-            .invoke_with_workspace_lease("Read", serde_json::json!({}), bare_ctx(), Some(77))
-            .await
-            .expect("dispatch");
-
-        assert_eq!(
-            *seen.lock().unwrap(),
-            Some(Some(77)),
-            "the deferred invoker must forward the lease token, not swallow it"
-        );
     }
 }

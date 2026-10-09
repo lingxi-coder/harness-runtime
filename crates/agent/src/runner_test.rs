@@ -456,7 +456,6 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
         _name: &str,
         _input: serde_json::Value,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        _workspace_lease_token: Option<u64>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
         lingxi_core::host::tool_invoker::ToolInvokerError,

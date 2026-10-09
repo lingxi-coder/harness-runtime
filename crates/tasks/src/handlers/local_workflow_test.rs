@@ -92,47 +92,6 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
     assert_eq!(metrics.terminal_counts(), (2, 1, 1, 1));
 }
 
-/// The lease is what stops a build from borrowing the session cwd or another
-/// app's workspace. `requires_workspace_lease` now reads a task's typed
-/// `ManagedWorkflowScope` (design §18 Phase -1 step 8 / §8.1) instead of
-/// a `workflow_id` name check, so a `Build`-purpose scope requires the lease
-/// regardless of which app it names, and any other purpose never does.
-#[test]
-fn only_a_build_purpose_scope_requires_a_workspace_lease() {
-    let build = crate::scope::ManagedWorkflowScope::for_build("app-a").expect("valid");
-    let canvas_build = crate::scope::ManagedWorkflowScope::for_build("canvas-app").expect("valid");
-    assert!(
-        requires_workspace_lease(Some(&build)),
-        "a Build scope always requires the lease, whatever app it names"
-    );
-    assert!(
-        requires_workspace_lease(Some(&canvas_build)),
-        "the drawn-surface build writes the same workspace and needs the same lease"
-    );
-
-    let use_test = crate::scope::ManagedWorkflowScope::for_use_test("app-a").expect("valid");
-    let mcp = crate::scope::ManagedWorkflowScope::for_mcp_authoring("app-a").expect("valid");
-    assert!(!requires_workspace_lease(Some(&use_test)));
-    assert!(!requires_workspace_lease(Some(&mcp)));
-}
-
-/// §8.1 / hazard (d): a custom workflow that merely reuses a real build
-/// workflow's `workflow_id` string carries no authority any more -- there is
-/// no `workflow_id` parameter for it to reuse in the first place.
-/// `requires_workspace_lease` takes only `Option<&ManagedWorkflowScope>`,
-/// and a `None` -- which is what every workflow gets today, since nothing
-/// yet threads a Host-minted scope through `spawn()` (see
-/// `crate::state::LocalWorkflowTaskState::scope`'s doc comment) -- never
-/// requires the lease, independent of any name.
-#[test]
-fn a_same_named_custom_workflow_gets_no_workspace_lease() {
-    assert!(
-        !requires_workspace_lease(None),
-        "no scope at all must never grant the workspace lease, no matter what \
-         workflow_id/args a caller attached to the task"
-    );
-}
-
 // ---- Echo SubagentSpawner: `agent(p)` → "echo:p" (records prompts) ------
 
 #[derive(Default)]
@@ -858,7 +817,6 @@ fn workflow_input(script: &str) -> TaskSpawnInput {
         creator_teammate_name: None,
         creator_team_name: None,
         creator_agent_id: None,
-        scope: None,
     }
 }
 
@@ -2970,7 +2928,6 @@ async fn workflow_transcript_root_stays_pinned_across_retarget() {
                 creator_teammate_name: None,
                 creator_team_name: None,
                 creator_agent_id: None,
-                scope: None,
             },
             make_ctx(fs),
         )
@@ -3025,7 +2982,6 @@ async fn workflow_transcript_dir_matches_child_transcript_location() {
                 creator_teammate_name: None,
                 creator_team_name: None,
                 creator_agent_id: None,
-                scope: None,
             },
             make_ctx(fs),
         )
@@ -3106,7 +3062,6 @@ async fn resume_replays_journaled_agent_results_without_respawning() {
         creator_teammate_name: None,
         creator_team_name: None,
         creator_agent_id: None,
-        scope: None,
     };
     let handle2 = h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
     assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
@@ -3165,7 +3120,6 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
                 creator_teammate_name: None,
                 creator_team_name: None,
                 creator_agent_id: None,
-                scope: None,
             },
             make_ctx(fs_trait.clone()),
         )
@@ -3214,7 +3168,6 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
                 creator_teammate_name: None,
                 creator_team_name: None,
                 creator_agent_id: None,
-                scope: None,
             },
             make_ctx(fs_trait),
         )
@@ -3297,7 +3250,6 @@ async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
         creator_teammate_name: None,
         creator_team_name: None,
         creator_agent_id: None,
-        scope: None,
     };
     h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
     assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);

@@ -131,4 +131,10 @@
 /// complete synthetic API-error metadata, and child tombstones delete by UUID.
 /// The snapshot element and native binding layouts change; no old row format
 /// is accepted by this current contract.
-pub const CLIENT_PROTOCOL_VERSION: &str = "19.0.0";
+/// Bumped to 20.0.0 when Local App left the client protocol. Local App is an
+/// externally installed plugin now: the app/bridge/plugin command families
+/// (`ListApps` … `DeleteApp`, `ExecuteAppBridgeRequest`, `ResolveApp*`,
+/// `PluginCommand`), the `App*` events and their DTOs are gone. Removals are
+/// BREAKING structural changes under the F1-09 guard, and the generated mobile
+/// bindings change positionally.
+pub const CLIENT_PROTOCOL_VERSION: &str = "20.0.0";

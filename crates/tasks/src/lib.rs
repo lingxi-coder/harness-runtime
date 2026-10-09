@@ -35,14 +35,8 @@ pub mod output_manager;
 pub mod registry;
 pub mod registry_status_sink;
 mod resolve;
-pub mod scope;
 pub mod state;
 pub mod task_trait;
-
-// This crate's guards read a task's typed `scope::ManagedWorkflowScope`, not a workflow-name
-// string (see `registry::TaskRegistry::find_nonterminal_managed_workflows` and
-// `handlers::local_workflow::requires_workspace_lease`). There is no list of workflow names
-// anywhere to keep in step with it.
 
 pub use handlers::{
     escape_xml, fusion_result_xml, DreamHandler, InProcessTeammateHandler, LocalAgentHandler,
@@ -53,7 +47,6 @@ pub use registry::{
     register_agent_handlers, register_dream_handler, register_fusion_handler,
     register_self_contained_handlers,
 };
-pub use scope::{MalformedAppId, ManagedWorkflowPurpose, ManagedWorkflowScope};
 pub use state::*;
 pub use task_trait::*;
 

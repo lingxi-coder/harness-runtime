@@ -27,10 +27,6 @@ use crate::protocol::listings::{
     SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto,
     StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
-use crate::protocol::local_apps::{
-    AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
-    AppRuntimeStateDto, AppSessionRowDto, AppWorkflowStateDto,
-};
 use crate::protocol::message::MessageDto;
 use crate::protocol::permission::PermissionResolutionDto;
 use serde::{Deserialize, Serialize};
@@ -396,65 +392,6 @@ pub enum ClientEvent {
 
     CommandsChanged {
         commands: Vec<SlashCommandDto>,
-    },
-
-    // ── Local apps ────────────────────────────────────────────────────────
-    //
-    // Docstrings in this section are deliberately terse: uniffi bakes every
-    // docstring into a fixed-capacity per-item metadata buffer, and the
-    // `ClientEvent` enum is near that cap. Full semantics live on the
-    // `crate::protocol::local_apps` DTOs and the matching `ClientCommand` variants.
-    AppsChanged {
-        apps: Vec<AppRecordDto>,
-    },
-
-    AppEvent {
-        event: AppEventDto,
-    },
-
-    AppWorkflowChanged {
-        app_id: String,
-        state: AppWorkflowStateDto,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-    },
-
-    AppRuntimeChanged {
-        app_id: String,
-        state: AppRuntimeStateDto,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        details: Option<AppRuntimeDetailsDto>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_error: Option<String>,
-    },
-
-    AppSessionsChanged {
-        app_id: String,
-        sessions: Vec<AppSessionRowDto>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        next_offset: Option<u64>,
-    },
-
-    AppCheckpointCreated {
-        app_id: String,
-        checkpoint: AppCheckpointDto,
-    },
-
-    AppOperationFailed {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        app_id: Option<String>,
-        code: AppErrorCodeDto,
-        message: String,
-        // Correlation key from the `CreateApp` (or other app command) that
-        // failed, echoed verbatim so the caller that started the operation
-        // can recognise its own failure. `None` for a failure the engine
-        // synthesized with no originating request.
-        //
-        // Appended LAST: UniFFI encodes struct variants POSITIONALLY, so a
-        // field inserted above `message` would be reinterpreted by a client
-        // built against the previous bindings.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
     },
 
     // ── Live thinking/usage (§0.7 follow-up) + reserved (§0.9) ────────────

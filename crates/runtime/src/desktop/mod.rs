@@ -502,7 +502,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         name: &str,
         input: serde_json::Value,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
         supplied: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
@@ -511,7 +510,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
-                    .invoke_supplied_detailed(name, input, ctx, workspace_lease_token, supplied)
+                    .invoke_supplied_detailed(name, input, ctx, supplied)
                     .await
             }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
@@ -526,7 +525,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         name: &str,
         input: serde_json::Value,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
         lingxi_core::host::tool_invoker::ToolInvokerError,
@@ -534,7 +532,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
-                    .invoke_detailed(name, input, ctx, workspace_lease_token)
+                    .invoke_detailed(name, input, ctx)
                     .await
             }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
@@ -552,34 +550,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
-            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
-                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
-                    .to_string(),
-            )),
-        }
-    }
-
-    /// Forward the lease token instead of inheriting the trait's delegating
-    /// default. This wrapper sits between the lease PRODUCER
-    /// (`WorkspaceLeaseToolInvoker`) and the CONSUMER (`RegistryToolInvoker`,
-    /// which folds the token into `PermissionCheckContext`), so the default —
-    /// which drops the token and calls `invoke` — left
-    /// `workspace_lease_token` permanently `None` in production: the lease
-    /// ALLOW never fired, and neither did the paired `denies_host_owned_for_token`
-    /// hard deny.
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: serde_json::Value,
-        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
-        match self.inner.get() {
-            Some(invoker) => {
-                invoker
-                    .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
-                    .await
-            }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .to_string(),
@@ -1283,27 +1253,6 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                             .creator_agent_id
                             .as_deref()
                             .and_then(lingxi_core::types::AgentId::parse_prefixed),
-                        // Desktop hosts no Local Apps: no app store and no
-                        // delete guard, so there is nothing for a scope to
-                        // authorize. `None` rather than a purpose invented at
-                        // the call site.
-                        //
-                        // ⚠️ Desktop DOES have a workspace-lease registry —
-                        // `with_workspace_permission_leases` is wired further
-                        // down this file. `None` is still right, and strictly
-                        // safer: a lease is an ALLOW grant, so an unscoped
-                        // desktop workflow gets less than before, never more.
-                        //
-                        // Unremarked behaviour delta, recorded here because the
-                        // diff does not otherwise say it: before the scope was
-                        // threaded, a desktop launch named like a Local App
-                        // build workflow but carrying no `args.app_id` failed
-                        // hard with `requires a non-empty workflow args.app_id`.
-                        // It now runs silently unscoped. Nothing on desktop
-                        // relies on that refusal today — there is no app store
-                        // for it to protect — but a future reader looking for
-                        // where it went should find this.
-                        scope: None,
                     },
                     task_description,
                 )
@@ -5585,9 +5534,6 @@ mod environment_oauth_tests;
 #[path = "tests/connected_fallback_tests.rs"]
 mod connected_fallback_tests;
 
-#[cfg(test)]
-#[path = "tests/workspace_lease_forwarding_tests.rs"]
-mod workspace_lease_forwarding_tests;
 
 /// Round-5 review item 11's class member (1), handed to the gate by that
 /// fixer's `needs_other_file`: the connect LOOP inside

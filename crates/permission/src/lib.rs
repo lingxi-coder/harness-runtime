@@ -94,7 +94,6 @@ pub mod shell_command;
 pub mod shell_rule_matching;
 pub mod update;
 pub mod working_dirs;
-pub mod workspace_lease;
 
 pub use allow_suggestion::{allow_suggestion, call_matches_rule};
 pub use auto_edit_safety::{
@@ -197,11 +196,6 @@ pub use working_dirs::{
     is_network_working_directory, is_network_working_directory_against,
     network_working_directory_message, AdditionalWorkingDirs, WorkingDirectory,
 };
-pub use workspace_lease::{
-    WorkspaceLeaseInfo, WorkspacePermissionLease, WorkspacePermissionLeaseRegistry,
-    WorkspaceProfile,
-};
-
 pub use model_path::{FileSystemPathTranslator, ModelPathOutcome, ModelPathTranslator};
 
 mod monitor_url;

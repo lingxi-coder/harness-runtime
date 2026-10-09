@@ -4339,7 +4339,6 @@ mod tests {
                     creator_teammate_name: None,
                     creator_team_name: None,
                     creator_agent_id: None,
-                    scope: None,
                 },
                 make_ctx(fs),
             )

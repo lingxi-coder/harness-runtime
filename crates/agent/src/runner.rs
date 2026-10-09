@@ -349,7 +349,6 @@ fn live_agent_tool_dispatch(ctx: &SubagentContext) -> Option<live_tools::LiveAge
                             &call.name,
                             call.input,
                             call.context,
-                            None,
                             std::sync::Arc::new(tool_api::tool_invoker_impl::SuppliedTool(tool)),
                         )
                         .await
@@ -360,7 +359,7 @@ fn live_agent_tool_dispatch(ctx: &SubagentContext) -> Option<live_tools::LiveAge
                 }
             } else {
                 invoker
-                    .invoke_detailed(&call.name, call.input, call.context, None)
+                    .invoke_detailed(&call.name, call.input, call.context)
                     .await
             }
         }) as futures::future::BoxFuture<'static, _>

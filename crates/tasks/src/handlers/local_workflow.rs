@@ -30,7 +30,6 @@
 //! the worker loop sees the closed channel and ends, and the outcome that the
 //! script thread sends last is delivered to the caller.
 
-use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
@@ -40,6 +39,7 @@ use async_trait::async_trait;
 use futures::stream::StreamExt;
 use lingxi_core::host::filesystem::FileSystem;
 use lingxi_core::host::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
+#[cfg(test)]
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
@@ -509,26 +509,6 @@ pub trait WorkflowProgressSink: Send + Sync {
 /// Handler name reported by [`Task::name`] / used as the runtime task-name.
 const HANDLER_NAME: &str = "local_workflow";
 
-/// Whether this workflow run must hold its app's exclusive workspace lease.
-///
-/// Reads the task's typed [`crate::scope::ManagedWorkflowScope`]
-/// (design §18 Phase -1 step 8 / §8.1) instead of matching `workflow_id`
-/// against this crate's (since-deleted) list of build-workflow names: a
-/// `workflow_id` is a string the *caller* supplies when launching a
-/// workflow, so a custom workflow that happens to reuse a real build
-/// workflow's name used to collect the exact same lease. `None` -- no scope
-/// at all -- never requires the lease; only a
-/// `Some` scope whose [`ManagedWorkflowPurpose`](crate::scope::ManagedWorkflowPurpose)
-/// is `Build` does (`ManagedWorkflowScope::requires_workspace_lease`).
-///
-/// `pub(crate)` (not private) so `registry_test.rs` can exercise it directly
-/// alongside [`crate::registry::TaskRegistry::find_nonterminal_managed_workflows`]
-/// in the same integration test, without needing a full spawn (which needs a
-/// lease registry, a data root and a live runtime).
-pub(crate) fn requires_workspace_lease(scope: Option<&crate::scope::ManagedWorkflowScope>) -> bool {
-    scope.is_some_and(crate::scope::ManagedWorkflowScope::requires_workspace_lease)
-}
-
 /// Claude Code `k6a` — the per-run lifetime cap on real `agent()` calls. The
 /// 1001st call is refused via the throw channel so the prelude rejects the
 /// `agent()` promise with `WorkflowAgentCapError` (a runaway-loop backstop).
@@ -547,86 +527,6 @@ const WF_THROW_PREFIX: &str = "\u{1}__wf_throw__\u{1}";
 const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
 const REGISTRATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Adds the current workflow's lease token to every recursive tool dispatch.
-/// The wrapper is deliberately stateful and cannot be reused by another app.
-struct WorkspaceLeaseToolInvoker {
-    inner: Arc<dyn ToolInvoker>,
-    token: u64,
-}
-
-#[async_trait]
-impl ToolInvoker for WorkspaceLeaseToolInvoker {
-    async fn cleanup_computer_inputs(
-        &self,
-        agent_id: lingxi_core::types::AgentId,
-        origin_session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
-        self.inner
-            .cleanup_computer_inputs(agent_id, origin_session_id)
-            .await
-    }
-
-    fn permission_mode(&self) -> Option<String> {
-        self.inner.permission_mode()
-    }
-
-    fn tool_is_concurrency_safe(&self, name: &str, input: &Value) -> Option<bool> {
-        self.inner.tool_is_concurrency_safe(name, input)
-    }
-
-    async fn invoke(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError> {
-        self.inner
-            .invoke_with_workspace_lease(name, input, ctx, Some(self.token))
-            .await
-    }
-
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-        _workspace_lease_token: Option<u64>,
-    ) -> Result<Value, ToolInvokerError> {
-        self.inner
-            .invoke_with_workspace_lease(name, input, ctx, Some(self.token))
-            .await
-    }
-
-    async fn invoke_detailed(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-        _workspace_lease_token: Option<u64>,
-    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
-        self.inner
-            .invoke_detailed(name, input, ctx, Some(self.token))
-            .await
-    }
-
-    async fn invoke_supplied_detailed(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-        _workspace_lease_token: Option<u64>,
-        supplied: Arc<dyn Any + Send + Sync>,
-    ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
-        self.inner
-            .invoke_supplied_detailed(name, input, ctx, Some(self.token), supplied)
-            .await
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
 
 /// Build a throw-channel result slot carrying `message`.
 fn wf_throw(message: &str) -> String {
@@ -977,13 +877,6 @@ pub struct LocalWorkflowHandler {
     /// snapshots `baseline.load()` so the run's `budget.spent()` is turn-relative
     /// (`pool - baseline` = `getTurnSpent()`). Unset (tests) ⇒ baseline 0.
     turn_baseline_cell: Option<Arc<OnceLock<Arc<AtomicU64>>>>,
-    /// Optional permission lease registry used by managed-app build workflows.
-    workspace_leases: Option<Arc<permission::WorkspacePermissionLeaseRegistry>>,
-    /// Profile root containing `apps/<app_id>/workspace`. The managed-app
-    /// workflow derives the exact app workspace from its validated `app_id`
-    /// instead of reusing the engine session cwd (which may belong to another
-    /// app or to the host project).
-    workspace_root: Option<std::path::PathBuf>,
     /// Optional live plugin-workflow registry (§14 — the SAME `Arc` shared
     /// with `plugin::PluginManager::with_plugin_workflows` and
     /// `tool_workflow::WorkflowTool::with_plugin_workflows`). When wired, a
@@ -1022,8 +915,6 @@ impl LocalWorkflowHandler {
             output_pool_cell: None,
             output_scopes: None,
             turn_baseline_cell: None,
-            workspace_leases: None,
-            workspace_root: None,
             plugin_workflows: None,
         }
     }
@@ -1121,17 +1012,6 @@ impl LocalWorkflowHandler {
     #[must_use]
     pub fn with_turn_baseline_cell(mut self, cell: Arc<OnceLock<Arc<AtomicU64>>>) -> Self {
         self.turn_baseline_cell = Some(cell);
-        self
-    }
-
-    #[must_use]
-    pub fn with_workspace_permission_leases(
-        mut self,
-        registry: Arc<permission::WorkspacePermissionLeaseRegistry>,
-        app_data_root: std::path::PathBuf,
-    ) -> Self {
-        self.workspace_leases = Some(registry);
-        self.workspace_root = Some(app_data_root);
         self
     }
 
@@ -3713,7 +3593,6 @@ impl Task for LocalWorkflowHandler {
             creator_teammate_name: _,
             creator_team_name: _,
             creator_agent_id: _,
-            scope,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -3750,47 +3629,6 @@ impl Task for LocalWorkflowHandler {
                     .map_err(|error| TaskError::Internal(error.to_string()))
             })
             .transpose()?;
-
-        // A managed-app build may only run with a lease bound to the exact app
-        // workspace. Do this validation before allocating task/spool state so
-        // a malformed scope cannot start a prompt-heavy workflow with a
-        // generic cwd or leave an orphaned spool file behind.
-        //
-        // `scope` is whatever the Host put on the spawn input -- a value only
-        // a purpose constructor can produce, for an app id the Host resolved
-        // itself. Deriving `app_id` from `workflow_args` here instead --
-        // caller-supplied JSON, exactly like `workflow_id` -- is the exact
-        // vector this migration exists to close (design §8.1: a custom
-        // workflow must get nothing "即使伪造 meta.name 或 args.app_id"), so it
-        // is deliberately NOT restored as a fallback: an unscoped run simply
-        // takes no lease.
-        let workspace_lease = if requires_workspace_lease(scope.as_ref()) {
-            let app_id = scope
-                .as_ref()
-                .expect("requires_workspace_lease(Some(_)) implies scope is Some")
-                .app_id()
-                .to_string();
-            let registry = self.workspace_leases.clone().ok_or_else(|| {
-                TaskError::Internal(format!(
-                    "{workflow_id} requires a workspace permission lease registry"
-                ))
-            })?;
-            let data_root = self.workspace_root.clone().ok_or_else(|| {
-                TaskError::Internal(format!("{workflow_id} requires an app data root"))
-            })?;
-            // The profile's workspace layout is the persisted invariant. Keep
-            // this derivation here, at the point where the workflow's app_id
-            // is validated, so a workflow cannot borrow the current session
-            // cwd or another app's workspace.
-            let root = registry.workspace_root_for(&data_root, &app_id);
-            Some(
-                registry
-                    .begin_bound(app_id, root)
-                    .map_err(TaskError::Internal)?,
-            )
-        } else {
-            None
-        };
 
         // 2. Generate the task id (prefix 'w') and allocate its spool file.
         let task_id = crate::id::generate_task_id(TaskType::LocalWorkflow);
@@ -3871,13 +3709,9 @@ impl Task for LocalWorkflowHandler {
         // not the number of runtime `phase()` calls.
         let meta_phase_count = workflow::meta_array_len(&script, "phases").unwrap_or(0) as i64;
         let script_size_chars = workflow_script_size_chars(&script);
-        let workspace_lease_token = workspace_lease
-            .as_ref()
-            .map(permission::WorkspacePermissionLease::token);
         let worker = Box::pin({
             async move {
                 let _completion_signal = WorkerCompletionSignal::new(completion_tx);
-                let _workspace_lease = workspace_lease;
                 let registered = wait_for_workflow_registration(
                     &status_sink,
                     &runtime,
@@ -4060,15 +3894,7 @@ impl Task for LocalWorkflowHandler {
                     }
                 };
                 let run_start = std::time::Instant::now();
-                let workflow_tool_invoker: Arc<dyn ToolInvoker> =
-                    if let Some(token) = workspace_lease_token {
-                        Arc::new(WorkspaceLeaseToolInvoker {
-                            inner: tool_invoker.clone(),
-                            token,
-                        })
-                    } else {
-                        tool_invoker.clone()
-                    };
+                let workflow_tool_invoker: Arc<dyn ToolInvoker> = tool_invoker.clone();
                 let workflow_spawner: Arc<dyn SubagentSpawner> =
                     if let Some(worktree) = worktree_manager.clone() {
                         Arc::new(WorkflowIsolationSpawner {

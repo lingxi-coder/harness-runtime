@@ -290,18 +290,7 @@ impl ToolInvoker for RegistryToolInvoker {
         input: Value,
         ctx: SubagentInvocationContext,
     ) -> Result<Value, ToolInvokerError> {
-        self.invoke_with_workspace_lease(name, input, ctx, None)
-            .await
-    }
-
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
-    ) -> Result<Value, ToolInvokerError> {
-        self.invoke_detailed(name, input, ctx, workspace_lease_token)
+        self.invoke_detailed(name, input, ctx)
             .await
             .map(|result| result.data)
     }
@@ -311,9 +300,8 @@ impl ToolInvoker for RegistryToolInvoker {
         name: &str,
         input: Value,
         ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
-        self.invoke_registered_or_supplied(name, input, ctx, workspace_lease_token, None)
+        self.invoke_registered_or_supplied(name, input, ctx, None)
             .await
     }
 
@@ -322,7 +310,6 @@ impl ToolInvoker for RegistryToolInvoker {
         name: &str,
         input: Value,
         ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
         supplied: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         if self.gate.is_none() {
@@ -338,7 +325,7 @@ impl ToolInvoker for RegistryToolInvoker {
         if tool.name() != name && !tool.aliases().contains(&name) {
             return Err(ToolInvokerError::NotFound(name.into()));
         }
-        self.invoke_registered_or_supplied(name, input, ctx, workspace_lease_token, Some(tool))
+        self.invoke_registered_or_supplied(name, input, ctx, Some(tool))
             .await
     }
 
@@ -353,7 +340,6 @@ impl RegistryToolInvoker {
         name: &str,
         mut input: Value,
         ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
         supplied: Option<Arc<dyn crate::Tool>>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         let tool = supplied
@@ -616,7 +602,6 @@ impl RegistryToolInvoker {
                 // main thread / a spawn with no override.
                 mode_override: ctx.mode_override.clone(),
                 is_non_interactive_session: ctx.is_non_interactive_session,
-                workspace_lease_token,
                 // Replay the fork-time command denies as a `disallowed_tools`
                 // LAYER. The fold applies layers ON TOP of the base policy, so a
                 // frozen deny wins over a live rule that would now allow the same
@@ -1376,7 +1361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_call_cancellation_reaches_normal_and_workspace_lease_tool_contexts() {
+    async fn per_call_cancellation_reaches_tool_contexts_without_leaking_a_prior_scope() {
         let captured: Arc<
             StdMutex<
                 Option<(
@@ -1391,12 +1376,12 @@ mod tests {
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
 
-        for workspace_lease_token in [None, Some(41)] {
+        for with_prior_snapshot in [false, true] {
             *captured.lock().unwrap() = None;
             let cancellation_token = tokio_util::sync::CancellationToken::new();
             let mut context = no_ctx();
             context.cancellation_token = cancellation_token.clone();
-            let stale_token = if workspace_lease_token.is_some() {
+            let stale_token = if with_prior_snapshot {
                 let stale_token = tokio_util::sync::CancellationToken::new();
                 let mut stale_context = ToolUseContext::model_seed("prior-call".into(), None);
                 stale_context.cancel = Some(stale_token.clone());
@@ -1407,17 +1392,10 @@ mod tests {
                 None
             };
 
-            if let Some(token) = workspace_lease_token {
-                invoker
-                    .invoke_with_workspace_lease("RecordingTool", json!({}), context, Some(token))
-                    .await
-                    .expect("workspace-leased tool call succeeds");
-            } else {
-                invoker
-                    .invoke("RecordingTool", json!({}), context)
-                    .await
-                    .expect("normal tool call succeeds");
-            }
+            invoker
+                .invoke("RecordingTool", json!({}), context)
+                .await
+                .expect("tool call succeeds");
 
             let observed_token = captured
                 .lock()
@@ -1722,7 +1700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_lease_dispatch_preserves_trusted_execution_policy() {
+    async fn dispatch_preserves_trusted_execution_policy() {
         let captured = Arc::new(StdMutex::new(None));
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(NameRecordingTool {
@@ -1730,7 +1708,7 @@ mod tests {
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
         invoker
-            .invoke_with_workspace_lease(
+            .invoke(
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
@@ -1764,16 +1742,15 @@ mod tests {
                     request_source: None,
                     frozen_command_denies: Vec::new(),
                 },
-                Some(77),
             )
             .await
-            .expect("lease-aware dispatch succeeds");
+            .expect("dispatch succeeds");
         let captured = captured.lock().unwrap();
         let captured = captured.as_ref().expect("tool call ran");
         assert_eq!(
             captured.4,
             lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel,
-            "workspace lease path must not drop the trusted Fusion policy"
+            "dispatch must not drop the trusted Fusion policy"
         );
     }
 

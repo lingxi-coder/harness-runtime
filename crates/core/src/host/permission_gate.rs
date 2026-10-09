@@ -268,10 +268,6 @@ pub struct PermissionCheckContext {
     /// context rather than stored process-globally so synchronous and async
     /// subagents can inherit the correct owner semantics without races.
     pub is_non_interactive_session: bool,
-    /// Ephemeral host-managed workspace lease used to bind automatic filesystem
-    /// authorization to the workflow that owns the call. `None` for ordinary
-    /// session and main-loop dispatches.
-    pub workspace_lease_token: Option<u64>,
     /// This call's ORDERED permission-LAYER stack — 1:1 with claude-code
     /// `toolUseContext.permissionLayers`, folded onto the session's base
     /// permission context by `gn(toolUseContext)` (2.1.238 binary @287028951)
