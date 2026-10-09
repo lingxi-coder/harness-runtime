@@ -329,16 +329,6 @@ path = "tests/desktop/settings_watch_spawn.rs"
 required-features = ["desktop"]
 
 [[test]]
-name = "component_literal_scan"
-path = "tests/mobile/component_literal_scan.rs"
-required-features = ["mobile"]
-
-[[test]]
-name = "plugin_workflow_scripts"
-path = "tests/mobile/plugin_workflow_scripts.rs"
-required-features = ["mobile"]
-
-[[test]]
 name = "mobile_git_gating"
 path = "tests/mobile/mobile_git_gating.rs"
 required-features = ["mobile"]

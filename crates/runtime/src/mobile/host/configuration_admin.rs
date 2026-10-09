@@ -592,7 +592,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(home.join("plugins/installed_plugins.json"),json!({"version":2,"plugins":{"fixture@tests":[{"scope":"user","installPath":plugin_dir,"version":"1.0.0"}]}}).to_string()).unwrap();
-        std::fs::write(home.join("settings.json"),json!({"enabledPlugins":{"fixture@tests":false,(crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME):false}}).to_string()).unwrap();
+        std::fs::write(home.join("settings.json"),json!({"enabledPlugins":{"fixture@tests":false}}).to_string()).unwrap();
         let mut cfg = test_config(&workspace);
         cfg.lingxi_home = home.clone();
         let storage = Arc::new(lingxi_core::host::InMemorySecureStorage::new());
