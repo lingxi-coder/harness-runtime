@@ -8,7 +8,7 @@ sbom_dir="${MOBILE_LINUX_EVIDENCE_DIR:-}"
 auth_manifest="${repo_root}/docs/mobile-linux/authorization/AUTHORIZATION_MANIFEST.json"
 rootfs_manifest="${sbom_dir}/rootfs-manifest.json"
 rootfs_lock="${sbom_dir}/rootfs-build.lock.json"
-tool_path="${repo_root}/scripts/local-apps/rootfs_tool.py"
+tool_path="${repo_root}/scripts/mobile-linux/rootfs_tool.py"
 
 if [[ "${enabled}" != "1" ]]; then
   echo "mobile-linux SBOM/license gate skipped (LINGXI_MOBILE_LINUX_ENABLED!=1)"

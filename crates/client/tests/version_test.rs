@@ -32,7 +32,7 @@ fn version_is_semver() {
     }
 }
 
-/// Major 20 removes the Local App families from the client protocol; major 18
+/// Major 20 removes the app families from the client protocol; major 18
 /// added the current Mod UI request/result and targeted invalidation
 /// protocol. This is a deliberate second lock beyond the structural guard
 /// because generated native bindings change and the host requires protocol

@@ -71,14 +71,14 @@ digest = hashlib.sha256((root / "rootfs.tar.gz").read_bytes()).hexdigest()
 )
 PY
 expect_rejection "an uncommitted release rootfs digest to fail validation" \
-  python3 "${SCRIPT_DIR}/../local-apps/rootfs_tool.py" --sdk-root "${SDK_ROOT}" verify-release-archive \
+  python3 "${SCRIPT_DIR}/../mobile-linux/rootfs_tool.py" --sdk-root "${SDK_ROOT}" verify-release-archive \
   --pins "${ROOTFS_PINS}/source-only-pins.json" --abi arm64-v8a \
   --archive "${ROOTFS_PINS}/rootfs.tar.gz"
 expect_rejection "a release rootfs digest mismatch to fail validation" \
-  python3 "${SCRIPT_DIR}/../local-apps/rootfs_tool.py" --sdk-root "${SDK_ROOT}" verify-release-archive \
+  python3 "${SCRIPT_DIR}/../mobile-linux/rootfs_tool.py" --sdk-root "${SDK_ROOT}" verify-release-archive \
   --pins "${ROOTFS_PINS}/wrong-pins.json" --abi arm64-v8a \
   --archive "${ROOTFS_PINS}/rootfs.tar.gz"
-python3 "${SCRIPT_DIR}/../local-apps/rootfs_tool.py" --sdk-root "${SDK_ROOT}" verify-release-archive \
+python3 "${SCRIPT_DIR}/../mobile-linux/rootfs_tool.py" --sdk-root "${SDK_ROOT}" verify-release-archive \
   --pins "${ROOTFS_PINS}/pins.json" --abi arm64-v8a \
   --archive "${ROOTFS_PINS}/rootfs.tar.gz"
 

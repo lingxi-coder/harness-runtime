@@ -34,7 +34,7 @@ class ProductNeutral(unittest.TestCase):
         self.assertIn("1 files", result.stdout)
 
     def test_each_spelling_in_each_crate_is_found(self):
-        for crate in ("core", "mcp", "tasks", "permission"):
+        for crate in ("core", "mcp", "tasks", "permission", "runtime", "client"):
             for text in ("LocalAppBuild", "local_app_id", "local-app-build", "// a Local App", "LOCAL_APP_ROOT",
                          "local_apps::ids"):
                 with self.subTest(crate=crate, text=text):
@@ -52,10 +52,11 @@ class ProductNeutral(unittest.TestCase):
                 result = self.run_gate({"crates/tasks/" + name: "local-app-builder-contracts = 1\n", "crates/tasks/src/a.rs": ""})
                 self.assertEqual(result.returncode, 1)
 
-    def test_a_crate_that_may_name_the_product_is_not_scanned(self):
-        result = self.run_gate({"crates/core/src/a.rs": "", "crates/client/src/a.rs": "LocalAppBuild\n",
-                                "crates/runtime/src/a.rs": "LocalAppBuild\n"})
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_no_crate_is_exempt(self):
+        result = self.run_gate({"crates/client/src/a.rs": "LocalAppBuild\n", "crates/runtime/src/a.rs": "LocalAppBuild\n"})
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("crates/client/src/a.rs names the Local App product", result.stderr)
+        self.assertIn("crates/runtime/src/a.rs names the Local App product", result.stderr)
 
     def test_an_untracked_file_is_not_scanned_so_the_driver_says_to_stage_first(self):
         root, keep = self.repo({"crates/core/src/a.rs": ""})

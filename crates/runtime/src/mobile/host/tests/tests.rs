@@ -2211,14 +2211,6 @@ use lingxi_core::host::audio::{
 /// `Platform`) so the F3-05 `submit` path is exercised on CI. Returns the
 /// handle plus the recording listener so a test can read back delivered
 /// events.
-///
-/// Task 11: `CreateApp` (and friends) now trigger a REAL background
-/// authoring/planning round trip. Off-device tests have no network, so
-/// this installs a deterministic, always-fails-fast local-apps model
-/// (zero scripted responses ⇒ an immediate, in-process
-/// `AppError::Io`, no I/O) instead of leaving every caller race a real
-/// `api.anthropic.com` request — a test that wants a scripted success
-/// overrides it via `set_local_apps_model` before triggering.
 fn build_submit_handle(root: &std::path::Path) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
     build_submit_handle_with_platform(root, Arc::new(HostFakePlatform::new(root.to_path_buf())))
 }

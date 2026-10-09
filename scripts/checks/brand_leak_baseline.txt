@@ -626,8 +626,8 @@ G1	scripts/checks/prompt_drift_scan.py	LINGXI
 G1	scripts/checks/prompt_drift_scan.py	LingXi
 G1	scripts/checks/prompt_drift_scan.py	\.claude(?![A-Za-z0-9_.\-])
 G1	scripts/checks/prompt_drift_scan.py	\.lingxi
-G1	scripts/local-apps/check-authorizations.sh	LINGXI
-G1	scripts/local-apps/check-sbom-and-licenses.sh	LINGXI
+G1	scripts/mobile-linux/check-authorizations.sh	LINGXI
+G1	scripts/mobile-linux/check-sbom-and-licenses.sh	LINGXI
 G1	scripts/tests/computer_desktop_acceptance.py	LingXi
 G1	scripts/tests/computer_desktop_acceptance.py	\.lingxi
 G1	scripts/tests/fixtures/ComputerUseProbe.swift	LingXi

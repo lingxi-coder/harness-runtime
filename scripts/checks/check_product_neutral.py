@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Engine crates must not name the Local App product (driver: scripts/checks/check-product-neutral.sh).
+"""No crate names the Local App product (driver: scripts/checks/check-product-neutral.sh).
 
-Every crate under `crates/` is product-neutral except the two that are the product's adapters: `runtime` (the
-composition root, which installs the product into the engine) and `client` (the wire protocol the apps speak). What
-an engine crate needs from the product (the layout of its workspaces, the rows of its tool table, the grammar of
-its server ids) is injected by the composition root, so a Local App identifier in one of them is a coupling that
-the extraction removed and must not come back.
+Local App is an externally installed plugin (manifest, skills, agents, workflows and a separately distributed MCP
+server). The engine and the apps carry none of its code, so a Local App identifier anywhere under `crates/` is a
+coupling the extraction removed and must not come back.
 
 A hit is `LocalApp…`, `local_app…`, `local-app…`, `local app…` or `LOCAL_APP…` in a tracked source, manifest, JSON or
-text file under such a crate (`LocalAppData`, the Windows directory, is not one). The one way to keep a hit is a line
+text file under `crates/` (`LocalAppData`, the Windows directory, is not one). The one way to keep a hit is a line
 in `product_neutral_keep.txt`:
 
     <path>\t<needle>\t<reason>
@@ -21,8 +19,8 @@ import re
 import subprocess
 import sys
 
-# The crates that are the product's own adapters; everything else under crates/ is scanned.
-ADAPTERS = ("crates/runtime/", "crates/client/")
+# Every crate under crates/ is scanned; there are no adapter exemptions any more.
+ADAPTERS = ()
 EXTENSIONS = (".rs", ".toml", ".json", ".md", ".txt")
 # `local_approval`, `local_application` and friends are ordinary words; the app family is `app`/`apps` followed by a
 # non-letter (or the end).
@@ -53,7 +51,7 @@ def load_keep(path):
 
 
 def in_scope(rel):
-    return rel.startswith("crates/") and rel.endswith(EXTENSIONS) and not rel.startswith(ADAPTERS)
+    return rel.startswith("crates/") and rel.endswith(EXTENSIONS) and not (ADAPTERS and rel.startswith(ADAPTERS))
 
 
 def scan(root, files, keep):
@@ -101,8 +99,8 @@ def main(argv):
         for path, needle, _ in stale:
             sys.stderr.write("  - keep entry for %s (%s) matches nothing — remove it\n" % (path, needle))
         return 1
-    print("check-product-neutral: OK — %d files under crates/ outside %s, no Local App identifiers (%d kept)"
-          % (len(scanned), ", ".join(ADAPTERS), len(keep)))
+    print("check-product-neutral: OK — %d files under crates/, no Local App identifiers (%d kept)"
+          % (len(scanned), len(keep)))
     return 0
 
 

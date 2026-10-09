@@ -20,18 +20,19 @@ LEAVES = {"app", "example"}
 # concrete `tool-shell` would defeat the whole composition-root design.
 API_CRATES = {"tool-api", "skill-api", "command-api"}
 
-# Who may name the Local App project's crates, by NAME. Rules written for workspace members cannot see an edge onto a
-# crate that lives in another repository; this table does not care where a crate lives. A crate may name one only if it
-# is listed here, which keeps the engine's use of the project to the shared primitives it re-exports and to the one
-# composition root that assembles it. The project's own graph (primitives at the bottom, no engine) is checked in its
-# repository.
-LOCAL_APP_PRIMITIVES = {"device-api", "local-app-builder-contracts", "mcp-wire", "rooted-fs"}
-LOCAL_APP_CRATES = LOCAL_APP_PRIMITIVES | {"local-app-builder-plugin", "local-app-builder-service", "local-apps"}
+# Who may name the crates published from the local-app-builder repository, by NAME. Rules written for workspace
+# members cannot see an edge onto a crate that lives in another repository; this table does not care where a crate
+# lives. The engine uses only the shared primitives (device API, MCP wire types, rooted filesystem) and only where
+# listed here. Local App is an externally installed plugin, so the crates that implement it (`local-apps`,
+# `local-app-builder-{contracts,plugin,service}`) may not be named by anything in this workspace.
+LOCAL_APP_PRIMITIVES = {"device-api", "mcp-wire", "rooted-fs"}
+LOCAL_APP_CRATES = LOCAL_APP_PRIMITIVES | {
+    "local-app-builder-contracts", "local-app-builder-plugin", "local-app-builder-service", "local-apps",
+}
 LOCAL_APP_CONSUMERS = {
-    "core": LOCAL_APP_PRIMITIVES - {"local-app-builder-contracts"},  # re-exports the shared device/MCP/fs primitives only
-    "platform-android": {"local-app-builder-contracts"},  # the Android build profile's guest paths
+    "core": LOCAL_APP_PRIMITIVES,  # re-exports the shared device/MCP/fs primitives only
     "mcp": {"mcp-wire"},
-    "harness-runtime": LOCAL_APP_CRATES,  # the composition root: adapters, build script, bundle
+    "harness-runtime": LOCAL_APP_PRIMITIVES,  # the composition root: MCP wire types and the rooted filesystem
 }
 
 # The SDK assembles existing components; components must never reach back into
@@ -154,7 +155,7 @@ def main():
         for dep in pkgs[n]["dependencies"]:
             if dep["name"] in LOCAL_APP_CRATES and dep["name"] not in allowed:
                 violations.append(
-                    "%s depends on %s — only %s may name the Local App project's crates%s"
+                    "%s depends on %s — only %s may name the local-app-builder crates%s"
                     % (n, dep["name"], ", ".join(sorted(LOCAL_APP_CONSUMERS)),
                        "" if not allowed else " (and %s may name only %s)" % (n, ", ".join(sorted(allowed))))
                 )

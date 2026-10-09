@@ -644,7 +644,7 @@ mod tests {
         task_create
             .call(
                 serde_json::json!({
-                    "subject": "Generate local app",
+                    "subject": "Generate report",
                     "description": "Exercise the iOS app-private task store"
                 }),
                 fresh_ctx(),

@@ -74,7 +74,7 @@ pub struct AudioInitiatorDto {
     /// Tool-use identifier, when invoked by a model tool call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
-    /// Host request identifier, when invoked by a Local App or UI request.
+    /// Host request identifier, when invoked by an app or UI request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
 }
