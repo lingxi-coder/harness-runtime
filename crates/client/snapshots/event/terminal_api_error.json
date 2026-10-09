@@ -1,0 +1,6 @@
+{
+  "type": "terminal_api_error",
+  "api_error_status": 413,
+  "terminal_reason": "image_error",
+  "stop_reason": "stop_sequence"
+}

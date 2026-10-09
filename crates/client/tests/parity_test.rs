@@ -187,7 +187,7 @@ fn task_record_parity() {
         task_id: "b00000001".to_string(),
         task_type: "local_bash".to_string(),
         status: "running".to_string(),
-        description: "cargo build".to_string(),
+        description: "cargo build".into(),
         command: None,
         agent_facts: None,
         ..Default::default()
@@ -196,7 +196,7 @@ fn task_record_parity() {
         task_id: "a00000002".to_string(),
         task_type: "local_agent".to_string(),
         status: "completed".to_string(),
-        description: "explore".to_string(),
+        description: "explore".into(),
         command: None,
         agent_facts: None,
         ..Default::default()
@@ -208,13 +208,13 @@ fn task_record_parity() {
     // Field-for-field parity with the `TaskRow` the poller produces …
     assert_eq!(running_dto.task_id, "b00000001");
     assert_eq!(running_dto.task_type, "local_bash");
-    assert_eq!(running_dto.description, "cargo build");
+    assert_eq!(running_dto.description.display(), "cargo build");
     // … with the one transform: the wire `status` String → the DTO enum.
     assert_eq!(running_dto.status, TaskStatusDto::Running);
 
     assert_eq!(completed_dto.task_id, "a00000002");
     assert_eq!(completed_dto.task_type, "local_agent");
-    assert_eq!(completed_dto.description, "explore");
+    assert_eq!(completed_dto.description.display(), "explore");
     assert_eq!(completed_dto.status, TaskStatusDto::Completed);
 }
 
@@ -323,7 +323,7 @@ fn hook_info_parity() {
     let with_matcher = HookInfo {
         name: "guard".to_string(),
         event: "PreToolUse".to_string(),
-        matcher: Some("Bash.*".to_string()),
+        matcher: Some("Bash.*".into()),
         timeout_ms: 5_000,
         ..HookInfo::default()
     };
@@ -338,7 +338,10 @@ fn hook_info_parity() {
     let with_dto = lower_hook_info(&with_matcher);
     assert_eq!(with_dto.name, "guard");
     assert_eq!(with_dto.event, "PreToolUse");
-    assert_eq!(with_dto.matcher.as_deref(), Some("Bash.*"));
+    assert_eq!(
+        with_dto.matcher.as_ref().map(|matcher| matcher.display()),
+        Some("Bash.*".into())
+    );
     assert_eq!(with_dto.timeout_ms, 5_000);
 
     let without_dto = lower_hook_info(&without_matcher);

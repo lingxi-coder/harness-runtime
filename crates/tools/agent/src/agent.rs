@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use lingxi_core::host::agent_statistics::{AgentSpawnRefusal, AgentSpawnToken};
 use lingxi_core::host::budget::BudgetError;
 use lingxi_core::host::fusion::{
     FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
@@ -3818,6 +3819,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         resolved_cwd: Option<String>,
         agent_worktree: Option<lingxi_core::host::worktree::WorktreeHandle>,
         mod_start: Option<Box<dyn AgentSpawnStart>>,
+        agent_spawn_token: Option<AgentSpawnToken>,
     ) -> Result<ToolCallResult, ToolError> {
         // [round-4 review, finding 15] `dispatch_async` is reached ONLY when
         // `run_in_background` is true (its sole caller gates on that flag
@@ -3846,6 +3848,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             budget,
         };
         let request = SubagentSpawnRequest {
+            agent_spawn_token: agent_spawn_token.clone(),
             agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
             teammate_color: None,
             subagent_type: effective_type.to_string(),
@@ -3964,6 +3967,9 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                 ))
             }
             Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
+                if let Some(token) = &agent_spawn_token {
+                    token.refused(AgentSpawnRefusal::ConcurrencyLimit);
+                }
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     bus,
@@ -4315,6 +4321,30 @@ impl Tool for AgentTool {
                 .expect("normalized description is a root string"),
         );
 
+        // Nested Agent calls inherit the still-live parent's statistics
+        // authority; top-level calls resolve the owner for their trusted
+        // origin session. Neither source comes from model-controlled input.
+        let inherited_statistics = match (self.ctx.task_registry.as_ref(), ctx.agent_id) {
+            (Some(registry), Some(agent_id)) => {
+                registry.agent_statistics_for_parent(agent_id).await
+            }
+            _ => None,
+        };
+        let statistics = match inherited_statistics {
+            Some(statistics) => Some(statistics),
+            None => match (
+                self.ctx.task_registry.as_ref(),
+                Self::origin_session_id(&ctx).await,
+            ) {
+                (Some(registry), Some(session_id)) => registry.agent_session_statistics(session_id),
+                _ => None,
+            },
+        };
+        let requested_background = self
+            .advertise_run_in_background
+            .then_some(parsed.run_in_background)
+            .flatten();
+
         // `if(xi()&&a.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL)F=void 0`
         // (@3577560) — on a coordinator session pinned to worker inheritance the
         // `model` argument is dropped before anything reads it, which is also
@@ -4357,6 +4387,9 @@ impl Tool for AgentTool {
         // unless CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH raises the limit.
         let depth_limit = lingxi_core::host::subagent_spawn::max_subagent_spawn_depth();
         if ctx.depth >= depth_limit {
+            if let Some(statistics) = &statistics {
+                statistics.record_refused(AgentSpawnRefusal::DepthLimit);
+            }
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -5113,6 +5146,9 @@ impl Tool for AgentTool {
         // does not consume one of the 200 lifetime slots.
         let concurrent_cap = lingxi_core::host::subagent_spawn::max_concurrent_subagents();
         if spawner.concurrent_subagent_count().await >= concurrent_cap {
+            if let Some(statistics) = &statistics {
+                statistics.record_refused(AgentSpawnRefusal::ConcurrencyLimit);
+            }
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -5136,6 +5172,9 @@ impl Tool for AgentTool {
         let origin_session_id = Self::origin_session_id(&ctx).await;
         let budget = Self::budget_for_origin(budget, origin_session_id);
         if let Err(BudgetError::Exceeded { current_nano_usd }) = budget.check_and_charge(0).await {
+            if let Some(statistics) = &statistics {
+                statistics.record_refused(AgentSpawnRefusal::Budget);
+            }
             Self::emit_failed(
                 &bus,
                 &invocation_id,
@@ -5609,6 +5648,14 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 ));
             }
         }
+        let agent_spawn_token = statistics.as_ref().map(|statistics| {
+            statistics.prepare_spawn(
+                selected.agent_type.clone(),
+                requested_background,
+                run_in_background,
+                ctx.depth + 1,
+            )
+        });
         let is_async = run_in_background;
         Self::emit_agent_tool_selected(
             &bus,
@@ -5722,6 +5769,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     resolved_cwd,
                     agent_worktree,
                     mod_start,
+                    agent_spawn_token,
                 )
                 .await;
         }
@@ -5768,6 +5816,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         };
 
         let request = SubagentSpawnRequest {
+            agent_spawn_token: agent_spawn_token.clone(),
             agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
             teammate_color: None,
             // Propagate the RESOLVED effective type (fork → `fork`; omitted →
@@ -6310,6 +6359,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 Err(ToolError::Internal("Agent: subagent was killed".into()))
             }
             Err(lingxi_core::host::subagent_spawn::SubagentSpawnError::PoolFull) => {
+                if let Some(token) = &agent_spawn_token {
+                    token.refused(AgentSpawnRefusal::ConcurrencyLimit);
+                }
                 self.release_spawn_reservation();
                 Self::emit_failed(
                     &bus,

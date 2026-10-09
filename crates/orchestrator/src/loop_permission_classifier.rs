@@ -1153,6 +1153,10 @@ mod tests {
                             is_meta: message["isMeta"].as_bool().unwrap_or(false),
                             is_compact_summary: false,
                             is_visible_in_transcript_only: false,
+                            turn_companion: None,
+                            usage_limit_note: None,
+                            origin: None,
+                            turn_origin: None,
                         }
                     }
                 })

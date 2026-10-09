@@ -17,7 +17,9 @@ use lingxi_core::host::{
     ProcessCommand, ProcessHandle, ProcessRunner, Sandbox, SandboxCapability, SandboxError,
     SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
-use lingxi_core::types::{HookId, HttpResponse, SessionId, ToolUseId};
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection, HookId, HttpResponse, SessionId, ToolUseId,
+};
 use mobile_linux_api::{ProcessError, ProcessOutput, SandboxBackend};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -60,7 +62,10 @@ fn load() -> Fixture {
 fn pre_tool_use_event() -> HookEvent {
     HookEvent::PreToolUse {
         tool_name: "Bash".into(),
-        tool_input: serde_json::json!({"command": "echo hi"}),
+        tool_input: Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"command": "echo hi"}),
+        )
+        .unwrap(),
         tool_use_id: ToolUseId::new(),
     }
 }
@@ -68,8 +73,12 @@ fn pre_tool_use_event() -> HookEvent {
 fn post_tool_use_event() -> HookEvent {
     HookEvent::PostToolUse {
         tool_name: "Bash".into(),
-        tool_input: serde_json::json!({"command": "echo hi"}),
-        tool_output: serde_json::json!({"output": "hi"}),
+        tool_input: Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"command": "echo hi"}),
+        )
+        .unwrap(),
+        tool_output: Utf16JsonProjection::from_serde_value(&serde_json::json!({"output": "hi"}))
+            .unwrap(),
         tool_use_id: ToolUseId::new(),
         duration_ms: None,
     }
@@ -170,7 +179,7 @@ impl BuiltinHookHandler for NoOpBuiltin {
         HookResult {
             outcome: HookOutcome::Success,
             stdout: "builtin-ran".into(),
-            stderr: String::new(),
+            stderr: String::new().into(),
             exit_code: Some(0),
             response: None,
         }
@@ -200,6 +209,7 @@ async fn builtin_arm_pretooluse_returns_success() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());
@@ -214,7 +224,7 @@ async fn builtin_arm_pretooluse_returns_success() {
     let stdout: String = agg
         .all_results
         .iter()
-        .map(|(_, r)| r.stdout.as_str())
+        .map(|(_, r)| r.stdout.display.as_str())
         .collect();
     assert!(
         stdout.contains("builtin-ran"),
@@ -250,6 +260,7 @@ async fn http_arm_pretooluse_with_mock_transport_succeeds() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
 
     let mock_http = Arc::new(MockHttpTransport::new());
@@ -277,7 +288,7 @@ async fn http_arm_pretooluse_with_mock_transport_succeeds() {
     let stderr: String = agg
         .all_results
         .iter()
-        .map(|(_, r)| r.stderr.as_str())
+        .map(|(_, r)| r.stderr.display.as_str())
         .collect();
     assert!(
         !stderr.contains("SSRF guard rejected") && !stderr.contains("http error"),
@@ -313,6 +324,7 @@ async fn http_arm_ssrf_guard_blocks_loopback_url() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
 
     let mock_http = Arc::new(MockHttpTransport::new());
@@ -326,7 +338,7 @@ async fn http_arm_ssrf_guard_blocks_loopback_url() {
     let stderr: String = agg
         .all_results
         .iter()
-        .map(|(_, r)| r.stderr.as_str())
+        .map(|(_, r)| r.stderr.display.as_str())
         .collect();
     assert!(
         stderr.contains("SSRF guard rejected url"),
@@ -454,6 +466,7 @@ fn command_hook_definition() -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -526,6 +539,7 @@ async fn command_arm_without_runner_returns_structured_error() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());
@@ -539,7 +553,7 @@ async fn command_arm_without_runner_returns_structured_error() {
     let stderr: String = agg
         .all_results
         .iter()
-        .map(|(_, r)| r.stderr.as_str())
+        .map(|(_, r)| r.stderr.display.as_str())
         .collect();
     assert!(
         stderr.contains("command executor not wired"),
@@ -573,6 +587,7 @@ async fn agent_arm_without_spawner_returns_error() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());
@@ -585,7 +600,7 @@ async fn agent_arm_without_spawner_returns_error() {
     let stderr: String = agg
         .all_results
         .iter()
-        .map(|(_, r)| r.stderr.as_str())
+        .map(|(_, r)| r.stderr.display.as_str())
         .collect();
     assert!(
         stderr.contains("agent executor not wired"),
@@ -617,6 +632,7 @@ async fn builtin_arm_posttooluse_fires_correctly() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());
@@ -629,7 +645,7 @@ async fn builtin_arm_posttooluse_fires_correctly() {
     let stdout: String = agg
         .all_results
         .iter()
-        .map(|(_, r)| r.stdout.as_str())
+        .map(|(_, r)| r.stdout.display.as_str())
         .collect();
     assert!(
         stdout.contains("builtin-ran"),

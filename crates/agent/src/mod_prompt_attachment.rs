@@ -12,8 +12,15 @@ use serde_json::{json, Value};
 #[derive(Default)]
 pub(crate) struct ChildPromptAttachments {
     descriptors: HashMap<MessageId, (String, Value)>,
-    answers:
-        HashMap<MessageId, (Utf16JsonProjection, (u64, u64), u64, Option<Utf16JsonProjection>)>,
+    answers: HashMap<
+        MessageId,
+        (
+            Utf16JsonProjection,
+            (u64, u64),
+            u64,
+            Option<Utf16JsonProjection>,
+        ),
+    >,
 }
 
 fn content_text_units(block: &ContentBlock) -> Option<Vec<u16>> {
@@ -41,7 +48,10 @@ fn message_text_units(message: &ConversationMessage) -> Option<Vec<u16>> {
 fn unwrap_system_reminder(units: &[u16]) -> (Vec<u16>, bool) {
     let prefix = "<system-reminder>\n".encode_utf16().collect::<Vec<_>>();
     let suffix = "\n</system-reminder>".encode_utf16().collect::<Vec<_>>();
-    if units.starts_with(&prefix) && units.ends_with(&suffix) && units.len() >= prefix.len() + suffix.len() {
+    if units.starts_with(&prefix)
+        && units.ends_with(&suffix)
+        && units.len() >= prefix.len() + suffix.len()
+    {
         (
             units[prefix.len()..units.len() - suffix.len()].to_vec(),
             true,
@@ -53,8 +63,9 @@ fn unwrap_system_reminder(units: &[u16]) -> (Vec<u16>, bool) {
 
 fn replace_content_text(block: &mut ContentBlock, units: Vec<u16>) {
     let citations = match block {
-        ContentBlock::Text { citations, .. }
-        | ContentBlock::TextJsUtf16 { citations, .. } => citations.clone(),
+        ContentBlock::Text { citations, .. } | ContentBlock::TextJsUtf16 { citations, .. } => {
+            citations.clone()
+        }
         _ => return,
     };
     let display = String::from_utf16_lossy(&units);
@@ -187,18 +198,15 @@ impl ChildPromptAttachments {
             };
             let (body_units, wrapped) = unwrap_system_reminder(&original_units);
             if body_units.iter().all(|unit| {
-                char::from_u32(u32::from(*unit)).is_some_and(
-                    lingxi_core::host::subagent_output_guard::is_js_space,
-                )
+                char::from_u32(u32::from(*unit))
+                    .is_some_and(lingxi_core::host::subagent_output_guard::is_js_space)
             }) {
                 messages.push(message);
                 continue;
             }
-            let body = Utf16JsonProjection::root_string(
-                String::from_utf16_lossy(&body_units),
-                body_units,
-            )
-            .expect("prompt attachment body is a root string");
+            let body =
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&body_units), body_units)
+                    .expect("prompt attachment body is a root string");
             let mut input = Utf16JsonProjection::from_serde_value(&json!({
                 "type":kind,
                 "text":"",
@@ -243,9 +251,7 @@ impl ChildPromptAttachments {
                             .subprojection("/text")
                             .ok()
                             .filter(|text| text.string_units("").is_some())
-                            .ok_or_else(|| {
-                                ModError::Hook("prompt.attachment needs text".into())
-                            })?;
+                            .ok_or_else(|| ModError::Hook("prompt.attachment needs text".into()))?;
                         Ok(Some(
                             Utf16JsonProjection::object(vec![("text".into(), text)])
                                 .expect("generated prompt.attachment result is valid"),
@@ -491,9 +497,14 @@ export function register(on) {
         )
         .unwrap();
         let host = ModHost::start(None).await.unwrap();
-        host.load("child-attachment", dir.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "child-attachment",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::from_serde_value(&json!({})).unwrap(),
+        )
+        .await
+        .unwrap();
         let session: Arc<dyn ModSessionContext> = Arc::new(Session {
             cwd: dir.path().to_path_buf(),
             generation: AtomicU64::new(0),

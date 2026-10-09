@@ -249,17 +249,31 @@ async fn real_hook_stream_has_no_connection_recovery_and_main_resends_v2p() {
     }
     std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
     capture.0.lock().unwrap().clear();
-    let system = llm_runtime::SystemPromptInput::source_vector(
-        vec!["main".into()],
-        None,
-        None,
-    );
+    let system = llm_runtime::SystemPromptInput::source_vector(vec!["main".into()], None, None);
     let main = StreamingApiClient::stream(
-        &adapter, "claude-sonnet-4-6", Some("anthropic"), Some(&system),
+        &adapter,
+        "claude-sonnet-4-6",
+        Some("anthropic"),
+        Some(&system),
         vec![ConversationMessage::user(MessageId::new(), "answer".into())],
-        vec![serde_json::json!({"name":"StructuredOutput", "description":"schema", "input_schema":{"type":"object", "properties":{}}})],
-        "sdk", false, None,
-    ).await;
+        llm_runtime::convert::to_tool_declarations(vec![
+            lingxi_core::host::SourceToolWireDefinition {
+                name: "StructuredOutput".into(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from("schema"),
+                input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"type":"object","properties":{}}"#,
+                )
+                .unwrap(),
+                strict: false,
+                defer_loading: false,
+            },
+        ])
+        .unwrap(),
+        "sdk",
+        false,
+        None,
+    )
+    .await;
     assert!(main.is_err());
     let requests = capture.0.lock().unwrap();
     assert_eq!(

@@ -76,7 +76,7 @@ mod tests {
         }));
         let h = LogoutHandler::new(m);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Logged out.");
+            assert_eq!(s, "Logged out.".into());
         } else {
             panic!();
         }
@@ -107,7 +107,7 @@ mod tests {
         let m = Arc::new(FailingAuth);
         let h = LogoutHandler::new(m);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Could not log out: network error: disk full");
+            assert_eq!(s, "Could not log out: network error: disk full".into());
         } else {
             panic!();
         }

@@ -145,9 +145,10 @@ async fn session_environment_worker() {
     ] {
         std::env::remove_var(name);
     }
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../deps/llm-client/tests/fixtures/session_identity_2_1_287.json"
-    ))
+    let fixture: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../llm-client/tests/fixtures/session_identity_2_1_287.json"
+    )))
     .unwrap();
     let home = tempfile::tempdir().unwrap();
     let mut checked = 0;

@@ -98,7 +98,7 @@ mod tests {
             by_model: &rows,
         });
         match h.handle(&args()).await {
-            CommandResult::Done { display: Some(s) } => assert_eq!(s, expected),
+            CommandResult::Done { display: Some(s) } => assert_eq!(s, expected.into()),
             other => panic!("expected display, got {other:?}"),
         }
     }

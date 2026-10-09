@@ -320,8 +320,8 @@ impl ConversationOrchestrator {
 mod tests {
     use super::*;
     use crate::test_support::{
-        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-        noop_hook_executor,
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
     };
 
     fn projection(json: &str) -> Ujp {
@@ -389,7 +389,7 @@ mod tests {
             "describe-command",
             dir.path(),
             &module,
-            serde_json::json!({}),
+            Ujp::parse("{}").unwrap(),
         )
         .await
         .unwrap();
@@ -446,11 +446,10 @@ mod tests {
                 .and_then(|value| value.as_bool()),
             Some(true)
         );
-        assert!(
-            orch.apply_mod_command_description(input.clone())
-                .await
-                .semantically_eq(&first)
-        );
+        assert!(orch
+            .apply_mod_command_description(input.clone())
+            .await
+            .semantically_eq(&first));
         hooks::mods::ModSessionContext::invalidate_command_describe(&*orch)
             .await
             .unwrap();
@@ -474,9 +473,14 @@ mod tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("describe-retry", dir.path(), &module, serde_json::json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "describe-retry",
+            dir.path(),
+            &module,
+            Ujp::parse("{}").unwrap(),
+        )
+        .await
+        .unwrap();
         let mut registry = hooks::HookRegistry::new();
         registry.set_mod_host(host);
         let registry = Arc::new(tokio::sync::RwLock::new(registry));
@@ -494,11 +498,10 @@ mod tests {
         let input = projection(
             r#"{"command":"retry","description":"base","isHidden":false,"immediate":false,"provider":{"plugin":"engine"}}"#,
         );
-        assert!(
-            orch.apply_mod_command_description(input.clone())
-                .await
-                .semantically_eq(&input)
-        );
+        assert!(orch
+            .apply_mod_command_description(input.clone())
+            .await
+            .semantically_eq(&input));
         assert_eq!(
             orch.apply_mod_command_description(input)
                 .await

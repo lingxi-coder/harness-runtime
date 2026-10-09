@@ -497,9 +497,9 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
     let line = |value: serde_json::Value| serde_json::from_value(value).unwrap();
     let set_at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
     let compact_goal = ActiveGoalState {
-        condition: "ship it".to_string(),
+        condition: "ship it".into(),
         set_at,
-        last_reason: Some("initial".to_string()),
+        last_reason: Some("initial".into()),
         iterations: 1,
         tokens_at_start: 10,
         // `origin` is `serde(skip)`, so this never reaches the transcript — the
@@ -508,9 +508,9 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
         origin: GoalOrigin::User,
     };
     let updated_goal = ActiveGoalState {
-        condition: "ship it".to_string(),
+        condition: "ship it".into(),
         set_at,
-        last_reason: Some("still working".to_string()),
+        last_reason: Some("still working".into()),
         iterations: 2,
         tokens_at_start: 10,
         origin: GoalOrigin::User,
@@ -540,8 +540,14 @@ fn resume_recovers_active_goal_from_compact_metadata_and_later_updates() {
 
     let state = state_from_messages(sid, &messages);
     let restored = state.active_goal.expect("goal restored");
-    assert_eq!(restored.condition, "ship it");
-    assert_eq!(restored.last_reason.as_deref(), Some("still working"));
+    assert_eq!(restored.condition.string_at(""), Some("ship it"));
+    assert_eq!(
+        restored
+            .last_reason
+            .as_ref()
+            .and_then(|reason| reason.string_at("")),
+        Some("still working")
+    );
     assert_eq!(
         restored.origin,
         GoalOrigin::Restored,
@@ -555,27 +561,24 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
     let sid = Uuid::new_v4();
     let set_at = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
     let snapshot = lingxi_core::host::ActiveGoalSnapshot {
-        condition: "ship it".to_string(),
+        condition: "ship it".into(),
         set_at,
-        last_reason: Some("tests pending".to_string()),
+        last_reason: Some("tests pending".into()),
         iterations: 2,
         tokens_at_start: 500,
     };
     let attachment =
         |status, goal_state: Option<lingxi_core::host::ActiveGoalSnapshot>| match status {
             lingxi_core::host::GoalStatusKind::Set => {
-                lingxi_core::host::GoalStatusAttachment::sentinel_set(
-                    "ship it".to_string(),
-                    goal_state,
-                )
+                lingxi_core::host::GoalStatusAttachment::sentinel_set("ship it".into(), goal_state)
             }
             lingxi_core::host::GoalStatusKind::Cleared => {
-                lingxi_core::host::GoalStatusAttachment::sentinel_cleared("ship it".to_string())
+                lingxi_core::host::GoalStatusAttachment::sentinel_cleared("ship it".into())
             }
             lingxi_core::host::GoalStatusKind::Achieved => {
                 lingxi_core::host::GoalStatusAttachment::achieved(
-                    "ship it".to_string(),
-                    Some("tests pending".to_string()),
+                    "ship it".into(),
+                    Some("tests pending".into()),
                     2,
                     1000,
                     200,
@@ -583,8 +586,8 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
             }
             lingxi_core::host::GoalStatusKind::Failed => {
                 lingxi_core::host::GoalStatusAttachment::failed(
-                    "ship it".to_string(),
-                    Some("tests pending".to_string()),
+                    "ship it".into(),
+                    Some("tests pending".into()),
                     2,
                     1000,
                     200,
@@ -592,8 +595,8 @@ fn resume_prefers_typed_goal_status_attachment_and_honors_achieved() {
             }
             lingxi_core::host::GoalStatusKind::NotMet => {
                 lingxi_core::host::GoalStatusAttachment::not_met(
-                    "ship it".to_string(),
-                    Some("tests pending".to_string()),
+                    "ship it".into(),
+                    Some("tests pending".into()),
                     goal_state,
                 )
             }
@@ -755,10 +758,12 @@ fn resume_drops_malformed_text_blocks_without_losing_valid_siblings() {
             content,
             &vec![
                 lingxi_core::types::ContentBlock::Text {
-                    text: "before".into(), citations: None
+                    text: "before".into(),
+                    citations: None
                 },
                 lingxi_core::types::ContentBlock::Text {
-                    text: "after".into(), citations: None
+                    text: "after".into(),
+                    citations: None
                 },
             ]
         );
@@ -1338,10 +1343,26 @@ mod deferred_tool_resume_tests {
             "Echo"
         }
 
-        fn input_schema(&self) -> &Value {
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
             static SCHEMA: once_cell::sync::Lazy<Value> =
                 once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
-            &SCHEMA
+            static SCHEMA_SOURCE: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_schema(&SCHEMA)
+            });
+            &SCHEMA_SOURCE
+        }
+
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+
+                exempt_top_level_keys: None,
+            }
         }
 
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -1352,17 +1373,23 @@ mod deferred_tool_resume_tests {
             1024 * 1024
         }
 
-        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
 
-        fn is_read_only(&self, _input: &Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
 
         async fn validate_input(
             &self,
-            _input: &Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
@@ -1370,7 +1397,7 @@ mod deferred_tool_resume_tests {
 
         async fn check_permissions(
             &self,
-            _input: &Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -1383,7 +1410,11 @@ mod deferred_tool_resume_tests {
             }
         }
 
-        async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _opts: &DescriptionOptions,
+        ) -> String {
             "echo".into()
         }
 
@@ -1396,17 +1427,18 @@ mod deferred_tool_resume_tests {
 
         async fn call(
             &self,
-            _input: Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(ToolCallResult {
-                data: json!({ "out": "resumed" }),
+                data: tool_api::tool_trait::generated_builtin_result(&json!({ "out": "resumed" })),
                 model_content: Some("resumed".into()),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -1422,8 +1454,8 @@ mod deferred_tool_resume_tests {
             self.seen.lock().unwrap().push(ctx.trace_context.clone());
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: Some(HookResponse::default()),
             }
@@ -1498,6 +1530,7 @@ mod deferred_tool_resume_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -1756,9 +1789,15 @@ async fn scheduled_actual_settings_do_not_replace_persisted_human_defaults() {
             .rev()
             .find(|row| row.message_type == "assistant")
             .unwrap();
-        assert_eq!(actual.message["model"], "claude-opus-4-6");
-        assert_eq!(actual.extra["effort"], "high");
-        assert_eq!(actual.extra["perTurnSettings"], true);
+        assert_eq!(actual.message.string_at("/model"), Some("claude-opus-4-6"));
+        assert_eq!(actual.extra.string_at("/effort"), Some("high"));
+        assert_eq!(
+            actual
+                .extra
+                .at_pointer("/perTurnSettings")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
         assert_eq!(
             replayed.state.history.len(),
             if with_human_turn { 4 } else { 2 }
@@ -1912,7 +1951,11 @@ fn client_state_recovery_skips_other_tools_and_multi_block_lines() {
     assert_eq!(
         recovered
             .into_iter()
-            .map(|(key, value)| (key, serde_json::from_str::<serde_json::Value>(&value.to_json_string().unwrap()).unwrap()))
+            .map(|(key, value)| (
+                key,
+                serde_json::from_str::<serde_json::Value>(&value.to_json_string().unwrap())
+                    .unwrap()
+            ))
             .collect::<std::collections::HashMap<_, _>>(),
         std::collections::HashMap::from([
             ("toolu_spawn".to_string(), spawn),
@@ -1961,16 +2004,40 @@ async fn resume_restores_latest_api_usage_from_disk_without_summing_split_rows()
         Some(usage)
     );
     let mut synthetic = messages.last().unwrap().clone();
-    synthetic.message["model"] = json!("<synthetic>");
-    synthetic.message["usage"] = json!({"input_tokens":0,"output_tokens":0});
+    synthetic
+        .message
+        .set_field("model", "<synthetic>".into())
+        .unwrap();
+    synthetic
+        .message
+        .set_field(
+            "usage",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({"input_tokens":0,"output_tokens":0}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
     messages.push(synthetic);
     assert_eq!(
         runtime_metadata_from_messages(&messages).current_usage,
         Some(usage)
     );
     let mut sentinel = messages.last().unwrap().clone();
-    sentinel.message["model"] = json!("claude-sonnet-4-5");
-    sentinel.message["content"] = json!([{"type":"text","text":"[Request interrupted by user]"}]);
+    sentinel
+        .message
+        .set_field("model", "claude-sonnet-4-5".into())
+        .unwrap();
+    sentinel
+        .message
+        .set_field(
+            "content",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!([{"type":"text","text":"[Request interrupted by user]"}]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
     messages.push(sentinel);
     assert_eq!(
         runtime_metadata_from_messages(&messages).current_usage,
@@ -1980,24 +2047,44 @@ async fn resume_restores_latest_api_usage_from_disk_without_summing_split_rows()
     boundary.message_type = "system".into();
     boundary
         .extra
-        .insert("subtype".into(), json!("compact_boundary"));
+        .set_field("subtype", "compact_boundary".into())
+        .unwrap();
     messages.push(boundary);
     assert_eq!(
         runtime_metadata_from_messages(&messages).current_usage,
         None
     );
     let mut fresh = messages[1].clone();
-    fresh.message["usage"] = json!({"input_tokens":0,"output_tokens":0});
+    fresh
+        .message
+        .set_field(
+            "usage",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({"input_tokens":0,"output_tokens":0}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
     messages.push(fresh);
     assert_eq!(
         runtime_metadata_from_messages(&messages).current_usage,
         Some(Default::default())
     );
-    messages.last_mut().unwrap().message["usage"] = json!({"input_tokens":50,"output_tokens":2});
-    messages.last_mut().unwrap().message["usage"]["cache_read_input_tokens"] =
-        serde_json::Value::Null;
-    messages.last_mut().unwrap().message["usage"]["cache_creation_input_tokens"] =
-        serde_json::Value::Null;
+    messages
+        .last_mut()
+        .unwrap()
+        .message
+        .set_field(
+            "usage",
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({
+                "input_tokens":50,
+                "output_tokens":2,
+                "cache_read_input_tokens":null,
+                "cache_creation_input_tokens":null,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     assert_eq!(
         runtime_metadata_from_messages(&messages).current_usage,
         Some(lingxi_core::host::CurrentUsageSnapshot {
@@ -2035,7 +2122,12 @@ fn resume_normalizes_nontext_tool_results_like_claude_2_1_286() {
         let ContentBlock::ToolResult { content: text, .. } = &content[1] else {
             panic!("tool result");
         };
-        assert_eq!(text, case["expected"].as_str().unwrap(), "{}", case["name"]);
+        assert_eq!(
+            text.string_at(""),
+            case["expected"].as_str(),
+            "{}",
+            case["name"]
+        );
         assert_eq!(row.message, original, "raw transcript is not rewritten");
     }
 }

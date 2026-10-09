@@ -1,0 +1,4 @@
+NATIVE_MOD_UI_BUTTON={"type":"Button","props":{"key":"button-children","label":"ABC"},"press":{"plugin":"mod-ui-render-295","handle":585254746},"children":["A",{"type":"Text","props":{"bold":true},"children":["B","C"]}]}
+NATIVE_MOD_UI_BUTTON={"type":"Button","props":{"key":"button-explicit-label","label":"Explicit"},"press":{"plugin":"mod-ui-render-295","handle":585254747},"children":[{"type":"Text","children":["Child"]}]}
+NATIVE_MOD_UI_BUTTON={"type":"Button","props":{"key":"button-string-child","label":"String child"},"press":{"plugin":"mod-ui-render-295","handle":585254748}}
+NATIVE_MOD_UI_NOTIFY=rejected:no implementation for ui.notify

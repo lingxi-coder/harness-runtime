@@ -82,6 +82,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         isolated_credential_storage: true,
         credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::PlainTextFixture,
         api_base: "https://api.anthropic.com".to_string(),
+        anthropic_client_metadata: None,
         api_key: String::new(),
         api_key_helper: None,
         // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no

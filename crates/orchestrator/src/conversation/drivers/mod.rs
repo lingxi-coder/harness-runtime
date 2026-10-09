@@ -641,6 +641,7 @@ impl ConversationOrchestrator {
     ) -> Result<ConversationOutcome, OrchestratorError> {
         let prompt = prompt.into();
         let _turn_guard = self.turn_gate.lock().await;
+        self.begin_turn_metrics();
         let _activity_guard = self.main_loop_activity(true);
         tracing::info!(
             event = orch_events::CONVERSATION_STARTED,
@@ -660,6 +661,7 @@ impl ConversationOrchestrator {
         let cleanup = crate::native_computer::cleanup(self).await;
         let result = result.and_then(|outcome| cleanup.map(|()| outcome));
         self.fire_mod_turn_complete(false, result.is_err()).await;
+        self.complete_turn_metrics();
         self.emit_terminal_rate_limit_if_changed(&result).await;
         let result = result.map_err(|e| self.enrich_api_error(e));
         // ConversationOutcome is #[non_exhaustive] so future variants will
@@ -924,7 +926,7 @@ impl ConversationOrchestrator {
             // The host already reserved its UI/permission lifecycle. Close it
             // even when a preceding turn consumed this completion at the gate.
             let cost = self.snapshot_cost_real().await;
-            self.output.emit_end_turn("end_turn", &cost).await;
+            self.emit_turn_terminal("end_turn", &cost).await;
             return Ok(if cancel.is_cancelled() {
                 TurnOutcome::Cancelled
             } else {
@@ -971,6 +973,7 @@ impl ConversationOrchestrator {
         &self,
         cancel: Option<CancellationToken>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.begin_turn_metrics();
         let _activity_guard = self.main_loop_activity(false);
         let cancel_probe = cancel.clone();
         self.output.emit_turn_started().await;
@@ -981,7 +984,7 @@ impl ConversationOrchestrator {
             )
             .await;
         self.emit_terminal_rate_limit_if_changed(&result).await;
-        match result {
+        let result = match result {
             Ok(
                 ConversationOutcome::EndTurn { .. } | ConversationOutcome::StopHookPrevented { .. },
             ) => Ok(
@@ -996,7 +999,7 @@ impl ConversationOrchestrator {
             ),
             Err(OrchestratorError::MaxTurnsReached { .. }) => {
                 let cost = self.snapshot_cost_real().await;
-                self.output.emit_end_turn("max_tokens", &cost).await;
+                self.emit_turn_terminal("max_tokens", &cost).await;
                 Ok(TurnOutcome::MaxTurns)
             }
             Err(error) => {
@@ -1005,10 +1008,12 @@ impl ConversationOrchestrator {
                 let error_text = crate::turn_loop::orchestrator_error_text_source(&error, &model);
                 self.output.emit_system_notice(&error_text, true).await;
                 let cost = self.snapshot_cost_real().await;
-                self.output.emit_end_turn("error", &cost).await;
+                self.emit_turn_terminal("error", &cost).await;
                 Err(error)
             }
-        }
+        };
+        self.complete_turn_metrics();
+        result
     }
 
     pub(crate) async fn settle_stream_tool_results(
@@ -1701,7 +1706,7 @@ impl ConversationOrchestrator {
                 }
                 if tool_prevent_continuation {
                     let cost = self.snapshot_cost_real().await;
-                    let emit = self.output.emit_end_turn("hook_stopped", &cost);
+                    let emit = self.emit_turn_terminal("hook_stopped", &cost);
                     if let Some(guard) = dispatch_guard.as_ref() {
                         guard.publish_if_current(Box::pin(emit)).await;
                     } else {
@@ -1784,7 +1789,7 @@ impl ConversationOrchestrator {
                 }
                 if batch_prevent {
                     let cost = self.snapshot_cost_real().await;
-                    let emit = self.output.emit_end_turn("hook_stopped", &cost);
+                    let emit = self.emit_turn_terminal("hook_stopped", &cost);
                     if let Some(guard) = batch_guard.as_ref() {
                         guard.publish_if_current(Box::pin(emit)).await;
                     } else {
@@ -1916,7 +1921,7 @@ impl ConversationOrchestrator {
                         telemetry.await;
                     }
                     let cost = self.snapshot_cost_real().await;
-                    let emit = self.output.emit_end_turn("end_turn", &cost);
+                    let emit = self.emit_turn_terminal("end_turn", &cost);
                     if let Some(guard) = batch_guard.as_ref() {
                         guard.publish_if_current(Box::pin(emit)).await;
                     } else {
@@ -2008,7 +2013,7 @@ impl ConversationOrchestrator {
                     )
                     .await;
                     let cost = self.snapshot_cost_real().await;
-                    self.output.emit_end_turn("end_turn", &cost).await;
+                    self.emit_turn_terminal("end_turn", &cost).await;
                     return Ok(StreamingIterationDisposition::Complete(failed_msg.id()));
                 }
                 self.discard_retry_attempt(assistant_id).await;
@@ -2148,7 +2153,9 @@ impl ConversationOrchestrator {
                     self.persist_api_error_message_to_jsonl(&err_msg, envelope)
                         .await;
                     if other == "refusal" {
-                        self.output.emit_terminal_api_error(None, "api_error").await;
+                        self.output
+                            .emit_terminal_api_error(None, "api_error", "refusal")
+                            .await;
                     }
                     self.output.emit_text(&text).await;
                     Some(err_msg.id())
@@ -2161,7 +2168,7 @@ impl ConversationOrchestrator {
                 } else {
                     other
                 };
-                self.output.emit_end_turn(terminal_reason, &cost).await;
+                self.emit_turn_terminal(terminal_reason, &cost).await;
                 Ok(StreamingIterationDisposition::Complete(
                     surfaced_id.unwrap_or(assistant_id),
                 ))
@@ -2228,6 +2235,9 @@ impl ConversationOrchestrator {
         queued_inputs: Option<Vec<QueuedPromptInput>>,
         row_token: Option<String>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        if !transient_rewake {
+            self.begin_turn_metrics();
+        }
         let completion_cancel = user_cancel.clone();
         let result = crate::server_fallback::scope_query_and_flush(
             self,
@@ -2256,6 +2266,9 @@ impl ConversationOrchestrator {
             result.is_err(),
         )
         .await;
+        if !transient_rewake {
+            self.complete_turn_metrics();
+        }
         result
     }
 
@@ -2295,6 +2308,7 @@ impl ConversationOrchestrator {
             let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
                 return Ok(TurnOutcome::Cancelled);
             };
+            self.begin_turn_metrics();
             let _activity_guard = self.main_loop_activity(true);
             tracing::info!(
                 event = orch_events::CONVERSATION_STARTED,
@@ -2324,6 +2338,7 @@ impl ConversationOrchestrator {
             )
             .await;
             self.emit_terminal_rate_limit_if_changed(&result).await;
+            self.complete_turn_metrics();
             result.map_err(|e| self.enrich_api_error(e))
         })
     }
@@ -2813,8 +2828,7 @@ impl ConversationOrchestrator {
             }
             *inputs = admitted;
             if inputs.is_empty() {
-                self.output
-                    .emit_end_turn("end_turn", &self.snapshot_cost_real().await)
+                self.emit_turn_terminal("end_turn", &self.snapshot_cost_real().await)
                     .await;
                 return Ok(TurnOutcome::EndTurn);
             }
@@ -3047,6 +3061,7 @@ pub(super) fn llm_response_to_pumped_turn(
         // Non-streaming fallback: carry the response's refusal stop_details so
         // the terminal refusal arm gets the cyber/bio variant.
         stop_details: resp.stop_details.clone(),
+        timing_capture: None,
     }
 }
 
@@ -3201,7 +3216,10 @@ mod server_fallback_response_tests {
                 llm_runtime::ContentBlock::ToolCall {
                     id: "toolu_read".into(),
                     name: "Read".into(),
-                    input: serde_json::json!({"file_path":"a.txt"}),
+                    input: lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                        &serde_json::json!({"file_path":"a.txt"}),
+                    )
+                    .expect("generated SDK tool input is valid"),
                 },
                 llm_runtime::ContentBlock::Text {
                     text: "between".into(),
@@ -3211,7 +3229,10 @@ mod server_fallback_response_tests {
                 llm_runtime::ContentBlock::ToolCall {
                     id: "toolu_bash".into(),
                     name: "Bash".into(),
-                    input: serde_json::json!({"command":"pwd"}),
+                    input: lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                        &serde_json::json!({"command":"pwd"}),
+                    )
+                    .expect("generated SDK tool input is valid"),
                 },
             ],
             stop_reason: Some("tool_use".into()),

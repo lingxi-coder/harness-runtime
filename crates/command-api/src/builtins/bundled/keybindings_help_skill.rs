@@ -220,18 +220,24 @@ mod tests {
     #[test]
     fn a_request_is_appended_last() {
         let out = KeybindingsHelpPromptFn.build(&"rebind ctrl+s".into());
-        assert!(out.ends_with("\n\n## User Request\n\nrebind ctrl+s"));
+        assert!(out
+            .string_at("")
+            .unwrap()
+            .ends_with("\n\n## User Request\n\nrebind ctrl+s"));
         assert!(!KeybindingsHelpPromptFn
             .build(&"".into())
+            .string_at("")
+            .unwrap()
             .contains("## User Request"));
     }
 
     #[test]
     fn the_section_order_matches_upstream() {
         let out = KeybindingsHelpPromptFn.build(&"".into());
-        let reserved = out.find("## Reserved Shortcuts").expect("reserved");
-        let contexts = out.find("## Available Contexts").expect("contexts");
-        let actions = out.find("## Available Actions").expect("actions");
+        let text = out.string_at("").unwrap();
+        let reserved = text.find("## Reserved Shortcuts").expect("reserved");
+        let contexts = text.find("## Available Contexts").expect("contexts");
+        let actions = text.find("## Available Actions").expect("actions");
         assert!(reserved < contexts && contexts < actions);
     }
 }

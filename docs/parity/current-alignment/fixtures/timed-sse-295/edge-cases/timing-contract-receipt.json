@@ -1,0 +1,108 @@
+{
+  "scope": "Native 2.1.295 timing behavior for one 404-to-nonstream fallback and a controlled 500 retry followed by SSE. This is a bounded timing contract, not broad retry-family coverage.",
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner": "run-native.py",
+  "fixed_boundary": "Isolated HOME/config, dummy API key, loopback-only Anthropic stub, no upstream requests, 45-second per-case timeout.",
+  "cases": [
+    {
+      "id": "http404-nonstream-fallback",
+      "source_receipt": "../native-baseline/2.1.295/edge-cases/http404-nonstream-fallback/receipt.json",
+      "input_contract": {
+        "max_retries": 0,
+        "responses": [404, 200],
+        "response_kinds": ["error", "nonstream_anthropic_message"]
+      },
+      "observed_contract": {
+        "stream_sequence": [true, false],
+        "exit_code": 0,
+        "result_type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "num_turns": 1,
+        "timing_fields_present": ["ttft_ms", "duration_api_ms", "duration_ms"],
+        "timing_fields_absent": ["time_to_request_ms", "ttft_stream_ms", "first_content_frame_ms"],
+        "native_stdout_key_order": [
+          "duration_api_ms", "stop_reason", "session_id", "total_cost_usd", "usage", "modelUsage", "permission_denials", "terminal_reason", "fast_mode_state", "fast_mode_disabled_reason", "subagent_stats", "safety_stops", "is_error", "num_turns", "subtype", "api_error_status", "result", "ttft_ms", "type", "duration_ms", "uuid", "queued_turn_count", "result_index"
+        ]
+      },
+      "observed_timing_ms": {
+        "ttft_ms": 638,
+        "duration_api_ms": 621,
+        "duration_ms": 642
+      },
+      "test_rule": "Assert response/request sequence, final result fields, timing-field presence/absence, and captured key order. Do not require observed elapsed millisecond values to repeat exactly."
+    },
+    {
+      "id": "http500-retry-stream",
+      "source_receipt": "../native-baseline/2.1.295/edge-cases/http500-retry-stream/receipt.json",
+      "input_contract": {
+        "max_retries": 1,
+        "first_error_status": 500,
+        "first_error_headers": {"x-should-retry": "true", "retry-after": "0"},
+        "first_error_delay_ms": 200,
+        "success_response": "SSE",
+        "sse_delays_ms": {"message_start": 400, "content_block_start": 100, "content_block_delta": 150}
+      },
+      "observed_contract": {
+        "stream_sequence": [true, true],
+        "second_request_body_sha256_equals_first": true,
+        "exit_code": 0,
+        "result_type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "timing_fields_present": ["time_to_request_ms", "ttft_stream_ms", "first_content_frame_ms", "ttft_ms", "duration_api_ms", "duration_ms"]
+      },
+      "observed_timing_ms": {
+        "time_to_request_ms": 20,
+        "ttft_stream_ms": 1204,
+        "first_content_frame_ms": 1306,
+        "ttft_ms": 1459,
+        "duration_api_ms": 1444,
+        "duration_ms": 1463
+      },
+      "test_rule": "Assert one retry, unchanged request body across attempts, successful final result, and timing-field presence. Treat elapsed millisecond values as observations, not fixed bytes."
+    },
+    {
+      "id": "http500-retry-stream-long-first-delay",
+      "source_receipt": "../native-baseline/2.1.295/edge-cases/http500-retry-stream-long-first-delay/receipt.json",
+      "input_contract": {
+        "max_retries": 1,
+        "first_error_status": 500,
+        "first_error_headers": {"x-should-retry": "true", "retry-after": "0"},
+        "first_error_delay_ms": 400,
+        "success_response": "SSE",
+        "sse_delays_ms": {"message_start": 400, "content_block_start": 100, "content_block_delta": 150}
+      },
+      "observed_contract": {
+        "stream_sequence": [true, true],
+        "second_request_body_sha256_equals_first": true,
+        "exit_code": 0,
+        "result_type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "timing_fields_present": ["time_to_request_ms", "ttft_stream_ms", "first_content_frame_ms", "ttft_ms", "duration_api_ms", "duration_ms"]
+      },
+      "observed_timing_ms": {
+        "time_to_request_ms": 18,
+        "ttft_stream_ms": 1449,
+        "first_content_frame_ms": 1549,
+        "ttft_ms": 1717,
+        "duration_api_ms": 1706,
+        "duration_ms": 1726
+      },
+      "test_rule": "Use this paired case to test the timing response to a 200 ms increase in first-error delay; do not assert these absolute elapsed millisecond values."
+    }
+  ],
+  "paired_observation": {
+    "cases": ["http500-retry-stream", "http500-retry-stream-long-first-delay"],
+    "first_error_delay_delta_ms": 200,
+    "second_request_offset_delta_ms": 246.011,
+    "time_to_request_ms": [20, 18],
+    "ttft_stream_ms_delta": 245,
+    "first_content_frame_ms_delta": 243,
+    "ttft_ms_delta": 258,
+    "interpretation": "The controlled delay moved the second request and stream timing fields by about the same amount while time_to_request_ms stayed near 20 ms. This supports (but does not prove) that time_to_request_ms is latched before the retried attempt; the timer origin is not directly exposed by the public output.",
+    "test_rule": "Keep exact per-capture numbers in receipts for diagnosis. A portable test may assert only broad ordering/presence and the controlled paired relationship with a tolerance justified by its own repeated captures; do not byte-compare timing values or call the inference a proven internal definition."
+  }
+}

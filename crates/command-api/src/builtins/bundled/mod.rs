@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::{CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand, SlashCommandKind};
 
 pub mod batch_skill;
+pub mod builtin_skill;
 pub mod checkup_skill;
 pub mod code_review_skill;
 pub mod cron_skill;
@@ -33,23 +34,76 @@ pub mod workflow_authoring_skill;
 /// `/loop` half mirrors the reference `isEnabled: isKairosCronEnabled` gate
 /// (loop.ts:83); `/cron` shares it so it cannot advertise a stopped scheduler.
 pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
+    // Keep the Native prompt-skill assembly order separate from the ASCII
+    // order used by slash palettes. The headless unknown-command preview reads
+    // this registration order directly.
+    register_dataviz_skill(reg);
+    register_update_config_skill(reg);
+    register_code_review_skill(reg);
+    register_simplify_skill(reg);
+    register_fewer_permission_prompts_skill(reg);
     register_loop_skill(reg, cron_enabled);
+    register_claude_api_skill(reg);
+    register_workflow_authoring_skill(reg);
+    register_run_skill(reg);
+    register_plugin_authoring_skill(reg);
+
+    // Remaining bundles retain their source registration order after the
+    // prompt names above; manual-only bundles are counted but not named.
     register_cron_skill(reg, cron_enabled);
     register_verify_skill(reg);
-    register_run_skill(reg);
-    register_simplify_skill(reg);
-    register_workflow_authoring_skill(reg);
     register_checkup_skill(reg);
     register_debug_skill(reg);
     register_run_skill_generator_skill(reg);
-    register_fewer_permission_prompts_skill(reg);
-    register_code_review_skill(reg);
     register_deep_research_skill(reg);
     register_batch_skill(reg);
-    register_dataviz_skill(reg);
-    register_update_config_skill(reg);
     register_keybindings_help_skill(reg);
     register_explain_usage_skill(reg);
+}
+
+/// Register a desktop Skill API builtin as a slash command using the shared
+/// name, description, and prompt body.
+fn register_claude_api_skill(reg: &mut CommandRegistry) {
+    let skill = skill_api::desktop_builtin_skill("claude-api")
+        .expect("claude-api is registered as a desktop builtin Skill");
+    reg.register_command(SlashCommand {
+        name: skill.name.into(),
+        description: skill.description,
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(builtin_skill::DesktopBuiltinSkillPromptFn::new(
+                "claude-api",
+            ))),
+        },
+        loaded_from: Some("bundled".into()),
+        is_prompt: true,
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
+}
+
+/// Register the desktop plugin-authoring reference as a prompt skill.
+fn register_plugin_authoring_skill(reg: &mut CommandRegistry) {
+    let skill = skill_api::desktop_builtin_skill("plugin-authoring")
+        .expect("plugin-authoring is registered as a desktop builtin Skill");
+    reg.register_command(SlashCommand {
+        name: skill.name.into(),
+        description: skill.description,
+        source: CommandSource::Bundled,
+        kind: SlashCommandKind::Bundled {
+            frontmatter: CommandFrontmatter::default(),
+            prompt_fn: Some(Arc::new(builtin_skill::DesktopBuiltinSkillPromptFn::new(
+                "plugin-authoring",
+            ))),
+        },
+        loaded_from: Some("bundled".into()),
+        is_prompt: true,
+        user_invocable: Some(true),
+        has_user_specified_description: true,
+        ..SlashCommand::default()
+    });
 }
 
 /// Register the user-facing `/cron` scheduler command.
@@ -112,6 +166,7 @@ fn register_dataviz_skill(reg: &mut CommandRegistry) {
             prompt_fn: Some(Arc::new(dataviz_skill::DatavizPromptFn)),
         },
         loaded_from: Some("bundled".into()),
+        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -190,6 +245,7 @@ fn register_code_review_skill(reg: &mut CommandRegistry) {
             prompt_fn: Some(Arc::new(code_review_skill::CodeReviewPromptFn)),
         },
         loaded_from: Some("bundled".into()),
+        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         argument_hint: Some(code_review_skill::CODE_REVIEW_ARGUMENT_HINT.into()),
@@ -214,6 +270,7 @@ fn register_fewer_permission_prompts_skill(reg: &mut CommandRegistry) {
             )),
         },
         loaded_from: Some("bundled".into()),
+        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -318,6 +375,7 @@ fn register_workflow_authoring_skill(reg: &mut CommandRegistry) {
             )),
         },
         loaded_from: Some("bundled".into()),
+        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -339,6 +397,7 @@ fn register_simplify_skill(reg: &mut CommandRegistry) {
             prompt_fn: Some(Arc::new(simplify_skill::SimplifyPromptFn)),
         },
         loaded_from: Some("bundled".into()),
+        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         // Reference `argumentHint:"[<target>]"`.
@@ -360,6 +419,7 @@ fn register_run_skill(reg: &mut CommandRegistry) {
             prompt_fn: Some(Arc::new(run_skill::RunPromptFn)),
         },
         loaded_from: Some("bundled".into()),
+        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -414,6 +474,7 @@ fn register_loop_skill(reg: &mut CommandRegistry, cron_enabled: bool) {
         // Sets `is_bundled` in the skill listing + satisfies the listing's
         // loadedFrom ∈ {bundled,…} filter.
         loaded_from: Some("bundled".into()),
+        is_prompt: true,
         // PARITY: binary `_Zm` `aliases:["proactive"]` (cc_all.txt:521920).
         aliases: vec!["proactive".into()],
         // PARITY: binary `_Zm` `whenToUse` (cc_all.txt:521920).
@@ -458,6 +519,7 @@ fn register_update_config_skill(reg: &mut CommandRegistry) {
             prompt_fn: Some(Arc::new(update_config_skill::UpdateConfigPromptFn)),
         },
         loaded_from: Some("bundled".into()),
+        is_prompt: true,
         user_invocable: Some(true),
         has_user_specified_description: true,
         ..SlashCommand::default()
@@ -513,35 +575,9 @@ mod tests {
     use super::*;
     use crate::model::SourceTextTestExt;
 
-    /// The bundled-skill NAME SET, locked against Claude Code 2.1.267.
-    ///
-    /// Nothing pinned this before: the per-skill tests below check one skill
-    /// each, so adding or losing a whole skill changed no assertion. A name set
-    /// is the right shape for it — a count would tell you something moved
-    /// without telling you what, which is exactly how the workflow-event count
-    /// went stale for six removals.
-    ///
-    /// Upstream 2.1.267 registers 21 bundled skills (`uo({name:…})`, resolved
-    /// from `~/.claude/oracle-chunks/2.1.267`): artifact-components, batch,
-    /// claude-api, claude-in-chrome, code-review, dataviz, debug, design-sync,
-    /// doctor, explain-usage, fewer-permission-prompts, keybindings-help, loop,
-    /// memory-types, run, run-skill-generator, setup-claude, update-config,
-    /// whiteboard, workflow-authoring, workshop.
-    ///
-    /// | in both | LingXi-only | upstream-only |
-    /// |---|---|---|
-    /// | batch, code-review, dataviz, fewer-permission-prompts, loop, run, run-skill-generator, workflow-authoring | cron, deep-research, simplify, verify | the remaining 12 |
-    ///
-    /// ⚠️ The upstream-only 13 are NOT automatically a backlog. Most ride
-    /// surfaces this port does not have (artifact-components / whiteboard /
-    /// workshop / design-sync need the Artifact and Design surfaces, which are
-    /// register-but-disabled here; claude-in-chrome needs the Chrome
-    /// extension). Each needs its own adjudication before anyone ports it —
-    /// see `docs/parity-2.1.267-skills-2026-09-10.md`.
-    ///
-    /// `claude-api` is registered separately, as the `skill-api` compiled-in
-    /// builtin rather than through this registrar, and is locked by
-    /// `skill_api::builtin`'s own test.
+    /// Lock exact membership as well as individual behavior. Desktop Skill API
+    /// entries exposed through slash invocation use the same body as the
+    /// `Skill` tool.
     #[test]
     fn the_bundled_skill_name_set_is_locked() {
         let mut reg = CommandRegistry::new();
@@ -555,7 +591,12 @@ mod tests {
             .list_all()
             .into_iter()
             .filter(|cmd| cmd.source == CommandSource::Bundled)
-            .map(|cmd| cmd.name.clone())
+            .map(|cmd| {
+                cmd.name
+                    .string_at("")
+                    .expect("bundled command names are valid Unicode")
+                    .to_owned()
+            })
             .collect();
         got.sort();
 
@@ -565,6 +606,7 @@ mod tests {
             // upstream registers `doctor` (aliases ["checkup"]), but this
             // port's `/doctor` is a deterministic client-rendered report.
             "checkup".to_string(),
+            "claude-api".to_string(),
             "code-review".to_string(),
             "cron".to_string(),
             "dataviz".to_string(),
@@ -578,6 +620,7 @@ mod tests {
             // it never shows in the slash menu; the user route is /keybindings.
             "keybindings-help".to_string(),
             "loop".to_string(),
+            "plugin-authoring".to_string(),
             "run".to_string(),
             "run-skill-generator".to_string(),
             "simplify".to_string(),

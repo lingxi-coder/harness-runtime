@@ -1,0 +1,103 @@
+{
+  "method": "Compare untouched JSON result string literal bytes; separately check decoded persisted text code units and typed status/stream sequence. Full result envelopes/JSONL rows are not claimed byte-equal.",
+  "input_cases_sha256": "2e18c262c9da85dfa94cf8c8cecb52aad600eb0a5311473a50e8e4482d914bba",
+  "cases": [
+    {
+      "case": "nested-error-message-lone-surrogate",
+      "prior_stdout": "docs/parity/current-alignment/fixtures/provider-error/native-baseline/nested-error-message-lone-surrogate/native.stdout.raw",
+      "prior_stdout_sha256": "0bc149b09676cb2d57ee20e24e5da53de9ecd9d853eae6108eb421cfa622efbc",
+      "current_stdout_sha256": "9aba6028415533236a5517d11a8e2809b7c58edcbfb9bf2096c8c39563ed66e9",
+      "raw_result_literal_equal": true,
+      "allowed_field_constraint": null,
+      "persisted_text_utf16_equal": true,
+      "request_stream_sequence": [
+        true
+      ]
+    },
+    {
+      "case": "empty-response-body",
+      "prior_stdout": "docs/parity/current-alignment/fixtures/provider-error/native-baseline/empty-response-body/native.stdout.raw",
+      "prior_stdout_sha256": "eeb1b90d957ecaaff8d40e54c79363df614d1cb196eb0cca3021309aeab842b1",
+      "current_stdout_sha256": "a1a6e9a27955ffdd1b8ceec3323ef635a06bb6c056a5c2e0a7ff6b7965cadbd7",
+      "raw_result_literal_equal": true,
+      "allowed_field_constraint": null,
+      "persisted_text_utf16_equal": true,
+      "request_stream_sequence": [
+        true
+      ]
+    },
+    {
+      "case": "nested-error-message-null",
+      "prior_stdout": "docs/parity/current-alignment/fixtures/provider-error/native-baseline/nested-error-message-null/native.stdout.raw",
+      "prior_stdout_sha256": "b2ef724ee463ed4995a110aebc3ead86beb6ba9e05fa102e88973d3fe5e197ea",
+      "current_stdout_sha256": "1b022ddeeac13aa897491250ac4882e70426867de9b19e30472a5bcf36ad14fb",
+      "raw_result_literal_equal": true,
+      "allowed_field_constraint": null,
+      "persisted_text_utf16_equal": true,
+      "request_stream_sequence": [
+        true
+      ]
+    },
+    {
+      "case": "http-403",
+      "prior_stdout": "docs/parity/current-alignment/fixtures/provider-error/native-baseline/status-controls/http-403.stdout.raw",
+      "prior_stdout_sha256": "420e521a65ad9b9ea5ef38071c33d90a569ba89f62476fa957cfe51680252cff",
+      "current_stdout_sha256": "26c52c20eec0222faf243f9b86bbd4fd97eb189a9c7fbc430023337d7871fb9d",
+      "raw_result_literal_equal": true,
+      "allowed_field_constraint": null,
+      "persisted_text_utf16_equal": true,
+      "request_stream_sequence": [
+        true
+      ]
+    },
+    {
+      "case": "http-404",
+      "prior_stdout": "docs/parity/current-alignment/fixtures/provider-error/native-baseline/status-controls/http-404.stdout.raw",
+      "prior_stdout_sha256": "51aead4be68651483910ad2a3687183e33055131b57c4bd7b626dd419e9c2716",
+      "current_stdout_sha256": "7f4305fbb4b95c97b31d8710d9d4680f18326bb6abbef067bdc21d890668b1b8",
+      "raw_result_literal_equal": true,
+      "allowed_field_constraint": null,
+      "persisted_text_utf16_equal": true,
+      "request_stream_sequence": [
+        true,
+        false
+      ]
+    },
+    {
+      "case": "http-413",
+      "prior_stdout": "docs/parity/current-alignment/fixtures/provider-error/native-baseline/status-controls/http-413.stdout.raw",
+      "prior_stdout_sha256": "433d3d4a1abf5fc853a9c0a0a6b083fc28ce28301725069ee5df5d4d64db30dd",
+      "current_stdout_sha256": "1ed1e1d81306c666539c1b173a5e5ea8d89cc1c38940b5cfea35738734e1d13c",
+      "raw_result_literal_equal": true,
+      "allowed_field_constraint": null,
+      "persisted_text_utf16_equal": true,
+      "request_stream_sequence": [
+        true
+      ]
+    },
+    {
+      "case": "http-401",
+      "prior_stdout": "docs/parity/current-alignment/fixtures/provider-error/native-baseline/retry-header-controls/http-401-no-retry-header.stdout.raw",
+      "prior_stdout_sha256": "f483130e419af74accf1b53d174461bc76291dc4438c58fb810b0ea97a2f2868",
+      "current_stdout_sha256": "fb43bac9d6727c1b7f94897ddfd4fa26f39fdf51053601d7aae26c81d91f4dc9",
+      "raw_result_literal_equal": true,
+      "allowed_field_constraint": null,
+      "persisted_text_utf16_equal": true,
+      "request_stream_sequence": [
+        true
+      ]
+    },
+    {
+      "case": "http-500",
+      "prior_stdout": "docs/parity/current-alignment/fixtures/provider-error/native-baseline/retry-header-controls/http-500-no-retry-header.stdout.raw",
+      "prior_stdout_sha256": "46a4bc57cc143cc81f407e10aa039bb46e59fd6990867e759e543e8fa7a03aeb",
+      "current_stdout_sha256": "eb0cd80932bc82e3441e4093b94754c65e6cbe4d7520ebe2c0f4a257c8d55c64",
+      "raw_result_literal_equal": false,
+      "allowed_field_constraint": "500 inference gateway authority is actual loopback listener host:port",
+      "persisted_text_utf16_equal": true,
+      "request_stream_sequence": [
+        true
+      ]
+    }
+  ]
+}

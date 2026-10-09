@@ -170,7 +170,7 @@ mod tests {
         for raw in ["", "   "] {
             match handler().handle(&args(raw)).await {
                 CommandResult::Done { display: Some(s) } => {
-                    assert_eq!(s, "Usage: /subtask \\<task\\>");
+                    assert_eq!(s, "Usage: /subtask \\<task\\>".into());
                 }
                 other => panic!("expected Done, got {other:?}"),
             }
@@ -186,7 +186,7 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
                     s,
-                    "Cannot start a subtask before the first conversation turn"
+                    "Cannot start a subtask before the first conversation turn".into()
                 );
             }
             other => panic!("expected Done, got {other:?}"),

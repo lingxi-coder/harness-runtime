@@ -1,0 +1,92 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "8868447db69e653af7132658715f546c5be76afa16c3e13a5a967c247eac45c2",
+  "skill_source_sha256": "f7fa404192d46221f2b5b8c8c13ce1a836e7754bb2a6de52c7937d76459ca018",
+  "skill_source_bytes": 338,
+  "fixed_input": {
+    "skill_name": "native-width-probe",
+    "description_mode": "ascii",
+    "description_utf16_units": 250,
+    "description_utf8_sha256": "3f3e35e0a775d9b1d5ec2eccca06381c41efedeb59d5ac5491ebe9696cb0887b",
+    "description_ascii_a_count": 250,
+    "cwd_isolated": true,
+    "home_config_isolated": true,
+    "model": "claude-sonnet-4-5",
+    "prompt": "Return the fixed skill-width probe response."
+  },
+  "argv": [
+    "$CLAUDE_NATIVE_BINARY",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--print",
+    "--no-session-persistence",
+    "--tools",
+    "default",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000003091",
+    "Return the fixed skill-width probe response."
+  ],
+  "loopback_only_dummy_key": true,
+  "timed_out": false,
+  "exit_code": 0,
+  "requests": [
+    {
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "bytes": 124995,
+      "sha256": "09c82c33723ead8072cda8f51b9f9a85a2841065c5567ed29796be30d81d8a96"
+    }
+  ],
+  "response": {
+    "path": "response.raw.sse",
+    "bytes": 829,
+    "sha256": "153a3176b95267ee0c0a0731d6802e2989355221097d19ea6b1df0173280545e"
+  },
+  "system_field_raw": {
+    "path": "system-field.raw.json",
+    "bytes": 27919,
+    "sha256": "314a5d43dee4c3265a0552ddb301d52c6f6c414137b917619418cbb00a87e927"
+  },
+  "listing_observation": {
+    "skill_name_found_in_system": false,
+    "system_occurrences": 0,
+    "request_occurrences": 1,
+    "string_matches": [
+      {
+        "json_path": "$.messages[0].content[3].text",
+        "decoded_excerpt": "- native-width-probe: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "excerpt_code_points": 272,
+        "ascii_a_count": 251,
+        "max_ascii_a_run": 250,
+        "replacement_character_count": 0,
+        "ellipsis_present": false
+      }
+    ],
+    "source_description_literal_present_in_request": true,
+    "ascii_tail_present_in_request": true,
+    "system_blocks": 3
+  },
+  "source_description_literal_present_in_request": true,
+  "ascii_tail_present_in_request": true,
+  "skill_bearing_request_excerpt": {
+    "path": "skill-bearing-request.raw-excerpt.bin",
+    "bytes": 1152,
+    "sha256": "1cd5f4aca2ea7fda748211bbe0daad3b9972413b6404e34309589d0f8e91c5d1"
+  },
+  "full_request_remains_in_ignored_run_output": true,
+  "stdout": {
+    "path": "native.stdout.raw",
+    "bytes": 33,
+    "sha256": "4918dcb422869014fe127ead3d9abbc5726405f14880af3f24dc3c98c805f8c3"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

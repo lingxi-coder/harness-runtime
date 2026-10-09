@@ -751,7 +751,8 @@ mod tests {
         let (tool, _sink, _session, _use_ctx) = make_tool_and_session();
         let desc = tool
             .description(
-                &json!({}),
+                &Utf16JsonProjection::from_serde_value(&json!({}))
+                    .expect("empty todo input is valid source JSON"),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -911,10 +912,10 @@ mod tests {
                 { "id": "t1", "content": "x", "status": "done" }
             ]
         });
-        let err = tool
-            .call(input, use_ctx, fresh_tx())
-            .await
-            .expect_err("unknown variant must fail");
+        let err = match tool.call(input, use_ctx, fresh_tx()).await {
+            Ok(_) => panic!("unknown variant must fail"),
+            Err(error) => error,
+        };
         let msg = format!("{err}");
         assert!(msg.contains("TodoWrite: invalid todos shape"), "msg: {msg}");
         assert!(msg.contains("unknown variant"), "msg: {msg}");

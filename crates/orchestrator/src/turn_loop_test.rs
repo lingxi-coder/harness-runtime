@@ -3,6 +3,16 @@
 //! `turn_loop.rs`, so each `mod` here resolves `crate::turn_loop::*` for the
 //! private helpers it exercises (was `super::*` when co-located).
 
+// Construct source fixtures from generated JSON literals. Source values inside
+// dynamic payloads must use the source object/array builders instead.
+macro_rules! source_fixture {
+    ($($tokens:tt)*) => {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!($($tokens)*)
+        ).expect("generated source fixture")
+    };
+}
+
 // ============================================================================
 // #6 (main-loop parity): a hook's allowlisted `terminalSequence` is FORWARDED
 // to the host's terminal-write seam (`OutputStream::emit_terminal_sequence`),
@@ -313,7 +323,10 @@ mod model_text_tests {
     fn prefers_model_content_over_content() {
         // Read-shaped: the model sees the cat -n string, not the raw `content`.
         let data = source(&json!({ "model_content": "1\thi\n2\t", "content": "hi\n" }));
-        assert_eq!(tool_result_to_model_text(&data).string_at(""), Some("1\thi\n2\t"));
+        assert_eq!(
+            tool_result_to_model_text(&data).string_at(""),
+            Some("1\thi\n2\t")
+        );
     }
 
     #[test]
@@ -321,7 +334,10 @@ mod model_text_tests {
         // Bash/Edit/Write-shaped: no `model_content`, so the model sees the raw
         // `content` string verbatim — NOT a JSON dump of the object.
         let data = source(&json!({ "content": "build ok\n", "exit_code": 0 }));
-        assert_eq!(tool_result_to_model_text(&data).string_at(""), Some("build ok\n"));
+        assert_eq!(
+            tool_result_to_model_text(&data).string_at(""),
+            Some("build ok\n")
+        );
     }
 
     #[test]
@@ -337,7 +353,10 @@ mod model_text_tests {
             "durationMs": 3,
             "url": "https://e.example/",
         }));
-        assert_eq!(tool_result_to_model_text(&data).string_at(""), Some("# Hello\n\nbody"));
+        assert_eq!(
+            tool_result_to_model_text(&data).string_at(""),
+            Some("# Hello\n\nbody")
+        );
     }
 
     #[test]
@@ -350,7 +369,7 @@ mod model_text_tests {
             let input = source(&case["input"]);
             assert_eq!(
                 tool_result_to_model_text(&input).string_at(""),
-                case["expected"].as_str().unwrap(),
+                Some(case["expected"].as_str().unwrap()),
                 "{}",
                 case["name"]
             );
@@ -362,10 +381,16 @@ mod model_text_tests {
         // Structured-only result (no string `content`/`model_content`) uses
         // JSON text; these small ASCII outputs remain unchanged.
         let data = source(&json!({ "matches": ["a", "b"] }));
-        assert_eq!(tool_result_to_model_text(&data).string_at(""), Some(r#"{"matches":["a","b"]}"#));
+        assert_eq!(
+            tool_result_to_model_text(&data).string_at(""),
+            Some(r#"{"matches":["a","b"]}"#)
+        );
         // A non-string `content` also falls through to JSON.
         let data2 = source(&json!({ "content": 42 }));
-        assert_eq!(tool_result_to_model_text(&data2).string_at(""), Some(r#"{"content":42}"#));
+        assert_eq!(
+            tool_result_to_model_text(&data2).string_at(""),
+            Some(r#"{"content":42}"#)
+        );
     }
 }
 #[cfg(test)]
@@ -384,7 +409,7 @@ mod read_file_state_tests {
     use hooks::events::HookEventType;
     use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
     use lingxi_core::host::OrchestratorHandle;
-    use lingxi_core::types::{HookId, ToolUseId};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
     use permission::{
         PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
         PermissionRuleValue, PolicyPermissionGate,
@@ -415,39 +440,55 @@ mod read_file_state_tests {
         fn name(&self) -> &str {
             self.name
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| {
-                    json!({
-                        "type": "object",
-                        "properties": { "file_path": { "type": "string" } },
-                        "required": ["file_path"],
-                    })
-                });
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| {
+                source_fixture!({
+                    "type": "object",
+                    "properties": { "file_path": { "type": "string" } },
+                    "required": ["file_path"],
+                })
+            });
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -461,7 +502,7 @@ mod read_file_state_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "stub file tool".into()
@@ -474,12 +515,12 @@ mod read_file_state_tests {
         }
         async fn call(
             &self,
-            input: serde_json::Value,
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             let path = input
-                .get("file_path")
+                .at_pointer("/file_path")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolError::InvalidInput("file_path required".into()))?;
             // Resolve against the tool's cwd (mirrors getCwd()), then touch
@@ -489,11 +530,12 @@ mod read_file_state_tests {
                 .await
                 .map_err(|e| ToolError::Io(format!("read {}: {e}", resolved.display()).into()))?;
             Ok(ToolCallResult {
-                data: json!({ "content": content }),
+                data: source_fixture!({ "content": content }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -517,24 +559,27 @@ mod read_file_state_tests {
                 lingxi_core::types::MessageId::new(),
                 "hidden context".into(),
             ));
-        let api = hooks::mods::ModSessionContext::messages(&orch, json!({"as":"api"}))
+        let api =
+            hooks::mods::ModSessionContext::messages(&orch, Some(source_fixture!({"as":"api"})))
+                .await
+                .unwrap();
+        let summary = hooks::mods::ModSessionContext::messages(&orch, Some(source_fixture!({})))
             .await
             .unwrap();
-        let summary = hooks::mods::ModSessionContext::messages(&orch, json!({}))
-            .await
-            .unwrap();
-        assert!(api.strings.is_empty());
-        assert!(summary.strings.is_empty());
+        api.validate().expect("valid message projection");
+        summary.validate().expect("valid summary projection");
         assert_eq!(
-            api.value,
-            json!([{"role":"user","content":[
+            api,
+            source_fixture!([{"role":"user","content":[
             {"type":"text","text":"hidden context"}]}])
         );
-        assert_eq!(summary.value, json!([]));
-        let missing_agent =
-            hooks::mods::ModSessionContext::messages(&orch, json!({"agentId":"not-this-session"}))
-                .await
-                .unwrap_err();
+        assert_eq!(summary, source_fixture!([]));
+        let missing_agent = hooks::mods::ModSessionContext::messages(
+            &orch,
+            Some(source_fixture!({"agentId":"not-this-session"})),
+        )
+        .await
+        .unwrap_err();
         assert!(missing_agent
             .to_string()
             .contains("no conversation of agent not-this-session"));
@@ -573,7 +618,7 @@ mod read_file_state_tests {
         async fn check(
             &self,
             _name: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> permission::PermissionDecision {
             permission::PermissionDecision::Allow
         }
@@ -613,7 +658,7 @@ mod read_file_state_tests {
     fn assistant_with_tool_use(
         tuid: &ToolUseId,
         name: &str,
-        input: serde_json::Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> lingxi_core::types::ConversationMessage {
         lingxi_core::types::ConversationMessage::Assistant {
             id: lingxi_core::types::MessageId::new(),
@@ -636,7 +681,13 @@ mod read_file_state_tests {
                         content, is_error, ..
                     } = b
                     {
-                        return (content.clone(), is_error.unwrap_or(false));
+                        return (
+                            content
+                                .string_at("")
+                                .expect("scalar tool result fixture")
+                                .to_owned(),
+                            is_error.unwrap_or(false),
+                        );
                     }
                 }
             }
@@ -665,7 +716,7 @@ mod read_file_state_tests {
             s.history.push(assistant_with_tool_use(
                 &tuid,
                 "Read",
-                json!({"file_path":"missing.txt"}),
+                source_fixture!({"file_path":"missing.txt"}),
             ));
         }
 
@@ -673,7 +724,7 @@ mod read_file_state_tests {
             .run_orphaned_permission(
                 &tuid,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    updated_input: Some(source_fixture!({"file_path":"real.txt"})),
                     permission_updates: vec![],
                     decision_classification: None,
                 },
@@ -724,17 +775,14 @@ mod read_file_state_tests {
             .push(assistant_with_tool_use(
                 &tool_use_id,
                 "Read",
-                json!({"file_path":"real.txt"}),
+                source_fixture!({"file_path":"real.txt"}),
             ));
-        let update = json!({
+        let update_projection = source_fixture!({
             "type": "addRules",
             "rules": [{"toolName": "Read"}],
             "behavior": "allow",
             "destination": "session"
         });
-        let update_projection =
-            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&update)
-                .expect("test permission update is valid JSON");
 
         assert!(orch
             .run_orphaned_permission(
@@ -783,14 +831,14 @@ mod read_file_state_tests {
             .push(assistant_with_tool_use(
                 &tool_use_id,
                 "Read",
-                json!({"file_path":"missing.txt"}),
+                source_fixture!({"file_path":"missing.txt"}),
             ));
 
         assert!(orch
             .run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
-                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    updated_input: Some(source_fixture!({"file_path":"real.txt"})),
                 },
             )
             .await
@@ -827,7 +875,7 @@ mod read_file_state_tests {
             s.history.push(assistant_with_tool_use(
                 &tuid,
                 "Read",
-                json!({"file_path":"real.txt"}),
+                source_fixture!({"file_path":"real.txt"}),
             ));
         }
 
@@ -875,7 +923,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("recovery-mod", dir.path(), &module, json!({}))
+        host.load("recovery-mod", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut hook_registry = hooks::HookRegistry::new();
@@ -894,13 +942,13 @@ mod read_file_state_tests {
             .push(assistant_with_tool_use(
                 &tool_use_id,
                 "Read",
-                json!({"file_path":"real.txt"}),
+                source_fixture!({"file_path":"real.txt"}),
             ));
         assert!(orch
             .run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    updated_input: Some(source_fixture!({"file_path":"real.txt"})),
                     permission_updates: vec![],
                     decision_classification: None,
                 },
@@ -932,7 +980,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("recovery-lazy", dir.path(), &module, json!({}))
+        host.load("recovery-lazy", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -954,13 +1002,13 @@ mod read_file_state_tests {
             .push(assistant_with_tool_use(
                 &tool_use_id,
                 "Schemic",
-                json!({"path":"/x"}),
+                source_fixture!({"path":"/x"}),
             ));
         assert!(orch
             .run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                    updated_input: Some(json!({"path":"/x"})),
+                    updated_input: Some(source_fixture!({"path":"/x"})),
                     permission_updates: vec![],
                     decision_classification: None,
                 },
@@ -1012,13 +1060,13 @@ mod read_file_state_tests {
             .push(assistant_with_tool_use(
                 &tool_use_id,
                 "Read",
-                json!({"file_path":"real.txt"}),
+                source_fixture!({"file_path":"real.txt"}),
             ));
         assert!(orch
             .run_orphaned_permission(
                 &tool_use_id,
                 lingxi_core::host::permission_gate::PermissionOutcome::Allow {
-                    updated_input: Some(json!({"file_path":"real.txt"})),
+                    updated_input: Some(source_fixture!({"file_path":"real.txt"})),
                     permission_updates: vec![],
                     decision_classification: None,
                 },
@@ -1046,7 +1094,7 @@ mod read_file_state_tests {
             s.history.push(assistant_with_tool_use(
                 &tuid,
                 "Read",
-                json!({"file_path":"x.txt"}),
+                source_fixture!({"file_path":"x.txt"}),
             ));
             // A matching tool_result already exists ⇒ resolved.
             s.history
@@ -1062,6 +1110,10 @@ mod read_file_state_tests {
                     is_meta: false,
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
                 });
         }
         let before = orch.session().lock().await.history.len();
@@ -1123,8 +1175,11 @@ mod read_file_state_tests {
         {
             let sess = orch.session();
             let mut s = sess.lock().await;
-            s.history
-                .push(assistant_with_tool_use(&tuid, "Ghost", json!({"x":1})));
+            s.history.push(assistant_with_tool_use(
+                &tuid,
+                "Ghost",
+                source_fixture!({"x":1}),
+            ));
         }
         let before = orch.session().lock().await.history.len();
         let recovered = orch
@@ -1171,12 +1226,12 @@ mod read_file_state_tests {
             s.history.push(assistant_with_tool_use(
                 &id1,
                 "Read",
-                json!({"file_path":"a.txt"}),
+                source_fixture!({"file_path":"a.txt"}),
             ));
             s.history.push(assistant_with_tool_use(
                 &id2,
                 "Read",
-                json!({"file_path":"b.txt"}),
+                source_fixture!({"file_path":"b.txt"}),
             ));
         }
         let allow = || lingxi_core::host::permission_gate::PermissionOutcome::Allow {
@@ -1196,7 +1251,7 @@ mod read_file_state_tests {
                 lingxi_core::types::ConversationMessage::User { content, .. } => {
                     content.iter().find_map(|b| match b {
                         lingxi_core::types::ContentBlock::ToolResult { content, .. } => {
-                            Some(content.as_str())
+                            content.string_at("")
                         }
                         _ => None,
                     })
@@ -1230,7 +1285,7 @@ mod read_file_state_tests {
             s.history.push(assistant_with_tool_use(
                 &tuid,
                 "Read",
-                json!({"file_path":"real.txt"}),
+                source_fixture!({"file_path":"real.txt"}),
             ));
         }
         let allow = || lingxi_core::host::permission_gate::PermissionOutcome::Allow {
@@ -1246,15 +1301,17 @@ mod read_file_state_tests {
     }
 
     // ----- JSON-schema input-validation gate -------------------------------
-    // (claude-code `toolExecution.ts:615` `inputSchema.safeParse`). BEHAVIORAL
-    // parity only — the message bytes intentionally differ from claude-code's
-    // Zod `formatZodValidationError` output (unportable).
+    // Exercise the shared Native schema gate at the dispatcher boundary.
+    // Concrete Native diagnostics have separate raw-byte oracle fixtures.
 
     fn schema_gate_tool_result(block: &lingxi_core::types::ContentBlock) -> (&str, bool) {
         match block {
             lingxi_core::types::ContentBlock::ToolResult {
                 content, is_error, ..
-            } => (content.as_str(), is_error.unwrap_or(false)),
+            } => (
+                content.string_at("").expect("fixture tool result is text"),
+                is_error.unwrap_or(false),
+            ),
             other => panic!("expected ToolResult, got {other:?}"),
         }
     }
@@ -1273,32 +1330,64 @@ mod read_file_state_tests {
         fn name(&self) -> &str {
             "Schemic"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| {
-                    json!({
-                        "type": "object",
-                        "properties": { "path": { "type": "string" } },
-                        "required": ["path"],
-                    })
-                });
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| {
+                source_fixture!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                })
+            });
             &SCHEMA
         }
-        fn output_schema(&self) -> Option<&serde_json::Value> {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({"type":["object","string"]}));
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
+        fn output_schema(&self) -> Option<&lingxi_core::types::utf16_json::Utf16JsonProjection> {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| source_fixture!({"type":["object","string"]}));
             Some(&SCHEMA)
         }
-        fn map_result_text(&self, result: &serde_json::Value) -> Option<String> {
-            result
-                .get("mapped")
-                .and_then(serde_json::Value::as_str)
-                .map(|text| format!("tool-mapped:{text}"))
+        async fn parse_output(
+            &self,
+            output: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolError> {
+            if output.string_units("").is_some() || output.object_entries().is_some() {
+                Ok(output.clone())
+            } else {
+                Err(ToolError::InvalidInput(
+                    "expected object or string output".into(),
+                ))
+            }
         }
-        fn map_result_is_error(&self, result: &serde_json::Value) -> Option<bool> {
+        fn map_result_text(
+            &self,
+            result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+            result.string_units("/mapped").map(|text| {
+                let mut units = "tool-mapped:".encode_utf16().collect::<Vec<_>>();
+                units.extend(text);
+                let mut builder = lingxi_core::types::utf16_json::Utf16JsonBuilder::new();
+                let root = builder.push_string_units(units);
+                builder.finish(root).unwrap()
+            })
+        }
+        fn map_result_is_error(
+            &self,
+            result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> Option<bool> {
             result
-                .get("mappedError")
-                .and_then(serde_json::Value::as_bool)
+                .at_pointer("/mappedError")
+                .and_then(lingxi_core::types::utf16_json::JsonValueView::as_bool)
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
@@ -1306,22 +1395,28 @@ mod read_file_state_tests {
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn on_input_schema_rejected(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _tool_use_id: Option<&str>,
             assistant_message_id: Option<&lingxi_core::types::MessageId>,
         ) {
@@ -1331,7 +1426,7 @@ mod read_file_state_tests {
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             if let Some(counter) = &self.permission_checks {
@@ -1348,7 +1443,7 @@ mod read_file_state_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "schema tracker".into()
@@ -1361,17 +1456,18 @@ mod read_file_state_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(ToolCallResult {
-                data: json!({ "ok": true }),
+                data: source_fixture!({ "ok": true }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -1391,7 +1487,12 @@ mod read_file_state_tests {
                 permission_checks: None,
             })],
         );
-        let uses = vec![(ToolUseId::new(), "Schemic".to_string(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            source_fixture!({}),
+            None,
+        )];
         let results = dispatch_tool_uses(&orch, &uses).await.expect("dispatch");
         assert_eq!(results.len(), 1);
         let (content, is_error) = schema_gate_tool_result(&results[0]);
@@ -1422,7 +1523,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({ "path": "/x" }),
+            source_fixture!({ "path": "/x" }),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.expect("dispatch");
@@ -1449,32 +1550,48 @@ mod read_file_state_tests {
         fn name(&self) -> &str {
             "Bash"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| {
-                    json!({
-                        "type":"object",
-                        "properties":{"command":{"type":"string"}},
-                        "required":["command"]
-                    })
-                });
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| {
+                source_fixture!({
+                    "type":"object",
+                    "properties":{"command":{"type":"string"}},
+                    "required":["command"]
+                })
+            });
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             false
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             if let Some(permission_checks) = &self.permission_checks {
@@ -1491,7 +1608,7 @@ mod read_file_state_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "Bash dispatch probe".into()
@@ -1504,17 +1621,18 @@ mod read_file_state_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(ToolCallResult {
-                data: json!({"ran":true}),
+                data: source_fixture!({"ran":true}),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -1533,26 +1651,42 @@ mod read_file_state_tests {
         fn name(&self) -> &str {
             self.name
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| source_fixture!({"type":"object"}));
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn is_mcp(&self) -> bool {
             true
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             false
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             false
         }
         async fn tool_check_permission_ceiling(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> Option<lingxi_core::host::McpPermissionCeiling> {
             Some(lingxi_core::host::McpPermissionCeiling::Ask)
         }
@@ -1561,7 +1695,7 @@ mod read_file_state_tests {
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             let message = "Your organization requires approval for this tool";
@@ -1580,7 +1714,7 @@ mod read_file_state_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "MCP connector probe".into()
@@ -1593,17 +1727,18 @@ mod read_file_state_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(ToolCallResult {
-                data: json!({"ran":true}),
+                data: source_fixture!({"ran":true}),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -1616,7 +1751,7 @@ mod read_file_state_tests {
         async fn check(
             &self,
             _tool_name: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> permission::PermissionDecision {
             permission::PermissionDecision::Deny {
                 reason: "test prompt denied".into(),
@@ -1655,7 +1790,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("permission-probe", dir.path(), &module, json!({}))
+        host.load("permission-probe", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -1701,7 +1836,12 @@ mod read_file_state_tests {
         // Exercise the non-normal plan path: its post-dispatch tool-Ask guard
         // used to undo a Mod Allow after `next(e)` returned the core Ask.
         orch.session().lock().await.plan_mode = true;
-        let uses = vec![(ToolUseId::new(), tool_name.into(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            tool_name.into(),
+            source_fixture!({}),
+            None,
+        )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
         let (content, is_error) = schema_gate_tool_result(&results[0]);
         assert!(
@@ -1734,7 +1874,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("user-approval", dir.path(), &module, json!({}))
+        host.load("user-approval", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         host.set_sec_default_order(Some(-1));
@@ -1786,7 +1926,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Bash".to_string(),
-            json!({"command":command}),
+            source_fixture!({"command":command}),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -1827,7 +1967,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("deny-test", dir.path(), &module, json!({}))
+        host.load("deny-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -1845,7 +1985,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({ "path": "/x" }),
+            source_fixture!({ "path": "/x" }),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -1879,7 +2019,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("session-test", dir.path(), &module, json!({}))
+        host.load("session-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -1915,7 +2055,12 @@ mod read_file_state_tests {
                 ));
             (session.session_id.to_string(), session.model.clone())
         };
-        let uses = vec![(ToolUseId::new(), "Schemic".into(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".into(),
+            source_fixture!({}),
+            None,
+        )];
         dispatch_tool_uses(&orch, &uses).await.unwrap();
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(
@@ -1924,7 +2069,7 @@ mod read_file_state_tests {
                 .lock()
                 .await
                 .get(uses[0].0.as_str()),
-            Some(&json!({
+            Some(&source_fixture!({
                 "cwd": first_cwd.to_string_lossy(),
                 "root": first_cwd.to_string_lossy(),
                 "model": model,
@@ -1942,7 +2087,12 @@ mod read_file_state_tests {
                 lingxi_core::types::MessageId::new(),
                 "second prompt".into(),
             ));
-        let moved_use = vec![(ToolUseId::new(), "Schemic".into(), json!({}), None)];
+        let moved_use = vec![(
+            ToolUseId::new(),
+            "Schemic".into(),
+            source_fixture!({}),
+            None,
+        )];
         dispatch_tool_uses(&orch, &moved_use).await.unwrap();
         assert_eq!(
             orch.transcript
@@ -1950,7 +2100,7 @@ mod read_file_state_tests {
                 .lock()
                 .await
                 .get(moved_use[0].0.as_str()),
-            Some(&json!({
+            Some(&source_fixture!({
                 "cwd": second_cwd.to_string_lossy(),
                 "root": second_cwd.to_string_lossy(),
                 "model": model,
@@ -1975,7 +2125,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("rewrite-test", dir.path(), &module, json!({}))
+        host.load("rewrite-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -1990,14 +2140,22 @@ mod read_file_state_tests {
             })],
         )
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        let uses = vec![(ToolUseId::new(), "Schemic".to_string(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "Schemic".to_string(),
+            source_fixture!({}),
+            None,
+        )];
         let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
             .await
             .unwrap();
         let (content, is_error) = schema_gate_tool_result(&dispatched.results[0]);
         assert!(!is_error, "{content}");
         assert!(called.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(dispatched.post_tool_batch_calls[0].tool_input, json!({}));
+        assert_eq!(
+            dispatched.post_tool_batch_calls[0].tool_input,
+            source_fixture!({})
+        );
     }
 
     #[tokio::test]
@@ -2019,7 +2177,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("check-test", dir.path(), &module, json!({}))
+        host.load("check-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -2037,7 +2195,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -2078,7 +2236,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("permission-phase", dir.path(), &module, json!({}))
+        host.load("permission-phase", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -2119,7 +2277,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Bash".to_string(),
-            json!({"command":"curl https://example.invalid"}),
+            source_fixture!({"command":"curl https://example.invalid"}),
             None,
         )];
 
@@ -2177,7 +2335,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("org-ceiling", dir.path(), &module, json!({}))
+        host.load("org-ceiling", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -2220,7 +2378,12 @@ mod read_file_state_tests {
         // The server-pushed ask ceiling remains an Ask for a non-read-only
         // connector while the session is in Plan mode.
         orch.session().lock().await.plan_mode = true;
-        let uses = vec![(ToolUseId::new(), "McpConnector".into(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "McpConnector".into(),
+            source_fixture!({}),
+            None,
+        )];
 
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
         let (content, is_error) = schema_gate_tool_result(&results[0]);
@@ -2270,9 +2433,14 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("org-ceiling-ask-rule", dir.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "org-ceiling-ask-rule",
+            dir.path(),
+            &module,
+            source_fixture!({}),
+        )
+        .await
+        .unwrap();
         let mut registry = hooks::HookRegistry::new();
         registry.set_mod_host(host);
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2317,7 +2485,12 @@ mod read_file_state_tests {
             cwd,
         )
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        let uses = vec![(ToolUseId::new(), "McpConnector".into(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "McpConnector".into(),
+            source_fixture!({}),
+            None,
+        )];
 
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
         let (_, is_error) = schema_gate_tool_result(&results[0]);
@@ -2455,7 +2628,7 @@ mod read_file_state_tests {
             async fn check(
                 &self,
                 _name: &str,
-                _input: &serde_json::Value,
+                _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             ) -> permission::PermissionDecision {
                 panic!("the direct Mod denial must not call the legacy permission gate")
             }
@@ -2463,7 +2636,7 @@ mod read_file_state_tests {
             async fn resolve_detailed_or_abort(
                 &self,
                 _name: &str,
-                _input: &serde_json::Value,
+                _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
                 _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
             ) -> Result<
                 lingxi_core::host::permission_gate::PermissionResolution,
@@ -2494,7 +2667,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("lazy-check", dir.path(), &module, json!({}))
+        host.load("lazy-check", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -2522,7 +2695,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".into(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -2539,7 +2712,7 @@ mod read_file_state_tests {
         let next_uses = vec![(
             ToolUseId::new(),
             "Schemic".into(),
-            json!({"path":"/run"}),
+            source_fixture!({"path":"/run"}),
             None,
         )];
         let next_results = dispatch_tool_uses(&orch, &next_uses).await.unwrap();
@@ -2572,7 +2745,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("rule-first", dir.path(), &module, json!({}))
+        host.load("rule-first", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -2610,7 +2783,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".into(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -2641,7 +2814,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("query-test", dir.path(), &module, json!({}))
+        host.load("query-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -2675,7 +2848,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -2687,7 +2860,7 @@ mod read_file_state_tests {
                 .lock()
                 .await
                 .get(uses[0].0.as_str()),
-            Some(&json!({"decision":"allow","rule":"Schemic"}))
+            Some(&source_fixture!({"decision":"allow","rule":"Schemic"}))
         );
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
@@ -2775,7 +2948,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("allow-test", dir.path(), &module, json!({}))
+        host.load("allow-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -2813,7 +2986,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -2829,13 +3002,15 @@ mod read_file_state_tests {
             PermissionRuleValue, PolicyPermissionGate,
         };
 
-        struct RecordingPrompt(std::sync::Mutex<Option<String>>);
+        struct RecordingPrompt(
+            std::sync::Mutex<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+        );
         #[async_trait]
         impl permission::PermissionGate for RecordingPrompt {
             async fn check(
                 &self,
                 _name: &str,
-                _input: &serde_json::Value,
+                _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             ) -> permission::PermissionDecision {
                 panic!("the Mod ask must carry its reason through the contextual transport")
             }
@@ -2843,7 +3018,7 @@ mod read_file_state_tests {
             async fn check_with_context(
                 &self,
                 _name: &str,
-                _input: &serde_json::Value,
+                _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
                 ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
             ) -> lingxi_core::host::permission_gate::PermissionOutcome {
                 *self.0.lock().unwrap() = ctx.decision_reason.clone();
@@ -2867,7 +3042,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("ask-test", dir.path(), &module, json!({}))
+        host.load("ask-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -2905,7 +3080,7 @@ mod read_file_state_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".into(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -2913,12 +3088,16 @@ mod read_file_state_tests {
         assert!(is_error, "{content}");
         assert_eq!(content, "dialog refused");
         assert_eq!(
-            prompt.0.lock().unwrap().as_deref(),
+            prompt
+                .0
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|value| value.string_at("")),
             Some("Schemic needs approval (asked by plugin ask-test: human review)")
         );
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
-    use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
 
     #[tokio::test]
     async fn mod_prompt_attachment_retains_utf16_through_rewrite_and_cache_identity() {
@@ -2937,7 +3116,7 @@ mod read_file_state_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("utf16-context", dir.path(), &module, json!({}))
+        host.load("utf16-context", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -2964,12 +3143,16 @@ mod read_file_state_tests {
                 is_meta: true,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             };
             let rendered = orch
                 .mod_prompt_attachment(
                     "hook_additional_context",
                     message,
-                    json!({"kind":"plugin","event":"tool.call"}),
+                    serde_json::json!({"kind":"plugin","event":"tool.call"}),
                 )
                 .await
                 .unwrap();
@@ -2994,30 +3177,6 @@ mod read_file_state_tests {
             );
         }
     }
-}
-// ============================================================================
-// A1: max_output_tokens recovery (multi-turn nudge + escalation/exhaustion).
-// Drives `execute_one_turn_with_recovery` directly with a `max_tokens`-scripted
-// MockApiClient and asserts the nudge injection, counter increments, and
-// disposition (Continue while under the limit; Ended on exhaustion).
-// ============================================================================
-#[cfg(test)]
-mod max_output_tokens_recovery_tests {
-    use crate::conversation::ConversationOrchestrator;
-    use crate::test_support::{
-        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
-        NoOpPermissionGate, StaticMemoryProvider,
-    };
-    use crate::turn_loop::{
-        execute_one_turn_with_recovery, RecoveryState, TurnStepOutcome, ESCALATED_MAX_TOKENS,
-        MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
-    };
-    use crate::OrchestratorConfig;
-    use lingxi_core::types::{ContentBlock, ConversationMessage};
-    use llm_runtime::HistoryResponse;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use tool_api::registry::ToolRegistry;
 
     #[tokio::test]
     async fn mod_tool_call_can_replace_model_visible_result() {
@@ -3041,7 +3200,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("result-test", dir.path(), &module, json!({}))
+        host.load("result-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -3068,7 +3227,7 @@ mod max_output_tokens_recovery_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({ "path": "/x" }),
+            source_fixture!({ "path": "/x" }),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -3082,7 +3241,7 @@ mod max_output_tokens_recovery_tests {
                 .lock()
                 .await
                 .get(uses[0].0.as_str()),
-            Some(&json!("redacted")),
+            Some(&source_fixture!("redacted")),
             "the core payload must not reach transcript persistence"
         );
         let output_events = output.snapshot().await;
@@ -3116,7 +3275,7 @@ mod max_output_tokens_recovery_tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(tool_results, vec![json!("redacted")]);
+        assert_eq!(tool_results, vec![source_fixture!("redacted")]);
     }
 
     #[tokio::test]
@@ -3140,7 +3299,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("context-test", dir.path(), &module, json!({}))
+        host.load("context-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -3158,7 +3317,7 @@ mod max_output_tokens_recovery_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
@@ -3176,15 +3335,18 @@ mod max_output_tokens_recovery_tests {
         );
         let queued = orch.take_queued_hook_attachments(&uses[0].0).await;
         assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].0.value["type"], "hook_additional_context");
-        assert_eq!(queued[0].0.value["hookName"], "tool.call");
         assert_eq!(
-            queued[0].0.value["toolUseID"],
-            format!("{}-context", uses[0].0.as_str())
+            queued[0].0.string_at("/type"),
+            Some("hook_additional_context")
+        );
+        assert_eq!(queued[0].0.string_at("/hookName"), Some("tool.call"));
+        assert_eq!(
+            queued[0].0.string_at("/toolUseID"),
+            Some(format!("{}-context", uses[0].0.as_str()).as_str())
         );
         assert_eq!(
-            queued[0].0.value["content"],
-            json!(["Contents of /tmp/AGENTS.md:\n\nNested rule", "second line"])
+            queued[0].0.subprojection("/content").unwrap(),
+            source_fixture!(["Contents of /tmp/AGENTS.md:\n\nNested rule", "second line"])
         );
         let mut model_copy = vec![reminder.clone()];
         orch.screen_mod_persisted_attachments(&mut model_copy).await;
@@ -3208,7 +3370,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("text-test", dir.path(), &module, json!({}))
+        host.load("text-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -3226,7 +3388,7 @@ mod max_output_tokens_recovery_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
@@ -3242,7 +3404,7 @@ mod max_output_tokens_recovery_tests {
                 .lock()
                 .await
                 .get(uses[0].0.as_str()),
-            Some(&json!({"ok":true}))
+            Some(&source_fixture!({"ok":true}))
         );
     }
 
@@ -3262,7 +3424,7 @@ mod max_output_tokens_recovery_tests {
             let module = dir.path().join("register.js");
             std::fs::write(&module, source).unwrap();
             let host = hooks::mods::ModHost::start(None).await.unwrap();
-            host.load("schema-test", dir.path(), &module, json!({}))
+            host.load("schema-test", dir.path(), &module, source_fixture!({}))
                 .await
                 .unwrap();
             let mut registry = hooks::HookRegistry::new();
@@ -3280,7 +3442,7 @@ mod max_output_tokens_recovery_tests {
             let uses = vec![(
                 ToolUseId::new(),
                 "Schemic".to_string(),
-                json!({"path":"/x"}),
+                source_fixture!({"path":"/x"}),
                 None,
             )];
             let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
@@ -3302,7 +3464,7 @@ mod max_output_tokens_recovery_tests {
                     .lock()
                     .await
                     .get(uses[0].0.as_str())
-                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| value.string_at(""))
                     .is_some_and(|raw| raw.starts_with("Error: tool.call step resolved Schemic"))
             );
         }
@@ -3318,7 +3480,7 @@ mod max_output_tokens_recovery_tests {
             let module = dir.path().join("register.js");
             std::fs::write(&module, source).unwrap();
             let host = hooks::mods::ModHost::start(None).await.unwrap();
-            host.load("mapping-test", dir.path(), &module, json!({}))
+            host.load("mapping-test", dir.path(), &module, source_fixture!({}))
                 .await
                 .unwrap();
             let mut registry = hooks::HookRegistry::new();
@@ -3335,7 +3497,7 @@ mod max_output_tokens_recovery_tests {
             let uses = vec![(
                 ToolUseId::new(),
                 "Schemic".to_string(),
-                json!({"path":"/x"}),
+                source_fixture!({"path":"/x"}),
                 None,
             )];
             let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
@@ -3351,7 +3513,7 @@ mod max_output_tokens_recovery_tests {
                     .lock()
                     .await
                     .get(uses[0].0.as_str()),
-                Some(&json!({"mapped":"direct"}))
+                Some(&source_fixture!({"mapped":"direct"}))
             );
         }
     }
@@ -3370,7 +3532,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("image-mapping", dir.path(), &module, json!({}))
+        host.load("image-mapping", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -3387,7 +3549,7 @@ mod max_output_tokens_recovery_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
@@ -3399,8 +3561,8 @@ mod max_output_tokens_recovery_tests {
             panic!("expected tool result");
         };
         assert_eq!(
-            content_blocks.as_ref().unwrap()[0]["source"]["data"],
-            "AAAA"
+            content_blocks.as_ref().unwrap().string_at("/0/source/data"),
+            Some("AAAA")
         );
     }
 
@@ -3414,7 +3576,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("error-mapping", dir.path(), &module, json!({}))
+        host.load("error-mapping", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -3431,7 +3593,7 @@ mod max_output_tokens_recovery_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({"path":"/x"}),
+            source_fixture!({"path":"/x"}),
             None,
         )];
         let dispatched = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
@@ -3460,7 +3622,7 @@ mod max_output_tokens_recovery_tests {
             }
         "#).unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("mod-test", dir.path(), &module, json!({}))
+        host.load("mod-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut hooks = hooks::HookRegistry::new();
@@ -3481,18 +3643,21 @@ mod max_output_tokens_recovery_tests {
             .find_by_name("mcp__mod-test__echo")
             .expect("registered tool");
         assert!(tool.is_mcp());
-        assert_eq!(tool.input_schema()["required"], json!(["text"]));
+        assert_eq!(
+            tool.input_schema().subprojection("/required").unwrap(),
+            source_fixture!(["text"])
+        );
         assert!(orch
             .build_wire_tools()
             .await
             .0
             .iter()
-            .any(|entry| entry["name"] == "mcp__mod-test__echo"
-                && entry["description"] == "Echo a message"));
+            .any(|entry| entry.name == "mcp__mod-test__echo"
+                && entry.description.string_at("") == Some("Echo a message")));
         let second = vec![(
             ToolUseId::new(),
             "mcp__mod-test__echo".into(),
-            json!({"text":"hello"}),
+            source_fixture!({"text":"hello"}),
             None,
         )];
         let result = dispatch_tool_uses(&orch, &second).await.unwrap();
@@ -3518,7 +3683,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("deny-after-next", dir.path(), &module, json!({}))
+        host.load("deny-after-next", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -3536,7 +3701,7 @@ mod max_output_tokens_recovery_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({ "path": "/x" }),
+            source_fixture!({ "path": "/x" }),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -3550,7 +3715,7 @@ mod max_output_tokens_recovery_tests {
                 .lock()
                 .await
                 .get(uses[0].0.as_str()),
-            Some(&json!("<tool_use_error>hidden</tool_use_error>")),
+            Some(&source_fixture!("<tool_use_error>hidden</tool_use_error>")),
         );
     }
 
@@ -3572,7 +3737,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("retry", dir.path(), &module, json!({}))
+        host.load("retry", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -3589,7 +3754,7 @@ mod max_output_tokens_recovery_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({ "path": "/x" }),
+            source_fixture!({ "path": "/x" }),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -3602,7 +3767,7 @@ mod max_output_tokens_recovery_tests {
                 .lock()
                 .await
                 .get(uses[0].0.as_str()),
-            Some(&json!("2")),
+            Some(&source_fixture!("2")),
         );
     }
 
@@ -3623,7 +3788,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("zero-ref", dir.path(), &module, json!({}))
+        host.load("zero-ref", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -3641,7 +3806,7 @@ mod max_output_tokens_recovery_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({ "path": "/x" }),
+            source_fixture!({ "path": "/x" }),
             None,
         )];
 
@@ -3657,7 +3822,7 @@ mod max_output_tokens_recovery_tests {
                 .lock()
                 .await
                 .get(uses[0].0.as_str()),
-            Some(&json!("synthetic replacement")),
+            Some(&source_fixture!("synthetic replacement")),
         );
     }
 
@@ -3675,7 +3840,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("short-circuit", dir.path(), &module, json!({}))
+        host.load("short-circuit", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -3697,6 +3862,7 @@ mod max_output_tokens_recovery_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let orch = orch_with_tools(
@@ -3711,7 +3877,7 @@ mod max_output_tokens_recovery_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Schemic".to_string(),
-            json!({ "path": "/x" }),
+            source_fixture!({ "path": "/x" }),
             None,
         )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
@@ -3735,14 +3901,19 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("read-cwd", dir.path(), &module, json!({}))
+        host.load("read-cwd", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
         registry.set_mod_host(host);
         let orch = orch_with_tools(dir.path().to_path_buf(), Vec::new())
             .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        let uses = vec![(ToolUseId::new(), "Read".to_string(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "Read".to_string(),
+            source_fixture!({}),
+            None,
+        )];
         let results = dispatch_tool_uses(&orch, &uses).await.unwrap();
         let (content, is_error) = schema_gate_tool_result(&results[0]);
         assert_eq!(content, "session working directory");
@@ -3757,7 +3928,7 @@ mod max_output_tokens_recovery_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: "Schemic".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         )]));
@@ -3799,15 +3970,15 @@ mod max_output_tokens_recovery_tests {
             assert_eq!(
                 orch.context_attachment_history(&session.history),
                 vec![
-                    json!({"type":"session_context","context":{}}),
-                    json!({"type":"date","date":date}),
-                    json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+                    source_fixture!({"type":"session_context","context":{}}),
+                    source_fixture!({"type":"date","date":date}),
+                    source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
                 ]
             );
             assert!(
                 matches!(&session.history[0], lingxi_core::types::ConversationMessage::System {
                 subtype: Some(subtype), content, ..
-            } if subtype == "model_reminder_attachment" && content.is_empty())
+            } if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
             );
             assert_eq!(
                 session.history[1].text_content(),
@@ -3822,7 +3993,7 @@ mod max_output_tokens_recovery_tests {
                 lingxi_core::types::ConversationMessage::Assistant { id, content, .. } => {
                     assert!(
                         matches!(content.as_slice(), [lingxi_core::types::ContentBlock::ToolUse { name, input, .. }]
-                        if name == "Schemic" && input == &json!({}))
+                        if name == "Schemic" && input == &source_fixture!({}))
                     );
                     id.to_string()
                 }
@@ -3861,13 +4032,14 @@ mod max_output_tokens_recovery_tests {
         let orch = orch_with_tools(cwd, tools);
         let wire = orch.build_wire_tools().await.0;
 
-        let names: Vec<&str> = wire.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = wire.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["Bash", "Read"], "sorted by name");
         for t in &wire {
-            // The base triple, nothing else.
-            assert_eq!(t.as_object().unwrap().len(), 3, "base triple only: {t}");
-            assert!(t.get("description").is_some());
-            assert_eq!(t["input_schema"]["type"], "object");
+            // Generated tools carry the base fields with optional flags disabled.
+            assert_eq!(t.description.string_at(""), Some(""));
+            assert_eq!(t.input_schema.string_at("/type"), Some("object"));
+            assert!(!t.strict);
+            assert!(!t.defer_loading);
         }
     }
 
@@ -3901,7 +4073,7 @@ mod max_output_tokens_recovery_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("describe", dir.path(), &module, json!({}))
+        host.load("describe", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut hooks = hooks::HookRegistry::new();
@@ -3939,18 +4111,19 @@ mod max_output_tokens_recovery_tests {
                 .iter()
                 .find(|tool| tool.name == "Read")
                 .unwrap()
-                .description,
-            "mod description 1"
+                .description
+                .string_at(""),
+            Some("mod description 1")
         );
         deferral.mark_loaded(["Read".to_string()]);
         let cached = orch.build_wire_tools().await.0;
-        let read = cached.iter().find(|entry| entry["name"] == "Read").unwrap();
-        assert_eq!(read["description"], "mod description 1");
-        assert_eq!(read["defer_loading"], true);
+        let read = cached.iter().find(|entry| entry.name == "Read").unwrap();
+        assert_eq!(read.description.string_at(""), Some("mod description 1"));
+        assert!(read.defer_loading);
 
         host.dispatch_with_log_at_session(
             "prompt.submit",
-            json!({"text":"refresh"}),
+            source_fixture!({"text":"refresh"}),
             &orch,
             |event| async move { Ok(event) },
             |_, _| async {},
@@ -3958,19 +4131,13 @@ mod max_output_tokens_recovery_tests {
         .await
         .unwrap();
         let refreshed = orch.build_wire_tools().await.0;
-        let read = refreshed
-            .iter()
-            .find(|entry| entry["name"] == "Read")
-            .unwrap();
-        assert_eq!(read["description"], "mod description 2");
+        let read = refreshed.iter().find(|entry| entry.name == "Read").unwrap();
+        assert_eq!(read.description.string_at(""), Some("mod description 2"));
         host.unload("describe").await.unwrap();
         let ordinary = orch.build_wire_tools().await.0;
-        let read = ordinary
-            .iter()
-            .find(|entry| entry["name"] == "Read")
-            .unwrap();
-        assert_eq!(read["description"], "");
-        assert!(read.get("defer_loading").is_none());
+        let read = ordinary.iter().find(|entry| entry.name == "Read").unwrap();
+        assert_eq!(read.description.string_at(""), Some(""));
+        assert!(!read.defer_loading);
         assert!(!deferral.wants_defer("Read", false));
     }
 
@@ -4023,7 +4190,7 @@ mod max_output_tokens_recovery_tests {
             .with_coordinator_simple_mode_for_test(false)
             .with_coordinator_pool_for_test(false, &[]);
         let wire = orch.build_wire_tools().await.0;
-        let names: Vec<&str> = wire.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        let names: Vec<&str> = wire.iter().map(|t| t.name.as_str()).collect();
         let mut actual = names;
         actual.sort_unstable();
         let mut expected = allowed;
@@ -4093,10 +4260,8 @@ mod max_output_tokens_recovery_tests {
         )
     }
 
-    fn wire_tool_names(wire: &[serde_json::Value]) -> Vec<String> {
-        wire.iter()
-            .map(|t| t["name"].as_str().unwrap().to_string())
-            .collect()
+    fn wire_tool_names(wire: &[lingxi_core::host::SourceToolWireDefinition]) -> Vec<String> {
+        wire.iter().map(|t| t.name.as_str().to_string()).collect()
     }
 
     #[tokio::test]
@@ -4971,14 +5136,14 @@ mod max_output_tokens_recovery_tests {
         assert_eq!(
             orch.context_attachment_history(&h),
             vec![
-                serde_json::json!({"type":"session_context","context":{}}),
-                serde_json::json!({"type":"date","date":date}),
-                serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+                source_fixture!({"type":"session_context","context":{}}),
+                source_fixture!({"type":"date","date":date}),
+                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
             ]
         );
         assert!(
             matches!(&h[len_before], ConversationMessage::System { subtype: Some(subtype), content, .. }
-            if subtype == "model_reminder_attachment" && content.is_empty())
+            if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
         );
         assert_eq!(
             h[len_before + 1].text_content(),
@@ -5055,14 +5220,14 @@ mod max_output_tokens_recovery_tests {
         assert_eq!(
             orch.context_attachment_history(&h),
             vec![
-                serde_json::json!({"type":"session_context","context":{}}),
-                serde_json::json!({"type":"date","date":date}),
-                serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+                source_fixture!({"type":"session_context","context":{}}),
+                source_fixture!({"type":"date","date":date}),
+                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
             ]
         );
         assert!(
             matches!(&h[len_before], ConversationMessage::System { subtype: Some(subtype), content, .. }
-            if subtype == "model_reminder_attachment" && content.is_empty())
+            if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
         );
         assert_eq!(
             h[len_before + 1].text_content(),
@@ -5138,14 +5303,14 @@ mod max_output_tokens_recovery_tests {
         assert_eq!(
             orch.context_attachment_history(&h),
             vec![
-                serde_json::json!({"type":"session_context","context":{}}),
-                serde_json::json!({"type":"date","date":date}),
-                serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+                source_fixture!({"type":"session_context","context":{}}),
+                source_fixture!({"type":"date","date":date}),
+                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
             ]
         );
         assert!(
             matches!(&h[len_before], ConversationMessage::System { subtype: Some(subtype), content, .. }
-            if subtype == "model_reminder_attachment" && content.is_empty())
+            if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
         );
         assert_eq!(
             h[len_before + 1].text_content(),
@@ -5564,7 +5729,7 @@ mod malformed_and_thinking_only_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: "toolu_1".into(),
                 name: "Nope".into(), // unknown tool → synthetic error, still dispatched
-                input: serde_json::json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         );
@@ -5609,7 +5774,7 @@ mod malformed_and_thinking_only_tests {
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
                 name: STRUCTURED_OUTPUT_TOOL_NAME.to_string(),
-                input: serde_json::json!({}),
+                input: source_fixture!({}),
                 provider_id: None,
             }],
             stop_reason: None,
@@ -5630,6 +5795,10 @@ mod malformed_and_thinking_only_tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -5643,6 +5812,10 @@ mod malformed_and_thinking_only_tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -5690,7 +5863,7 @@ mod malformed_and_thinking_only_tests {
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
                 name: "Read".into(),
-                input: serde_json::json!({}),
+                input: source_fixture!({}),
                 provider_id: None,
             }],
             stop_reason: None,
@@ -5966,8 +6139,8 @@ mod pre_tool_hook_tests {
         async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: Some(self.response.clone()),
             }
@@ -5997,6 +6170,7 @@ mod pre_tool_hook_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -6027,6 +6201,7 @@ mod pre_tool_hook_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -6047,8 +6222,8 @@ mod pre_tool_hook_tests {
             self.fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: Some(HookResponse::default()),
             }
@@ -6081,6 +6256,7 @@ mod pre_tool_hook_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -6105,8 +6281,8 @@ mod pre_tool_hook_tests {
             *self.seen.lock().unwrap() = Some(ctx.clone());
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: Some(HookResponse::default()),
             }
@@ -6136,6 +6312,7 @@ mod pre_tool_hook_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -6177,7 +6354,7 @@ mod pre_tool_hook_tests {
         )
         .with_jsonl_writer(writer);
 
-        let uses = vec![(ToolUseId::new(), "Echo".into(), json!({}), None)];
+        let uses = vec![(ToolUseId::new(), "Echo".into(), source_fixture!({}), None)];
         let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .unwrap();
@@ -6217,7 +6394,7 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
 
-        let uses = vec![(ToolUseId::new(), "Echo".into(), json!({}), None)];
+        let uses = vec![(ToolUseId::new(), "Echo".into(), source_fixture!({}), None)];
         let _ = telemetry::otel::with_trace_context_future(
             Some(&trace_context),
             dispatch_tool_uses_tracked(&orch, &uses, None),
@@ -6275,7 +6452,7 @@ mod pre_tool_hook_tests {
         .with_config_home(config_home.clone())
         .with_session_id(session_id);
 
-        let uses = vec![(ToolUseId::new(), "Echo".into(), json!({}), None)];
+        let uses = vec![(ToolUseId::new(), "Echo".into(), source_fixture!({}), None)];
         let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .unwrap();
@@ -6325,7 +6502,7 @@ mod pre_tool_hook_tests {
         );
         orch.session().lock().await.plan_mode = true;
 
-        let uses = vec![(ToolUseId::new(), "Echo".into(), json!({}), None)];
+        let uses = vec![(ToolUseId::new(), "Echo".into(), source_fixture!({}), None)];
         let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .unwrap();
@@ -6343,7 +6520,11 @@ mod pre_tool_hook_tests {
     struct DenyAllGate;
     #[async_trait]
     impl PermissionGate for DenyAllGate {
-        async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _tool: &str,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "denied-by-gate".into(),
             }
@@ -6355,7 +6536,11 @@ mod pre_tool_hook_tests {
     struct DenyRuleGate;
     #[async_trait]
     impl PermissionGate for DenyRuleGate {
-        async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _tool: &str,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "denied-by-rule".into(),
             }
@@ -6363,7 +6548,7 @@ mod pre_tool_hook_tests {
         async fn resolve_after_hook_allow_mod_core(
             &self,
             _tool: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> Result<
             lingxi_core::host::permission_gate::HookAllowModCoreEvaluation,
@@ -6391,7 +6576,11 @@ mod pre_tool_hook_tests {
     struct AllowAllGate;
     #[async_trait]
     impl PermissionGate for AllowAllGate {
-        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _t: &str,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             PermissionDecision::Allow
         }
     }
@@ -6399,7 +6588,11 @@ mod pre_tool_hook_tests {
     struct RouteProbeGate;
     #[async_trait]
     impl PermissionGate for RouteProbeGate {
-        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _t: &str,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "via-check".into(),
             }
@@ -6407,7 +6600,7 @@ mod pre_tool_hook_tests {
         async fn resolve_detailed_in_plan_mode_or_abort(
             &self,
             _t: &str,
-            _i: &serde_json::Value,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> Result<PermissionResolution, lingxi_core::host::permission_gate::PermissionAbort>
         {
@@ -6431,7 +6624,11 @@ mod pre_tool_hook_tests {
     struct AskGate;
     #[async_trait]
     impl PermissionGate for AskGate {
-        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _t: &str,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "prompt-denied".into(),
             }
@@ -6439,11 +6636,15 @@ mod pre_tool_hook_tests {
         async fn check_after_hook_allow_rewritten(
             &self,
             _t: &str,
-            _i: &serde_json::Value,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> PermissionDecision {
             PermissionDecision::Allow
         }
-        async fn resolve_detailed(&self, _t: &str, _i: &serde_json::Value) -> PermissionResolution {
+        async fn resolve_detailed(
+            &self,
+            _t: &str,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionResolution {
             PermissionResolution::Ask
         }
     }
@@ -6463,14 +6664,18 @@ mod pre_tool_hook_tests {
 
     #[async_trait]
     impl PermissionGate for RecordingTransportGate {
-        async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _tool: &str,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             panic!("the Mod ask must use the contextual transport")
         }
 
         async fn check_with_context(
             &self,
             _name: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> lingxi_core::host::permission_gate::PermissionOutcome {
             *self.saw_ctx.lock().unwrap() = Some(ctx.clone());
@@ -6483,14 +6688,18 @@ mod pre_tool_hook_tests {
 
     #[async_trait]
     impl PermissionGate for PlanAskProbeGate {
-        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _t: &str,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             panic!("plan-mode path must not call legacy check()")
         }
 
         async fn check_with_context(
             &self,
             _name: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> lingxi_core::host::permission_gate::PermissionOutcome {
             self.transport_calls
@@ -6501,7 +6710,7 @@ mod pre_tool_hook_tests {
         async fn resolve_detailed_in_plan_mode_or_abort(
             &self,
             _name: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> Result<PermissionResolution, lingxi_core::host::permission_gate::PermissionAbort>
         {
@@ -6516,14 +6725,18 @@ mod pre_tool_hook_tests {
 
     #[async_trait]
     impl PermissionGate for AbortGate {
-        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _t: &str,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             panic!("abort-aware dispatch must not call the legacy check method")
         }
 
         async fn resolve_detailed_or_abort(
             &self,
             _name: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> Result<PermissionResolution, lingxi_core::host::permission_gate::PermissionAbort>
         {
@@ -6543,12 +6756,20 @@ mod pre_tool_hook_tests {
     struct SourcedDenyGate(PermissionDecisionSource);
     #[async_trait]
     impl PermissionGate for SourcedDenyGate {
-        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _t: &str,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             PermissionDecision::Deny {
                 reason: "sourced-deny".into(),
             }
         }
-        async fn resolve_detailed(&self, _t: &str, _i: &serde_json::Value) -> PermissionResolution {
+        async fn resolve_detailed(
+            &self,
+            _t: &str,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionResolution {
             PermissionResolution::Deny {
                 reason: "sourced-deny".into(),
                 source: self.0,
@@ -6570,33 +6791,51 @@ mod pre_tool_hook_tests {
         fn name(&self) -> &str {
             "Echo"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             if let Some(counter) = &self.permission_checks {
@@ -6613,7 +6852,7 @@ mod pre_tool_hook_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "echo".into()
@@ -6626,16 +6865,17 @@ mod pre_tool_hook_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!({ "content": "ECHOED-OUTPUT" }),
+                data: source_fixture!({ "content": "ECHOED-OUTPUT" }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -6651,33 +6891,51 @@ mod pre_tool_hook_tests {
         fn name(&self) -> &str {
             "McpEndTurn"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -6691,7 +6949,7 @@ mod pre_tool_hook_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "mcp-end-turn".into()
@@ -6704,17 +6962,18 @@ mod pre_tool_hook_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!([{ "type": "text", "text": "ENDED" }]),
+                data: source_fixture!([{ "type": "text", "text": "ENDED" }]),
                 model_content: Some("ENDED".into()),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: self.is_error,
-                mcp_meta: Some(json!({ "_meta": { "claude/endTurn": true } })),
+                subagent_hooks_fired: false,
+                mcp_meta: Some(source_fixture!({ "_meta": { "claude/endTurn": true } })),
             })
         }
     }
@@ -6729,33 +6988,51 @@ mod pre_tool_hook_tests {
         fn name(&self) -> &str {
             "RefreshMcpTools"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             false
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -6769,7 +7046,7 @@ mod pre_tool_hook_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "refresh-mcp-tools".into()
@@ -6782,7 +7059,7 @@ mod pre_tool_hook_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -6800,11 +7077,12 @@ mod pre_tool_hook_tests {
                 .expect("shared tool registry wired")
                 .register_mcp_tools(self.conn_id, tools);
             Ok(ToolCallResult {
-                data: json!({ "content": "refreshed" }),
+                data: source_fixture!({ "content": "refreshed" }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -6818,11 +7096,23 @@ mod pre_tool_hook_tests {
         fn name(&self) -> &str {
             &self.name
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
@@ -6832,22 +7122,28 @@ mod pre_tool_hook_tests {
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -6861,7 +7157,7 @@ mod pre_tool_hook_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             self.name.clone()
@@ -6874,16 +7170,17 @@ mod pre_tool_hook_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!({ "content": "noop" }),
+                data: source_fixture!({ "content": "noop" }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -6894,40 +7191,60 @@ mod pre_tool_hook_tests {
     /// with, so a test can assert `dispatch_tool_uses_tracked` threads the
     /// turn's recorded system prompt onto every tool's context.
     struct CaptureSystemPromptTool {
-        captured: Arc<std::sync::Mutex<Option<Option<String>>>>,
+        captured: Arc<
+            std::sync::Mutex<Option<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
+        >,
     }
     #[async_trait]
     impl Tool for CaptureSystemPromptTool {
         fn name(&self) -> &str {
             "Capture"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -6941,7 +7258,7 @@ mod pre_tool_hook_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "capture".into()
@@ -6954,17 +7271,18 @@ mod pre_tool_hook_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             *self.captured.lock().unwrap() = Some(ctx.fork_parent_system_prompt.clone());
             Ok(ToolCallResult {
-                data: json!({ "content": "ok" }),
+                data: source_fixture!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -6992,11 +7310,21 @@ mod pre_tool_hook_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         );
-        let parent_bytes = "PARENT RENDERED SYSTEM PROMPT";
-        orch.save_current_turn_system_prompt(Some(parent_bytes))
+        let parent_bytes = lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            "PARENT RENDERED SYSTEM PROMPT",
+        );
+        let parent_prompt = llm_runtime::SystemPromptInput::custom_prompt(
+            llm_runtime::PromptText::from_utf16(parent_bytes.string_units("").unwrap()),
+        );
+        orch.save_current_turn_system_prompt(Some(&parent_prompt))
             .await;
 
-        let uses = vec![(ToolUseId::new(), "Capture".to_string(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "Capture".to_string(),
+            source_fixture!({}),
+            None,
+        )];
         let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .unwrap();
@@ -7004,7 +7332,7 @@ mod pre_tool_hook_tests {
         let got = captured.lock().unwrap().clone();
         assert_eq!(
             got,
-            Some(Some(parent_bytes.to_string())),
+            Some(Some(parent_bytes)),
             "tool ctx must carry the turn's recorded system prompt bytes"
         );
     }
@@ -7030,7 +7358,12 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
 
-        let uses = vec![(ToolUseId::new(), "Capture".to_string(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "Capture".to_string(),
+            source_fixture!({}),
+            None,
+        )];
         let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .unwrap();
@@ -7053,33 +7386,51 @@ mod pre_tool_hook_tests {
         fn name(&self) -> &str {
             "Inject"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -7093,7 +7444,7 @@ mod pre_tool_hook_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "inject".into()
@@ -7106,12 +7457,12 @@ mod pre_tool_hook_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!({
+                data: source_fixture!({
                     "content": "TOOL-RESULT",
                     "model_content": "Launching skill: demo",
                 }),
@@ -7122,6 +7473,7 @@ mod pre_tool_hook_tests {
                 )],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -7150,22 +7502,31 @@ mod pre_tool_hook_tests {
         )
     }
 
-    fn uses() -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
-        vec![(ToolUseId::new(), "Echo".into(), json!({}), None)]
+    fn uses() -> Vec<(
+        ToolUseId,
+        String,
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        Option<String>,
+    )> {
+        vec![(ToolUseId::new(), "Echo".into(), source_fixture!({}), None)]
     }
 
     struct AbortHookPreflightGate;
 
     #[async_trait]
     impl PermissionGate for AbortHookPreflightGate {
-        async fn check(&self, _tool: &str, _input: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _tool: &str,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             PermissionDecision::Allow
         }
 
         async fn resolve_after_hook_allow_mod_core(
             &self,
             _tool: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &lingxi_core::host::permission_gate::PermissionCheckContext,
         ) -> Result<
             lingxi_core::host::permission_gate::HookAllowModCoreEvaluation,
@@ -7263,7 +7624,10 @@ mod pre_tool_hook_tests {
         match block {
             ContentBlock::ToolResult {
                 content, is_error, ..
-            } => (content.as_str(), is_error.unwrap_or(false)),
+            } => (
+                content.string_at("").expect("fixture tool result is text"),
+                is_error.unwrap_or(false),
+            ),
             other => panic!("expected ToolResult, got {other:?}"),
         }
     }
@@ -7315,7 +7679,12 @@ mod pre_tool_hook_tests {
             PathBuf::from("/tmp"),
         );
         let skill_tu = ToolUseId::new();
-        let uses = vec![(skill_tu.clone(), "Inject".to_string(), json!({}), None)];
+        let uses = vec![(
+            skill_tu.clone(),
+            "Inject".to_string(),
+            source_fixture!({}),
+            None,
+        )];
         let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .unwrap();
@@ -7351,7 +7720,7 @@ mod pre_tool_hook_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Inject".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         );
@@ -7401,7 +7770,7 @@ mod pre_tool_hook_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Echo".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         );
@@ -7439,7 +7808,7 @@ mod pre_tool_hook_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Inject".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         );
@@ -7753,7 +8122,7 @@ mod pre_tool_hook_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Echo".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         );
@@ -7782,7 +8151,7 @@ mod pre_tool_hook_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "Echo".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         );
@@ -7804,7 +8173,7 @@ mod pre_tool_hook_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         )]));
@@ -7846,14 +8215,14 @@ mod pre_tool_hook_tests {
         assert_eq!(
             orch.context_attachment_history(&history),
             vec![
-                json!({"type":"session_context","context":{}}),
-                json!({"type":"date","date":date}),
-                json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+                source_fixture!({"type":"session_context","context":{}}),
+                source_fixture!({"type":"date","date":date}),
+                source_fixture!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
             ]
         );
         assert!(
             matches!(&history[0], ConversationMessage::System { subtype: Some(subtype), content, .. }
-            if subtype == "model_reminder_attachment" && content.is_empty())
+            if subtype == "model_reminder_attachment" && content.string_units("").is_some_and(|units| units.is_empty()))
         );
         assert_eq!(
             history[1].text_content(),
@@ -7901,7 +8270,7 @@ mod pre_tool_hook_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         )]));
@@ -7940,7 +8309,7 @@ mod pre_tool_hook_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("rewrite-mcp", dir.path(), &module, json!({}))
+        host.load("rewrite-mcp", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -7952,7 +8321,12 @@ mod pre_tool_hook_tests {
             false,
         )
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        let uses = vec![(ToolUseId::new(), "McpEndTurn".to_string(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "McpEndTurn".to_string(),
+            source_fixture!({}),
+            None,
+        )];
 
         let _ = dispatch_tool_uses_tracked_deferred(&orch, &uses, None, None)
             .await
@@ -7964,7 +8338,7 @@ mod pre_tool_hook_tests {
                 .lock()
                 .await
                 .get(uses[0].0.as_str()),
-            Some(&json!({ "_meta": { "claude/endTurn": true } })),
+            Some(&source_fixture!({ "_meta": { "claude/endTurn": true } })),
         );
         assert_eq!(
             orch.transcript
@@ -7983,7 +8357,7 @@ mod pre_tool_hook_tests {
             .map(|_| llm_runtime::ContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: "McpEndTurn".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             })
             .collect();
         let api = Arc::new(MockApiClient::new(vec![mock_message_response(
@@ -8040,7 +8414,7 @@ mod pre_tool_hook_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "RefreshMcpTools".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         )]));
@@ -8081,7 +8455,7 @@ mod pre_tool_hook_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: tu.to_string(),
                 name: "McpEndTurn".into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         )]));
@@ -8168,7 +8542,7 @@ mod pre_tool_hook_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("veto-test", dir.path(), &module, json!({}))
+        host.load("veto-test", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut mod_registry = HookRegistry::new();
@@ -8223,7 +8597,7 @@ mod pre_tool_hook_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("allow-after-hook", dir.path(), &module, json!({}))
+        host.load("allow-after-hook", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut mod_registry = HookRegistry::new();
@@ -8275,7 +8649,7 @@ mod pre_tool_hook_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("pre-rule-first", dir.path(), &module, json!({}))
+        host.load("pre-rule-first", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut mod_registry = HookRegistry::new();
@@ -8337,7 +8711,7 @@ mod pre_tool_hook_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("ask-after-hook", dir.path(), &module, json!({}))
+        host.load("ask-after-hook", dir.path(), &module, source_fixture!({}))
             .await
             .unwrap();
         let mut mod_registry = HookRegistry::new();
@@ -8374,7 +8748,10 @@ mod pre_tool_hook_tests {
         assert_eq!(context.tool_use_id.as_deref(), Some(calls[0].0.as_str()));
         assert_eq!(context.decision_reason_type.as_deref(), Some("hook"));
         assert_eq!(
-            context.decision_reason.as_deref(),
+            context
+                .decision_reason
+                .as_ref()
+                .and_then(|value| value.string_at("")),
             Some("Echo needs approval (asked by plugin ask-after-hook: review it)")
         );
     }
@@ -8459,7 +8836,12 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![],
         );
-        let uses = vec![(ToolUseId::new(), "NoSuchTool".to_string(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "NoSuchTool".to_string(),
+            source_fixture!({}),
+            None,
+        )];
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .unwrap();
@@ -8480,33 +8862,51 @@ mod pre_tool_hook_tests {
         fn name(&self) -> &str {
             "AlwaysFail"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -8520,7 +8920,7 @@ mod pre_tool_hook_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "always fails".into()
@@ -8533,7 +8933,7 @@ mod pre_tool_hook_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -8573,7 +8973,12 @@ mod pre_tool_hook_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         );
-        let uses = vec![(ToolUseId::new(), "AlwaysFail".to_string(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "AlwaysFail".to_string(),
+            source_fixture!({}),
+            None,
+        )];
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .unwrap();
@@ -8608,33 +9013,51 @@ mod pre_tool_hook_tests {
         fn name(&self) -> &str {
             "ValidatingFail"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Err(ValidationError("bad path".into()))
         }
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -8648,7 +9071,7 @@ mod pre_tool_hook_tests {
         }
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "always-invalid".into()
@@ -8661,7 +9084,7 @@ mod pre_tool_hook_tests {
         }
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -8681,8 +9104,8 @@ mod pre_tool_hook_tests {
             self.fired.store(true, std::sync::atomic::Ordering::SeqCst);
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: Some(HookResponse::default()),
             }
@@ -8712,6 +9135,7 @@ mod pre_tool_hook_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -8743,7 +9167,7 @@ mod pre_tool_hook_tests {
         let uses = vec![(
             ToolUseId::new(),
             "ValidatingFail".to_string(),
-            json!({}),
+            source_fixture!({}),
             None,
         )];
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
@@ -8780,7 +9204,7 @@ mod pre_tool_hook_tests {
         let uses = vec![(
             ToolUseId::new(),
             "ValidatingFail".to_string(),
-            json!({}),
+            source_fixture!({}),
             None,
         )];
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
@@ -9109,8 +9533,18 @@ mod pre_tool_hook_tests {
             vec![],
         );
         let two = vec![
-            (ToolUseId::new(), "Echo".to_string(), json!({}), None),
-            (ToolUseId::new(), "Echo".to_string(), json!({}), None),
+            (
+                ToolUseId::new(),
+                "Echo".to_string(),
+                source_fixture!({}),
+                None,
+            ),
+            (
+                ToolUseId::new(),
+                "Echo".to_string(),
+                source_fixture!({}),
+                None,
+            ),
         ];
         let (results, prevent, _, _) = dispatch_tool_uses_tracked(&orch, &two, None).await.unwrap();
         assert!(!prevent, "multi-tool defer does NOT terminate the turn");
@@ -9134,8 +9568,8 @@ mod pre_tool_hook_tests {
                 }
                 HookResult {
                     outcome: HookOutcome::Success,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: String::new().into(),
+                    stderr: String::new().into(),
                     exit_code: Some(0),
                     response: Some(HookResponse::default()),
                 }
@@ -9162,6 +9596,7 @@ mod pre_tool_hook_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -9170,8 +9605,18 @@ mod pre_tool_hook_tests {
         exec.register_builtin(Arc::new(CaptureBatch { seen: seen.clone() }));
         let orch = orch_with(Arc::new(exec), Arc::new(AllowAllGate), vec![]);
         let two = vec![
-            (ToolUseId::new(), "Echo".to_string(), json!({}), None),
-            (ToolUseId::new(), "Echo".to_string(), json!({}), None),
+            (
+                ToolUseId::new(),
+                "Echo".to_string(),
+                source_fixture!({}),
+                None,
+            ),
+            (
+                ToolUseId::new(),
+                "Echo".to_string(),
+                source_fixture!({}),
+                None,
+            ),
         ];
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &two, None).await.unwrap();
         assert_eq!(results.len(), 2, "both tools ran");
@@ -9201,8 +9646,8 @@ mod pre_tool_hook_tests {
                 }
                 HookResult {
                     outcome: HookOutcome::Success,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: String::new().into(),
+                    stderr: String::new().into(),
                     exit_code: Some(0),
                     response: Some(HookResponse::default()),
                 }
@@ -9230,6 +9675,7 @@ mod pre_tool_hook_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -9241,7 +9687,7 @@ mod pre_tool_hook_tests {
 
         let first = dispatch_tool_uses_tracked_deferred(
             &orch,
-            &[(ToolUseId::new(), "Echo".into(), json!({}), None)],
+            &[(ToolUseId::new(), "Echo".into(), source_fixture!({}), None)],
             None,
             None,
         )
@@ -9249,7 +9695,7 @@ mod pre_tool_hook_tests {
         .expect("first dispatch");
         let second = dispatch_tool_uses_tracked_deferred(
             &orch,
-            &[(ToolUseId::new(), "Echo".into(), json!({}), None)],
+            &[(ToolUseId::new(), "Echo".into(), source_fixture!({}), None)],
             None,
             None,
         )
@@ -9257,7 +9703,7 @@ mod pre_tool_hook_tests {
         .expect("second dispatch");
         assert_eq!(
             first.post_tool_batch_calls[0].tool_response,
-            Some(json!("ECHOED-OUTPUT")),
+            Some(source_fixture!("ECHOED-OUTPUT")),
             "PostToolBatch sees the yielded tool_result content, not raw ToolCallResult.data"
         );
         assert!(
@@ -9300,9 +9746,9 @@ mod pre_tool_hook_tests {
             crate::turn_loop::PostToolBatchDispatch::unguarded(vec![
                 hooks::events::PostToolBatchCall {
                     tool_name: "Echo".into(),
-                    tool_input: json!({}),
+                    tool_input: source_fixture!({}),
                     tool_use_id: id,
-                    tool_response: Some(json!("ok")),
+                    tool_response: Some(source_fixture!("ok")),
                 },
             ]),
         )
@@ -9413,10 +9859,20 @@ mod pre_tool_hook_tests {
             self.name
         }
 
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| source_fixture!({"type":"object"}));
             &SCHEMA
+        }
+
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
         }
 
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -9427,11 +9883,17 @@ mod pre_tool_hook_tests {
             true
         }
 
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             false
         }
 
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             false
         }
 
@@ -9441,7 +9903,7 @@ mod pre_tool_hook_tests {
 
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             self.permission_checks
@@ -9451,7 +9913,7 @@ mod pre_tool_hook_tests {
 
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "MCP tool-owned deny probe".into()
@@ -9466,17 +9928,18 @@ mod pre_tool_hook_tests {
 
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.called.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(ToolCallResult {
-                data: json!({"ran":true}),
+                data: source_fixture!({"ran":true}),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -9490,8 +9953,8 @@ mod pre_tool_hook_tests {
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: Some(HookResponse {
                     decision: Some(HookDecision::Approve),
@@ -9525,6 +9988,7 @@ mod pre_tool_hook_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut registry = HookRegistry::new();
         registry.register(hook);
@@ -9563,7 +10027,7 @@ mod pre_tool_hook_tests {
             )
             .unwrap();
             let host = hooks::mods::ModHost::start(None).await.unwrap();
-            host.load("tool-deny-probe", dir.path(), &module, json!({}))
+            host.load("tool-deny-probe", dir.path(), &module, source_fixture!({}))
                 .await
                 .unwrap();
             registry.set_mod_host(host);
@@ -9635,7 +10099,12 @@ mod pre_tool_hook_tests {
             cwd,
         )
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        let uses = vec![(ToolUseId::new(), tool_name.into(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            tool_name.into(),
+            source_fixture!({}),
+            None,
+        )];
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
             .await
             .unwrap();
@@ -9671,21 +10140,37 @@ mod pre_tool_hook_tests {
             "CapturedPreflight"
         }
 
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| source_fixture!({"type":"object"}));
             &SCHEMA
+        }
+
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
         }
 
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
 
-        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
 
-        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        fn is_read_only(
+            &self,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
 
@@ -9695,7 +10180,7 @@ mod pre_tool_hook_tests {
 
         async fn validate_input(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
@@ -9703,7 +10188,7 @@ mod pre_tool_hook_tests {
 
         async fn check_permissions(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             self.permission_checks
@@ -9723,7 +10208,7 @@ mod pre_tool_hook_tests {
 
         async fn description(
             &self,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _opts: &DescriptionOptions,
         ) -> String {
             "captured preflight barrier probe".into()
@@ -9738,17 +10223,18 @@ mod pre_tool_hook_tests {
 
         async fn call(
             &self,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(ToolCallResult {
-                data: json!({"content":"CAPTURED-PREFLIGHT-RAN"}),
+                data: source_fixture!({"content":"CAPTURED-PREFLIGHT-RAN"}),
                 model_content: None,
                 new_messages: Vec::new(),
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -9801,7 +10287,7 @@ mod pre_tool_hook_tests {
         let uses = vec![(
             ToolUseId::new(),
             "CapturedPreflight".into(),
-            json!({}),
+            source_fixture!({}),
             None,
         )];
         let dispatch = tokio::spawn({
@@ -9815,15 +10301,12 @@ mod pre_tool_hook_tests {
             1,
             "the barrier is reached after captured preflight and before fallback resolution"
         );
-        gate.apply_permission_update(
-            &lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({
-                "type": "addRules",
-                "rules": [{"toolName": "CapturedPreflight"}],
-                "behavior": "deny",
-                "destination": "session"
-            }))
-            .expect("test permission update is valid JSON"),
-        );
+        gate.apply_permission_update(&source_fixture!({
+            "type": "addRules",
+            "rules": [{"toolName": "CapturedPreflight"}],
+            "behavior": "deny",
+            "destination": "session"
+        }));
         continue_check.notify_one();
 
         let (results, _, _, _) = dispatch.await.unwrap().unwrap();
@@ -9924,9 +10407,14 @@ mod pre_tool_hook_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("raw-noop-clean-core", dir.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "raw-noop-clean-core",
+            dir.path(),
+            &module,
+            source_fixture!({}),
+        )
+        .await
+        .unwrap();
         let mut registry = HookRegistry::new();
         registry.set_mod_host(host);
 
@@ -9964,7 +10452,7 @@ mod pre_tool_hook_tests {
         let uses = vec![(
             ToolUseId::new(),
             "McpConnector".into(),
-            json!({"scenario":scenario}),
+            source_fixture!({"scenario":scenario}),
             None,
         )];
         let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
@@ -10171,33 +10659,48 @@ mod pre_cancel_tests {
         fn name(&self) -> &str {
             "NeverRun"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -10209,7 +10712,11 @@ mod pre_cancel_tests {
                 metadata: permission::result::PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _: &DescriptionOptions,
+        ) -> String {
             "never-run".into()
         }
         async fn prompt(
@@ -10220,7 +10727,7 @@ mod pre_cancel_tests {
         }
         async fn call(
             &self,
-            _: serde_json::Value,
+            _: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -10242,36 +10749,54 @@ mod pre_cancel_tests {
         fn name(&self) -> &str {
             "NonCooperativeCancel"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
             true
         }
-        fn interrupt_behavior(&self, _: &serde_json::Value) -> InterruptBehavior {
+        fn interrupt_behavior(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> InterruptBehavior {
             InterruptBehavior::Cancel
         }
         async fn validate_input(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -10283,7 +10808,11 @@ mod pre_cancel_tests {
                 metadata: permission::result::PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _: &DescriptionOptions,
+        ) -> String {
             "non-cooperative-cancel".into()
         }
         async fn prompt(
@@ -10294,14 +10823,14 @@ mod pre_cancel_tests {
         }
         async fn call(
             &self,
-            _: serde_json::Value,
+            _: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.started.notify_one();
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             Ok(ToolCallResult::from_data(
-                json!({ "unexpected": "completed" }),
+                source_fixture!({ "unexpected": "completed" }),
             ))
         }
     }
@@ -10317,29 +10846,47 @@ mod pre_cancel_tests {
         fn name(&self) -> &str {
             "BlockingMutation"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(
+                || source_fixture!({ "type": "object", "properties": {} }),
+            );
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
             false
         }
-        fn interrupt_behavior(&self, input: &serde_json::Value) -> InterruptBehavior {
+        fn interrupt_behavior(
+            &self,
+            input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> InterruptBehavior {
             // Mirrors AgentTool's input-sensitive contract: Fusion owns a
             // settlement boundary; ordinary Agent calls remain cancelable.
             if input
-                .get("subagent_type")
-                .and_then(serde_json::Value::as_str)
+                .at_pointer("/subagent_type")
+                .and_then(lingxi_core::types::utf16_json::JsonValueView::as_str)
                 == Some("fusion")
             {
                 InterruptBehavior::Block
@@ -10349,14 +10896,14 @@ mod pre_cancel_tests {
         }
         async fn validate_input(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -10368,7 +10915,11 @@ mod pre_cancel_tests {
                 metadata: permission::result::PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _: &DescriptionOptions,
+        ) -> String {
             "blocking-mutation".into()
         }
         async fn prompt(
@@ -10379,7 +10930,7 @@ mod pre_cancel_tests {
         }
         async fn call(
             &self,
-            _: serde_json::Value,
+            _: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: ToolUseContext,
             progress: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -10393,7 +10944,9 @@ mod pre_cancel_tests {
             });
             self.started.notify_one();
             self.release.notified().await;
-            Ok(ToolCallResult::from_data(json!({ "committed": true })))
+            Ok(ToolCallResult::from_data(
+                source_fixture!({ "committed": true }),
+            ))
         }
     }
 
@@ -10421,7 +10974,12 @@ mod pre_cancel_tests {
         let cancel = CancellationToken::new();
         cancel.cancel(); // fire BEFORE dispatch
 
-        let uses = vec![(ToolUseId::new(), "NeverRun".to_string(), json!({}), None)];
+        let uses = vec![(
+            ToolUseId::new(),
+            "NeverRun".to_string(),
+            source_fixture!({}),
+            None,
+        )];
         let (results, prevent_continuation, injected, _) =
             dispatch_tool_uses_tracked(&orch, &uses, Some(cancel))
                 .await
@@ -10437,7 +10995,7 @@ mod pre_cancel_tests {
                     "pre-cancel tool_result must have is_error=true, got content={content:?}"
                 );
                 assert_eq!(
-                    content, CANCEL_MESSAGE,
+                    content.string_at(""), Some(CANCEL_MESSAGE),
                     "pre-cancel content must be the bare CANCEL_MESSAGE (not <tool_use_error>-wrapped)"
                 );
             }
@@ -10484,7 +11042,7 @@ mod pre_cancel_tests {
         let uses = vec![(
             id.clone(),
             "NonCooperativeCancel".to_string(),
-            json!({}),
+            source_fixture!({}),
             None,
         )];
 
@@ -10504,7 +11062,10 @@ mod pre_cancel_tests {
             panic!("expected ToolResult");
         };
         assert!(is_error.unwrap_or(false));
-        assert!(content.contains("aborted"));
+        assert!(content
+            .string_at("")
+            .expect("abort text")
+            .contains("aborted"));
         assert_eq!(
             output.denial_snapshot().await,
             vec![(id, "interrupted".to_string())]
@@ -10546,7 +11107,7 @@ mod pre_cancel_tests {
                     &[(
                         ToolUseId::new(),
                         "BlockingMutation".to_string(),
-                        json!({ "subagent_type": "general-purpose" }),
+                        source_fixture!({ "subagent_type": "general-purpose" }),
                         None,
                     )],
                     Some(cancel),
@@ -10569,7 +11130,10 @@ mod pre_cancel_tests {
             panic!("expected ordinary Agent ToolResult");
         };
         assert!(is_error.unwrap_or(false));
-        assert!(content.contains("aborted"));
+        assert!(content
+            .string_at("")
+            .expect("abort text")
+            .contains("aborted"));
 
         let cancel = CancellationToken::new();
         let task_orch = orch.clone();
@@ -10580,7 +11144,7 @@ mod pre_cancel_tests {
                 &[(
                     ToolUseId::new(),
                     "BlockingMutation".to_string(),
-                    json!({ "subagent_type": "fusion" }),
+                    source_fixture!({ "subagent_type": "fusion" }),
                     None,
                 )],
                 Some(task_cancel),
@@ -10609,7 +11173,10 @@ mod pre_cancel_tests {
             panic!("expected ToolResult");
         };
         assert!(!is_error.unwrap_or(false));
-        assert!(content.contains("committed"));
+        assert!(content
+            .string_at("")
+            .expect("commit text")
+            .contains("committed"));
         assert_eq!(
             output.denial_snapshot().await.len(),
             1,
@@ -10637,7 +11204,7 @@ mod pre_cancel_tests {
         orch: &ConversationOrchestrator,
         id: &ToolUseId,
         name: &str,
-        input: serde_json::Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
         orch.session().lock().await.history.push(
             lingxi_core::types::ConversationMessage::Assistant {
@@ -10667,7 +11234,7 @@ mod pre_cancel_tests {
         let (orch, id) = orphaned_with_tool(Arc::new(NonCooperativeCancelTool {
             started: started.clone(),
         }));
-        seed_orphan(&orch, &id, "NonCooperativeCancel", json!({})).await;
+        seed_orphan(&orch, &id, "NonCooperativeCancel", source_fixture!({})).await;
         let cancel = CancellationToken::new();
         let token = cancel.clone();
         let recovered = orch.clone();
@@ -10722,7 +11289,7 @@ mod pre_cancel_tests {
             &orch,
             &id,
             "BlockingMutation",
-            json!({"subagent_type":"fusion"}),
+            source_fixture!({"subagent_type":"fusion"}),
         )
         .await;
         let cancel = CancellationToken::new();
@@ -10866,19 +11433,29 @@ mod memdir_index_cap_tests {
             "Write"
         }
 
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| {
-                    json!({
-                        "type": "object",
-                        "properties": {
-                            "file_path": { "type": "string" },
-                            "content": { "type": "string" }
-                        },
-                        "required": ["file_path", "content"]
-                    })
-                });
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| {
+                source_fixture!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["file_path", "content"]
+                })
+            });
             &SCHEMA
+        }
+
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
         }
 
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -10889,17 +11466,20 @@ mod memdir_index_cap_tests {
             1024 * 1024
         }
 
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
 
-        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
             false
         }
 
         async fn validate_input(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
@@ -10907,7 +11487,7 @@ mod memdir_index_cap_tests {
 
         async fn check_permissions(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -10920,7 +11500,11 @@ mod memdir_index_cap_tests {
             }
         }
 
-        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _: &DescriptionOptions,
+        ) -> String {
             "write".into()
         }
 
@@ -10933,17 +11517,17 @@ mod memdir_index_cap_tests {
 
         async fn call(
             &self,
-            input: serde_json::Value,
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             ctx: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             let raw = input
-                .get("file_path")
-                .and_then(serde_json::Value::as_str)
+                .at_pointer("/file_path")
+                .and_then(lingxi_core::types::utf16_json::JsonValueView::as_str)
                 .ok_or_else(|| ToolError::InvalidInput("file_path required".into()))?;
             let content = input
-                .get("content")
-                .and_then(serde_json::Value::as_str)
+                .at_pointer("/content")
+                .and_then(lingxi_core::types::utf16_json::JsonValueView::as_str)
                 .ok_or_else(|| ToolError::InvalidInput("content required".into()))?;
             let cwd = ctx.cwd.unwrap_or_else(|| PathBuf::from("/tmp"));
             let path = if Path::new(raw).is_absolute() {
@@ -10960,11 +11544,12 @@ mod memdir_index_cap_tests {
                 .await
                 .map_err(|e| ToolError::Io(e.to_string().into()))?;
             Ok(ToolCallResult {
-                data: json!({ "content": "wrote file" }),
+                data: source_fixture!({ "content": "wrote file" }),
                 model_content: Some("wrote file".into()),
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             })
         }
@@ -11017,7 +11602,9 @@ mod memdir_index_cap_tests {
 
     fn tool_result_text(block: &ContentBlock) -> &str {
         match block {
-            ContentBlock::ToolResult { content, .. } => content,
+            ContentBlock::ToolResult { content, .. } => {
+                content.string_at("").expect("scalar tool result fixture")
+            }
             other => panic!("expected ToolResult, got {other:?}"),
         }
     }
@@ -11045,7 +11632,7 @@ mod memdir_index_cap_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Write".to_string(),
-            json!({"file_path": "MEMORY.md", "content": near_cap}),
+            source_fixture!({"file_path": "MEMORY.md", "content": near_cap}),
             None,
         )];
         let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
@@ -11103,7 +11690,7 @@ mod memdir_index_cap_tests {
         let uses = vec![(
             ToolUseId::new(),
             "Write".to_string(),
-            json!({"file_path": "other.md", "content": "hello"}),
+            source_fixture!({"file_path": "other.md", "content": "hello"}),
             None,
         )];
         let (results, _prevent, injected, _mods) = dispatch_tool_uses_tracked(&orch, &uses, None)
@@ -11394,13 +11981,13 @@ mod goal_auto_clear_tests {
 
 #[test]
 fn tool_result_size_matches_javascript_utf16_length() {
-    assert_eq!(super::tool_result_size("中😀a", None), 4);
-    let blocks = vec![
-        serde_json::json!({"type": "text", "text": "中😀"}),
-        serde_json::json!({"type": "image", "text": "ignored"}),
-        serde_json::json!({"type": "text", "text": "a"}),
-    ];
-    assert_eq!(super::tool_result_size("ignored", Some(&blocks)), 4);
+    assert_eq!(super::tool_result_size(&"中😀a".into(), None), 4);
+    let blocks = source_fixture!([
+        {"type": "text", "text": "中😀"},
+        {"type": "image", "text": "ignored"},
+        {"type": "text", "text": "a"},
+    ]);
+    assert_eq!(super::tool_result_size(&"ignored".into(), Some(&blocks)), 4);
 }
 
 #[test]

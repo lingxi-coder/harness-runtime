@@ -1,13 +1,13 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::prompt::{MemoryFile, MemoryHierarchyProvider};
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
-use memory::lingxi_md::{LingxiMdTier, agents::InstructionFilesMode};
+use crate::OrchestratorConfig;
+use memory::lingxi_md::{agents::InstructionFilesMode, LingxiMdTier};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
 /// A Project-tier conditional rule living at `<cwd>/.lingxi/rules/{name}.md`
@@ -372,11 +372,9 @@ async fn freeze_unsent_rule(
     );
     assert_eq!(frozen[0].body, "frozen eager sentinel\n");
     assert!(frozen[0].globs.is_none());
-    assert!(
-        std::fs::read_to_string(&fixture.rule)
-            .unwrap()
-            .ends_with(&format!("{body}\n"))
-    );
+    assert!(std::fs::read_to_string(&fixture.rule)
+        .unwrap()
+        .ends_with(&format!("{body}\n")));
     push_touched(orchestrator, &fixture.trigger("unrelated/probe.txt"));
     // Exercise the real producer order. A cached conditional producer used
     // to run first and claim a stale path before fresh nested discovery could
@@ -511,12 +509,10 @@ async fn changed_unsent_rule_globs_activate_a_new_match_with_fresh_body() {
     );
     assert_eq!(
         rule_reminder_texts(&next.model_reminders, &fixture.rule),
-        vec![
-            native["expected"]["rendered"][0]
-                .as_str()
-                .unwrap()
-                .replace("/repo/LINGXI.md", &fixture.rule.display().to_string())
-        ]
+        vec![native["expected"]["rendered"][0]
+            .as_str()
+            .unwrap()
+            .replace("/repo/LINGXI.md", &fixture.rule.display().to_string())]
     );
     assert_eq!(frozen[0].body, "frozen eager sentinel\n");
     assert_eq!(provider.eager_loads.load(Ordering::SeqCst), 1);

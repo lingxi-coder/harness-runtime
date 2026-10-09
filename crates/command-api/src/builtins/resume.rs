@@ -159,7 +159,7 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = ResumeHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("")).await {
-            assert_eq!(s, "No resumable sessions found.");
+            assert_eq!(s.string_at(""), Some("No resumable sessions found."));
         } else {
             panic!();
         }

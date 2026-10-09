@@ -3197,6 +3197,129 @@ async fn modern_listen_request_is_filtered_and_ack_opens_from_zero() {
 }
 
 #[tokio::test]
+async fn modern_listener_remote_network_named_error_keeps_live_connection_generation() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let registry = Arc::new(McpRegistry::new(mock as Arc<dyn McpTransport>));
+    let (connection, peer_tx, mut peer_rx) = drivable_connection();
+    let connection_id = ConnId::new();
+    let client = Arc::new(
+        McpClient::new(
+            "srv",
+            std::path::PathBuf::from("/tmp/work"),
+            connection.clone(),
+        )
+        .await
+        .with_negotiated_protocol(modern_negotiated()),
+    );
+    registry.clients.write().await.insert(
+        "srv".into(),
+        RegisteredClient {
+            connection_id: Some(connection_id),
+            client: client.clone(),
+        },
+    );
+    registry.connections.write().await.insert(
+        "srv".into(),
+        McpConnectionState::Connected {
+            config: cfg("srv"),
+            connection_id,
+            capabilities: caps(true, true, false),
+            negotiated: modern_negotiated(),
+            tools: Vec::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            prompts: Vec::new(),
+            connected_at: SystemTime::now(),
+        },
+    );
+
+    let listener = tokio::spawn({
+        let registry = registry.clone();
+        let connection = connection.clone();
+        async move {
+            registry
+                .run_modern_catalog_change_listener(
+                    "srv".into(),
+                    connection_id,
+                    connection.clone(),
+                    connection.notifications(),
+                    caps(true, true, false),
+                    modern_negotiated(),
+                    ModernListenOpenTelemetry {
+                        outcome: telemetry::tengu::mcp::ListenReopenOutcome::OpenedFromZero,
+                        attempts: 0,
+                        trigger: telemetry::tengu::mcp::ListenReopenTrigger::Connect,
+                    },
+                )
+                .await;
+        }
+    });
+
+    let listen_frame = tokio::time::timeout(Duration::from_secs(2), peer_rx.recv())
+        .await
+        .expect("subscriptions/listen is sent")
+        .expect("listen request frame");
+    let listen_request: Value = serde_json::from_slice(&listen_frame).expect("listen JSON");
+    assert_eq!(listen_request["method"], "subscriptions/listen");
+    let mut response = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": listen_request["id"].clone(),
+        "error": {"code": -32000, "message": "ECONNRESET returned by fixture server"}
+    }))
+    .expect("remote JSON-RPC error response");
+    response.push(b'\n');
+    peer_tx
+        .send(Bytes::from(response))
+        .await
+        .expect("fixture server returns its remote error");
+    tokio::time::timeout(Duration::from_secs(2), listener)
+        .await
+        .expect("remote error ends this listener task")
+        .expect("listener task joins");
+
+    {
+        let connections = registry.connections.read().await;
+        assert!(
+            matches!(
+                connections.get("srv"),
+                Some(McpConnectionState::Connected { connection_id: current, .. })
+                    if *current == connection_id
+            ),
+            "a JSON-RPC error response must not retire the live connection generation"
+        );
+    }
+    assert!(
+        peer_rx.try_recv().is_err(),
+        "no reconnect/discovery request sent"
+    );
+
+    // The same client and underlying transport still handle a later request.
+    let ping = tokio::spawn(async move { client.ping().await });
+    let ping_frame = tokio::time::timeout(Duration::from_secs(2), peer_rx.recv())
+        .await
+        .expect("ping uses the retained connection")
+        .expect("ping frame");
+    let ping_request: Value = serde_json::from_slice(&ping_frame).expect("ping JSON");
+    assert_eq!(ping_request["method"], "ping");
+    let mut pong = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": ping_request["id"].clone(),
+        "result": {}
+    }))
+    .expect("ping response");
+    pong.push(b'\n');
+    peer_tx
+        .send(Bytes::from(pong))
+        .await
+        .expect("fixture returns ping success");
+    ping.await
+        .expect("ping task joins")
+        .expect("same MCP client remains usable");
+
+    connection.close();
+}
+
+#[tokio::test]
 async fn modern_catalog_listener_does_not_borrow_replaced_generation_capability_authority() {
     let mock = Arc::new(BridgeMock::new(&[]));
     let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);

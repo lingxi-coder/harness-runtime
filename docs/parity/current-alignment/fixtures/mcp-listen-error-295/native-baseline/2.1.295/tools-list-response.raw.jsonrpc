@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"listener_probe","description":"Returns a fixed marker after the modern catalog listener reports ECONNRESET.","inputSchema":{"type":"object","properties":{"marker":{"type":"string"}},"required":["marker"],"additionalProperties":false}}]}}

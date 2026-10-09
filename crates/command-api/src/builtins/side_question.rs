@@ -215,7 +215,7 @@ mod tests {
         let h = SideQuestionHandler::new(mock);
         match h.handle(&args("   ")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Usage: /btw <your question>")
+                assert_eq!(s.string_at(""), Some("Usage: /btw <your question>"))
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -230,7 +230,11 @@ mod tests {
         let h = SideQuestionHandler::new(mock);
         match h.handle(&args("why is the sky blue?")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert!(s.starts_with("Couldn't answer side question:"), "got: {s}");
+                assert!(
+                    s.string_at("")
+                        .is_some_and(|text| text.starts_with("Couldn't answer side question:")),
+                    "got: {s:?}"
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }

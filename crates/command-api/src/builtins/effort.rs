@@ -565,6 +565,7 @@ pub fn load_reasoning_default_selection_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
     use lingxi_core::host::effort::{EffortCapabilities, EffortState};
     use orchestrator::test_support::MockOrchestratorHandle;
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -667,11 +668,11 @@ mod tests {
                 .unwrap()
                 .replace("CLAUDE_CODE_EFFORT_LEVEL", branding::EFFORT_LEVEL_ENV);
             if !wanted.starts_with("Failed to set effort level:") {
-                assert_eq!(message, wanted, "case {index}: {input}");
+                assert_eq!(message, wanted.into(), "case {index}: {input}");
             } else {
                 assert!(
                     message.starts_with("Failed to set effort level:"),
-                    "{message}"
+                    "{message:?}"
                 );
             }
             let snapshot = mock.effort_command_snapshot().await.unwrap().unwrap();

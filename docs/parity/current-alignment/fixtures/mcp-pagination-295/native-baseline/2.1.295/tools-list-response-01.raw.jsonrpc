@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"page_tool_00","description":"Fixed pagination marker tool from page 0.","inputSchema":{"type":"object","properties":{"page":{"type":"integer"}},"required":["page"],"additionalProperties":false}}],"nextCursor":"same-cursor"}}

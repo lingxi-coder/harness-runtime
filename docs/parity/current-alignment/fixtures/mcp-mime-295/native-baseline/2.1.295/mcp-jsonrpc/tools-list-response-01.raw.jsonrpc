@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"return_blob_matrix","description":"Return a fixed batch of MIME-tagged embedded resource blobs.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}}

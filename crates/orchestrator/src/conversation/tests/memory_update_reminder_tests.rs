@@ -1,8 +1,8 @@
+use crate::test_support::{
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+};
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
-use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
-};
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,7 +97,7 @@ fn dream_notification(
         output_path: None,
         exit_code: None,
         error: None,
-        result: result.map(str::to_string),
+        result: result.map(|result| result.to_owned().into()),
         usage: None,
         killed_by: None,
         worktree_path: None,
@@ -191,7 +191,10 @@ async fn a_failed_dream_queues_nothing_and_the_result_falls_back_to_the_descript
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     assert_eq!(queued.len(), 1);
-    assert_eq!(queued[0].summary, "memory consolidation");
+    assert_eq!(
+        queued[0].summary.string_at(""),
+        Some("memory consolidation")
+    );
 }
 
 /// The BATCHED driver enqueues but never drains, so the queue is capped.
@@ -215,5 +218,9 @@ async fn the_queue_is_capped_dropping_the_oldest() {
         queued.len(),
         ConversationOrchestrator::MAX_PENDING_MEMORY_UPDATES
     );
-    assert_eq!(queued[0].summary, "run3", "the OLDEST entries are dropped");
+    assert_eq!(
+        queued[0].summary.string_at(""),
+        Some("run3"),
+        "the OLDEST entries are dropped"
+    );
 }

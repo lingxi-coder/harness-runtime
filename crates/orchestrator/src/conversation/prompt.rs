@@ -1173,6 +1173,7 @@ impl ConversationOrchestrator {
             self.prepend_transient_leading_context(messages, reminder.clone());
         }
         messages.extend(turn_reminders.iter().cloned());
+        crate::request_context::attach(messages);
         self.screen_mod_persisted_attachments(messages).await;
     }
 

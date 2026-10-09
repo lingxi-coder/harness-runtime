@@ -38,6 +38,10 @@ fn counts_documents_and_images_across_user_and_assistant() {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         },
         ConversationMessage::Assistant {
             id: MessageId::new(),

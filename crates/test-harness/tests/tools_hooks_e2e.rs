@@ -4,7 +4,7 @@ use hooks::{
     HookExecutor, HookExecutorImpl, HookOutcome, HookRegistry, HookResponse, HookResult,
     HookSource,
 };
-use lingxi_core::types::{HookId, SessionId, ToolUseId};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, HookId, SessionId, ToolUseId};
 use std::sync::Arc;
 use test_harness::mocks::{MockHttpTransport, MockRuntimeSpawner};
 use tokio::sync::RwLock;
@@ -16,8 +16,8 @@ impl BuiltinHookHandler for BlockingBuiltin {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: Some(0),
             response: Some(HookResponse {
                 impossible: false,
@@ -104,6 +104,7 @@ async fn pretooluse_block_short_circuits() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
 
     let http = Arc::new(MockHttpTransport::new());
@@ -113,7 +114,10 @@ async fn pretooluse_block_short_circuits() {
 
     let event = HookEvent::PreToolUse {
         tool_name: "Bash".into(),
-        tool_input: serde_json::json!({"command": "rm -rf /"}),
+        tool_input: Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"command": "rm -rf /"}),
+        )
+        .unwrap(),
         tool_use_id: ToolUseId::new(),
     };
     let ctx = HookContext {
@@ -124,5 +128,8 @@ async fn pretooluse_block_short_circuits() {
     };
     let result = exec.execute(event, ctx).await;
     assert_eq!(result.decision, Some(HookDecision::Block));
-    assert_eq!(result.reason.as_deref(), Some("test policy"));
+    assert_eq!(
+        result.reason.as_ref().map(|reason| reason.display.as_str()),
+        Some("test policy")
+    );
 }

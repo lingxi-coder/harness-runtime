@@ -16,6 +16,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_core::host::{ModelListing, OrchestratorHandle};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 use telemetry::tengu::command as cmd_evt;
 
@@ -182,6 +183,8 @@ impl BuiltinCommandHandler for ModelHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args(raw: &str) -> ParsedSlashCommand {
@@ -206,6 +209,7 @@ mod tests {
             assert_eq!(
                 s,
                 "Current model: claude-opus-4-7\nAvailable: claude-opus-4-7, claude-sonnet-4-6"
+                    .into()
             );
         } else {
             panic!();
@@ -251,7 +255,7 @@ mod tests {
 
         assert_eq!(
             s,
-            concat!(
+            Utf16JsonProjection::from(concat!(
                 "Current model: github-copilot/gpt-5.6-sol\n",
                 "Available:\n",
                 "GitHub Copilot:\n",
@@ -259,7 +263,7 @@ mod tests {
                 "OpenAI:\n",
                 "  - openai/gpt-5.6-sol\n",
                 "  - openai/gpt-5.6-terra"
-            )
+            ))
         );
         assert!(!s.contains("gpt-4o"), "non-curated models stay hidden");
     }
@@ -300,7 +304,7 @@ mod tests {
         let h = ModelHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("claude-haiku-4-5")).await
         {
-            assert_eq!(s, "Switched to model: claude-haiku-4-5");
+            assert_eq!(s, "Switched to model: claude-haiku-4-5".into());
         } else {
             panic!();
         }
@@ -313,7 +317,7 @@ mod tests {
         if let CommandResult::Done { display: Some(s) } =
             h.handle(&args("  claude-opus-4-7  ")).await
         {
-            assert_eq!(s, "Switched to model: claude-opus-4-7");
+            assert_eq!(s, "Switched to model: claude-opus-4-7".into());
         } else {
             panic!();
         }
@@ -327,7 +331,7 @@ mod tests {
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("foo")).await {
             assert_eq!(
                 s,
-                "Could not switch model: handle action failed: invalid name"
+                "Could not switch model: handle action failed: invalid name".into()
             );
         } else {
             panic!();

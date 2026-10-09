@@ -49,7 +49,8 @@ fn make_orch_with(
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "done".to_string(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -135,7 +136,9 @@ async fn proactive_compacts_over_threshold_and_next_call_carries_compacted_histo
     let after = history(&orch).await;
     let boundary = after.iter().find_map(|m| match m {
         // CSM.4: the boundary is the TS "Conversation compacted" sentinel.
-        ConversationMessage::System { content, .. } if content == "Conversation compacted" => {
+        ConversationMessage::System { content, .. }
+            if content.string_at("") == Some("Conversation compacted") =>
+        {
             Some(content.clone())
         }
         _ => None,
@@ -163,7 +166,7 @@ async fn proactive_compacts_over_threshold_and_next_call_carries_compacted_histo
     // The compacted call must contain the boundary marker (it was applied to
     // session.history before the snapshot).
     let call_has_boundary = calls[0].iter().any(|m| {
-        matches!(m, ConversationMessage::System { content, .. } if content == "Conversation compacted")
+        matches!(m, ConversationMessage::System { content, .. } if content.string_at("") == Some("Conversation compacted"))
     });
     assert!(
         call_has_boundary,
@@ -202,7 +205,7 @@ async fn under_threshold_is_strict_noop() {
     assert!(
         !after.iter().any(|m| matches!(
             m,
-            ConversationMessage::System { content, .. } if content == "Conversation compacted"
+            ConversationMessage::System { content, .. } if content.string_at("") == Some("Conversation compacted")
         )),
         "no compaction boundary marker may appear under threshold"
     );
@@ -247,7 +250,7 @@ async fn gate_follows_a_wide_catalog_model_instead_of_the_engine_threshold() {
     assert!(
         !after.iter().any(|m| matches!(
             m,
-            ConversationMessage::System { content, .. } if content == "Conversation compacted"
+            ConversationMessage::System { content, .. } if content.string_at("") == Some("Conversation compacted")
         )),
         "no compaction boundary may appear below the model's own threshold"
     );
@@ -310,7 +313,7 @@ async fn no_compactor_wired_is_strict_noop() {
     assert!(
         !after.iter().any(|m| matches!(
             m,
-            ConversationMessage::System { content, .. } if content == "Conversation compacted"
+            ConversationMessage::System { content, .. } if content.string_at("") == Some("Conversation compacted")
         )),
         "no boundary marker when no compactor is wired"
     );

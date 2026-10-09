@@ -162,11 +162,30 @@ pub(crate) async fn prepare(
     let client = cache.get(&profile, transport)?;
     let mut input = crate::upstream::request(request, profile.protocol)?;
     input.model.clone_from(&route.display_model);
+    let native_anthropic_endpoint_admission = request
+        .execution
+        .native_anthropic_base_url_fingerprint
+        .as_deref()
+        .filter(|fingerprint| {
+            *fingerprint == sdk::files::provider_file_endpoint_fingerprint(&profile.base_url)
+        })
+        .filter(|_| {
+            route.provider_id == crate::ProviderId::AnthropicFirstParty
+                && route.profile_name == profile.profile_name
+                && profile.protocol == wire::ProtocolFamily::AnthropicMessages
+        })
+        .map(|_| {
+            sdk::client::NativeAnthropicEndpointAdmission::selected_first_party_messages_endpoint(
+                profile.profile_name.clone(),
+                profile.base_url.clone(),
+            )
+        });
     let mut draft = Box::pin(client.prepare_draft_on(
         &profile.profile_name,
         &input,
         &sdk::RequestOptions {
             anthropic_request_kind,
+            native_anthropic_endpoint_admission,
             message_text_utf16_overrides: request.execution.message_json_string_overrides.clone(),
             fast_capability,
             authenticator: Some(sdk::client::options::RequestAuthenticator(authenticator)),
@@ -395,7 +414,17 @@ impl HostAuthenticator {
     ) -> Result<(), LlmError> {
         self.client
             .authenticate_wire(profile_name, request, now, self.snapshot.as_ref())
-            .await
+            .await?;
+        if request.http1_header_layout == Some(sdk::Http1HeaderLayout::NativeFetch) {
+            for (name, _) in &mut request.headers {
+                let canonical =
+                    sdk::providers::anthropic::request_policy::native_fetch_header_name(name);
+                if canonical != name {
+                    *name = canonical.to_owned();
+                }
+            }
+        }
+        Ok(())
     }
 }
 #[async_trait::async_trait]

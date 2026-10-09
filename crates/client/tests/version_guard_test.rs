@@ -3,9 +3,10 @@
 //! This enforces governing decision §0.10's STRUCTURAL versioning rule, NOT a
 //! naive "file changed ⇒ bump" check:
 //!
-//! - A REMOVED entry, or a RENAMED / RETYPED tag or field ⇒ requires a MAJOR
-//!   `CLIENT_PROTOCOL_VERSION` bump (the guard fails unless the major changed).
-//! - A NEW variant or a NEW (optional) field ⇒ additive, no bump required (the
+//! - A REMOVED entry, a RENAMED / RETYPED tag or field, or a NEW required field
+//!   on an existing variant/record ⇒ requires a MAJOR `CLIENT_PROTOCOL_VERSION`
+//!   bump (the guard fails unless the major changed).
+//! - A NEW variant or a NEW optional field ⇒ additive, no bump required (the
 //!   guard passes).
 //!
 //! The "contract index" is a flat, deterministic structural fingerprint of the
@@ -80,10 +81,11 @@ type ContractIndex = BTreeMap<String, String>;
 /// The classification of a single index diff (decision §0.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Compatibility {
-    /// No structural change, OR purely additive (a new variant / new field).
+    /// No structural change, OR purely additive (a new variant / optional field).
     /// Requires NO major bump.
     Compatible,
-    /// A removed / renamed / retyped entry. Requires a MAJOR bump.
+    /// A removed / renamed / retyped entry, or a required field on an existing
+    /// variant/record. Requires a MAJOR bump.
     Breaking,
 }
 
@@ -92,7 +94,9 @@ enum Compatibility {
 ///
 /// - A key present in `old` but ABSENT in `new` ⇒ removed/renamed.
 /// - A key present in BOTH but with a DIFFERENT type ⇒ retyped.
-/// - A key present only in `new` ⇒ additive ⇒ never listed here.
+/// - A new required field whose parent variant/record already exists in `old`
+///   ⇒ breaking.
+/// - A new optional field or variant ⇒ additive ⇒ never listed here.
 ///
 /// This is the single source of truth for [`classify`] (which is just "is this
 /// list empty"), so the guard's failure message can NAME the entries that broke
@@ -110,7 +114,30 @@ fn breaking_entries(old: &ContractIndex, new: &ContractIndex) -> Vec<String> {
             Some(_) => {}
         }
     }
+    for (key, new_ty) in new {
+        if old.contains_key(key)
+            || new_ty.starts_with("Option<")
+            || !has_existing_field_parent(old, key)
+        {
+            continue;
+        }
+        broken.push(format!("{key}: ADDED REQUIRED FIELD ({new_ty:?})"));
+    }
     broken
+}
+
+/// Whether a newly added dotted field belongs to a record/variant already
+/// represented by the checked-in contract. A field on a completely new
+/// variant remains compatible because the variant itself is additive.
+fn has_existing_field_parent(old: &ContractIndex, key: &str) -> bool {
+    let Some((parent, _field)) = key.rsplit_once('.') else {
+        return false;
+    };
+    let sibling_prefix = format!("{parent}.");
+    old.contains_key(parent)
+        || old
+            .keys()
+            .any(|existing| existing.starts_with(&sibling_prefix))
 }
 
 /// Classify the structural diff from `old` (checked-in) to `new` (current).
@@ -254,6 +281,7 @@ fn current_contract_index() -> ContractIndex {
         "Option<u16>",
     );
     put("ClientEvent::TerminalApiError.terminal_reason", "String");
+    put("ClientEvent::TerminalApiError.stop_reason", "String");
 
     put("ClientEvent::MessageIdentity", "message_identity");
     put("ClientEvent::MessageIdentity.message_id", "String");
@@ -292,6 +320,9 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::UiInvalidate.instances_json", "Option<String>");
     put("ClientEvent::UiInvalidate.uuid", "String");
     put("ClientEvent::UiInvalidate.session_id", "String");
+    put("ClientEvent::UiNotify", "ui_notify");
+    put("ClientEvent::UiNotify.plugin", "String");
+    put("ClientEvent::UiNotify.text", "ClientTextDto");
 
     put("ClientEvent::TextDelta", "text_delta");
     put("ClientEvent::TextDelta.text", "ClientTextDto");
@@ -2225,6 +2256,7 @@ fn current_contract_index() -> ContractIndex {
 
     put("AppAgentTerminalErrorDto.api_error_status", "Option<u16>");
     put("AppAgentTerminalErrorDto.terminal_reason", "String");
+    put("AppAgentTerminalErrorDto.stop_reason", "String");
     put("AppAgentTurnResponseDto.cancelled", "bool");
     put("AppAgentTurnResponseDto.session_id", "String");
     put("AppAgentTurnResponseDto.stream_id", "Option<String>");
@@ -2254,6 +2286,10 @@ fn current_contract_index() -> ContractIndex {
     );
     put(
         "AppBridgeStreamFrameDto::TerminalApiError.terminal_reason",
+        "String",
+    );
+    put(
+        "AppBridgeStreamFrameDto::TerminalApiError.stop_reason",
         "String",
     );
 
@@ -2949,11 +2985,34 @@ fn adding_a_variant_is_compatible() {
         "ClientEvent::PromptAccepted".to_string(),
         "prompt_accepted".to_string(),
     );
+    doctored.insert(
+        "ClientEvent::PromptAccepted.prompt_id".to_string(),
+        "String".to_string(),
+    );
 
     assert_eq!(
         classify(&base, &doctored),
         Compatibility::Compatible,
         "adding a variant must classify as Compatible (no bump required)"
+    );
+}
+
+/// Adding a required field to an already-existing variant/record changes the
+/// payload shape for existing clients and therefore requires a major bump.
+#[test]
+fn adding_required_field_to_existing_variant_requires_major_bump() {
+    let base = current_contract_index();
+
+    let mut doctored = base.clone();
+    doctored.insert(
+        "ClientEvent::TextDelta.lang".to_string(),
+        "String".to_string(),
+    );
+
+    assert_eq!(
+        classify(&base, &doctored),
+        Compatibility::Breaking,
+        "adding a required field to an existing variant must require a major bump"
     );
 }
 
@@ -3141,6 +3200,7 @@ fn contract_index_covers_every_dto() {
         ClientEvent::TerminalApiError {
             api_error_status: Some(413),
             terminal_reason: "image_error".into(),
+            stop_reason: "stop_sequence".into(),
         },
         ClientEvent::SystemNotice {
             message: String::new().into(),
@@ -3173,6 +3233,10 @@ fn contract_index_covers_every_dto() {
             instances_json: None,
             uuid: String::new(),
             session_id: String::new(),
+        },
+        ClientEvent::UiNotify {
+            plugin: String::new(),
+            text: ClientTextDto::default(),
         },
         ClientEvent::ProviderCredentialStatus {
             operation_id: 0,
@@ -3951,6 +4015,7 @@ fn contract_index_covers_every_dto() {
     let _agent_terminal_error = AppAgentTerminalErrorDto {
         api_error_status: Some(413),
         terminal_reason: "image_error".into(),
+        stop_reason: "stop_sequence".into(),
     };
     let _agent_turn_response = AppAgentTurnResponseDto {
         cancelled: false,
@@ -4055,6 +4120,7 @@ fn contract_index_covers_every_dto() {
                 seq: 0,
                 api_error_status: Some(413),
                 terminal_reason: "image_error".into(),
+                stop_reason: "stop_sequence".into(),
             },
             frame_json: String::new(),
         },

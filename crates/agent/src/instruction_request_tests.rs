@@ -5,6 +5,7 @@ use lingxi_core::host::instructions::{
     InstructionContext, InstructionContextProvider, InstructionFile, InstructionFileType,
     InstructionReadContext, InstructionRendering, InstructionScope,
 };
+use serde_json::Value;
 use std::path::Path;
 
 struct InstructionFixture {
@@ -1131,6 +1132,13 @@ fn cold_child_snapshot_routing_matches_native_schema_and_independent_gate() {
         } else {
             InstructionRendering::Announced
         };
+        let attachments = attachments
+            .iter()
+            .map(|value| {
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(value)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             crate::instructions::cold_rendering(&attachments, enabled),
             expected,

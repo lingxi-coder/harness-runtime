@@ -1,0 +1,31 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "session_id": "00000000-0000-4000-8000-000000002352",
+  "model": "claude-sonnet-4-5",
+  "server_name": "fixture",
+  "prompt": "Call the fixture MCP error tool once, then finish with the fixed response.",
+  "final_text": "NATIVE_MCP_ERROR_TEXT_HOOK_FINISHED",
+  "timeout_seconds": 45,
+  "capture_cold_resume": false,
+  "tool_cases": [
+    {
+      "name": "error_text_hook",
+      "tool_use_id": "toolu_native_error_text_hook_295",
+      "marker": "MCP_ERROR_TEXT_HOOK_MARKER",
+      "is_error": true,
+      "content": [
+        {"type": "text", "text": " \n\t "},
+        {"type": "text", "text": "  FIRST_LINE \n"},
+        {"type": "text", "text": "\nSECOND_LINE\t \n  "},
+        {
+          "type": "image",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jH0sAAAAASUVORK5CYII=",
+          "mimeType": "image/png"
+        }
+      ],
+      "expected_raw_text_join": " \n\t \n  FIRST_LINE \n\n\nSECOND_LINE\t \n  ",
+      "expected_outer_trim": "FIRST_LINE \n\n\nSECOND_LINE"
+    }
+  ]
+}

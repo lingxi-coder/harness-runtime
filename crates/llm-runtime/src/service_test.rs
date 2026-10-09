@@ -501,6 +501,12 @@ mod tests {
         request.opts.model_attempt = registered_request().execution.model_attempt;
         request.opts.request_dispatch_admission =
             Some(crate::RequestDispatchAdmission::new(|| false));
+        let dispatch_observations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = dispatch_observations.clone();
+        request.opts.request_dispatch_observer =
+            Some(crate::RequestDispatchObserver::new(move || {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }));
         let capture = crate::prompt_cache::RequestCapture::default();
 
         let result = capture.scope(service.messages_create(request)).await;
@@ -515,6 +521,11 @@ mod tests {
             transport.seen_count(),
             0,
             "rejected prompts never reach SDK transport"
+        );
+        assert_eq!(
+            dispatch_observations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "rejected prompts are not observed as dispatched"
         );
         assert_eq!(
             *probe.events.lock().unwrap(),
@@ -537,10 +548,16 @@ mod tests {
         service.set_model_attempt_hooks(Arc::new(probe.clone()));
         let admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let check = admissions.clone();
+        let dispatch_observations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = dispatch_observations.clone();
         let mut request = registered_request();
         request.execution.request_dispatch_admission =
             Some(crate::RequestDispatchAdmission::new(move || {
                 check.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+            }));
+        request.execution.request_dispatch_observer =
+            Some(crate::RequestDispatchObserver::new(move || {
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }));
 
         let result = service
@@ -561,6 +578,11 @@ mod tests {
             transport.seen_count(),
             1,
             "the rejected retry is never replayed"
+        );
+        assert_eq!(
+            dispatch_observations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the observer reports one admitted physical dispatch across retries"
         );
         assert_eq!(
             *probe.events.lock().unwrap(),
@@ -7504,6 +7526,8 @@ mod tests {
         }]);
         let service = make_adapter_with_retries(transport.clone(), Some(0));
         let capture = crate::prompt_cache::RequestCapture::default();
+        let rejected_observations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rejected = rejected_observations.clone();
         let result = capture
             .scope(service.stream_with_system_prompt(
                 "claude-sonnet-4-20250514",
@@ -7516,6 +7540,10 @@ mod tests {
                 false,
                 Some("main"),
                 Some(crate::RequestDispatchAdmission::new(|| false)),
+                Vec::new(),
+                Some(crate::RequestDispatchObserver::new(move || {
+                    rejected.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })),
             ))
             .await;
 
@@ -7526,6 +7554,10 @@ mod tests {
             })
         ));
         assert_eq!(transport.stream_call_count(), 0);
+        assert_eq!(
+            rejected_observations.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         assert!(
             capture.take().is_none(),
             "rejected stream is not a dispatch snapshot"
@@ -7537,6 +7569,8 @@ mod tests {
             body_json: None,
         }]);
         let service = make_adapter_with_retries(accepted.clone(), Some(0));
+        let accepted_observations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = accepted_observations.clone();
         let _stream = service
             .stream_with_system_prompt(
                 "claude-sonnet-4-20250514",
@@ -7549,10 +7583,18 @@ mod tests {
                 false,
                 Some("main"),
                 Some(crate::RequestDispatchAdmission::new(|| true)),
+                Vec::new(),
+                Some(crate::RequestDispatchObserver::new(move || {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })),
             )
             .await
             .expect("positive control reaches transport");
         assert_eq!(accepted.stream_call_count(), 1);
+        assert_eq!(
+            accepted_observations.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -7570,6 +7612,8 @@ mod tests {
         let service = make_adapter_with_retries(transport.clone(), Some(1));
         let admission_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls = admission_calls.clone();
+        let dispatch_observations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = dispatch_observations.clone();
 
         let result = service
             .stream_with_system_prompt(
@@ -7588,6 +7632,10 @@ mod tests {
                 Some(crate::RequestDispatchAdmission::new(move || {
                     calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
                 })),
+                Vec::new(),
+                Some(crate::RequestDispatchObserver::new(move || {
+                    observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })),
             )
             .await;
 
@@ -7602,6 +7650,11 @@ mod tests {
             transport.stream_call_count(),
             1,
             "the stale retry must be rejected before a second transport send"
+        );
+        assert_eq!(
+            dispatch_observations.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the observer reports one admitted physical dispatch across retries"
         );
     }
 
@@ -9441,6 +9494,62 @@ mod tests {
             .expect("1m request");
         assert_eq!(beta_req.input.max_tokens, Some(32_000));
     }
+
+    mod request_session_capture_tests {
+        use super::*;
+
+        fn service_with_metadata() -> ApiService {
+            let mut metadata =
+                lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::
+                    claude_code_2_1_293("darwin", "arm64");
+            metadata.session_id = Some("stale-builder-session".into());
+            make_adapter(FakeTransport::always(ProviderResponse::json(
+                200,
+                ok_response_json(),
+            )))
+            .with_anthropic_client_metadata(metadata)
+        }
+
+        #[tokio::test]
+        async fn live_request_source_is_captured_per_request_and_none_does_not_fall_back() {
+            let service = service_with_metadata();
+            let source: RequestSessionIdSource =
+                Arc::new(|| Box::pin(async { Some("live-session".to_owned()) }));
+            service.set_request_session_id_source(source);
+
+            let mut request = LlmRequest::new("claude-sonnet-4-5");
+            service.capture_request_session_id(&mut request).await;
+            assert_eq!(
+                request.execution.request_session_id.as_deref(),
+                Some("live-session")
+            );
+
+            let source: RequestSessionIdSource = Arc::new(|| Box::pin(async { None }));
+            service.set_request_session_id_source(source);
+            let mut request = LlmRequest::new("claude-sonnet-4-5");
+            service.capture_request_session_id(&mut request).await;
+            assert_eq!(request.execution.request_session_id, None);
+        }
+
+        #[tokio::test]
+        async fn task_local_session_precedes_the_live_request_source() {
+            let service = service_with_metadata();
+            let source: RequestSessionIdSource =
+                Arc::new(|| Box::pin(async { Some("wrong-live-session".to_owned()) }));
+            service.set_request_session_id_source(source);
+            let expected = lingxi_core::types::SessionId::new();
+
+            let captured =
+                lingxi_core::host::session_flags::scope_request_session_id(expected, async {
+                    let mut request = LlmRequest::new("claude-sonnet-4-5");
+                    service.capture_request_session_id(&mut request).await;
+                    request.execution.request_session_id
+                })
+                .await;
+
+            assert_eq!(captured, Some(expected.as_uuid().to_string()));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -9467,5 +9576,84 @@ mod subscription_rate_limit_tests {
         // handled by the parity subscriber gate.
         assert!(!cannot_clear(Some("anthropic"), "claude-opus-5"));
         assert!(!cannot_clear(None, "claude-opus-5"));
+    }
+}
+
+#[cfg(test)]
+mod tool_result_reminder_suffix_tests {
+    use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+
+    #[test]
+    fn only_anthropic_messages_moves_the_typed_reminder_into_its_tool_result() {
+        let reminder_id = MessageId::new();
+        let target_id = MessageId::new();
+        let reminder_text = Utf16JsonProjection::from("<system-reminder>tokens</system-reminder>");
+        let make_messages = || {
+            vec![
+                ConversationMessage::User {
+                    id: target_id,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: ToolUseId::from("toolu_target"),
+                        content: Utf16JsonProjection::from("tool output"),
+                        is_error: None,
+                        provider_tool_use_id: None,
+                        content_blocks: None,
+                    }],
+                    is_meta: false,
+                    is_compact_summary: false,
+                    is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
+                },
+                ConversationMessage::user_meta(
+                    reminder_id,
+                    reminder_text.string_at("").unwrap().to_owned(),
+                ),
+            ]
+        };
+        let suffix = crate::convert::AnthropicToolResultReminderSuffix {
+            tool_use_id: ToolUseId::from("toolu_target"),
+            reminder_message_id: reminder_id,
+            text: reminder_text.clone(),
+        };
+
+        let mut openai_messages = make_messages();
+        let original_len = openai_messages.len();
+        apply_anthropic_tool_result_reminder_suffixes(
+            lingxi_llm_client::protocol::ProtocolFamily::OpenAiChat,
+            &mut openai_messages,
+            std::slice::from_ref(&suffix),
+        );
+        assert_eq!(openai_messages.len(), original_len);
+        assert_eq!(openai_messages[1].id(), reminder_id);
+        let ConversationMessage::User { content, .. } = &openai_messages[0] else {
+            panic!("expected original tool result");
+        };
+        let ContentBlock::ToolResult { content, .. } = &content[0] else {
+            panic!("expected tool result block");
+        };
+        assert_eq!(content.string_at(""), Some("tool output"));
+
+        let mut anthropic_messages = make_messages();
+        apply_anthropic_tool_result_reminder_suffixes(
+            lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
+            &mut anthropic_messages,
+            std::slice::from_ref(&suffix),
+        );
+        assert_eq!(anthropic_messages.len(), 1);
+        let ConversationMessage::User { content, .. } = &anthropic_messages[0] else {
+            panic!("expected decorated tool result");
+        };
+        let ContentBlock::ToolResult { content, .. } = &content[0] else {
+            panic!("expected decorated tool result block");
+        };
+        assert_eq!(
+            content.string_at(""),
+            Some("tool output\n\n<system-reminder>tokens</system-reminder>")
+        );
     }
 }

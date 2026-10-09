@@ -287,6 +287,11 @@ impl BudgetEnforcer {
         self.cost_tracker.clone()
     }
 
+    /// Observe model safety events against this enforcer's cost-session owner.
+    pub fn model_safety_observer(&self) -> lingxi_core::host::model_safety::ModelSafetyObserver {
+        self.cost_tracker.model_safety_observer()
+    }
+
     /// Configured session-wide ceiling, if budget enforcement is enabled.
     #[must_use]
     pub fn max_session_nano_usd(&self) -> Option<u64> {

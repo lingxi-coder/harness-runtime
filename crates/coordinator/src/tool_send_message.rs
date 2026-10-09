@@ -1287,6 +1287,7 @@ mod tests {
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
             agent_spawn_provenance: Default::default(),
+            native_query_depth: None,
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
@@ -1838,7 +1839,7 @@ mod tests {
         match err {
             ToolError::InvalidInput(message) => assert_eq!(
                 message.string_at(""),
-                "structured messages cannot be sent cross-session — only plain text"
+                Some("structured messages cannot be sent cross-session — only plain text")
             ),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -1884,7 +1885,12 @@ mod tests {
         let messages = dir.drain_inbox(target_session).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(
-            lingxi_core::host::live_sessions::extract_cross_session_inner(&messages[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(
+                messages[0]
+                    .content
+                    .string_at("")
+                    .expect("inbox content string")
+            ),
             "hello after stale UDS"
         );
         assert!(messages[0].msg_id.is_some());
@@ -1956,14 +1962,24 @@ mod tests {
         lingxi_core::host::uds_inbox::stop_process_inbox();
 
         assert_eq!(woken.len(), 1, "an idle peer must be woken: {woken:?}");
-        assert!(woken[0].contains("hello over the socket"), "{woken:?}");
+        assert!(
+            woken[0]
+                .string_at("")
+                .is_some_and(|text| text.contains("hello over the socket")),
+            "{woken:?}"
+        );
         assert_eq!(
             inbox.len(),
             1,
             "the durable copy must be written even when the socket answered"
         );
         assert_eq!(
-            lingxi_core::host::live_sessions::extract_cross_session_inner(&inbox[0].content),
+            lingxi_core::host::live_sessions::extract_cross_session_inner(
+                inbox[0]
+                    .content
+                    .string_at("")
+                    .expect("inbox content string")
+            ),
             "hello over the socket"
         );
     }
@@ -2073,7 +2089,7 @@ mod tests {
                 _agent_id: AgentId,
                 _name: String,
                 _team_name: String,
-                _description: String,
+                _description: Utf16JsonProjection,
             ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
                 Ok(String::new())
             }
@@ -2242,12 +2258,7 @@ mod tests {
 
         // The departing teammate owns one open task on the shared list.
         let store = task_store::TodoStore::for_list_at(&home, team_name);
-        let mut owned = task_store::TodoTask::new(
-            "Fix parser".into(),
-            "d".into(),
-            None,
-            serde_json::Map::new(),
-        );
+        let mut owned = task_store::TodoTask::new("Fix parser".into(), "d".into(), None, None);
         owned.status = lingxi_core::TodoState::InProgress;
         owned.owner = Some("nova".into());
         let tid = store.create(owned).await.unwrap();
@@ -2280,7 +2291,7 @@ mod tests {
                     _: AgentId,
                     _: String,
                     _: String,
-                    _: String,
+                    _: Utf16JsonProjection,
                 ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
                     unreachable!("shutdown-only seam")
                 }
@@ -2338,7 +2349,7 @@ mod tests {
                     _: AgentId,
                     _: String,
                     _: String,
-                    _: String,
+                    _: Utf16JsonProjection,
                 ) -> Result<String, lingxi_core::host::team_spawn::TeamSpawnError> {
                     unreachable!("shutdown-only seam")
                 }
@@ -2366,10 +2377,12 @@ mod tests {
                 let mut frames = Vec::new();
                 loop {
                     frames.extend(lead_mailbox.drain());
-                    if frames
-                        .iter()
-                        .any(|frame| frame.content.contains("teammate_terminated"))
-                    {
+                    if frames.iter().any(|frame| {
+                        frame
+                            .content
+                            .string_at("")
+                            .is_some_and(|content| content.contains("teammate_terminated"))
+                    }) {
                         return frames;
                     }
                     tokio::task::yield_now().await;
@@ -2427,7 +2440,11 @@ mod tests {
         struct LiveGate(std::sync::Mutex<String>);
         #[async_trait]
         impl lingxi_core::host::PermissionGate for LiveGate {
-            async fn check(&self, _: &str, _: &Value) -> lingxi_core::host::PermissionDecision {
+            async fn check(
+                &self,
+                _: &str,
+                _: &Utf16JsonProjection,
+            ) -> lingxi_core::host::PermissionDecision {
                 lingxi_core::host::PermissionDecision::Deny {
                     reason: "unused by direct envelope test".into(),
                 }
@@ -2575,7 +2592,7 @@ mod tests {
             ToolError::InvalidInput(m) => {
                 assert_eq!(
                     m.string_at(""),
-                    "broadcast (to: \"*\") is no longer supported — send a message per recipient"
+                    Some("broadcast (to: \"*\") is no longer supported — send a message per recipient")
                 );
             }
             other => panic!("expected InvalidInput, got {other:?}"),

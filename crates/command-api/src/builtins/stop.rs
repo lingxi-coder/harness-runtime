@@ -279,7 +279,7 @@ mod tests {
         let h = StopHandler::new(mock.clone());
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Session stopped.");
+                assert_eq!(s, "Session stopped.".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -300,7 +300,7 @@ mod tests {
         let h = StopHandler::new(mock.clone());
         let result = h.handle(&args()).await;
         assert!(
-            matches!(result, CommandResult::Done { display: Some(ref s) } if s == "Session stopped.")
+            matches!(result, CommandResult::Done { display: Some(ref s) } if s == &"Session stopped.".into())
         );
         assert!(mock.was_exit_requested());
     }

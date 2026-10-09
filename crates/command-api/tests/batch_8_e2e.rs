@@ -70,8 +70,11 @@ fn fresh(
     (d, handle, root)
 }
 
-async fn handled(d: &RegistrySlashDispatcher, raw: &str) -> String {
-    match d.dispatch(raw).await {
+async fn handled(
+    d: &RegistrySlashDispatcher,
+    raw: &str,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    match d.dispatch(raw.into()).await {
         SlashDispatchResult::Handled { display } => display,
         other => panic!("{raw} expected Handled, got {other:?}"),
     }
@@ -107,8 +110,11 @@ fn all_8_batch_8_names_resolve() {
         "skill-doctor",
         "stop",
     ] {
-        assert!(reg.resolve(name).is_some(), "/{name} missing");
-        assert!(reg.get_handler(name).is_some(), "/{name} handler missing");
+        assert!(reg.resolve(&name.into()).is_some(), "/{name} missing");
+        assert!(
+            reg.get_handler(&name.into()).is_some(),
+            "/{name} handler missing"
+        );
     }
     drop(d);
     std::fs::remove_dir_all(root).ok();
@@ -119,7 +125,7 @@ async fn btw_is_a_real_handle_bound_command_not_a_stub() {
     let (dispatcher, _handle, root) = fresh("btw");
     assert_eq!(
         handled(&dispatcher, "/btw").await,
-        "Usage: /btw <your question>"
+        "Usage: /btw <your question>".into()
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -131,11 +137,12 @@ async fn autocompact_with_no_env_reports_auto_window() {
     std::env::remove_var("LINGXI_AUTO_COMPACT_WINDOW");
     let (d, _h, root) = fresh("autocompact");
     let out = handled(&d, "/autocompact").await;
+    let text = out.string_at("").unwrap();
     assert!(
-        out.starts_with("Auto-compact window: auto\n"),
-        "unexpected /autocompact output: {out}"
+        text.starts_with("Auto-compact window: auto\n"),
+        "unexpected /autocompact output: {text}"
     );
-    assert!(out.contains("The actual threshold is the minimum of this setting"));
+    assert!(text.contains("The actual threshold is the minimum of this setting"));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -151,7 +158,7 @@ async fn fork_without_prompt_copies_to_background_session() {
     let (d, _h, root) = fresh("fork");
     assert_eq!(
         handled(&d, "/fork").await,
-        "Copied conversation into a new background session (mock-bg-abcd)."
+        "Copied conversation into a new background session (mock-bg-abcd).".into()
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -161,7 +168,7 @@ async fn goal_with_no_active_goal_reports_no_goal_set() {
     let (d, _h, root) = fresh("goal");
     assert_eq!(
         handled(&d, "/goal").await,
-        "No goal set. Usage: `/goal <condition>`"
+        "No goal set. Usage: `/goal <condition>`".into()
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -171,7 +178,7 @@ async fn recap_with_empty_transcript_reports_nothing_to_recap() {
     let (d, _h, root) = fresh("recap");
     assert_eq!(
         handled(&d, "/recap").await,
-        "Nothing to recap yet — send a message first."
+        "Nothing to recap yet — send a message first.".into()
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -181,7 +188,7 @@ async fn reload_skills_on_empty_tree_reports_no_changes() {
     let (d, _h, root) = fresh("reload");
     assert_eq!(
         handled(&d, "/reload-skills").await,
-        "Reloaded skills: 0 skills available (no changes)"
+        "Reloaded skills: 0 skills available (no changes)".into()
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -191,7 +198,7 @@ async fn skill_doctor_on_empty_tree_reports_no_skills() {
     let (d, _h, root) = fresh("doctor");
     assert_eq!(
         handled(&d, "/skill-doctor").await,
-        "Skills loaded this session\n\n  (no skills loaded)"
+        "Skills loaded this session\n\n  (no skills loaded)".into()
     );
     std::fs::remove_dir_all(root).ok();
 }
@@ -201,7 +208,7 @@ async fn stop_requests_exit_and_returns_locked_literal() {
     // Ensure no stray job-dir rewrite path is exercised.
     std::env::remove_var("LINGXI_JOB_DIR");
     let (d, mock, root) = fresh("stop");
-    assert_eq!(handled(&d, "/stop").await, "Session stopped.");
+    assert_eq!(handled(&d, "/stop").await, "Session stopped.".into());
     assert!(mock.was_exit_requested());
     std::fs::remove_dir_all(root).ok();
 }

@@ -87,6 +87,12 @@ fn emit_list_paginated(
     telemetry::otel::emit_named_log_event(telemetry::tengu::mcp::LIST_PAGINATED, &attrs);
 }
 
+fn pagination_cursor_identity(cursor: &Utf16JsonProjection) -> Vec<u16> {
+    cursor
+        .string_units("")
+        .expect("decoded MCP pagination cursor is a string")
+}
+
 const MCP_LIST_RETRY_DELAYS: [std::time::Duration; 3] = [
     std::time::Duration::from_millis(250),
     std::time::Duration::from_millis(500),
@@ -1311,8 +1317,12 @@ impl McpClient {
         'retry: loop {
             let mut items = Vec::new();
             let mut cursor: Option<UJP> = None;
+            let mut sent_cursor_identities = BTreeSet::new();
             let mut page_count = 0_usize;
             loop {
+                if let Some(cursor) = cursor.as_ref() {
+                    sent_cursor_identities.insert(pagination_cursor_identity(cursor));
+                }
                 let mut fields = Vec::new();
                 if let Some(cursor) = cursor.clone() {
                     fields.push(("cursor".to_owned(), cursor));
@@ -1370,11 +1380,15 @@ impl McpClient {
                         return Err(error);
                     }
                 };
+                let repeated_cursor = next_cursor.as_ref().is_some_and(|next| {
+                    sent_cursor_identities.contains(&pagination_cursor_identity(next))
+                });
                 items.extend(page_items);
                 cursor = next_cursor;
 
-                let capped = cursor.is_some() && page_count >= MAX_MCP_LIST_PAGES;
-                if cursor.is_none() || capped {
+                let capped =
+                    cursor.is_some() && !repeated_cursor && page_count >= MAX_MCP_LIST_PAGES;
+                if cursor.is_none() || repeated_cursor || capped {
                     if aggregate_tools {
                         if capped {
                             emit_list_paginated(method, None, 0, "capped", Some("aggregate"));
@@ -1426,8 +1440,12 @@ impl McpClient {
         'retry: loop {
             let mut items = Vec::new();
             let mut cursor: Option<Utf16JsonProjection> = None;
+            let mut sent_cursor_identities = BTreeSet::new();
             let mut page_count = 0_usize;
             loop {
+                if let Some(cursor) = cursor.as_ref() {
+                    sent_cursor_identities.insert(pagination_cursor_identity(cursor));
+                }
                 let mut fields = Vec::new();
                 if let Some(cursor) = cursor.clone() {
                     fields.push(("cursor".to_owned(), cursor));
@@ -1482,11 +1500,15 @@ impl McpClient {
                         return Err(error);
                     }
                 };
+                let repeated_cursor = next_cursor.as_ref().is_some_and(|next| {
+                    sent_cursor_identities.contains(&pagination_cursor_identity(next))
+                });
                 items.extend(page_items);
                 cursor = next_cursor;
 
-                let capped = cursor.is_some() && page_count >= MAX_MCP_LIST_PAGES;
-                if cursor.is_none() || capped {
+                let capped =
+                    cursor.is_some() && !repeated_cursor && page_count >= MAX_MCP_LIST_PAGES;
+                if cursor.is_none() || repeated_cursor || capped {
                     if aggregate_tools {
                         if capped {
                             emit_list_paginated(method, None, 0, "capped", Some("aggregate"));
@@ -2937,6 +2959,34 @@ fn decode_next_cursor(cursor: Option<UJP>) -> Result<Option<UJP>, McpClientError
         Some(_) => Err(McpClientError::Deserialize(
             "MCP list nextCursor must be a string or null".into(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod pagination_cursor_identity_tests {
+    use super::pagination_cursor_identity;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn cursor_identity_uses_decoded_utf16_units_not_json_source_spelling() {
+        let escaped =
+            Utf16JsonProjection::parse(r#""\u0061\uD800""#).expect("escaped cursor is valid JSON");
+        let literal =
+            Utf16JsonProjection::parse(r#""a\uD800""#).expect("equivalent cursor is valid JSON");
+        let different =
+            Utf16JsonProjection::parse(r#""a\uD801""#).expect("different cursor is valid JSON");
+
+        assert_eq!(pagination_cursor_identity(&escaped), vec![0x0061, 0xD800]);
+        assert_eq!(
+            pagination_cursor_identity(&escaped),
+            pagination_cursor_identity(&literal),
+            "equivalent JavaScript strings must match despite different JSON escapes"
+        );
+        assert_ne!(
+            pagination_cursor_identity(&escaped),
+            pagination_cursor_identity(&different),
+            "distinct UTF-16 strings must remain distinct"
+        );
     }
 }
 

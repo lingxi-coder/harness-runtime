@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "gate": "M2-HTTP-1",
+  "artifact": "crates/llm-runtime/tests/fixtures/http-layout-293/native-http1-request-headers.raw",
+  "sourceArtifact": "fixtures/http-layout/run-output/native-2.1.293-print-text-20261008-rerun1/print-text/native-a/provider/000.request-headers.bin",
+  "sourceNativeBinarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "sourceBytes": 935,
+  "sourceSha256": "8cbda942fc7f3af7681116430a7bffc868b01b4cb682489c9850da34f4c8c448",
+  "artifactBytes": 935,
+  "artifactSha256": "8cbda942fc7f3af7681116430a7bffc868b01b4cb682489c9850da34f4c8c448",
+  "capturedHost": "127.0.0.1:54086",
+  "framing": "Raw bytes include request line, all ordered headers, CRLF line separators, and the final CRLF CRLF delimiter.",
+  "comparison": {
+    "firstChoice": "Bind 127.0.0.1:54086 and compare the entire candidate request header block byte-for-byte.",
+    "fallback": "If the captured port is already occupied, bind an ephemeral loopback port. Compare all bytes before and after the Host line verbatim; the sole permitted field value change is Host: 127.0.0.1:<actual-bound-port>.",
+    "contentLength": "Never normalize Content-Length. It must match the actual candidate request body and the Native value when the body is byte-identical.",
+    "claim": "Native-only raw header baseline. It does not claim candidate parity."
+  }
+}

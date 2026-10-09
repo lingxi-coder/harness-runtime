@@ -131,9 +131,10 @@ async fn environment_oauth_worker() {
         "\u{FEFF} enterprise \u{FEFF}",
     );
     std::env::set_var(branding::RATE_LIMIT_TIER_ENV, " default_claude_ai ");
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../../../deps/llm-client/tests/fixtures/oauth_source_2_1_288.json"
-    ))
+    let fixture: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../llm-client/tests/fixtures/oauth_source_2_1_288.json"
+    )))
     .unwrap();
     let mut count = 0;
     for row in fixture["cases"].as_array().unwrap() {

@@ -2,7 +2,7 @@
 //! compaction and forks can use message identity instead of parsing prose.
 
 use super::*;
-use lingxi_core::types::{ContentBlock, utf16_json::Utf16JsonProjection as Source};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection as Source, ContentBlock};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -391,8 +391,8 @@ impl ConversationOrchestrator {
 mod tests {
     use super::*;
     use crate::test_support::{
-        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-        mock_message_response, noop_hook_executor,
+        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+        NoOpPermissionGate, StaticMemoryProvider,
     };
     use platform_posix::{fs::PosixFileSystem, mcp::PosixMcpTransport};
     use serde_json::json;
@@ -407,8 +407,10 @@ mod tests {
         assert_eq!(oracle["cases"].as_array().unwrap().len(), 6);
         for case in oracle["cases"].as_array().unwrap() {
             let id = MessageId::new();
+            let attachment = Source::from_serde_value(&case["input"])
+                .expect("generated fixture attachment is valid JSON");
             let projected =
-                ConversationOrchestrator::file_attachment_projection(id, &case["input"]).unwrap();
+                ConversationOrchestrator::file_attachment_projection(id, &attachment).unwrap();
             let native_rows = case["expected"]["rendered"]
                 .as_array()
                 .unwrap()
@@ -443,9 +445,11 @@ mod tests {
                 .unwrap()
                 .iter()
                 .map(|attachment| {
+                    let attachment = Source::from_serde_value(attachment)
+                        .expect("generated fixture attachment is valid JSON");
                     ConversationOrchestrator::nested_memory_attachment_projection(
                         MessageId::new(),
-                        attachment,
+                        &attachment,
                     )
                     .unwrap()
                     .text_content()
@@ -485,6 +489,8 @@ mod tests {
                 },
                 "displayPath": format!("pkg/{}", branding::MEMORY_FILE),
             });
+            let attachment = Source::from_serde_value(&attachment)
+                .expect("generated nested-memory fixture is valid JSON");
             let nested = ConversationOrchestrator::nested_memory_attachment_projection(
                 MessageId::new(),
                 &attachment,
@@ -695,18 +701,15 @@ for line in sys.stdin:
             .collect();
         let attachment = rows
             .iter()
-            .find(|row| {
-                row.extra
-                    .get("attachment")
-                    .and_then(|a| a.get("type"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some("mcp_instructions_delta")
-            })
+            .find(|row| row.extra.string_at("/attachment/type") == Some("mcp_instructions_delta"))
             .unwrap();
         assert_eq!(attachment.message_type, "attachment");
-        assert!(attachment.message.is_null());
-        assert!(!attachment.extra.contains_key("permissionMode"));
-        assert!(!attachment.extra.contains_key("isMeta"));
+        assert!(attachment
+            .message
+            .at_pointer("")
+            .is_some_and(|value| value.is_null()));
+        assert!(!attachment.extra.contains_property("permissionMode"));
+        assert!(!attachment.extra.contains_property("isMeta"));
         assert!(attachment.prompt_id.is_none());
         assert_eq!(
             attachment.uuid,
@@ -728,13 +731,11 @@ for line in sys.stdin:
             1,
             "prior instructions remain with a correction"
         );
-        assert!(
-            calls[2]
-                .iter()
-                .any(|message| message.text_content().contains(
-                    "servers have disconnected. Their instructions above no longer apply:\nrecords"
-                ))
-        );
+        assert!(calls[2]
+            .iter()
+            .any(|message| message.text_content().contains(
+                "servers have disconnected. Their instructions above no longer apply:\nrecords"
+            )));
         // Removing the retained attachment (as compaction does) also removes
         // its delta baseline; replay never relies on a process-global latch.
         resumed.session.lock().await.history.clear();
@@ -752,7 +753,8 @@ for line in sys.stdin:
                     MessageId::new(),
                     format!("<system-reminder>\n{body}\n</system-reminder>"),
                 ),
-                json!({"type":"total_tokens_reminder", "text":body}),
+                Source::from_serde_value(&json!({"type":"total_tokens_reminder", "text":body}))
+                    .expect("generated reminder attachment is valid JSON"),
             )
             .await;
         let row = orch.to_jsonl_message(
@@ -764,7 +766,10 @@ for line in sys.stdin:
             None,
         );
         assert_eq!(row.message_type, "attachment");
-        assert!(row.message.is_null());
+        assert!(row
+            .message
+            .at_pointer("")
+            .is_some_and(|value| value.is_null()));
         let restored = crate::resume::state_from_messages(uuid::Uuid::nil(), &[row]);
         assert_eq!(restored.history, vec![message]);
     }

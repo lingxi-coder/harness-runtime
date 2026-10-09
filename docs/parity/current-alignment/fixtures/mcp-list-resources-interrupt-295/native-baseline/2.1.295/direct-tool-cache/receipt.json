@@ -1,0 +1,165 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "native_entrypoint": "Native 2.1.295 --print --output-format json, isolated strict --mcp-config, local stdio MCP, loopback Anthropic Messages stub",
+  "exit_code": 0,
+  "timed_out": false,
+  "native_result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "NATIVE_MCP_RESOURCES_INTERRUPT_FINISHED",
+    "num_turns": 2,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-4000-8000-000000002299"
+  },
+  "mcp_observation": {
+    "incoming": {
+      "path": "mcp-trace/mcp-stdio-in.raw.jsonl",
+      "bytes": 1755,
+      "sha256": "d49ed0aa4d11a55175ba6437d6ad3c53a01655f2388df295c6e24162025efd97"
+    },
+    "outgoing": {
+      "path": "mcp-trace/mcp-stdio-out.raw.jsonl",
+      "bytes": 902,
+      "sha256": "7be2b28c0a1e0b7f17ccaf7ba1b129c3a994fddf54f36ccfc8e0fa791c822035"
+    },
+    "methods": [
+      "server/discover",
+      "prompts/list",
+      "resources/list",
+      "tools/list"
+    ],
+    "resource_list_calls": 1,
+    "cancellation_notifications": []
+  },
+  "anthropic_messages_requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 114764,
+      "request_sha256": "7e92b5023afabe4e4c38c69a15d9de2470c48081d7a5205b92c8c7df3357a0a4",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "resource_list_tools": [
+        "ListMcpResourcesTool"
+      ],
+      "initial_resources_list_completed": true
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 115356,
+      "request_sha256": "7660e97efc44a9e10222f7104d87eeb0e91727377145a54738af2b9359417ccc",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "resource_list_tools": [
+        "ListMcpResourcesTool"
+      ],
+      "fixture_tool_result_present": true
+    }
+  ],
+  "interrupt": {
+    "signal": "SIGINT",
+    "requested": false,
+    "pending_observed": false,
+    "native_exit_code": 0,
+    "elapsed_since_launch_ms": 662.343,
+    "elapsed_since_launch_epoch_ms": 662.349,
+    "stdout_bytes": 1604,
+    "stderr_bytes": 0
+  },
+  "session_jsonl": {
+    "path": "native-session.raw.jsonl",
+    "bytes": 218205,
+    "sha256": "322752871b7bb0fce1714a6fff8740f98c9cf090f34880f429f3bc5196c60040"
+  },
+  "network_boundary": {
+    "model_endpoint": "127.0.0.1 loopback only",
+    "mcp_transport": "local stdio subprocess only",
+    "dummy_api_key_only": true,
+    "isolated_home_config": true,
+    "no_upstream_relay": true
+  },
+  "conclusion": {
+    "public_tool_path": "Native model-visible ListMcpResourcesTool was called with server_name fixture and returned the startup resource result.",
+    "rpc_boundary": "The raw MCP trace contains exactly one resources/list, the initial headless discovery request. The model tool did not issue a second resources/list request; the Native tool read the discovered resource cache.",
+    "interrupt": "The external SIGINT monitor did not observe a pending model-triggered resources/list and therefore sent no user interrupt. Native’s debug log records a SIGINT to the MCP child during ordinary CLI shutdown; that is not the user interrupt under test.",
+    "scope": "This is a reachability result for this fixed public 2.1.295 CLI invocation, not an interrupted pending-RPC result. No cancellation notification was observed."
+  },
+  "artifacts": {
+    "capture-receipt.raw.json": {
+      "bytes": 4816,
+      "sha256": "9fe41688c52d1686d8bc7effd5ce1fc64de517c7b7f6a1127994dd0835eab5b6"
+    },
+    "cases.json": {
+      "bytes": 697,
+      "sha256": "bab921d551a5cb9e2f000a4cab23c686f50ac2d0b1074cf37c64277b08189996"
+    },
+    "interrupt-trace.raw.json": {
+      "bytes": 228,
+      "sha256": "d1bc77ea03c62fe594c67ca7d45598f4ab36c60cc0943260856f5df49a712ce2"
+    },
+    "mcp-stdio-in.raw.jsonl": {
+      "bytes": 1755,
+      "sha256": "d49ed0aa4d11a55175ba6437d6ad3c53a01655f2388df295c6e24162025efd97"
+    },
+    "mcp-stdio-out.raw.jsonl": {
+      "bytes": 902,
+      "sha256": "7be2b28c0a1e0b7f17ccaf7ba1b129c3a994fddf54f36ccfc8e0fa791c822035"
+    },
+    "model-request-01.raw.json": {
+      "bytes": 114764,
+      "sha256": "7e92b5023afabe4e4c38c69a15d9de2470c48081d7a5205b92c8c7df3357a0a4"
+    },
+    "model-request-02.raw.json": {
+      "bytes": 115356,
+      "sha256": "7660e97efc44a9e10222f7104d87eeb0e91727377145a54738af2b9359417ccc"
+    },
+    "model-response-01.raw.sse": {
+      "bytes": 903,
+      "sha256": "262924d476317bd67d930c5d34fab13f4c4f3d262ffc0bee05f26880d06e76e8"
+    },
+    "model-response-02.raw.sse": {
+      "bytes": 813,
+      "sha256": "bd69cb481d0d36c996fee0f75a50fb17e240420ee6fdd3767aa9859e040f7e2b"
+    },
+    "native-mcp-debug.raw.jsonl": {
+      "bytes": 2122,
+      "sha256": "bfc44b0b484a3ddd260e9f267a48fc16c4d9f316d82a6884978102bb303750f4"
+    },
+    "native-session.raw.jsonl": {
+      "bytes": 218205,
+      "sha256": "322752871b7bb0fce1714a6fff8740f98c9cf090f34880f429f3bc5196c60040"
+    },
+    "native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native.stdout.raw.json": {
+      "bytes": 1604,
+      "sha256": "f54ad6d1b2afcb8137a4a2081854599cf2031a5e56f2f04a59875b84fcfa5ce4"
+    },
+    "resources-list-request-01.raw.jsonrpc": {
+      "bytes": 433,
+      "sha256": "9e32635a680a058f36b440dd52deab9a9c46631f3fd517cde2d54972d6b19f78"
+    },
+    "resources-list-response-01.raw.jsonrpc": {
+      "bytes": 280,
+      "sha256": "91d57f5bf442f68eae62f744c0b8a12de5ad42c945ca4b0d507cc116e0c81ce4"
+    },
+    "run-native.py": {
+      "bytes": 16961,
+      "sha256": "714a1fe348d26bc377195fbe5909bf2bcc29ac1adba5424057820dcb0f112e0d"
+    },
+    "stdio_server.py": {
+      "bytes": 6794,
+      "sha256": "07aaa42f5a11163eb14eb04243f03e654820e298001645ea588f2aae69c36490"
+    }
+  },
+  "raw_run_output": "run-output/native-mcp-list-resources-interrupt-295-v8p3ctwf (ignored; isolated config files intentionally not copied)"
+}

@@ -29,6 +29,44 @@ const MODEL: &str = "native-test-model";
 const PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a4fcAAAAASUVORK5CYII=";
 
+macro_rules! core_source {
+    ($($value:tt)*) => {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!($($value)*) )
+            .expect("generated core fixture is representable")
+    };
+}
+
+macro_rules! sdk_source {
+    ($($value:tt)*) => {
+        wire::JsonPayload::from_generated_value(&json!($($value)*) )
+            .expect("generated SDK fixture is valid JSON")
+    };
+}
+
+fn sdk_json(value: &Value) -> wire::JsonPayload {
+    wire::JsonPayload::from_generated_value(value).expect("generated SDK fixture is valid JSON")
+}
+
+fn set_continuation_response_id(response: &mut llm_runtime::HistoryResponse) {
+    let metadata = &response.provider_metadata;
+    let llm_client = metadata
+        .payload_at("/llm_client")
+        .expect("fixture has llm_client metadata");
+    let continuation = llm_client
+        .payload_at("/continuation")
+        .expect("fixture has continuation metadata");
+    let response_id = wire::JsonPayload::string(&response.id);
+    let continuation = continuation
+        .with_object_field("response_id", &response_id)
+        .expect("replace fixture response id");
+    let llm_client = llm_client
+        .with_object_field("continuation", &continuation)
+        .expect("replace fixture continuation");
+    response.provider_metadata = metadata
+        .with_object_field("llm_client", &llm_client)
+        .expect("replace fixture client metadata");
+}
+
 // Focused projection tests enter the same recovery-before-snapshot boundary
 // as the real turn driver; production projection itself never repairs history.
 async fn prepare_projection(
@@ -219,7 +257,7 @@ impl PermissionGate for Gate {
 }
 
 struct Computer {
-    calls: SyncMutex<Vec<Value>>,
+    calls: SyncMutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     outputs: SyncMutex<Vec<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
     ready: AtomicBool,
     fail_type: bool,
@@ -242,17 +280,34 @@ impl Computer {
 }
 #[async_trait]
 impl Tool for Computer {
-    fn map_result_text(&self, result: &Value) -> Option<String> {
+    fn map_result_text(
+        &self,
+        result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         tool_api::tool_result_media::computer_batch_model_text(result)
     }
     fn name(&self) -> &str {
         "computer"
     }
-    fn input_schema(&self) -> &Value {
-        static SCHEMA: once_cell::sync::Lazy<Value> = once_cell::sync::Lazy::new(
-            || json!({"type":"object","properties":{"action":{"type":"string"},"geometry_version":{"type":"string"},"text":{"type":"string"}},"required":["action"]}),
-        );
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_schema(
+                    &json!({"type":"object","properties":{"action":{"type":"string"},"geometry_version":{"type":"string"},"text":{"type":"string"}},"required":["action"]}),
+                )
+            });
         &SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -260,10 +315,10 @@ impl Tool for Computer {
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
     fn native_computer_capabilities(&self) -> Option<ComputerCapabilities> {
@@ -308,7 +363,7 @@ impl Tool for Computer {
             ));
         }
         op.validate(frame)
-            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+            .map_err(|e| ToolError::InvalidInput(e.to_string().into()))?;
         let point = |p: &ComputerPoint| json!([p.x, p.y]);
         let mut input = match op {
             ComputerOperation::Click {
@@ -408,12 +463,16 @@ impl Tool for Computer {
         self.ready.store(false, Ordering::SeqCst);
         Ok(())
     }
-    async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> Result<(), ValidationError> {
+    async fn validate_input(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _: &Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Ask {
@@ -429,39 +488,49 @@ impl Tool for Computer {
             metadata: Default::default(),
         }
     }
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &DescriptionOptions,
+    ) -> String {
         "fixture computer".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
-        input: Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         self.calls.lock().unwrap().push(input.clone());
-        self.trace
-            .lock()
-            .unwrap()
-            .push(input["action"].as_str().unwrap().into());
-        if self.fail_type && input["action"] == "type" {
+        let action = input
+            .string_at("/action")
+            .expect("fixture native action is a string")
+            .to_owned();
+        self.trace.lock().unwrap().push(action.clone());
+        if self.fail_type && action == "type" {
             return Err(ToolError::Internal("second input failed".into()));
         }
-        let mut result = if input["action"] == "screenshot"
-            || input["action"] == "zoom"
-            || input["action"] == "request_access"
+        let mut result = if action == "screenshot" || action == "zoom" || action == "request_access"
         {
-            ToolCallResult::from_data(
-                json!({"type":"image","file":{"base64":PNG,"type":"image/png"}}),
-            )
-        } else if input["action"] == "computer_batch" {
-            ToolCallResult::from_data(json!({"stepsCompleted":1,"results":[{
-                "action":"screenshot","result":{"type":"image","file":{"base64":PNG,"type":"image/png"}}
-            }]}))
+            ToolCallResult::from_data(tool_api::tool_trait::generated_builtin_result(
+                &json!({"type":"image","file":{"base64":PNG,"type":"image/png"}}),
+            ))
+        } else if action == "computer_batch" {
+            ToolCallResult::from_data(tool_api::tool_trait::generated_builtin_result(
+                &json!({"stepsCompleted":1,"results":[{
+                    "action":"screenshot","result":{"type":"image","file":{"base64":PNG,"type":"image/png"}}
+                }]}),
+            ))
         } else {
-            ToolCallResult::from_data(json!({"action":input["action"],"ok":true}))
+            ToolCallResult::from_data(tool_api::tool_trait::generated_builtin_result(
+                &json!({"action":action,"ok":true}),
+            ))
         };
         result.model_content = self
             .map_result_text(&result.data)
@@ -476,10 +545,23 @@ impl Tool for Other {
     fn name(&self) -> &str {
         self.0
     }
-    fn input_schema(&self) -> &Value {
-        static SCHEMA: once_cell::sync::Lazy<Value> =
-            once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_schema(&json!({"type":"object"}))
+            });
         &SCHEMA
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -490,18 +572,22 @@ impl Tool for Other {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
-    async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> Result<(), ValidationError> {
+    async fn validate_input(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _: &Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -513,20 +599,29 @@ impl Tool for Other {
             metadata: Default::default(),
         }
     }
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &DescriptionOptions,
+    ) -> String {
         "ordinary fixture".into()
     }
-    async fn prompt(&self, _: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
-        _: Value,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         self.2.lock().unwrap().push(self.0.into());
-        Ok(ToolCallResult::from_data(json!({"content":self.0})))
+        Ok(ToolCallResult::from_data(
+            tool_api::tool_trait::generated_builtin_result(&json!({"content":self.0})),
+        ))
     }
 }
 
@@ -553,7 +648,7 @@ impl OrchestratorApiClient for Api {
                 llm_runtime::convert::normalize_messages_for_api(main.messages.clone()),
             );
             let messages = llm_runtime::convert::to_llm_messages(messages)?;
-            let tools = llm_runtime::convert::to_tool_declarations(main.tools.clone())?;
+            let tools = main.tools.clone();
             let (input, _) = llm_runtime::convert::history_input(
                 &main.model,
                 &messages,
@@ -582,13 +677,15 @@ impl BuiltinHookHandler for RecordingHook {
         self.events.lock().unwrap().push(event.event_type());
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: Some(0),
             response: Some(
                 if self.remove_images && event.event_type() == HookEventType::PostToolUse {
                     HookResponse {
-                        updated_tool_output: Some(Some(json!({"content":"image removed by hook"}))),
+                        updated_tool_output: Some(core_source!({
+                            "content":"image removed by hook"
+                        })),
                         ..Default::default()
                     }
                 } else {
@@ -660,6 +757,7 @@ impl Fixture {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
         let mut executor = HookExecutorImpl::new(
             Arc::new(tokio::sync::RwLock::new(hook_registry)),
@@ -807,16 +905,33 @@ impl Fixture {
     ) -> Result<crate::turn_loop::DeferredToolDispatch, OrchestratorError> {
         let response_id = blocks.iter().find_map(|block| match block {
             ContentBlock::ProviderContent { value, .. }
-                if value["type"] == "lingxi_computer_binding" =>
+                if value.string_at("/type").as_deref() == Some("lingxi_computer_binding") =>
             {
-                value["provider_response_id"].as_str().map(str::to_owned)
+                value.string_at("/provider_response_id")
             }
             _ => None,
         });
         let existing = if let Some(response_id) = &response_id {
-            self.orch.session.lock().await.history.iter().find(|message| matches!(message,
-                ConversationMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block,
-                    ContentBlock::ProviderContent { value, .. } if value["type"] == "lingxi_computer_binding" && value["provider_response_id"] == *response_id))))
+            self.orch
+                .session
+                .lock()
+                .await
+                .history
+                .iter()
+                .find(|message| {
+                    matches!(
+                        message,
+                        ConversationMessage::Assistant { content, .. }
+                            if content.iter().any(|block| matches!(
+                                block,
+                                ContentBlock::ProviderContent { value, .. }
+                                    if value.string_at("/type").as_deref()
+                                        == Some("lingxi_computer_binding")
+                                        && value.string_at("/provider_response_id").as_deref()
+                                    == Some(*response_id)
+                            ))
+                    )
+                })
                 .cloned()
         } else {
             None
@@ -837,7 +952,7 @@ impl Fixture {
                     .responses
                     .lock()
                     .unwrap()
-                    .get(&response_id)
+                    .get(response_id)
                     .unwrap()
                     .clone();
                 let fence = self.fence();
@@ -942,6 +1057,10 @@ impl Fixture {
                 is_meta: false,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             };
             assert!(publish_native_result(&self.orch, &message).await.unwrap());
             self.orch.session.lock().await.history.push(message);
@@ -956,14 +1075,15 @@ fn response(
     let mut response = mock_message_response(content, Some("tool_use"));
     response.id = "native-response-1".into();
     response.model = MODEL.into();
-    response.provider_metadata = json!({"llm_client":{"computer_binding":{"account":"fixture-account","profile":"fixture-profile","model":MODEL,"endpoint":"fixture-endpoint","protocol":protocol_name(provider)}}});
+    let mut metadata = json!({"llm_client":{"computer_binding":{"account":"fixture-account","profile":"fixture-profile","model":MODEL,"endpoint":"fixture-endpoint","protocol":protocol_name(provider)}}});
     if provider == NativeComputerProvider::OpenAi {
-        response.provider_metadata["llm_client"]["continuation"] = json!({
+        metadata["llm_client"]["continuation"] = json!({
             "response_id":response.id,"protocol":protocol_name(provider),"provider_id":"openai",
             "profile_name":"fixture-profile","endpoint_fingerprint":"fixture-endpoint",
             "account_scope":"fixture-account","request_model":MODEL,
         });
     }
+    response.provider_metadata = sdk_json(&metadata);
     response
 }
 
@@ -977,7 +1097,7 @@ fn openai(actions: Value) -> llm_runtime::HistoryResponse {
         NativeComputerProvider::OpenAi,
         vec![llm_runtime::ContentBlock::ProviderContent {
             protocol: protocol_name(NativeComputerProvider::OpenAi),
-            value: json!({"type":"lingxi_native_content","block":block}),
+            value: sdk_source!({"type":"lingxi_native_content","block":block}),
         }],
     )
 }
@@ -990,11 +1110,14 @@ fn claude_screenshot() -> llm_runtime::HistoryResponse {
             llm_runtime::ContentBlock::ToolCall {
                 id: "call-1".into(),
                 name: "screenshot".into(),
-                input: json!({}),
+                input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                    &json!({}),
+                )
+                .expect("generated tool input fixture"),
             },
             llm_runtime::ContentBlock::ProviderContent {
                 protocol: protocol_name(NativeComputerProvider::Anthropic),
-                value: json!({"type":"lingxi_replay_metadata","block":block}),
+                value: sdk_source!({"type":"lingxi_replay_metadata","block":block}),
             },
         ],
     )
@@ -1018,7 +1141,10 @@ async fn ordinary_batch_images_use_the_existing_turn_driver_and_final_hook_outpu
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: "batch-1".into(),
                 name: "computer".into(),
-                input: json!({"action":"computer_batch","actions":[{"action":"screenshot"}]}),
+                input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                    &json!({"action":"computer_batch","actions":[{"action":"screenshot"}]}),
+                )
+                .expect("generated tool input fixture"),
             }],
         );
         let fixture = Fixture::with_responses(
@@ -1045,19 +1171,29 @@ async fn ordinary_batch_images_use_the_existing_turn_driver_and_final_hook_outpu
                     content_blocks,
                     ..
                 } if tool_use_id.as_str() == "batch-1" => {
-                    Some((content, content_blocks.as_deref().unwrap_or_default()))
+                    let image_count = content_blocks
+                        .as_ref()
+                        .map(|source| {
+                            (0..source.array_len("").unwrap_or_default())
+                                .filter_map(|index| {
+                                    source
+                                        .at_pointer("")
+                                        .and_then(|array| array.get_index(index))
+                                })
+                                .filter(|block| {
+                                    block.get_property("type").and_then(|value| value.as_str())
+                                        == Some("image")
+                                })
+                                .count()
+                        })
+                        .unwrap_or_default();
+                    Some((content, image_count))
                 }
                 _ => None,
             })
             .expect("ordinary driver publishes the batch result");
-        assert!(!text.contains(PNG));
-        assert_eq!(
-            blocks
-                .iter()
-                .filter(|block| block["type"] == "image")
-                .count(),
-            usize::from(!remove_images)
-        );
+        assert!(!text.string_at("").unwrap().contains(PNG));
+        assert_eq!(blocks, usize::from(!remove_images));
         assert_eq!(
             fixture.computer.ready.load(Ordering::SeqCst),
             !remove_images
@@ -1104,7 +1240,7 @@ async fn ordered_native_failure_stops_input_and_publishes_ordinary_results() {
             .lock()
             .unwrap()
             .iter()
-            .map(|i| i["action"].as_str().unwrap())
+            .map(|i| i.string_at("/action").unwrap().to_owned())
             .collect::<Vec<_>>(),
         ["left_click", "type"]
     );
@@ -1121,7 +1257,7 @@ async fn ordered_native_failure_stops_input_and_publishes_ordinary_results() {
             assert_eq!(id.as_deref(), Some(expected.as_str()));
             assert_eq!(name, "computer");
             assert!(matches!(
-                input["action"].as_str(),
+                input.string_at("/action"),
                 Some("left_click" | "type")
             ));
         }
@@ -1178,9 +1314,15 @@ async fn mod_success_replacement_cannot_admit_input_after_durable_failure() {
     "#,
     )
     .unwrap();
-    host.load("replace-failure", fixture._root.path(), &module, json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "replace-failure",
+        fixture._root.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({}))
+            .expect("generated hook options are representable"),
+    )
+    .await
+    .unwrap();
     fixture
         .orch
         .lifecycle_runtime
@@ -1261,14 +1403,14 @@ async fn compacted_completed_receipt_cannot_block_a_reused_call_in_a_new_respons
         .unwrap();
     let mut successor = response(NativeComputerProvider::OpenAi, vec![]);
     successor.id = "old-successor".into();
-    successor.provider_metadata["llm_client"]["continuation"]["response_id"] = json!(successor.id);
+    set_continuation_response_id(&mut successor);
     successor.stop_reason = Some("end_turn".into());
     fixture.accept_response(&successor).await.unwrap();
     fixture.orch.session.lock().await.history.clear();
     fixture.native().await;
     let mut new = openai(json!([{"type":"screenshot"}]));
     new.id = "new-response".into();
-    new.provider_metadata["llm_client"]["continuation"]["response_id"] = json!(new.id);
+    set_continuation_response_id(&mut new);
     let blocks = fixture.bind(&new).await.unwrap();
     let results = fixture.dispatch(blocks).await;
     fixture.publish(&results.results).await;
@@ -1296,13 +1438,13 @@ async fn confirmed_gemini_output_recovers_without_any_in_memory_safety_acknowled
     let check = json!({"decision":"require_confirmation","explanation":"submit form"});
     let block = wire::ContentBlock::Native {value:wire::NativeExtension::new(
         lingxi_llm_client::providers::google::computer::CALL_FORMAT,
-        json!({"type":"function_call","id":"call-1","name":"click","arguments":{"x":0,"y":0,"safety_decision":check}}),
+        sdk_source!({"type":"function_call","id":"call-1","name":"click","arguments":{"x":0,"y":0,"safety_decision":check}}),
     ).unwrap()};
     let response = response(
         NativeComputerProvider::Gemini,
         vec![llm_runtime::ContentBlock::ProviderContent {
             protocol: protocol_name(NativeComputerProvider::Gemini),
-            value: json!({"type":"lingxi_native_content","block":block}),
+            value: sdk_source!({"type":"lingxi_native_content","block":block}),
         }],
     );
     let blocks = fixture.bind(&response).await.unwrap();
@@ -1333,13 +1475,13 @@ async fn confirmed_but_failed_gemini_input_recovers_as_a_failed_receipt() {
     let check = json!({"decision":"require_confirmation","explanation":"submit form"});
     let block = wire::ContentBlock::Native {value:wire::NativeExtension::new(
         lingxi_llm_client::providers::google::computer::CALL_FORMAT,
-        json!({"type":"function_call","id":"call-1","name":"type","arguments":{"text":"fails","safety_decision":check}}),
+        sdk_source!({"type":"function_call","id":"call-1","name":"type","arguments":{"text":"fails","safety_decision":check}}),
     ).unwrap()};
     let response = response(
         NativeComputerProvider::Gemini,
         vec![llm_runtime::ContentBlock::ProviderContent {
             protocol: protocol_name(NativeComputerProvider::Gemini),
-            value: json!({"type":"lingxi_native_content","block":block}),
+            value: sdk_source!({"type":"lingxi_native_content","block":block}),
         }],
     );
     let blocks = fixture.bind(&response).await.unwrap();
@@ -1468,10 +1610,10 @@ async fn live_unfinished_native_outputs_abandon_the_old_call_without_replaying_i
                     provider,
                     vec![llm_runtime::ContentBlock::ProviderContent {
                         protocol: protocol_name(provider),
-                        value: json!({"type":"lingxi_native_content","block":wire::ContentBlock::Native {
+                        value: sdk_source!({"type":"lingxi_native_content","block":wire::ContentBlock::Native {
                             value: wire::NativeExtension::new(
                                 lingxi_llm_client::providers::google::computer::CALL_FORMAT,
-                                json!({"type":"function_call","id":"call-1","name":"click","arguments":{"x":0,"y":0}}),
+                                sdk_source!({"type":"function_call","id":"call-1","name":"click","arguments":{"x":0,"y":0}}),
                             ).unwrap(),
                         }}),
                     }],
@@ -1513,7 +1655,7 @@ async fn live_unfinished_native_outputs_abandon_the_old_call_without_replaying_i
                 ConversationMessage::User { content, .. } | ConversationMessage::Assistant { content, .. } => content.as_slice(),
                 ConversationMessage::System { .. } => &[],
             }).any(|b| matches!(b,
-                ContentBlock::ProviderContent { value, .. } if value["type"] == "lingxi_computer_abandoned")));
+                ContentBlock::ProviderContent { value, .. } if value.string_at("/type").as_deref() == Some("lingxi_computer_abandoned"))));
             let invalidations = fixture.computer.invalidations.load(Ordering::SeqCst);
             assert_eq!(invalidations, 1);
             let messages = llm_runtime::convert::to_llm_messages(
@@ -1549,7 +1691,7 @@ async fn live_unfinished_native_outputs_abandon_the_old_call_without_replaying_i
                 .dispatch(vec![ContentBlock::ToolUse {
                     id: ToolUseId::new(),
                     name: "computer".into(),
-                    input: json!({"action":"screenshot"}),
+                    input: core_source!({"action":"screenshot"}),
                     provider_id: None,
                 }])
                 .await;
@@ -1577,11 +1719,11 @@ async fn dynamic_scope_denial_removes_declaration_and_rejects_inflight_native_wo
     let error = fixture.bind(&claude_screenshot()).await.unwrap_err();
     assert!(error.to_string().contains("scope"));
     let (catalog, _) = fixture.orch.build_wire_tools().await;
-    assert!(!catalog.iter().any(|tool| tool["name"] == "computer"));
-    assert!(catalog.iter().any(|tool| tool["name"] == "Read"));
+    assert!(!catalog.iter().any(|tool| tool.name == "computer"));
+    assert!(catalog.iter().any(|tool| tool.name == "Read"));
     assert!(catalog
         .iter()
-        .any(|tool| tool["name"] == "mcp__computer-use__click"));
+        .any(|tool| tool.name == "mcp__computer-use__click"));
     assert!(prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -1602,14 +1744,17 @@ async fn native_members_keep_their_position_among_ordinary_calls() {
         llm_runtime::ContentBlock::ToolCall {
             id: "click-1".into(),
             name: "left_click".into(),
-            input: json!({"coordinate":[0,0]}),
+            input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                &json!({"coordinate":[0,0]}),
+            )
+            .expect("generated tool input fixture"),
         },
     );
     response.content.insert(
         1,
         llm_runtime::ContentBlock::ProviderContent {
             protocol: protocol_name(NativeComputerProvider::Anthropic),
-            value: json!({"type":"lingxi_replay_metadata","block":{
+            value: sdk_source!({"type":"lingxi_replay_metadata","block":{
                 "type":"tool_use","id":"click-1","name":"left_click",
                 "input":{"coordinate":[0,0]},"toolset_name":"computer"
             }}),
@@ -1627,7 +1772,7 @@ async fn native_members_keep_their_position_among_ordinary_calls() {
         .iter()
         .filter_map(|block| match block {
             ContentBlock::ToolUse { name, input, .. } => Some(if name == "computer" {
-                input["action"].as_str().unwrap().to_owned()
+                input.string_at("/action").unwrap().to_owned()
             } else {
                 name.clone()
             }),
@@ -1759,7 +1904,7 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
         .dispatch(vec![ContentBlock::ToolUse {
             id: ToolUseId::new(),
             name: "computer".into(),
-            input: json!({"action":"request_access"}),
+            input: core_source!({"action":"request_access"}),
             provider_id: None,
         }])
         .await;
@@ -1780,7 +1925,7 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
         ["Read", "mcp__computer-use__click"].map(|name| ContentBlock::ToolUse {
             id: ToolUseId::new(),
             name: name.into(),
-            input: json!({}),
+            input: core_source!({}),
             provider_id: None,
         }),
     );
@@ -1807,11 +1952,11 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
     assert_eq!(
         catalog
             .iter()
-            .map(|t| t["name"].clone())
+            .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
         next_catalog
             .iter()
-            .map(|t| t["name"].clone())
+            .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>()
     );
     next.submission.unwrap().before_submit().await.unwrap();
@@ -1833,7 +1978,7 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
             .lock()
             .unwrap()
             .iter()
-            .map(|i| i["action"].as_str().unwrap())
+            .map(|i| i.string_at("/action").unwrap().to_owned())
             .collect::<Vec<_>>(),
         ["request_access", "screenshot"]
     );
@@ -1854,7 +1999,7 @@ async fn partial_backend_keeps_working_function_tools_without_native_declaration
         .dispatch(vec![ContentBlock::ToolUse {
             id: ToolUseId::new(),
             name: "computer".into(),
-            input: json!({"action":"screenshot"}),
+            input: core_source!({"action":"screenshot"}),
             provider_id: None,
         }])
         .await;
@@ -1877,7 +2022,7 @@ async fn partial_backend_keeps_working_function_tools_without_native_declaration
         .unwrap()
         .contains("capability"));
     assert_eq!(fixture.computer.calls.lock().unwrap().len(), 1);
-    assert!(catalog.iter().any(|tool| tool["name"] == "computer"));
+    assert!(catalog.iter().any(|tool| tool.name == "computer"));
     assert!(fixture.journal.executions.lock().unwrap().is_empty());
     assert!(fixture
         .bind(&openai(json!([{"type":"screenshot"}])))
@@ -2077,7 +2222,7 @@ async fn fresh_owner_does_not_append_completed_rows_after_a_retained_successor_b
         .unwrap();
     let mut successor = response(NativeComputerProvider::OpenAi, vec![]);
     successor.id = "retained-successor".into();
-    successor.provider_metadata["llm_client"]["continuation"]["response_id"] = json!(successor.id);
+    set_continuation_response_id(&mut successor);
     successor.stop_reason = Some("end_turn".into());
     fixture.accept_response(&successor).await.unwrap();
     assert_eq!(
@@ -2093,7 +2238,7 @@ async fn fresh_owner_does_not_append_completed_rows_after_a_retained_successor_b
     fixture.orch.session.lock().await.history.retain(|message| !matches!(message,
         ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block,
             ContentBlock::ToolResult { .. }) || matches!(block,
-            ContentBlock::ProviderContent { value, .. } if value["type"] == "lingxi_computer_receipt"))));
+            ContentBlock::ProviderContent { value, .. } if value.string_at("/type").as_deref() == Some("lingxi_computer_receipt")))));
     let retained = serde_json::to_value(&fixture.orch.session.lock().await.history).unwrap();
     let transcript_before = std::fs::read(&fixture.transcript_path).unwrap();
     fixture.forget_runtime().await;
@@ -2124,7 +2269,7 @@ async fn old_unknown_call_id_does_not_invalidate_a_new_successful_response_scope
     fixture.native().await;
     let mut old = openai(json!([{"type":"screenshot"}]));
     old.id = "unknown-response".into();
-    old.provider_metadata["llm_client"]["continuation"]["response_id"] = json!(old.id);
+    set_continuation_response_id(&mut old);
     let old_blocks = fixture.bind(&old).await.unwrap();
     fixture
         .journal
@@ -2147,7 +2292,7 @@ async fn old_unknown_call_id_does_not_invalidate_a_new_successful_response_scope
         .dispatch(vec![ContentBlock::ToolUse {
             id: ToolUseId::new(),
             name: "computer".into(),
-            input: json!({"action":"screenshot"}),
+            input: core_source!({"action":"screenshot"}),
             provider_id: None,
         }])
         .await;
@@ -2162,7 +2307,7 @@ async fn old_unknown_call_id_does_not_invalidate_a_new_successful_response_scope
         .is_some());
     let mut new = openai(json!([{"type":"screenshot"}]));
     new.id = "successful-response".into();
-    new.provider_metadata["llm_client"]["continuation"]["response_id"] = json!(new.id);
+    set_continuation_response_id(&mut new);
     let new_blocks = fixture.bind(&new).await.unwrap();
     let new_results = fixture.dispatch(new_blocks).await;
     fixture.publish(&new_results.results).await;
@@ -2249,7 +2394,7 @@ async fn compacted_unknown_input_uses_its_durable_binding_without_replaying_or_r
         .dispatch(vec![ContentBlock::ToolUse {
             id: ToolUseId::new(),
             name: "computer".into(),
-            input: json!({"action":"screenshot"}),
+            input: core_source!({"action":"screenshot"}),
             provider_id: None,
         }])
         .await;
@@ -2289,7 +2434,7 @@ async fn saved_complete_successor_repairs_received_acknowledgement_without_resub
             citations: None,
             cache_control: None,
         });
-    successor.provider_metadata["llm_client"]["continuation"]["response_id"] = json!(successor.id);
+    set_continuation_response_id(&mut successor);
     fixture
         .journal
         .reject_received
@@ -2354,7 +2499,7 @@ async fn altered_response_attempt_is_rejected_before_repairing_history() {
         .unwrap();
     let mut successor = response(NativeComputerProvider::OpenAi, vec![]);
     successor.id = "attempt-successor".into();
-    successor.provider_metadata["llm_client"]["continuation"]["response_id"] = json!(successor.id);
+    set_continuation_response_id(&mut successor);
     fixture
         .journal
         .reject_received
@@ -2384,7 +2529,7 @@ async fn partially_prepared_response_batch_repairs_all_receipts_from_one_complet
     let call: OpenAiComputerCall = serde_json::from_value(json!({"type":"computer_call","id":"item-2","call_id":"call-2","pending_safety_checks":[],"status":"completed","actions":[{"type":"screenshot"}]})).unwrap();
     origin.content.push(llm_runtime::ContentBlock::ProviderContent {
         protocol: protocol_name(NativeComputerProvider::OpenAi),
-        value: json!({"type":"lingxi_native_content","block":wire::ContentBlock::Native { value:wire::NativeExtension::from_typed(call).unwrap() }}),
+        value: sdk_source!({"type":"lingxi_native_content","block":wire::ContentBlock::Native { value:wire::NativeExtension::from_typed(call).unwrap() }}),
     });
     let blocks = fixture.bind(&origin).await.unwrap();
     let dispatched = fixture.dispatch(blocks).await;
@@ -2403,7 +2548,7 @@ async fn partially_prepared_response_batch_repairs_all_receipts_from_one_complet
     submission.before_submit().await.unwrap();
     let mut successor = response(NativeComputerProvider::OpenAi, vec![]);
     successor.id = "complete-batch-successor".into();
-    successor.provider_metadata["llm_client"]["continuation"]["response_id"] = json!(successor.id);
+    set_continuation_response_id(&mut successor);
     fixture
         .journal
         .reject_prepared_after
@@ -2504,7 +2649,7 @@ async fn recovered_receipt_is_in_the_actual_turn_request_before_submission() {
             };
             !content.iter().any(|block| {
                 matches!(block,
-            ContentBlock::ProviderContent {value,..} if value["type"]=="lingxi_computer_receipt")
+            ContentBlock::ProviderContent {value,..} if value.string_at("/type").as_deref()==Some("lingxi_computer_receipt"))
             })
         });
         fixture
@@ -2540,7 +2685,7 @@ async fn recovered_receipt_is_in_the_actual_turn_request_before_submission() {
             fixture.orch.session.lock().await.history.last()
         );
         assert!(inputs[0].messages.iter().flat_map(|message|&message.content).any(|block|matches!(block,
-            wire::ContentBlock::Native {value} if value.format()==lingxi_llm_client::providers::openai::computer::OPENAI_COMPUTER_CALL_OUTPUT_FORMAT && value.data()["call_id"]=="call-1")),
+            wire::ContentBlock::Native {value} if value.format()==lingxi_llm_client::providers::openai::computer::OPENAI_COMPUTER_CALL_OUTPUT_FORMAT && value.data().string_at("/call_id").as_deref()==Some("call-1"))),
             "the actual SDK input must contain the recovered receipt, fresh={fresh}");
         drop(inputs);
         assert_eq!(
@@ -2570,7 +2715,7 @@ async fn gemini_member_name_collision_falls_back_with_the_actual_registry_catalo
         Arc::new(Other("click", false, fixture.trace.clone())),
     );
     let (catalog, _) = fixture.orch.build_wire_tools().await;
-    assert!(catalog.iter().any(|tool| tool["name"] == "click"));
+    assert!(catalog.iter().any(|tool| tool.name == "click"));
     let projection = prepare_projection(&fixture.orch, MODEL, None, &catalog)
         .await
         .unwrap()
@@ -2636,13 +2781,13 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                     NativeComputerProvider::Gemini => {
                         let block = wire::ContentBlock::Native { value: wire::NativeExtension::new(
                         lingxi_llm_client::providers::google::computer::CALL_FORMAT,
-                        json!({"type":"function_call","id":"call-1","name":"take_screenshot","arguments":{}}),
+                        sdk_source!({"type":"function_call","id":"call-1","name":"take_screenshot","arguments":{}}),
                     ).unwrap() };
                         response(
                             provider,
                             vec![llm_runtime::ContentBlock::ProviderContent {
                                 protocol: protocol_name(provider),
-                                value: json!({"type":"lingxi_native_content","block":block}),
+                                value: sdk_source!({"type":"lingxi_native_content","block":block}),
                             }],
                         )
                     }
@@ -2672,7 +2817,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 }
                 let origin_id = fixture.orch.session.lock().await.history.iter().find(|message| matches!(message,
                 ConversationMessage::Assistant {content,..} if content.iter().any(|block| matches!(block,
-                    ContentBlock::ProviderContent {value,..} if value["type"]=="lingxi_computer_binding")))).unwrap().id();
+                    ContentBlock::ProviderContent {value,..} if value.string_at("/type").as_deref()==Some("lingxi_computer_binding"))))).unwrap().id();
                 let later = ConversationMessage::user(
                     MessageId::new(),
                     "continue after the receipt".into(),
@@ -2684,6 +2829,10 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                     is_meta: false,
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
                     content: vec![ContentBlock::TextJsUtf16 {
                         text: "\u{fffd}".into(),
                         utf16_code_units: vec![0xd800],
@@ -2698,9 +2847,13 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                     is_meta: true,
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
                     content: vec![ContentBlock::ProviderContent {
                         protocol: protocol_name(provider),
-                        value: json!({"type":"lingxi_computer_abandoned",
+                        value: core_source!({"type":"lingxi_computer_abandoned",
                         "call_ids":["old-call"], "call_identities":[["old-response","old-call"]],
                         "reason":"old execution outcome is unknown; observe instead of repeating input"}),
                     }],

@@ -562,6 +562,7 @@ mod tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -1084,6 +1085,7 @@ mod tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let mut headers = HashMap::new();
         headers.insert(

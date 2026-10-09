@@ -17,6 +17,7 @@ use lingxi_core::host::{McpTransport, McpTransportSpec};
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 use mobile_linux_api::ProcessOutput;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use test_harness::mocks::MockMcpTransport;
 use tool_api::BuiltinToolContext;
 use tool_mcp::ListMcpResourcesTool;
@@ -54,31 +55,33 @@ fn ctx_with_registry(registry: Arc<McpRegistry>) -> BuiltinToolContext {
     ctx
 }
 
-async fn call_list(tool: &ListMcpResourcesTool, input: serde_json::Value) -> serde_json::Value {
+fn generated_input(value: serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).expect("generated test input is valid")
+}
+
+async fn call_list(tool: &ListMcpResourcesTool, input: serde_json::Value) -> Utf16JsonProjection {
     use tool_api::tool_trait::Tool;
     let ctx = tool_api::test_support::fresh_ctx();
     let tx = tool_api::test_support::fresh_tx();
-    tool.call(input, ctx, tx).await.expect("call ok").data
+    tool.call(generated_input(input), ctx, tx)
+        .await
+        .expect("call ok")
+        .data
 }
 
 /// Extract the flat `resources` array from the tool result.
-fn resources(data: &serde_json::Value) -> &Vec<serde_json::Value> {
-    data.get("resources")
-        .and_then(|v| v.as_array())
-        .expect("result carries a `resources` array")
-}
-
 /// All `(server, uri)` pairs in the result, sorted for order-insensitive asserts.
-fn server_uri_pairs(data: &serde_json::Value) -> Vec<(String, String)> {
-    let mut v: Vec<(String, String)> = resources(data)
-        .iter()
-        .map(|r| {
+fn server_uri_pairs(data: &Utf16JsonProjection) -> Vec<(String, String)> {
+    let len = data.array_len("/resources").expect("resources array");
+    let mut v: Vec<(String, String)> = (0..len)
+        .map(|index| {
             (
-                r.get("server")
-                    .and_then(|s| s.as_str())
+                data.string_at(&format!("/resources/{index}/server"))
                     .unwrap_or("")
                     .into(),
-                r.get("uri").and_then(|s| s.as_str()).unwrap_or("").into(),
+                data.string_at(&format!("/resources/{index}/uri"))
+                    .unwrap_or("")
+                    .into(),
             )
         })
         .collect();
@@ -118,12 +121,17 @@ async fn no_server_name_lists_all_servers_tagged_by_server() {
     );
 
     // Each row carries name + server (the TS output shape).
-    let row = resources(&data)
-        .iter()
-        .find(|r| r.get("uri").and_then(|u| u.as_str()) == Some("file:///a"))
-        .unwrap();
-    assert_eq!(row.get("name").and_then(|v| v.as_str()), Some("a"));
-    assert_eq!(row.get("server").and_then(|v| v.as_str()), Some("s1"));
+    let row_index = (0..data.array_len("/resources").expect("resources array"))
+        .find(|index| data.string_at(&format!("/resources/{index}/uri")) == Some("file:///a"))
+        .expect("row for file:///a");
+    assert_eq!(
+        data.string_at(&format!("/resources/{row_index}/name")),
+        Some("a")
+    );
+    assert_eq!(
+        data.string_at(&format!("/resources/{row_index}/server")),
+        Some("s1")
+    );
 }
 
 // ============================================================================

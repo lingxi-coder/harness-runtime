@@ -5,8 +5,8 @@ use crate::{
     ProviderId, ProviderProfile, SigningConfig,
 };
 use std::sync::{
-    Mutex,
     atomic::{AtomicUsize, Ordering},
+    Mutex,
 };
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -107,6 +107,7 @@ fn request(method: &str, body: &'static [u8]) -> sdk::HttpRequest {
         headers: vec![("Content-Type".into(), "application/json".into())],
         body: body.into(),
         timeout: None,
+        http1_header_layout: None,
     }
 }
 

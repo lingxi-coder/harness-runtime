@@ -2825,7 +2825,7 @@ async fn seam_send_message_accepts_the_same_aliases_as_stop_and_output() {
         "buddy".to_string(),
         "buddy@alpha".to_string(),
     ] {
-        seam.send_message(&alias, format!("msg via {alias}"))
+        seam.send_message(&alias, format!("msg via {alias}").into())
             .await
             .unwrap_or_else(|e| panic!("SendMessage must accept the alias {alias}: {e:?}"));
     }
@@ -2969,7 +2969,7 @@ async fn registry_with_firer(
         .create(
             TaskType::LocalBash,
             teammate_input(),
-            description.to_string(),
+            description.to_string().into(),
         )
         .await
         .unwrap();
@@ -2997,7 +2997,7 @@ async fn completed_transition_fires_byte_faithful_payload() {
     assert_eq!(f.status, "completed");
     // Wire payload (`TaskCompletedHookInputSchema`): subject + description
     // both source from the task description (no distinct subject field).
-    assert_eq!(f.task_subject, "ship the parity port");
+    assert_eq!(f.task_subject.string_at(""), Some("ship the parity port"));
     assert_eq!(
         f.task_description
             .as_ref()
@@ -3066,7 +3066,7 @@ async fn failed_transition_also_fires() {
         "a Failed transition fires TaskCompleted: {recorded:?}"
     );
     assert_eq!(recorded[0].status, "failed");
-    assert_eq!(recorded[0].task_subject, "do the thing");
+    assert_eq!(recorded[0].task_subject.string_at(""), Some("do the thing"));
 }
 
 #[tokio::test]
@@ -3370,7 +3370,7 @@ async fn create_fires_byte_faithful_task_created_payload() {
     assert_eq!(f.task_id, task_id);
     // Wire payload (`TaskCreatedHookInputSchema`): subject sources from the
     // task-type taxonomy bucket; description from the create description.
-    assert_eq!(f.task_subject, "LocalBash");
+    assert_eq!(f.task_subject.string_at(""), Some("LocalBash"));
     assert_eq!(
         f.task_description
             .as_ref()
@@ -3402,7 +3402,10 @@ async fn spawn_also_fires_task_created() {
     let recorded = firer.recorded();
     assert_eq!(recorded.len(), 1, "spawn fires TaskCreated: {recorded:?}");
     assert_eq!(recorded[0].task_id, task_id);
-    assert_eq!(recorded[0].task_subject, "InProcessTeammate");
+    assert_eq!(
+        recorded[0].task_subject.string_at(""),
+        Some("InProcessTeammate")
+    );
     assert_eq!(
         recorded[0]
             .task_description
@@ -5699,7 +5702,7 @@ async fn assert_scope_blocks_delete_at_the_guard(
             id: task_id.into(),
             task_type: TaskType::LocalWorkflow,
             status: TaskStatus::Running,
-            description: format!("{purpose:?} run"),
+            description: format!("{purpose:?} run").into(),
             tool_use_id: None,
             start_time: SystemTime::now(),
             end_time: None,
@@ -6114,7 +6117,7 @@ async fn rested_agent_surfaces_once_per_rest_without_eviction() {
     registry
         .mark_task_rested(
             "a-rest-1",
-            Some("final answer".to_string()),
+            Some(Utf16JsonProjection::from("final answer")),
             Some(lingxi_core::host::task_registry::AgentRunUsage {
                 subagent_tokens: 42,
                 tool_uses: 3,
@@ -6676,7 +6679,7 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
     assert_eq!(rosters.running_teammates, vec!["buddy@alpha".to_string()]);
     assert_eq!(
         rosters.background_agents,
-        vec!["a-bare".to_string(), "a-bg (survey the crate)".to_string()],
+        vec!["a-bare".into(), "a-bg (survey the crate)".into()],
         "a named agent is excluded, and a description-less agent is a bare id",
     );
 
@@ -6684,7 +6687,7 @@ async fn not_found_rosters_list_running_teammates_and_unnamed_background_agents(
     let from_bg = registry
         .not_found_rosters(Some("a-bg"), &["a-named".to_string()])
         .await;
-    assert_eq!(from_bg.background_agents, vec!["a-bare".to_string()]);
+    assert_eq!(from_bg.background_agents, vec!["a-bare".into()]);
 }
 
 #[derive(Default)]
@@ -8981,7 +8984,7 @@ async fn permission_prompt_wait_updates_teammate_and_sdk_even_on_cancel() {
     struct Prompt;
     #[async_trait]
     impl PermissionGate for Prompt {
-        async fn check(&self, _: &str, _: &serde_json::Value) -> PermissionDecision {
+        async fn check(&self, _: &str, _: &Utf16JsonProjection) -> PermissionDecision {
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             PermissionDecision::Allow
         }
@@ -9020,7 +9023,8 @@ async fn permission_prompt_wait_updates_teammate_and_sdk_even_on_cancel() {
         permission::PermissionPolicy::from_rules(permission::PermissionMode::Default, rules);
     let gate = permission::PolicyPermissionGate::new(Arc::new(policy), Arc::new(Prompt));
     let mut events = registry.subscribe_task_lifecycle();
-    let input = serde_json::json!({"command":"echo pause"});
+    let input = Utf16JsonProjection::from_serde_value(&serde_json::json!({"command":"echo pause"}))
+        .unwrap();
     gate.ask_via_transport("Bash", &input, &ctx).await;
     let first = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
         .await
@@ -10849,6 +10853,7 @@ async fn terminal_agent_wait_uses_native_transcript_and_claims_completion() {
                 citations: None,
             }],
             stop_reason: Some("end_turn".into()),
+            resumable: None,
         },
         // Native kfo skips an empty assistant candidate and scans backward.
         ConversationMessage::Assistant {
@@ -10858,6 +10863,7 @@ async fn terminal_agent_wait_uses_native_transcript_and_claims_completion() {
                 citations: None,
             }],
             stop_reason: Some("end_turn".into()),
+            resumable: None,
         },
     ];
     state.outcome.result = Some("spool/result must not be used".into());
@@ -10955,6 +10961,7 @@ async fn terminal_agent_wait_preserves_whitespace_and_prefers_task_error() {
             citations: None,
         }],
         stop_reason: Some("end_turn".into()),
+        resumable: None,
     }];
     registry
         .insert_state_for_test(TaskState::LocalAgent(state))

@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"CALLED:page_tool_01:1"}],"isError":false,"structuredContent":{"tool":"page_tool_01","page":1},"resultType":"complete","ttlMs":0,"cacheScope":"private"}}

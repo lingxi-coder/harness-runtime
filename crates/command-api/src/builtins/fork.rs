@@ -291,7 +291,7 @@ mod tests {
         for raw in ["", "   "] {
             match handler().handle(&args(raw)).await {
                 CommandResult::Done { display: Some(s) } => {
-                    assert_eq!(s, "Usage: /fork \\<directive\\>");
+                    assert_eq!(s, "Usage: /fork \\<directive\\>".into());
                 }
                 other => panic!("expected Done, got {other:?}"),
             }
@@ -306,7 +306,7 @@ mod tests {
     async fn no_first_turn_yet_blocks_fork() {
         match handler().handle(&args("Investigate the bug")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Cannot fork before the first conversation turn");
+                assert_eq!(s, "Cannot fork before the first conversation turn".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -316,7 +316,7 @@ mod tests {
     async fn whitespace_only_directive_is_treated_as_empty() {
         match handler().handle(&args("   \t  ")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Usage: /fork \\<directive\\>");
+                assert_eq!(s, "Usage: /fork \\<directive\\>".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -357,7 +357,7 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
                     s,
-                    "Copied conversation into a new background session (mock-bg-abcd)."
+                    "Copied conversation into a new background session (mock-bg-abcd).".into()
                 );
             }
             other => panic!("expected Done, got {other:?}"),
@@ -373,7 +373,7 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
                     s,
-                    "Copied conversation into a new background session (mock-bg-abcd)."
+                    "Copied conversation into a new background session (mock-bg-abcd).".into()
                 );
             }
             other => panic!("expected Done, got {other:?}"),

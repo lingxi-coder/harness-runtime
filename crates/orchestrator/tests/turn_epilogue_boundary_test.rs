@@ -102,9 +102,12 @@ impl tool_api::tool_trait::Tool for CancellingTool {
         "CancelsTurn"
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
-        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> = once_cell::sync::Lazy::new(|| {
-            tool_api::tool_trait::generated_builtin_schema(&serde_json::json!({ "type": "object" }))
-        });
+        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_schema(
+                    &serde_json::json!({ "type": "object" }),
+                )
+            });
         &SCHEMA
     }
     fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
@@ -147,8 +150,11 @@ impl tool_api::tool_trait::Tool for CancellingTool {
     ) -> String {
         String::new()
     }
-    async fn prompt(&self, _opts: &tool_api::tool_trait::PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &tool_api::tool_trait::PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -171,9 +177,12 @@ impl tool_api::tool_trait::Tool for NoopTool {
         "Noop"
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
-        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> = once_cell::sync::Lazy::new(|| {
-            tool_api::tool_trait::generated_builtin_schema(&serde_json::json!({ "type": "object" }))
-        });
+        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_schema(
+                    &serde_json::json!({ "type": "object" }),
+                )
+            });
         &SCHEMA
     }
     fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
@@ -216,8 +225,11 @@ impl tool_api::tool_trait::Tool for NoopTool {
     ) -> String {
         String::new()
     }
-    async fn prompt(&self, _opts: &tool_api::tool_trait::PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &tool_api::tool_trait::PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -428,7 +440,9 @@ struct CancelsOnDrain(tokio_util::sync::CancellationToken);
 
 #[async_trait::async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for CancelsOnDrain {
-    async fn take_mid_turn_input(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    async fn take_mid_turn_input(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         self.0.cancel();
         None
     }

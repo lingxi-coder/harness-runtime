@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","resources":[{"uri":"fixture://resources/initial.txt","name":"Initial fixture resource","description":"Makes the Native ListMcpResourcesTool path model-visible.","mimeType":"text/plain"}]}}

@@ -161,7 +161,7 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
     });
     let adapter = Arc::new(ProviderApiAdapter::new(api_service(transport.clone())));
     let output = Arc::new(MockOutputStream::new());
-    let orchestrator = Arc::new(
+    let orchestrator = ConversationOrchestrator::into_shared(
         ConversationOrchestrator::new_with_streaming(
             OrchestratorConfig {
                 model: MODEL.to_owned(),
@@ -185,15 +185,24 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
     let cancel = CancellationToken::new();
     let turn_orchestrator = orchestrator.clone();
     let turn_cancel = cancel.clone();
-    let turn = tokio::spawn(async move {
+    let mut turn = tokio::spawn(async move {
         turn_orchestrator
             .run_turn_streaming_with_cancel(PROMPT, turn_cancel)
             .await
     });
 
-    tokio::time::timeout(std::time::Duration::from_secs(5), opened.notified())
+    if tokio::time::timeout(std::time::Duration::from_secs(5), opened.notified())
         .await
-        .expect("one provider request must enter the fixed waiting transport");
+        .is_err()
+    {
+        cancel.cancel();
+        let _ = release_tx.send(true);
+        let turn_status = tokio::time::timeout(std::time::Duration::from_secs(5), &mut turn).await;
+        panic!(
+            "one provider request must enter the fixed waiting transport; calls={}, turn_status={turn_status:?}",
+            transport.calls.load(Ordering::SeqCst)
+        );
+    }
     assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
     cancel.cancel();
     release_tx

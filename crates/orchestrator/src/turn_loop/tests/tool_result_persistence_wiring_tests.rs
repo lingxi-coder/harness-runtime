@@ -27,11 +27,23 @@ impl Tool for SizedTool {
     fn name(&self) -> &str {
         "Sized"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &json!({ "type": "object", "properties": {} }),
+                )
+            });
         &SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
     }
@@ -103,6 +115,7 @@ impl Tool for SizedTool {
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -127,13 +140,8 @@ fn orch_with(tool: Arc<dyn Tool>, config_home: Option<PathBuf>) -> ConversationO
 }
 
 fn use_of(name: &str, len: usize) -> Vec<(ToolUseId, String, Utf16JsonProjection, Option<String>)> {
-    let input = json!({ "len": len });
-    vec![(
-        ToolUseId::new(),
-        name.into(),
-        Utf16JsonProjection::from_serde_value(&input).unwrap(),
-        None,
-    )]
+    let input = tool_api::tool_trait::generated_builtin_result(&json!({ "len": len }));
+    vec![(ToolUseId::new(), name.into(), input, None)]
 }
 
 async fn dispatch_content(
@@ -414,11 +422,22 @@ async fn persisting_an_mcp_array_result_drops_the_array() {
         fn name(&self) -> &str {
             "mcp__srv__big"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object" }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(&json!({ "type": "object" }))
+            });
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::SourceNative,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
         }
@@ -484,6 +503,7 @@ async fn persisting_an_mcp_array_result_drops_the_array() {
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -510,7 +530,8 @@ async fn persisting_an_mcp_array_result_drops_the_array() {
                 content
                     .string_at("")
                     .is_some_and(|text| text.starts_with(PERSISTED_OUTPUT_OPEN)),
-                "oversized MCP result must be persisted, got: {content}"
+                "oversized MCP result must be persisted, got: {}",
+                content.string_at("").unwrap_or("<non-string>")
             );
             assert!(
                 content_blocks.is_none(),

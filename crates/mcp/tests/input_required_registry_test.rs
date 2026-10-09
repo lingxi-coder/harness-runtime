@@ -107,7 +107,7 @@ impl McpTransport for Transport {
     async fn call_tool(
         &self,
         _: &McpRawConnection,
-        _: &Utf16JsonProjection,
+        _: &str,
         _: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         panic!("registry must use its constructed real client")
@@ -115,7 +115,7 @@ impl McpTransport for Transport {
     async fn read_resource(
         &self,
         _: &McpRawConnection,
-        _: &str,
+        _: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         panic!("unused")
     }

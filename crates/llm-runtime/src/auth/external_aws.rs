@@ -30,8 +30,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::FutureExt;
 use futures::future::Shared;
+use futures::FutureExt;
 
 use crate::{BoxFuture, LlmError, ProviderId};
 
@@ -206,7 +206,7 @@ impl AwsAuthProcess for ShellAwsAuthProcess {
 
 // ── STS output validation (`Rdi` / `wdi`) ───────────────────────────────────
 
-use lingxi_llm_client::auth::aws::{AwsExportedCredentials, parse_sts_output};
+use lingxi_llm_client::auth::aws::{parse_sts_output, AwsExportedCredentials};
 
 // ── Drive-loop trigger classification (`V_c` / `G_c`) ───────────────────────
 

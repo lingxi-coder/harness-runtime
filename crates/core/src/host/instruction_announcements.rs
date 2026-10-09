@@ -49,7 +49,13 @@ pub fn latest_snapshot_context_rendering(
     let valid_prompt = snapshot
         .at_pointer("/systemPrompt")
         .and_then(|value| value.array_len().map(|count| (value, count)))
-        .is_some_and(|(members, count)| (0..count).all(|index| members.get_index(index).is_some_and(|item| item.as_str().is_some())));
+        .is_some_and(|(members, count)| {
+            (0..count).all(|index| {
+                members
+                    .get_index(index)
+                    .is_some_and(|item| item.as_str().is_some())
+            })
+        });
     let valid_tools = match snapshot.at_pointer("/tools") {
         None => true,
         Some(tools) => tools.array_len().is_some_and(|count| {
@@ -57,7 +63,8 @@ pub fn latest_snapshot_context_rendering(
                 let Some(tool) = tools.get_index(index) else {
                     return false;
                 };
-                tool.get_property("name").is_some_and(|value| value.as_str().is_some())
+                tool.get_property("name")
+                    .is_some_and(|value| value.as_str().is_some())
                     && tool
                         .get_property("description")
                         .is_some_and(|value| value.as_str().is_some())
@@ -96,8 +103,7 @@ struct InstructionsAttachment {
 }
 
 fn parse_instructions(value: &Utf16JsonProjection) -> Option<InstructionsAttachment> {
-    (value.string_at("/type")? == "instructions")
-        .then(|| projection_value(value, ""))?
+    (value.string_at("/type")? == "instructions").then(|| projection_value(value, ""))?
 }
 
 /// Native schemas validate announcement baselines before comparing them.
@@ -106,32 +112,30 @@ fn parse_instructions(value: &Utf16JsonProjection) -> Option<InstructionsAttachm
 pub fn is_valid_context_attachment(value: &Utf16JsonProjection) -> bool {
     match value.string_at("/type") {
         Some("instructions") => parse_instructions(value).is_some(),
-        Some("session_context") => {
-            value
-                .at_pointer("/context")
-                .and_then(|context| context.object_entries())
-                .is_some_and(|context| {
-                    context.iter().all(|entry| {
-                        SESSION_CONTEXT_KEYS.contains(&entry.display_key)
-                            && entry.value.as_str().is_some()
+        Some("session_context") => value
+            .at_pointer("/context")
+            .and_then(|context| context.object_entries())
+            .is_some_and(|context| {
+                context.iter().all(|entry| {
+                    SESSION_CONTEXT_KEYS.contains(&entry.display_key)
+                        && entry.value.as_str().is_some()
+                })
+            }),
+        Some("context_sections") => value
+            .at_pointer("/sections")
+            .and_then(|sections| sections.array_len().map(|count| (sections, count)))
+            .is_some_and(|(sections, count)| {
+                (0..count).all(|index| {
+                    sections.get_index(index).is_some_and(|section| {
+                        section
+                            .get_property("name")
+                            .is_some_and(|value| value.as_str().is_some())
+                            && section
+                                .get_property("text")
+                                .is_some_and(|value| value.as_str().is_some())
                     })
                 })
-        }
-        Some("context_sections") => {
-            value
-                .at_pointer("/sections")
-                .and_then(|sections| sections.array_len().map(|count| (sections, count)))
-                .is_some_and(|(sections, count)| {
-                    (0..count).all(|index| {
-                        sections.get_index(index).is_some_and(|section| {
-                            section.get_property("name").is_some_and(|value| value.as_str().is_some())
-                                && section
-                                    .get_property("text")
-                                    .is_some_and(|value| value.as_str().is_some())
-                        })
-                    })
-                })
-        }
+            }),
         Some("date") => {
             value.string_at("/date").is_some()
                 && value
@@ -176,9 +180,9 @@ pub fn instructions_delta(
     reason: Option<&str>,
 ) -> Option<Utf16JsonProjection> {
     let Some(prior) = prior else {
-        return (!current.is_empty()).then(|| {
-            projection_from_typed_value(&json!({"type":"instructions","files":current}))
-        }).flatten();
+        return (!current.is_empty())
+            .then(|| projection_from_typed_value(&json!({"type":"instructions","files":current})))
+            .flatten();
     };
     let changed: Vec<_> = current
         .iter()
@@ -312,10 +316,11 @@ fn render_session_context(value: &Utf16JsonProjection) -> Option<String> {
             }
         }
     }
-    let changed = value.at_pointer("/changed").and_then(|changed| changed.as_bool()) == Some(true);
-    let reason = value
-        .string_at("/reason")
-        .and_then(refresh_reason);
+    let changed = value
+        .at_pointer("/changed")
+        .and_then(|changed| changed.as_bool())
+        == Some(true);
+    let reason = value.string_at("/reason").and_then(refresh_reason);
     if sections.is_empty() {
         return changed.then(|| format!("The session context was re-read{}; the values announced earlier (account, project, git status) no longer apply.", reason.map_or_else(String::new, |reason| format!(" {reason}"))));
     }
@@ -360,10 +365,17 @@ pub fn render_instruction_attachment(value: &Utf16JsonProjection) -> Option<Stri
         }
         "date" => {
             let date = value.string_at("/date")?;
-            if value.at_pointer("/changed").is_some_and(|changed| changed.as_bool().is_none()) {
+            if value
+                .at_pointer("/changed")
+                .is_some_and(|changed| changed.as_bool().is_none())
+            {
                 return None;
             }
-            if value.at_pointer("/changed").and_then(|changed| changed.as_bool()) == Some(true) {
+            if value
+                .at_pointer("/changed")
+                .and_then(|changed| changed.as_bool())
+                == Some(true)
+            {
                 format!("The date has changed. Today's date is now {date}. No need to announce the new date — the user's own clock shows it.")
             } else {
                 format!("Today's date is {date}.")
@@ -411,9 +423,7 @@ pub fn context_attachments(
                 .map(|value| ((*key).to_owned(), json!(value)))
         })
         .collect();
-    let announced_value = serde_json::Value::Object(
-        announced_fields.iter().cloned().collect(),
-    );
+    let announced_value = serde_json::Value::Object(announced_fields.iter().cloned().collect());
     let announced = projection_from_typed_value(&announced_value);
     let previous = history
         .iter()

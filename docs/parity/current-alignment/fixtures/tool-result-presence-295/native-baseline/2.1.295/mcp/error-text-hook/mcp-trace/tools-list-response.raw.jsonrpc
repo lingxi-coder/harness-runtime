@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"error_text_hook","description":"Return the fixed `True` isError control result.","inputSchema":{"type":"object","properties":{"case":{"type":"string"}},"required":["case"],"additionalProperties":false}}]}}

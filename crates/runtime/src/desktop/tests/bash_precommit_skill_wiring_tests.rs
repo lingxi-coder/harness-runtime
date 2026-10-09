@@ -13,7 +13,7 @@ fn oracle() -> serde_json::Value {
 fn command(name: &str, origin: &str) -> SlashCommand {
     SlashCommand {
         name: name.into(),
-        description: format!("Run {name}"),
+        description: format!("Run {name}").into(),
         source: if origin == "builtin" {
             CommandSource::Builtin
         } else {
@@ -47,7 +47,7 @@ async fn eligible_skill_provenance_matches_native_precommit_fixture() {
             for input in step["commands"].as_array().unwrap() {
                 let name = input["name"].as_str().unwrap();
                 // The native array's first matching command owns the name.
-                if registry.resolve(name).is_none() {
+                if registry.resolve(&name.into()).is_none() {
                     registry.register_command(command(name, input["loadedFrom"].as_str().unwrap()));
                 }
             }
@@ -95,7 +95,11 @@ struct LiveSkillGate(AtomicBool);
 
 #[async_trait::async_trait]
 impl lingxi_core::host::PermissionGate for LiveSkillGate {
-    async fn check(&self, _: &str, _: &serde_json::Value) -> lingxi_core::host::PermissionDecision {
+    async fn check(
+        &self,
+        _: &str,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::host::PermissionDecision {
         lingxi_core::host::PermissionDecision::Allow
     }
 

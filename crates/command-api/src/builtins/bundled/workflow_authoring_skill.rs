@@ -71,7 +71,8 @@ mod tests {
         ] {
             assert!(body.contains(hook), "the reference must document {hook:?}");
         }
-        assert!(body.len() > 15_000, "got {} bytes", body.len());
+        let text = body.string_at("").unwrap();
+        assert!(text.len() > 15_000, "got {} bytes", text.len());
     }
 
     /// Loading the reference must not read as authorization to run a workflow.

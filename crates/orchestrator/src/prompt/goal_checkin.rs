@@ -602,7 +602,7 @@ mod tests {
     }
 
     fn display(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> String {
-        source.string_at("").unwrap().into_owned()
+        source.string_at("").unwrap().to_owned()
     }
 
     fn task(id: &str, label: &str, detail: &str) -> DeferringTask {
@@ -780,7 +780,8 @@ mod tests {
             .expect("check-in at the interval");
         assert!(
             display(&text).contains("deferred for 30 min because"),
-            "got: {text}"
+            "got: {}",
+            display(&text)
         );
         assert_eq!(state.checkin_count, 1);
         assert_eq!(state.deferred_since, Some(interval));
@@ -794,7 +795,8 @@ mod tests {
             .expect("second check-in at one hour");
         assert!(
             display(&second).contains("deferred for 60 min because"),
-            "got: {second}"
+            "got: {}",
+            display(&second)
         );
         assert_eq!(state.checkin_count, 2);
 
@@ -807,7 +809,8 @@ mod tests {
             .expect("third check-in at two hours");
         assert!(
             display(&third).contains("deferred for 120 min because"),
-            "got: {third}"
+            "got: {}",
+            display(&third)
         );
         assert_eq!(state.checkin_count, 3);
     }

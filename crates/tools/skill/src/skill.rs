@@ -486,6 +486,10 @@ impl SkillTool {
             ctx.origin_session_id
         };
         let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+            // A skill fork is launched by the Skill tool, not admitted through
+            // AgentTool's statistics/accounting path. Preserve the primary
+            // implementation's explicit absence of an AgentSpawnToken.
+            agent_spawn_token: None,
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
             parent_native_query_depth: None,

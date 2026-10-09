@@ -53,7 +53,7 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
             .enumerate()
             .map(|(i, is_meta)| QueuedPromptInput {
                 goal_retry_id: None,
-                text: format!("queued text {i}"),
+                text: format!("queued text {i}").into(),
                 is_meta: *is_meta,
                 mod_origin: Some(if *is_meta {
                     serde_json::json!({"kind":"scheduled-trigger"})
@@ -114,10 +114,7 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
         );
         for (i, is_meta) in flags.iter().enumerate() {
             assert_eq!(
-                records[i]
-                    .extra
-                    .get("queuePriority")
-                    .and_then(serde_json::Value::as_str),
+                records[i].extra.string_at("/queuePriority"),
                 if *is_meta { Some("later") } else { None }
             );
         }
@@ -128,17 +125,11 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
         );
         for (i, is_meta) in flags.iter().enumerate() {
             assert_eq!(
-                records[i]
-                    .extra
-                    .get("scheduledTaskId")
-                    .and_then(serde_json::Value::as_str),
+                records[i].extra.string_at("/scheduledTaskId"),
                 is_meta.then(|| format!("task-{i}")).as_deref()
             );
             assert_eq!(
-                records[i]
-                    .extra
-                    .get("scheduledFireId")
-                    .and_then(serde_json::Value::as_str),
+                records[i].extra.string_at("/scheduledFireId"),
                 is_meta.then(|| format!("fire-{i}")).as_deref(),
                 "fire id without task id stays absent"
             );
@@ -147,8 +138,8 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
             assert_eq!(
                 records[i]
                     .extra
-                    .get("isMeta")
-                    .and_then(serde_json::Value::as_bool)
+                    .at_pointer("/isMeta")
+                    .and_then(|value| value.as_bool())
                     .unwrap_or(false),
                 *expected
             );
@@ -166,15 +157,15 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
             .find(|row| row.message_type == "user")
             .unwrap()
             .extra
-            .get("queuePriority")
+            .at_pointer("/queuePriority")
             .is_none());
         let ordinary = after
             .iter()
             .rev()
             .find(|row| row.message_type == "user")
             .unwrap();
-        assert!(!ordinary.extra.contains_key("scheduledTaskId"));
-        assert!(!ordinary.extra.contains_key("scheduledFireId"));
+        assert!(!ordinary.extra.contains_property("scheduledTaskId"));
+        assert!(!ordinary.extra.contains_property("scheduledFireId"));
         let model_messages =
             serde_json::to_string(&api.captured_calls().await[0].messages).unwrap();
         assert!(
@@ -213,9 +204,17 @@ async fn prompt_submit_mod_screens_each_batch_entry_before_persistence() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("submit", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "submit",
+        dir.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+            {}
+        ))
+        .expect("generated Mod options are representable"),
+    )
+    .await
+    .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
@@ -286,7 +285,10 @@ async fn prompt_submit_mod_screens_each_batch_entry_before_persistence() {
         .unwrap()
         .contains("rewritten bridge"));
     assert_eq!(records[1].message_type, "attachment");
-    assert_eq!(records[1].extra["attachment"]["hookName"], "prompt.submit");
+    assert_eq!(
+        records[1].extra.string_at("/attachment/hookName"),
+        Some("prompt.submit")
+    );
     assert_eq!(records[2].message_type, "user");
     assert!(serde_json::to_string(&records[2])
         .unwrap()

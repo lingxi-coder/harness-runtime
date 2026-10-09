@@ -88,8 +88,8 @@ impl BuiltinHookHandler for RecordingHandler {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -107,7 +107,7 @@ impl BuiltinHookHandler for FailingHandler {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Error,
-            stdout: String::new(),
+            stdout: String::new().into(),
             stderr: "the config-change hook itself blew up".into(),
             exit_code: Some(1),
             response: None,
@@ -133,6 +133,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 

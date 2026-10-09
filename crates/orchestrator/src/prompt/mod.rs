@@ -101,7 +101,8 @@ pub(crate) struct RenderedPromptSections {
     /// Static source blocks captured before dynamic context is appended.
     pub source_sections: Vec<PromptSection>,
     /// Exact restored Native source vector when this prompt comes from resume.
-    pub snapshot_system_prompt: Option<Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>>,
+    pub snapshot_system_prompt:
+        Option<Vec<lingxi_llm_client::providers::anthropic::system_prompt::PromptText>>,
     /// Joined static bytes before the separately-carried dynamic context.
     pub static_text: String,
     /// Current Native `systemContext` block, kept separate from frozen source
@@ -176,7 +177,9 @@ pub(crate) fn prompt_section_slots(
     sections: Vec<PromptSection>,
     ctx: &SystemPromptContext,
 ) -> Vec<PromptSectionSlot> {
-    let lean = sections.iter().any(|section| section.id_equals_ascii("lean_body"));
+    let lean = sections
+        .iter()
+        .any(|section| section.id_equals_ascii("lean_body"));
     let suffix = if lean { ":L" } else { "" };
     let mut shared = Vec::new();
     let mut available = Vec::new();
@@ -1059,7 +1062,11 @@ mod tests {
             Default::default(),
         );
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].block.text, s);
-        assert!(blocks[0].block.text.starts_with(HEADER));
+        assert_eq!(blocks[0].block.text_payload().string_at(""), Some(s));
+        assert!(blocks[0]
+            .block
+            .text_payload()
+            .string_at("")
+            .is_some_and(|text| text.starts_with(HEADER)));
     }
 }

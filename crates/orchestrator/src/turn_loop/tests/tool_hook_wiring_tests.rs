@@ -11,7 +11,7 @@ use lingxi_core::host::permission_gate::{
 };
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker};
 use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, MessageId, ToolUseId};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tool_api::context::ToolUseContext;
@@ -42,7 +42,7 @@ async fn monitor_websocket_classifier_allow_does_not_ask_again() {
             _: &str,
             _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &[permission::host_context::HostContextRecord],
-            _: &[String],
+            _: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
         ) -> AutoModeClassifierVerdict {
             self.0.fetch_add(1, Ordering::SeqCst);
             AutoModeClassifierVerdict::Allow {
@@ -68,33 +68,48 @@ async fn monitor_websocket_classifier_allow_does_not_ask_again() {
         fn name(&self) -> &str {
             "Monitor"
         }
-        fn input_schema(&self) -> &Value {
-            static SCHEMA: once_cell::sync::Lazy<Value> =
-                once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(&json!({"type":"object"}))
+            });
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _: &Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _: &Value) -> bool {
+        fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
             false
         }
         async fn validate_input(
             &self,
-            _: &Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _: &Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Ask {
@@ -110,7 +125,11 @@ async fn monitor_websocket_classifier_allow_does_not_ask_again() {
                 metadata: permission::result::PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _: &DescriptionOptions,
+        ) -> String {
             String::new()
         }
         async fn prompt(
@@ -121,12 +140,14 @@ async fn monitor_websocket_classifier_allow_does_not_ask_again() {
         }
         async fn call(
             &self,
-            _: Value,
+            _: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(ToolCallResult::from_data(json!({"content":"ran"})))
+            Ok(ToolCallResult::from_data(
+                tool_api::tool_trait::generated_builtin_result(&json!({"content":"ran"})),
+            ))
         }
     }
     let classifier = Arc::new(Model(AtomicUsize::new(0)));
@@ -156,7 +177,9 @@ async fn monitor_websocket_classifier_allow_does_not_ask_again() {
     let uses = vec![(
         ToolUseId::new(),
         "Monitor".into(),
-        json!({"ws":{"url":"wss://events.example.com"}}),
+        tool_api::tool_trait::generated_builtin_result(
+            &json!({"ws":{"url":"wss://events.example.com"}}),
+        ),
         None,
     )];
     dispatch_tool_uses_tracked(&orch, &uses, None)
@@ -168,7 +191,11 @@ async fn monitor_websocket_classifier_allow_does_not_ask_again() {
 
 #[async_trait]
 impl PermissionGate for PromptSpyGate {
-    async fn check(&self, _t: &str, _i: &Value) -> PermissionDecision {
+    async fn check(
+        &self,
+        _t: &str,
+        _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionDecision {
         // Stands in for the interactive prompt. Reaching this proves the
         // tool's ask was routed to the transport instead of being
         // re-authorized (and re-allowed) from the rule layer.
@@ -176,7 +203,11 @@ impl PermissionGate for PromptSpyGate {
             reason: "prompted-and-declined".into(),
         }
     }
-    async fn resolve_detailed(&self, _t: &str, _i: &Value) -> PermissionResolution {
+    async fn resolve_detailed(
+        &self,
+        _t: &str,
+        _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionResolution {
         PermissionResolution::Allow {
             rule_source: self.rule_source.clone(),
             classifier_approved: false,
@@ -197,8 +228,8 @@ impl hooks::BuiltinHookHandler for FixedPermissionRequestHook {
     ) -> hooks::HookResult {
         hooks::HookResult {
             outcome: hooks::HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: hooks::ExactHookText::from_text(""),
+            stderr: hooks::ExactHookText::from_text(""),
             exit_code: Some(0),
             response: Some(self.response.clone()),
         }
@@ -272,6 +303,7 @@ fn permission_request_hook_executor(response: hooks::HookResponse) -> Arc<hooks:
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     };
     let mut registry = hooks::HookRegistry::new();
     registry.register(hook);
@@ -291,12 +323,20 @@ struct ReadDenyGate;
 
 #[async_trait]
 impl PermissionGate for ReadDenyGate {
-    async fn check(&self, _t: &str, _i: &Value) -> PermissionDecision {
+    async fn check(
+        &self,
+        _t: &str,
+        _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: "prompted-and-declined".into(),
         }
     }
-    async fn resolve_detailed(&self, _t: &str, _i: &Value) -> PermissionResolution {
+    async fn resolve_detailed(
+        &self,
+        _t: &str,
+        _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionResolution {
         PermissionResolution::Deny {
             reason: "prompted-and-declined".into(),
             source: lingxi_core::host::permission_gate::PermissionDecisionSource::Rule,
@@ -318,7 +358,7 @@ struct SeamTool {
     mcp: bool,
     workflow_read_ask: bool,
     requires_ui: bool,
-    seen: Arc<Mutex<Vec<Value>>>,
+    seen: Arc<Mutex<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
     seen_context: Option<Arc<Mutex<Vec<CapturedToolContext>>>>,
 }
 
@@ -334,16 +374,25 @@ impl Tool for SeamTool {
     fn name(&self) -> &str {
         "Seam"
     }
-    fn input_schema(&self) -> &Value {
-        static SCHEMA: once_cell::sync::Lazy<Value> = once_cell::sync::Lazy::new(|| {
-            json!({
-                "type": "object",
-                "properties": { "timeout": { "type": "number" } },
-                "additionalProperties": false
-            })
-        });
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(&json!({
+                    "type": "object",
+                    "properties": { "timeout": { "type": "number" } },
+                    "additionalProperties": false
+                }))
+            });
         &SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
     }
@@ -356,38 +405,41 @@ impl Tool for SeamTool {
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
-    fn coerce_input(&self, input: &Value) -> Option<CoercedInput> {
+    fn coerce_input(
+        &self,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Option<CoercedInput> {
         if !self.coerce {
             return None;
         }
-        let obj = input.as_object()?;
-        if !obj.contains_key("timeout_ms") || obj.contains_key("timeout") {
+        if !input.contains_property("timeout_ms") || input.contains_property("timeout") {
             return None;
         }
-        let mut out = serde_json::Map::new();
-        for (k, v) in obj {
-            if k != "timeout_ms" {
-                out.insert(k.clone(), v.clone());
-            }
-        }
-        out.insert("timeout".into(), obj["timeout_ms"].clone());
+        let timeout = input.subprojection("/timeout_ms").ok()?;
+        let mut out = input.clone();
+        out.remove_field("timeout_ms").ok()?;
+        out.set_field("timeout", timeout).ok()?;
         Some(CoercedInput {
-            input: Value::Object(out),
+            input: out,
             shape_class: "timeout_ms".into(),
         })
     }
-    async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> Result<(), ValidationError> {
+    async fn validate_input(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _: &Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> permission::PermissionResult {
         if self.ask {
@@ -418,7 +470,11 @@ impl Tool for SeamTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &DescriptionOptions,
+    ) -> String {
         "seam".into()
     }
     async fn prompt(
@@ -429,7 +485,7 @@ impl Tool for SeamTool {
     }
     async fn call(
         &self,
-        input: Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         context: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -441,13 +497,21 @@ impl Tool for SeamTool {
                 same_turn_tool_uses: context.same_turn_tool_uses.clone(),
             });
         }
-        Ok(ToolCallResult::from_data(json!({ "content": "ran" })))
+        Ok(ToolCallResult::from_data(
+            tool_api::tool_trait::generated_builtin_result(&json!({ "content": "ran" })),
+        ))
     }
 }
 
 /// Dispatch `{"timeout_ms": 5000}` at one `SeamTool` configuration and return
 /// `(model text of the tool_result, inputs `call` saw)`.
-async fn dispatch(tool: SeamTool, rule_source: Option<&str>) -> (String, Vec<Value>) {
+async fn dispatch(
+    tool: SeamTool,
+    rule_source: Option<&str>,
+) -> (
+    String,
+    Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) {
     let seen = tool.seen.clone();
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(tool) as Arc<dyn Tool>);
@@ -466,14 +530,17 @@ async fn dispatch(tool: SeamTool, rule_source: Option<&str>) -> (String, Vec<Val
     let uses = vec![(
         ToolUseId::new(),
         "Seam".to_string(),
-        json!({ "timeout_ms": 5000 }),
+        tool_api::tool_trait::generated_builtin_result(&json!({ "timeout_ms": 5000 })),
         None,
     )];
     let (blocks, ..) = dispatch_tool_uses_tracked(&orch, &uses, None)
         .await
         .expect("dispatch must succeed");
     let text = match &blocks[0] {
-        ContentBlock::ToolResult { content, .. } => content.clone(),
+        ContentBlock::ToolResult { content, .. } => content
+            .string_at("")
+            .expect("tool result is a root string")
+            .to_owned(),
         other => panic!("expected a tool_result, got {other:?}"),
     };
     let inputs = seen.lock().unwrap().clone();
@@ -522,8 +589,8 @@ async fn physical_request_history_and_raw_row_facts_reach_the_tool_context() {
     let first_tool_id = ToolUseId::new();
     let second_tool_id = ToolUseId::new();
     let prior_tool_id = ToolUseId::new();
-    let first_input = json!({ "timeout": 7 });
-    let second_input = json!({ "timeout": 8 });
+    let first_input = tool_api::tool_trait::generated_builtin_result(&json!({ "timeout": 7 }));
+    let second_input = tool_api::tool_trait::generated_builtin_result(&json!({ "timeout": 8 }));
     let first_tool = ContentBlock::ToolUse {
         id: first_tool_id.clone(),
         name: "Seam".into(),
@@ -539,7 +606,7 @@ async fn physical_request_history_and_raw_row_facts_reach_the_tool_context() {
     let prior_tool = ContentBlock::ToolUse {
         id: prior_tool_id,
         name: "Read".into(),
-        input: json!({ "file_path": "prior.txt" }),
+        input: tool_api::tool_trait::generated_builtin_result(&json!({ "file_path": "prior.txt" })),
         provider_id: Some("provider-prior".into()),
     };
     let assistant_id = MessageId::new();
@@ -643,7 +710,10 @@ async fn coerce_input_is_applied_before_schema_validation() {
         "the coerced input must clear the strict schema, got: {text}"
     );
     assert_eq!(inputs.len(), 1, "the tool must have run");
-    assert_eq!(inputs[0], json!({ "timeout": 5000 }));
+    assert_eq!(
+        inputs[0],
+        tool_api::tool_trait::generated_builtin_result(&json!({ "timeout": 5000 }))
+    );
 }
 
 /// A/B TWIN — the same dispatch with `coerce_input` returning `None` is
@@ -717,7 +787,9 @@ async fn workflow_read_ask_permission_request_allow_rescues_with_rewrite() {
     registry.register_builtin(Arc::new(tool) as Arc<dyn Tool>);
     let hook = hooks::HookResponse {
         decision: Some(hooks::HookDecision::Approve),
-        updated_input: Some(json!({ "timeout": 7 })),
+        updated_input: Some(tool_api::tool_trait::generated_builtin_result(
+            &json!({ "timeout": 7 }),
+        )),
         ..hooks::HookResponse::default()
     };
     let orch = ConversationOrchestrator::new(
@@ -733,7 +805,7 @@ async fn workflow_read_ask_permission_request_allow_rescues_with_rewrite() {
     let uses = vec![(
         ToolUseId::new(),
         "Seam".to_string(),
-        json!({ "timeout_ms": 5000 }),
+        tool_api::tool_trait::generated_builtin_result(&json!({ "timeout_ms": 5000 })),
         None,
     )];
     let (blocks, ..) = dispatch_tool_uses_tracked(&orch, &uses, None)
@@ -743,10 +815,13 @@ async fn workflow_read_ask_permission_request_allow_rescues_with_rewrite() {
         ContentBlock::ToolResult { content, .. } => content,
         other => panic!("expected a tool_result, got {other:?}"),
     };
+    let text = text.string_at("").expect("tool result root string");
     assert!(!text.contains("prompted-and-declined"), "got: {text}");
     assert_eq!(
         seen.lock().unwrap().as_slice(),
-        &[json!({ "timeout": 7 })],
+        &[tool_api::tool_trait::generated_builtin_result(
+            &json!({ "timeout": 7 })
+        )],
         "PermissionRequest updatedInput must reach the rescued tool"
     );
 }
@@ -840,7 +915,7 @@ async fn workflow_script_path_read_deny_overrides_outer_allow_rule() {
     let uses = vec![(
         ToolUseId::new(),
         "Workflow".to_string(),
-        json!({ "scriptPath": "denied.js" }),
+        tool_api::tool_trait::generated_builtin_result(&json!({ "scriptPath": "denied.js" })),
         None,
     )];
     let (results, ..) = dispatch_tool_uses_tracked(&orch, &uses, None)
@@ -853,6 +928,7 @@ async fn workflow_script_path_read_deny_overrides_outer_allow_rule() {
         panic!("expected a tool_result from Workflow permission denial");
     };
     assert!(is_error.unwrap_or(false));
+    let content = content.string_at("").expect("tool result root string");
     assert!(content.contains("prompted-and-declined"), "got: {content}");
 }
 
@@ -886,6 +962,7 @@ async fn workflow_script_path_read_deny_overrides_subagent_allow() {
         assistant_message: None,
         same_turn_tool_uses: Vec::new(),
         depth: 0,
+        native_query_depth: None,
         observer: None,
         parent_model: None,
         parent_model_profile: None,
@@ -897,7 +974,11 @@ async fn workflow_script_path_read_deny_overrides_subagent_allow() {
         frozen_command_denies: Vec::new(),
     };
     let error = invoker
-        .invoke("Workflow", json!({ "scriptPath": "denied.js" }), ctx)
+        .invoke(
+            "Workflow",
+            tool_api::tool_trait::generated_builtin_result(&json!({ "scriptPath": "denied.js" })),
+            ctx,
+        )
         .await
         .expect_err("nested Read denial must stop subagent Workflow");
     assert!(

@@ -102,6 +102,7 @@ struct OpenedStreamingIteration<'a> {
     model_profile: Option<String>,
     outgoing_history_rewriter: Option<Arc<dyn OutgoingHistoryRewriter>>,
     turn_reminders: Vec<ConversationMessage>,
+    tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
     guarded_async_hook_reminders: Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
     context_announcements: PreparedContextAnnouncements,
     wire_tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
@@ -225,11 +226,13 @@ fn mod_turn_step_stream(
         Arc<dyn hooks::attachment::HookPublicationGuard>,
     )>,
     tools: Vec<llm_runtime::ToolDeclaration>,
+    tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
     skip_global_cache_for_system_prompt: bool,
     query_source: String,
     output_observation: Option<output_accounting_impl::MainOutputObservation>,
     retry_scope: ModelCallRetryScope,
     request_capture: llm_runtime::prompt_cache::RequestCapture,
+    request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
 ) -> (
     futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>,
     Arc<StdMutex<Option<(String, Option<String>)>>>,
@@ -261,6 +264,7 @@ fn mod_turn_step_stream(
         let fallback_profile = model_profile.clone();
         let fallback_system = system_prompt.clone();
         let fallback_snapshot = snapshot.clone();
+        let fallback_tool_result_reminder_suffixes = tool_result_reminder_suffixes.clone();
         let fallback_publication_guards = publication_guards.clone();
         let fallback_query_source = query_source.clone();
         let fallback_observation = observation.clone();
@@ -269,6 +273,8 @@ fn mod_turn_step_stream(
         let fallback_request_capture = request_capture.clone();
         let source_retry_scope = retry_scope.clone();
         let source_request_capture = request_capture.clone();
+        let source_tool_result_reminder_suffixes = tool_result_reminder_suffixes.clone();
+        let source_dispatch_observer = request_dispatch_observer.clone();
         let source = move |forwarded: Utf16JsonProjection| {
             let api = api.clone();
             let main_api = main_api.clone();
@@ -288,6 +294,8 @@ fn mod_turn_step_stream(
             let requested_model = source_requested.clone();
             let retry_scope = source_retry_scope.clone();
             let request_capture = source_request_capture.clone();
+            let request_dispatch_observer = source_dispatch_observer.clone();
+            let tool_result_reminder_suffixes = source_tool_result_reminder_suffixes.clone();
             async move {
                 let requested = forwarded.string_at("/model").unwrap_or_default().to_owned();
                 let resolved = main_api
@@ -344,9 +352,11 @@ fn mod_turn_step_stream(
                         snapshot,
                         tools,
                         effort_override,
+                        tool_result_reminder_suffixes,
                         &query_source,
                         skip_global_cache_for_system_prompt,
                         request_dispatch_admission,
+                        request_dispatch_observer.clone(),
                     )))
                     .await
                     .map_err(|error| {
@@ -516,9 +526,11 @@ fn mod_turn_step_stream(
                                 fallback_snapshot,
                                 fallback_tools,
                                 None,
+                                fallback_tool_result_reminder_suffixes,
                                 &fallback_query_source,
                                 skip_global_cache_for_system_prompt,
                                 request_dispatch_admission,
+                                request_dispatch_observer.clone(),
                             ),
                         ))
                         .await;
@@ -763,7 +775,7 @@ impl StreamingTurnDriver<'_> {
                 .await;
             let cost = orch.snapshot_cost_real().await;
             orch.mark_mod_turn_error();
-            orch.output.emit_end_turn("blocking_limit", &cost).await;
+            orch.emit_turn_terminal("blocking_limit", &cost).await;
             return Ok(PrepareStreamingOutcome::Complete(id));
         }
         // Past the preempt: this step's snapshot WILL be sent, so the
@@ -849,6 +861,7 @@ impl StreamingTurnDriver<'_> {
             mut model_profile,
             outgoing_history_rewriter,
             mut turn_reminders,
+            tool_result_reminder_suffixes,
             mut guarded_async_hook_reminders,
             context_announcements,
             wire_tools,
@@ -901,7 +914,7 @@ impl StreamingTurnDriver<'_> {
         // the OUTGOING snapshot BEFORE it is moved into `.stream(...)`.
         let api_success_message_count = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
         let api_success_message_tokens = compaction::grouping::estimate_tokens_for_range(&snapshot);
-        let did_fall_back_to_non_streaming = false;
+        let mut did_fall_back_to_non_streaming = false;
 
         orch.sync_thinking_signature_strip_flag_to_api().await;
         if let Some(scope) = cost_scope.as_ref() {
@@ -958,11 +971,13 @@ impl StreamingTurnDriver<'_> {
                 snapshot,
                 guarded_async_hook_reminders.clone(),
                 tool_declarations.clone(),
+                tool_result_reminder_suffixes.clone(),
                 skip_global_cache_for_system_prompt,
                 crate::config::sanitize_query_source(&orch.config.query_source).to_owned(),
                 first_output_observation.take().flatten(),
                 retry_scope.clone(),
                 orch.model_runtime.prompt_cache_capture.clone(),
+                orch.turn_request_dispatch_observer(),
             );
             mod_model_state = Some(effective_model.clone());
             // Poll one item before returning so connect-phase provider errors
@@ -1001,20 +1016,21 @@ impl StreamingTurnDriver<'_> {
                     &guarded_async_hook_reminders,
                 );
             retry_scope
-                .run(
-                    orch.model_runtime
-                        .prompt_cache_capture
-                        .scope(orch.streaming_api.stream(
-                            &model,
-                            model_profile.as_deref(),
-                            system_prompt.as_ref(),
-                            snapshot,
-                            tool_declarations.clone(),
-                            crate::config::sanitize_query_source(&orch.config.query_source),
-                            skip_global_cache_for_system_prompt,
-                            request_dispatch_admission,
-                        )),
-                )
+                .run(orch.model_runtime.prompt_cache_capture.scope(
+                    orch.streaming_api.stream_with_effort_override(
+                        &model,
+                        model_profile.as_deref(),
+                        system_prompt.as_ref(),
+                        snapshot,
+                        tool_declarations.clone(),
+                        None,
+                        tool_result_reminder_suffixes.clone(),
+                        crate::config::sanitize_query_source(&orch.config.query_source),
+                        skip_global_cache_for_system_prompt,
+                        request_dispatch_admission,
+                        orch.turn_request_dispatch_observer(),
+                    ),
+                ))
                 .await
                 .map(|stream| {
                     output_accounting_impl::account_stream(
@@ -1024,6 +1040,20 @@ impl StreamingTurnDriver<'_> {
                 })
         };
         orch.persist_thinking_signature_strip_latch().await;
+        // Cancellation can arrive while the HTTP connection is still opening.
+        // Its terminal result must not turn a closed/empty response into an
+        // API-error assistant row before the pump's cancellation checkpoint.
+        if token_aborted(user_cancel) {
+            drop(stream_result);
+            let cost = orch.snapshot_cost_real().await;
+            orch.emit_turn_terminal("aborted_streaming", &cost).await;
+            if orch.cancel_reason_now()
+                != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
+            {
+                orch.inject_user_message(INTERRUPT_MESSAGE).await;
+            }
+            return Ok(OpenStreamingOutcome::Complete(assistant_id));
+        }
         if stream_result.is_err() {
             if let Some(reason) = retry_scope.take_model_fallback_request() {
                 Self::advance_model(orch, loop_state, &model, model_profile.as_deref(), reason)
@@ -1033,6 +1063,70 @@ impl StreamingTurnDriver<'_> {
         }
         let opened = match stream_result {
             Ok(s) => OpenedModelStream::Stream(s),
+            // Native retries an HTTP model-not-found response once without
+            // streaming on the same model. A local registry miss has no HTTP
+            // facts and must never dispatch this fallback.
+            Err(error)
+                if error.native_anthropic_error_facts().is_some()
+                    && error.http_status() == Some(404)
+                    && !is_env_truthy(
+                        std::env::var(branding::DISABLE_NONSTREAMING_FALLBACK_ENV)
+                            .as_deref()
+                            .ok(),
+                    )
+                    && retry_scope.take_non_streaming_fallback() =>
+            {
+                did_fall_back_to_non_streaming = true;
+                match Self::fallback_after_stream_error(
+                    orch,
+                    OrchestratorError::Streaming(error),
+                    outgoing_history_rewriter.as_ref(),
+                    deferred_reminder.as_ref(),
+                    date_change_reminder.as_ref(),
+                    &mut turn_reminders,
+                    &mut guarded_async_hook_reminders,
+                    &context_announcements,
+                    &wire_tools,
+                    skip_global_cache_for_system_prompt,
+                    system_prompt,
+                    user_cancel,
+                    display_hook_active,
+                    loop_state.native_query_depth,
+                    assistant_id,
+                    cost_scope.as_ref(),
+                    api_call_started,
+                    retry_scope,
+                    false,
+                )
+                .await
+                {
+                    Ok(StreamErrorFallback::Recovered {
+                        pumped,
+                        executor,
+                        cost_receipt: fallback_cost_receipt,
+                    }) => {
+                        exec = executor;
+                        cost_receipt = fallback_cost_receipt;
+                        OpenedModelStream::Recovered(pumped)
+                    }
+                    Ok(StreamErrorFallback::Declined(message_id)) => {
+                        return Ok(OpenStreamingOutcome::Complete(message_id));
+                    }
+                    Err(error) if crate::turn_loop::is_carveout_propagated(&error) => {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        let env = classify_api_error(&error);
+                        let text = crate::turn_loop::orchestrator_error_text_source(&error, &model);
+                        let message_id =
+                            crate::turn_loop::surface_model_error(orch, text, env).await;
+                        let cost = orch.snapshot_cost_real().await;
+                        orch.mark_mod_turn_error();
+                        orch.emit_turn_terminal("model_error", &cost).await;
+                        return Ok(OpenStreamingOutcome::Complete(message_id));
+                    }
+                }
+            }
             // #1 (main-loop parity): a connect-phase 413 / prompt-too-long
             // surfaces HERE as `LlmError::ContextOverflow` — the adapter's
             // `drive_stream` returns `Err` on connect status >= 400, so it
@@ -1099,6 +1193,7 @@ impl StreamingTurnDriver<'_> {
                     deferred_reminder.clone(),
                     date_change_reminder.clone(),
                     turn_reminders.clone(),
+                    tool_result_reminder_suffixes.clone(),
                     &mut guarded_async_hook_reminders,
                     &context_announcements,
                     cost_scope.as_ref(),
@@ -1120,6 +1215,10 @@ impl StreamingTurnDriver<'_> {
                         // a fresh executor, register its tool_uses, and flow on
                         // as the turn's `pumped` result.
                         let mut pumped_from_recovery = llm_response_to_pumped_turn(&resp);
+                        if let Some(timing_capture) = orch.active_turn_timing_capture() {
+                            timing_capture.discard_unobserved_request_dispatch();
+                            pumped_from_recovery.timing_capture = Some(timing_capture);
+                        }
                         cost_receipt = Self::begin_stream_cost_response(
                             orch,
                             cost_scope.as_ref(),
@@ -1203,7 +1302,7 @@ impl StreamingTurnDriver<'_> {
                             .await;
                         let cost = orch.snapshot_cost_real().await;
                         orch.mark_mod_turn_error();
-                        orch.output.emit_end_turn("prompt_too_long", &cost).await;
+                        orch.emit_turn_terminal("prompt_too_long", &cost).await;
                         return Ok(OpenStreamingOutcome::Complete(id));
                     }
                     PtlCallOutcome::BlockingLimit => {
@@ -1224,7 +1323,7 @@ impl StreamingTurnDriver<'_> {
                             .await;
                         let cost = orch.snapshot_cost_real().await;
                         orch.mark_mod_turn_error();
-                        orch.output.emit_end_turn("blocking_limit", &cost).await;
+                        orch.emit_turn_terminal("blocking_limit", &cost).await;
                         return Ok(OpenStreamingOutcome::Complete(id));
                     }
                     PtlCallOutcome::RapidRefillBreaker => {
@@ -1245,9 +1344,7 @@ impl StreamingTurnDriver<'_> {
                             .await;
                         let cost = orch.snapshot_cost_real().await;
                         orch.mark_mod_turn_error();
-                        orch.output
-                            .emit_end_turn("rapid_refill_breaker", &cost)
-                            .await;
+                        orch.emit_turn_terminal("rapid_refill_breaker", &cost).await;
                         return Ok(OpenStreamingOutcome::Complete(id));
                     }
                 }
@@ -1277,7 +1374,7 @@ impl StreamingTurnDriver<'_> {
                 let id = crate::turn_loop::surface_model_error(orch, error_text, env).await;
                 let cost = orch.snapshot_cost_real().await;
                 orch.mark_mod_turn_error();
-                orch.output.emit_end_turn("model_error", &cost).await;
+                orch.emit_turn_terminal("model_error", &cost).await;
                 return Ok(OpenStreamingOutcome::Complete(id));
             }
         };
@@ -1291,6 +1388,7 @@ impl StreamingTurnDriver<'_> {
             model_profile,
             outgoing_history_rewriter,
             turn_reminders,
+            tool_result_reminder_suffixes,
             guarded_async_hook_reminders,
             context_announcements,
             wire_tools,
@@ -1497,6 +1595,10 @@ impl StreamingTurnDriver<'_> {
         // Convert HistoryResponse → PumpedTurn so the rest of the streaming
         // turn loop can proceed identically.
         let mut pumped_from_fallback = llm_response_to_pumped_turn(&resp);
+        if let Some(timing_capture) = orch.active_turn_timing_capture() {
+            timing_capture.discard_unobserved_request_dispatch();
+            pumped_from_fallback.timing_capture = Some(timing_capture);
+        }
         pumped_from_fallback.handled_server_fallback_events = handled_server_fallback_events;
         let cost_receipt = Self::begin_stream_cost_response(
             orch,
@@ -1668,6 +1770,7 @@ impl StreamingTurnDriver<'_> {
             model_profile,
             outgoing_history_rewriter,
             mut turn_reminders,
+            tool_result_reminder_suffixes,
             mut guarded_async_hook_reminders,
             context_announcements,
             wire_tools,
@@ -1965,7 +2068,7 @@ impl StreamingTurnDriver<'_> {
                             let retry_stream = retry_scope
                                 .run(
                                     orch.model_runtime.prompt_cache_capture.scope(
-                                        orch.streaming_api.stream(
+                                        orch.streaming_api.stream_with_effort_override(
                                             &re_model,
                                             re_profile.as_deref(),
                                             system_prompt.as_ref(),
@@ -1974,11 +2077,14 @@ impl StreamingTurnDriver<'_> {
                                                 wire_tools.clone(),
                                             )
                                             .map_err(OrchestratorError::ApiCall)?,
+                                            None,
+                                            tool_result_reminder_suffixes.clone(),
                                             crate::config::sanitize_query_source(
                                                 &orch.config.query_source,
                                             ),
                                             skip_global_cache_for_system_prompt,
                                             request_dispatch_admission,
+                                            orch.turn_request_dispatch_observer(),
                                         ),
                                     ),
                                 )
@@ -2364,7 +2470,7 @@ impl StreamingTurnDriver<'_> {
                         crate::server_fallback::flush_pending_notice(orch).await;
                         let cost = orch.snapshot_cost_real().await;
                         orch.mark_mod_turn_error();
-                        orch.output.emit_end_turn("model_error", &cost).await;
+                        orch.emit_turn_terminal("model_error", &cost).await;
                         return Ok(PumpStreamingOutcome::Complete(id));
                     }
                 }
@@ -2421,6 +2527,7 @@ impl StreamingTurnDriver<'_> {
                         model_profile: model_profile.clone(),
                         outgoing_history_rewriter,
                         turn_reminders,
+                        tool_result_reminder_suffixes,
                         guarded_async_hook_reminders,
                         context_announcements,
                         wire_tools: wire_tools.clone(),
@@ -2638,6 +2745,9 @@ impl StreamingTurnDriver<'_> {
         {
             return Ok(FinalizedStreamingIteration::Complete(assistant_id));
         }
+        // The first-frame metric is latched at event receipt. Publish TTFT
+        // only once the assistant row passes the conversation's guard.
+        pumped.commit_accepted_assistant_timing();
         orch.record_mod_turn_response(
             &assistant_msg,
             pumped.usage.as_ref(),
@@ -3204,7 +3314,7 @@ impl StreamingTurnDriver<'_> {
                 } else {
                     ("aborted_tools", INTERRUPT_MESSAGE_FOR_TOOL_USE)
                 };
-                orch.output.emit_end_turn(abort_reason, &cost).await;
+                orch.emit_turn_terminal(abort_reason, &cost).await;
                 // NOW-ABORT disambiguation: a `Now`-driven cancellation means the
                 // urgent queued command will run next via the between-turn drain —
                 // DON'T inject the user-interrupt message. For a plain user
@@ -3267,7 +3377,7 @@ impl StreamingTurnDriver<'_> {
                     .await;
                 let cost = orch.snapshot_cost_real().await;
                 orch.mark_mod_turn_error();
-                orch.output.emit_end_turn("model_error", &cost).await;
+                orch.emit_turn_terminal("model_error", &cost).await;
                 return Ok(Some(StepExit::FinishThroughEpilogue(
                     partial_finalize_notice_id.unwrap_or(assistant_id),
                 )));
@@ -3611,7 +3721,7 @@ impl StreamingTurnDriver<'_> {
                 .is_some_and(CancellationToken::is_cancelled)
             {
                 let cost = orch.snapshot_cost_real().await;
-                orch.output.emit_end_turn("aborted_streaming", &cost).await;
+                orch.emit_turn_terminal("aborted_streaming", &cost).await;
                 // NOW-ABORT disambiguation: when the cancellation was driven by a
                 // `Now`-priority enqueue (not a user Ctrl+C/ESC), the urgent
                 // command IS the "interruption" and will be run next by the

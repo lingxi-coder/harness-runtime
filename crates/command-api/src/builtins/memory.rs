@@ -94,7 +94,10 @@ mod tests {
         let h = MemoryHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Edited /home/u/.config/claude/LINGXI.md (exit 0).");
+                assert_eq!(
+                    s,
+                    "Edited /home/u/.config/claude/LINGXI.md (exit 0).".into()
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -108,7 +111,7 @@ mod tests {
         let h = MemoryHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Edited /tmp/LINGXI.md (exit 2).");
+                assert_eq!(s, "Edited /tmp/LINGXI.md (exit 2).".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -123,7 +126,7 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
                     s,
-                    "Could not edit memory: handle action failed: EDITOR not found"
+                    "Could not edit memory: handle action failed: EDITOR not found".into()
                 );
             }
             other => panic!("expected Done, got {other:?}"),

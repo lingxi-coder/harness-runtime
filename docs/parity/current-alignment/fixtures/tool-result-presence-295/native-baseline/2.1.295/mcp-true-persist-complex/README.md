@@ -1,0 +1,9 @@
+# Native 2.1.295 MCP error persistence and cold-resume fixture
+
+This is a separate one-tool public CLI capture; the earlier omitted/false/true baseline remains unchanged. It uses the pinned 2.1.295 binary, an isolated HOME/config, one local stdio MCP server, a dummy API key, and a loopback-only Anthropic Messages stub. The captured run and a public `--resume` both completed without contacting an upstream service.
+
+The MCP result sets `isError:true` and contains a whitespace-only text block, a second text block with surrounding whitespace and an escaped lone U+D800, and a small image block. Native accepts the response. Its persisted JSONL `tool_result.content` is `mcp-error-\ud800-tail`, and the separate `toolUseResult` field is `Error: mcp-error-\ud800-tail`; the raw files preserve those escapes and the row/block key order. The initial and cold-resume SDK request slices both carry `mcp-error-\ufffd-tail` followed by the total-token reminder, with `is_error:true`. The cold-resume slice omits `cache_control`.
+
+The raw JSON-RPC, SSE, SDK request bodies, actual JSONL row, exact `toolUseResult` JSON value, and receipts are stored here. `manifest.json` records byte lengths and SHA-256 values. The full raw user row includes generated UUIDs, timestamp, and a temporary cwd; those are retained as raw evidence and listed as dynamic fields, not normalized into a byte-pass claim. The fixture input and runner are next to the corresponding capture scripts under `fixtures/tool-result-presence-295/mcp/complex-error-persistence/`.
+
+To replay, set `CLAUDE_NATIVE_BINARY` to the exact 2.1.295 executable and run `python3 docs/parity/current-alignment/fixtures/tool-result-presence-295/mcp/complex-error-persistence/run-native.py`. It checks the binary version and SHA before starting. Output is written under the ignored `fixtures/tool-result-presence-295/run-output/` directory.

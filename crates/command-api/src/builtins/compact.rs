@@ -217,7 +217,7 @@ mod tests {
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Compacted (ctrl+o to see full summary)");
+                assert_eq!(s, "Compacted (ctrl+o to see full summary)".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -232,7 +232,7 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 // claude shows the fixed "Error compacting conversation" — the
                 // underlying error goes to telemetry, not the display.
-                assert_eq!(s, "Error compacting conversation");
+                assert_eq!(s, "Error compacting conversation".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -245,7 +245,7 @@ mod tests {
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Not enough messages to compact.");
+                assert_eq!(s, "Not enough messages to compact.".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -260,6 +260,7 @@ mod tests {
             CommandResult::Done { display: Some(s) } => assert_eq!(
                 s,
                 "Conversation too long. Press esc twice to go up a few messages and try again."
+                    .into()
             ),
             other => panic!("expected Done, got {other:?}"),
         }
@@ -274,7 +275,7 @@ mod tests {
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Compaction blocked by PreCompact hook: policy");
+                assert_eq!(s, "Compaction blocked by PreCompact hook: policy".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -350,7 +351,7 @@ mod tests {
         let h = CompactHandler::new(mock);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Compacted (ctrl+o to see full summary)");
+                assert_eq!(s, "Compacted (ctrl+o to see full summary)".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -419,6 +420,7 @@ mod tests {
                             citations: None,
                         }],
                         stop_reason: Some("end_turn".into()),
+                        resumable: None,
                     });
                 }
             }
@@ -429,8 +431,9 @@ mod tests {
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
-                    s, "Error during compaction: no forked summarizer wired",
-                    "got: {s}"
+                    s,
+                    "Error during compaction: no forked summarizer wired".into(),
+                    "got: {s:?}"
                 );
             }
             other => panic!("expected Done, got {other:?}"),

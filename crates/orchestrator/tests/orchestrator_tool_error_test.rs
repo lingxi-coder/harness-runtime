@@ -27,10 +27,20 @@ impl Tool for AlwaysFailingTool {
     fn name(&self) -> &str {
         "AlwaysFail"
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| json!({"type": "object"}));
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -38,22 +48,25 @@ impl Tool for AlwaysFailingTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -65,7 +78,11 @@ impl Tool for AlwaysFailingTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "fail".into()
     }
     async fn prompt(
@@ -76,7 +93,7 @@ impl Tool for AlwaysFailingTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -91,14 +108,18 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
         vec![LlmContentBlock::ToolCall {
             id: tool_use_id.to_string(),
             name: "AlwaysFail".into(),
-            input: json!({}),
+            input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(&json!(
+                {}
+            ))
+            .expect("generated tool input fixture"),
         }],
         Some("tool_use"),
     );
     let r2 = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "sorry, fix it later".into(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -139,8 +160,8 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
         })
         .expect("ToolResult event present");
     assert!(
-        tool_result.get("error").is_some(),
-        "result envelope: {tool_result}"
+        tool_result.contains_property("error"),
+        "result envelope: {tool_result:?}"
     );
 
     // The session's third message must be the user message carrying the
@@ -161,8 +182,16 @@ async fn tool_error_becomes_tool_result_with_is_error_true_and_loop_continues() 
                     ..
                 } => {
                     assert_eq!(*id, tool_use_id);
-                    assert!(text.starts_with("Error: "), "byte-locked prefix: {text}");
-                    assert!(text.contains("disk on fire"), "preserves payload: {text}");
+                    assert!(
+                        text.string_at("")
+                            .is_some_and(|source| source.starts_with("Error: ")),
+                        "byte-locked prefix: {text:?}"
+                    );
+                    assert!(
+                        text.string_at("")
+                            .is_some_and(|source| source.contains("disk on fire")),
+                        "preserves payload: {text:?}"
+                    );
                     assert!(is_error.unwrap_or(false));
                 }
                 _ => panic!("expected ToolResult content block"),

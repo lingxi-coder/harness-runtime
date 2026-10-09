@@ -1,0 +1,6 @@
+{"jsonrpc":"2.0","id":"server-discover-probe-1","error":{"code":-32601,"message":"fixture uses the standard notifications fallback"}}
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false},"prompts":{"listChanged":false},"resources":{"listChanged":true,"subscribe":false}},"serverInfo":{"name":"resources-interrupt-fixture","version":"1.0.0"}}}
+{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[]}}
+{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","prompts":[]}}
+{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","resources":[{"uri":"fixture://resources/initial.txt","name":"Initial fixture resource","description":"Makes the Native ListMcpResourcesTool path model-visible.","mimeType":"text/plain"}]}}
+{"jsonrpc":"2.0","method":"notifications/resources/list_changed","params":{}}

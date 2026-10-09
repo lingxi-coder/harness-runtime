@@ -1071,10 +1071,10 @@ mod tests {
 
         assert_eq!(
             result.data,
-            json!({
+            source_value(&json!({
                 "resources": [],
                 "error": "Server \"cached\" does not support directory listing."
-            })
+            }))
         );
         assert_eq!(transport.connect_calls("cached"), 1);
         assert_eq!(
@@ -1120,10 +1120,10 @@ mod tests {
 
         assert_eq!(
             result.data,
-            json!({
+            source_value(&json!({
                 "resources": [],
                 "error": "Server \"cached\" does not support resources"
-            })
+            }))
         );
         assert_eq!(transport.connect_calls("cached"), 1);
         assert_eq!(

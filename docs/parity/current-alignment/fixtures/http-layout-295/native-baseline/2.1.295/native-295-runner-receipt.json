@@ -1,0 +1,65 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "native_bytes": 239695888,
+  "primary_runner_commit": "1d7e55259a16c476eba652a7252f152009862d30",
+  "primary_runner_source_files": {
+    "scripts/tests/headless_native_differential.mjs": {
+      "bytes": 21074,
+      "sha256": "78b867ea36327a20b6988a28c2a0d30c5dbc91c27ad7a6aeafeb080931e3c946"
+    },
+    "scripts/tests/headless-byte-compare.mjs": {
+      "bytes": 19900,
+      "sha256": "c8a9b7de971788082e195c8d66945434ff847e3f93190e959c31b1eb7807cfbd"
+    },
+    "scripts/tests/headless-fixtures/matrix.mjs": {
+      "bytes": 16727,
+      "sha256": "bab9e2ce77a5a96f2dc3b640765fad3a394ae73f40c7e513bc30beb25f1038d0"
+    },
+    "scripts/tests/headless-fixtures/loopback-provider.mjs": {
+      "bytes": 9356,
+      "sha256": "b445507ddcdfa705d3e183e84ea2812ab6c78c3e2b7f3456bedff99651d182d1"
+    },
+    "scripts/tests/headless-fixtures/capture.mjs": {
+      "bytes": 15927,
+      "sha256": "2204f442b5aaf72b64c9d3d0af00534028ffed43b1bd8e007ae4452337d55d58"
+    },
+    "scripts/tests/headless-fixtures/normalization-adapter.mjs": {
+      "bytes": 18001,
+      "sha256": "452b3711fbb73d6e4b4d9fe1e0a25e2397671015942e68cc4c37dea111c7b0cd"
+    }
+  },
+  "baseline_file_overridden_in_temporary_archive": "docs/parity/headless-native-baseline.json",
+  "original_293_baseline_source_sha256": "1e2f3d242c35d23f8f152fe48bfcd49a06a7cae597f26ede8d006f04eac417a6",
+  "temporary_baseline_override": {
+    "scope": "version/release/binary identity fields only; no fixture, capture or comparison code changed",
+    "target_version": "2.1.295",
+    "target_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "node_version": "v25.2.1",
+  "invocation": [
+    "/opt/homebrew/bin/node",
+    "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/headless-native-295-primary-runner-5l3waqln/scripts/tests/headless_native_differential.mjs",
+    "--execute",
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "--only",
+    "print-text",
+    "--output",
+    "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/run-output/native-2.1.295-print-text-final"
+  ],
+  "fixture_id": "print-text",
+  "native_repetitions": 2,
+  "native_only": true,
+  "dummy_key_only": true,
+  "provider_boundary": "127.0.0.1 loopback stub from the pinned primary runner; no upstream relay",
+  "runner_exit_code": 0,
+  "runner_stdout": {
+    "bytes": 579,
+    "sha256": "1dc7fa5fe6937e84034cd5e5dc607465c0403c4e1455dbf4023149259b618f3d"
+  },
+  "runner_stderr": {
+    "bytes": 136,
+    "sha256": "61c27ab206e7228782e2a92500ba90e9ebcc69b37c67bd6a99210fbc3571282a"
+  },
+  "report": "report.json"
+}

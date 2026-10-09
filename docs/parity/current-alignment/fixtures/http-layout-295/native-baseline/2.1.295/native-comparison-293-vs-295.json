@@ -1,0 +1,203 @@
+{
+  "native_293": {
+    "version": "2.1.293",
+    "sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+    "source": "../http-layout/run-output/native-2.1.293-print-text-20261008-rerun1"
+  },
+  "native_295": {
+    "version": "2.1.295",
+    "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "source": "run-output/native-2.1.295-print-text-final"
+  },
+  "primary_runner": {
+    "commit": "1d7e55259a16c476eba652a7252f152009862d30",
+    "runner_files": {
+      "scripts/tests/headless_native_differential.mjs": {
+        "bytes": 21074,
+        "sha256": "78b867ea36327a20b6988a28c2a0d30c5dbc91c27ad7a6aeafeb080931e3c946"
+      },
+      "scripts/tests/headless-byte-compare.mjs": {
+        "bytes": 19900,
+        "sha256": "c8a9b7de971788082e195c8d66945434ff847e3f93190e959c31b1eb7807cfbd"
+      },
+      "scripts/tests/headless-fixtures/matrix.mjs": {
+        "bytes": 16727,
+        "sha256": "bab9e2ce77a5a96f2dc3b640765fad3a394ae73f40c7e513bc30beb25f1038d0"
+      },
+      "scripts/tests/headless-fixtures/loopback-provider.mjs": {
+        "bytes": 9356,
+        "sha256": "b445507ddcdfa705d3e183e84ea2812ab6c78c3e2b7f3456bedff99651d182d1"
+      },
+      "scripts/tests/headless-fixtures/capture.mjs": {
+        "bytes": 15927,
+        "sha256": "2204f442b5aaf72b64c9d3d0af00534028ffed43b1bd8e007ae4452337d55d58"
+      },
+      "scripts/tests/headless-fixtures/normalization-adapter.mjs": {
+        "bytes": 18001,
+        "sha256": "452b3711fbb73d6e4b4d9fe1e0a25e2397671015942e68cc4c37dea111c7b0cd"
+      }
+    },
+    "temporary_baseline_override": {
+      "scope": "version/release/binary identity fields only; no fixture, capture or comparison code changed",
+      "target_version": "2.1.295",
+      "target_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+    }
+  },
+  "same_fixed_input": {
+    "fixture": "print-text",
+    "argv": [
+      "--bare",
+      "--print",
+      "--output-format",
+      "text",
+      "--model",
+      "claude-sonnet-5-5",
+      "--system-prompt",
+      "You are a local deterministic headless fixture.",
+      "--tools",
+      "",
+      "--permission-mode",
+      "dontAsk",
+      "--permission-prompts",
+      "none",
+      "--session-id",
+      "6b7ff52d-e492-4084-88e2-5ad153e3c053",
+      "Return HEADLESS_LOCAL_RESPONSE."
+    ],
+    "native_repetitions": 2,
+    "dummy_key_only": true,
+    "loopback_only": true
+  },
+  "capture_outcome": {
+    "process_exit_codes": [
+      0,
+      0
+    ],
+    "stdout_bytes": [
+      24,
+      24
+    ],
+    "stdout_sha256": [
+      "4605a4223dd7f4d3fcc62f19200672ae830df3fa140fa179cd0eadd5ae203ab6",
+      "4605a4223dd7f4d3fcc62f19200672ae830df3fa140fa179cd0eadd5ae203ab6"
+    ],
+    "stderr_bytes": [
+      0,
+      0
+    ],
+    "messages_requests_per_run": [
+      1,
+      1
+    ],
+    "unexpected_provider_requests": [
+      [],
+      []
+    ],
+    "native_295_headers_raw_equal_across_runs": true,
+    "native_295_bodies_raw_equal_across_runs": false,
+    "native_295_native_native_comparison": {
+      "equal": false,
+      "request_headers_raw_equal": true,
+      "request_bodies_raw_equal": false,
+      "request_body_difference": {
+        "offset": 628,
+        "length": 64,
+        "field": "metadata.user_id.device_id"
+      },
+      "offered_and_actual_response_raw_equal": true,
+      "stdout_raw_equal": true,
+      "stderr_raw_equal": true,
+      "session_jsonl_sizes": [
+        4399,
+        4400
+      ],
+      "session_jsonl_raw_equal": false,
+      "session_jsonl_variation": "timestamps and resulting length only as recorded by primary runner; no session rows are copied to this fixture"
+    }
+  },
+  "header_raw": {
+    "native_293_bytes": 935,
+    "native_293_sha256": "8cbda942fc7f3af7681116430a7bffc868b01b4cb682489c9850da34f4c8c448",
+    "native_295_bytes": 935,
+    "native_295_sha256": "38dd23c5c6039f08c1ec8a0452ce70b3e749cab03548ea185633cbc461a533b5",
+    "raw_equal_across_versions": false,
+    "exact_different_raw_lines": [
+      {
+        "line_index": 3,
+        "native_293_raw": "User-Agent: claude-cli/2.1.293 (external, sdk-cli)",
+        "native_295_raw": "User-Agent: claude-cli/2.1.295 (external, sdk-cli)"
+      },
+      {
+        "line_index": 19,
+        "native_293_raw": "Host: 127.0.0.1:54086",
+        "native_295_raw": "Host: 127.0.0.1:58855"
+      }
+    ],
+    "all_other_header_lines_byte_equal": true
+  },
+  "body_raw": {
+    "native_293_bytes": 978,
+    "native_293_sha256": "8751c228e6c5d3e2d7e1b9a0199a53b396156c792b1309170c667dc55a1f5510",
+    "native_295_bytes": 978,
+    "native_295_sha256": "646bc0dc8dc166cbe2ceae32543f92193c1d55a0e580e8e15cb08d81009f2203",
+    "raw_equal_across_versions": false,
+    "first_raw_difference_offset": 309,
+    "only_changed_literal_source_ranges": [
+      {
+        "offset": 303,
+        "length": 11,
+        "field": "billing-version"
+      },
+      {
+        "offset": 628,
+        "length": 64,
+        "field": "device-id"
+      }
+    ],
+    "all_raw_bytes_outside_these_two_ranges_equal": true,
+    "fields": {
+      "native_293_billing_system_text": "x-anthropic-billing-header: cc_version=2.1.293.7c5; cc_entrypoint=sdk-cli;",
+      "native_295_billing_system_text": "x-anthropic-billing-header: cc_version=2.1.295.fa6; cc_entrypoint=sdk-cli;",
+      "top_level_key_order_equal": true,
+      "messages_raw_content_equal": true,
+      "other_top_level_values_equal": true
+    }
+  },
+  "identity_fields": {
+    "metadata_user_id_inner_keys": [
+      "device_id",
+      "account_uuid",
+      "session_id"
+    ],
+    "device_id": {
+      "native_293_length": 64,
+      "native_295_length": 64,
+      "format": "64 lowercase hex",
+      "values_differ": true,
+      "literal_values_recorded": false,
+      "values_available_only_in_raw_request_body_artifacts": true
+    },
+    "account_uuid": {
+      "native_293": "",
+      "native_295": "",
+      "equal": true
+    },
+    "metadata_session_id": {
+      "native_293": "6b7ff52d-e492-4084-88e2-5ad153e3c053",
+      "native_295": "6b7ff52d-e492-4084-88e2-5ad153e3c053",
+      "equal": true
+    },
+    "X-Claude-Code-Session-Id": {
+      "native_293": "6b7ff52d-e492-4084-88e2-5ad153e3c053",
+      "native_295": "6b7ff52d-e492-4084-88e2-5ad153e3c053",
+      "equal": true
+    }
+  },
+  "response_raw": {
+    "native_293_offered_bytes": 862,
+    "native_295_offered_bytes": 862,
+    "offered_response_raw_equal": true,
+    "native_295_stdout_raw_equal_across_runs": true
+  },
+  "claim": "Native-only 2.1.295 capture. Raw header/body/request/response files are preserved unchanged. The cross-version body comparison records only the exact billing-version and nested device-id source ranges; all bytes outside those ranges are identical. No request body was reserialized for byte comparison; no candidate Harness/Product call was made."
+}

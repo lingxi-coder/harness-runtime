@@ -313,7 +313,10 @@ async fn unknown_command_uses_locked_literal() {
     match outcome {
         SlashDispatchResult::Unknown { name, display } => {
             assert_eq!(name.string_at(""), Some("definitely-not-a-real-command"));
-            assert_eq!(display, "Unknown command: /definitely-not-a-real-command");
+            assert_eq!(
+                display.string_at(""),
+                Some("Unknown command: /definitely-not-a-real-command")
+            );
         }
         other => panic!("expected Unknown, got {other:?}"),
     }
@@ -480,7 +483,10 @@ async fn target_implemented_commands_do_not_return_m5_stub() {
             positional_args: vec![],
         };
         if let command_api::CommandResult::Done { display: Some(s) } = h.handle(&args).await {
-            assert_ne!(s, format!("{name}: not implemented in v0.6.0 (M5)"));
+            assert_ne!(
+                s.string_at(""),
+                Some(format!("{name}: not implemented in v0.6.0 (M5)").as_str())
+            );
         }
     }
 }

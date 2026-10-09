@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false},"prompts":{"listChanged":false},"resources":{"listChanged":false,"subscribe":false}},"serverInfo":{"name":"pagination-fixture","version":"1.0.0"}}}

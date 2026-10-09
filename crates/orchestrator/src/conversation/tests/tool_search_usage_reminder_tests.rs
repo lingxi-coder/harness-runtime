@@ -1,9 +1,9 @@
 use super::*;
+use crate::test_support::{
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+};
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
-use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
-};
 use lingxi_core::types::MessageId;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -29,34 +29,48 @@ impl Tool for DeferTool {
     fn should_defer(&self) -> bool {
         self.defer
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(
-            || serde_json::json!({ "type": "object", "properties": {} }),
-        );
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &serde_json::json!({ "type": "object", "properties": {} }),
+                )
+            });
         &SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -66,7 +80,11 @@ impl Tool for DeferTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         String::new()
     }
     async fn prompt(
@@ -77,17 +95,18 @@ impl Tool for DeferTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: serde_json::json!({}),
+            data: tool_api::tool_trait::generated_builtin_result(&serde_json::json!({})),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -165,11 +184,10 @@ async fn with_the_gate_on_it_lists_the_undiscovered_tools_sorted() {
         .with_coordinator_mode(mode.clone())
         .with_coordinator_simple_mode_for_test(false);
     assert!(orch.tools.find_by_name("ToolSearch").is_some());
-    assert!(
-        orch.tool_search_usage_reminder_message(false)
-            .await
-            .is_none()
-    );
+    assert!(orch
+        .tool_search_usage_reminder_message(false)
+        .await
+        .is_none());
     mode.0.store(false, std::sync::atomic::Ordering::SeqCst);
     let msg = orch.tool_search_usage_reminder_message(false).await;
     std::env::remove_var("LINGXI_TOOL_SEARCH_REMINDER");
@@ -180,11 +198,10 @@ async fn with_the_gate_on_it_lists_the_undiscovered_tools_sorted() {
         "sorted, no remainder; got: {text}"
     );
     // The mark was recorded ⇒ the next call is inside the interval.
-    assert!(
-        orch.tool_search_usage_reminder_message(false)
-            .await
-            .is_none()
-    );
+    assert!(orch
+        .tool_search_usage_reminder_message(false)
+        .await
+        .is_none());
 }
 
 #[tokio::test]

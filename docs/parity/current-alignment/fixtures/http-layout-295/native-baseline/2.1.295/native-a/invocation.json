@@ -1,0 +1,37 @@
+{
+  "command": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "argv": [
+    "--bare",
+    "--print",
+    "--output-format",
+    "text",
+    "--model",
+    "claude-sonnet-5-5",
+    "--system-prompt",
+    "You are a local deterministic headless fixture.",
+    "--tools",
+    "",
+    "--permission-mode",
+    "dontAsk",
+    "--permission-prompts",
+    "none",
+    "--session-id",
+    "6b7ff52d-e492-4084-88e2-5ad153e3c053",
+    "Return HEADLESS_LOCAL_RESPONSE."
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/run-output/native-2.1.295-print-text-final/print-text/workspace",
+  "environment": {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "LANG": "C.UTF-8",
+    "TMPDIR": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/run-output/native-2.1.295-print-text-final/print-text/tmp",
+    "HOME": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/run-output/native-2.1.295-print-text-final/print-text/state/isolated-home",
+    "CLAUDE_CONFIG_DIR": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/run-output/native-2.1.295-print-text-final/print-text/state",
+    "ANTHROPIC_API_KEY": "<fixed-dummy>",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:58855",
+    "DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_AUTOUPDATER": "1"
+  },
+  "inheritedEnvironment": false
+}

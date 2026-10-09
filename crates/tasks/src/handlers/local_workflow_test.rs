@@ -42,11 +42,21 @@ async fn nested_name_resolves_plugin_snapshot_after_saved_miss() {
 
 #[test]
 fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
-    assert!(workflow_result_value_is_empty(&json!("")));
-    assert!(workflow_result_value_is_empty(&json!([])));
-    assert!(workflow_result_value_is_empty(&json!({})));
-    assert!(workflow_result_value_is_empty(&json!({"items": []})));
-    assert!(!workflow_result_value_is_empty(&json!({"items": [1]})));
+    assert!(workflow_result_projection_is_empty(
+        &Utf16JsonProjection::parse(r#""""#).unwrap()
+    ));
+    assert!(workflow_result_projection_is_empty(
+        &Utf16JsonProjection::parse("[]").unwrap()
+    ));
+    assert!(workflow_result_projection_is_empty(
+        &Utf16JsonProjection::parse("{}").unwrap()
+    ));
+    assert!(workflow_result_projection_is_empty(
+        &Utf16JsonProjection::parse(r#"{"items": []}"#).unwrap()
+    ));
+    assert!(!workflow_result_projection_is_empty(
+        &Utf16JsonProjection::parse(r#"{"items": [1]}"#).unwrap()
+    ));
 
     let mut metrics = WorkflowRunMetrics::default();
     metrics.record_cached(0, None, None, "[]");
@@ -57,7 +67,7 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
         &Ok(SubagentResult::Completed {
             handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
-            content: json!("answer"),
+            content: Utf16JsonProjection::parse(r#""answer""#).unwrap(),
             usage: SubagentUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,
@@ -238,7 +248,7 @@ fn completed_probe_result(agent_id: lingxi_core::types::AgentId) -> SubagentResu
     SubagentResult::Completed {
         handback: None,
         agent_id,
-        content: Value::String("done".to_string()),
+        content: Utf16JsonProjection::parse(r#""done""#).unwrap(),
         usage: SubagentUsage::default(),
         total_tool_use_count: 0,
         total_duration_ms: 0,
@@ -854,6 +864,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
                                 text: "hello from child".to_string(), citations: None,
                             }],
                             stop_reason: None,
+                            resumable: None,
                         }
                     })
                 ),
@@ -863,7 +874,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
         Ok(SubagentResult::Completed {
             handback: None,
             agent_id,
-            content: Value::String("ok".to_string()),
+            content: Utf16JsonProjection::parse(r#""ok""#).unwrap(),
             usage: SubagentUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,
@@ -3347,7 +3358,13 @@ async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
     };
     h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
     assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
-    let mut seen = spawner2.seen.lock().unwrap().clone();
+    let mut seen: Vec<_> = spawner2
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|prompt| prompt.string_at("").unwrap().to_owned())
+        .collect();
     seen.sort();
     assert_eq!(
         seen,
@@ -4912,7 +4929,7 @@ async fn workflow_live_observer_writes_rich_snapshots_to_spool() {
         &observer,
         lingxi_core::host::subagent_spawn::SubagentObservation::Completed {
             agent_id,
-            content: Value::String("done".to_string()),
+            content: Utf16JsonProjection::parse(r#""done""#).unwrap(),
             total_tool_use_count: 3,
             total_duration_ms: 55,
             usage: SubagentUsage {
@@ -5003,6 +5020,7 @@ async fn workflow_observer_projects_message_rows_and_refusal_rows_without_treati
             provider_id: Some("provider-read".into()),
         }],
         stop_reason: Some("tool_use".into()),
+        resumable: None,
     };
 
     lingxi_core::host::subagent_spawn::SubagentSpawnObserver::on_event(

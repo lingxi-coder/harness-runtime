@@ -85,7 +85,7 @@ struct Fired {
     message_id: String,
     index: u64,
     is_final: bool,
-    delta: String,
+    delta: lingxi_core::types::utf16_json::Utf16JsonProjection,
 }
 
 type FiredLog = Arc<Mutex<Vec<Fired>>>;
@@ -138,20 +138,20 @@ impl BuiltinHookHandler for RecordingHandler {
         if self.fail {
             return HookResult {
                 outcome: HookOutcome::Error,
-                stdout: String::new(),
+                stdout: String::new().into(),
                 stderr: "boom".into(),
                 exit_code: Some(1),
                 response: None,
             };
         }
         let response = self.display.clone().map(|d| HookResponse {
-            display_content: Some(d),
+            display_content: Some(d.into()),
             ..Default::default()
         });
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response,
         }
@@ -176,6 +176,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -263,7 +264,11 @@ async fn message_display_fires_at_begin_and_on_completed_message() {
     );
     assert_eq!(begin.index, 0, "at-begin index is 0");
     assert!(!begin.is_final, "at-begin final is false");
-    assert_eq!(begin.delta, "", "no delta text has streamed yet at begin");
+    assert_eq!(
+        begin.delta.string_at(""),
+        Some(""),
+        "no delta text has streamed yet at begin"
+    );
 
     // The completed-message pass carries the full joined assistant text.
     let done = &seen[1];
@@ -276,7 +281,8 @@ async fn message_display_fires_at_begin_and_on_completed_message() {
     assert_eq!(done.index, 0, "completed-pass index is 0");
     assert!(done.is_final, "completed-pass final is true");
     assert_eq!(
-        done.delta, "hi",
+        done.delta.string_at(""),
+        Some("hi"),
         "completed pass carries the full joined text"
     );
 }
@@ -346,7 +352,8 @@ async fn message_display_display_content_substitutes_on_screen_text() {
     let done = seen.last().expect("completed pass fired");
     assert!(done.is_final, "last fire is the completed-message pass");
     assert_eq!(
-        done.delta, "hi",
+        done.delta.string_at(""),
+        Some("hi"),
         "the hook receives the ORIGINAL joined text, not the override"
     );
 }

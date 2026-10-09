@@ -1,0 +1,34 @@
+{
+  "capture-receipt.raw.json": {
+    "bytes": 8370,
+    "sha256": "32a1c5069b91dd51904160742b9d60d4df785b67510ec2d9d98faaad37426128"
+  },
+  "cases.json": {
+    "bytes": 1086,
+    "sha256": "a8813416ca31646e749bae695d4ccf13d2166d5606b7de1191ae73545edd6de9"
+  },
+  "http-response-headers.raw": {
+    "bytes": 104,
+    "sha256": "c3e801e95c2efee3a6b58239e33623813a1f2fca4397257fd70fb51b6a7e2d2e"
+  },
+  "model-request.raw.json": {
+    "bytes": 894,
+    "sha256": "245fc73e485bd5984abdac8b70035773138d0ce591697e625331aecf2a80d295"
+  },
+  "native.stderr.raw": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "native.stdout.raw.json": {
+    "bytes": 1596,
+    "sha256": "bcd4bf897c0cbb3749e1649b01bbb0086d4475f2e201b2bcb9e6bce48d83a058"
+  },
+  "run-native.py": {
+    "bytes": 12754,
+    "sha256": "35c7ea71c9ed3803fc6863ff4098564a9f5f7a73755c7c0249309e38e107ada2"
+  },
+  "scheduled-events.raw.sse": {
+    "bytes": 1404,
+    "sha256": "7b3980c8363a1c83061a2bd238b235892880fc1f8aba5a524fef6db6d412f97e"
+  }
+}

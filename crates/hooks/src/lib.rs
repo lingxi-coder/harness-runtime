@@ -62,7 +62,9 @@ pub use attachment::{
     HookAttachmentSink,
 };
 pub use cwd_changed_firer::{CwdChangedFire, CwdChangedFirer, OptionalCwdChangedFirer};
-pub use definition::{HookCondition, HookDefinition, HookExecutor, HookShell, HookSource};
+pub use definition::{
+    HookCondition, HookDefinition, HookExecutor, HookFailureBehavior, HookShell, HookSource,
+};
 pub use events::{HookEvent, HookEventType, HookProgressEvent};
 pub use executor::{
     default_hook_shell, powershell_base_args, powershell_env_token_rewrite,

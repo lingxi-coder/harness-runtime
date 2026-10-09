@@ -85,10 +85,20 @@ impl Tool for ConfigurableTool {
     fn name(&self) -> &str {
         self.name
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| json!({"type": "object"}));
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -99,22 +109,25 @@ impl Tool for ConfigurableTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -126,7 +139,11 @@ impl Tool for ConfigurableTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "configurable".into()
     }
     async fn prompt(
@@ -137,17 +154,20 @@ impl Tool for ConfigurableTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
             // The tool's own output the model would see absent any mutation.
-            data: json!({ "content": "ORIGINAL_OUTPUT" }),
+            data: tool_api::tool_trait::generated_builtin_result(
+                &json!({ "content": "ORIGINAL_OUTPUT" }),
+            ),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
@@ -163,11 +183,16 @@ impl BuiltinHookHandler for RewriteOutputHook {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: Some(HookResponse {
-                updated_mcp_tool_output: Some(json!({ "content": "REWRITTEN_BY_HOOK" })),
+                updated_mcp_tool_output: Some(
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &json!({ "content": "REWRITTEN_BY_HOOK" }),
+                    )
+                    .expect("generated hook output is representable"),
+                ),
                 ..Default::default()
             }),
         }
@@ -184,8 +209,8 @@ impl BuiltinHookHandler for ObserverHook {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -210,6 +235,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -250,14 +276,18 @@ fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
             vec![LlmContentBlock::ToolCall {
                 id: tool_use_id.to_string(),
                 name: tool_name.into(),
-                input: json!({}),
+                input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                    &json!({}),
+                )
+                .expect("generated tool input fixture"),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),

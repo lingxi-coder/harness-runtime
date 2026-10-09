@@ -1430,7 +1430,7 @@ mod tests {
         let s = get_large_output_instructions(
             "/tmp/out/mcp-srv-tool-1.json",
             1_234_567,
-            "JSON array with schema: {...}",
+            &UJP::from("JSON array with schema: {...}"),
             None,
         );
         let expected = "Error: result (1,234,567 characters) exceeds maximum allowed tokens. Output has been saved to /tmp/out/mcp-srv-tool-1.json.\n\
@@ -1441,7 +1441,7 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
 - If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n\
 - Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n\
 - If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n";
-        assert_eq!(s, expected);
+        assert_eq!(s.string_at(""), Some(expected));
     }
 
     #[test]
@@ -1455,7 +1455,7 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
         let s = get_large_output_instructions(
             "/tmp/out/mcp-srv-tool-1.txt",
             1_234_567,
-            "Plain text",
+            &UJP::from("Plain text"),
             Some(&ls),
         );
         let expected = "Error: result (1,234,567 characters across 5 lines) exceeds maximum allowed tokens. Output has been saved to /tmp/out/mcp-srv-tool-1.txt.\n\
@@ -1466,7 +1466,7 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
 - If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n\
 - Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n\
 - If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n";
-        assert_eq!(s, expected);
+        assert_eq!(s.string_at(""), Some(expected));
     }
 
     #[test]
@@ -1480,7 +1480,7 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
         let s = get_large_output_instructions(
             "/tmp/out/mcp-srv-tool-1.txt",
             1_234_567,
-            "Plain text",
+            &UJP::from("Plain text"),
             Some(&ls),
         );
         let expected = "Error: result (1,234,567 characters across 1 line) exceeds maximum allowed tokens. Output has been saved to /tmp/out/mcp-srv-tool-1.txt.\n\
@@ -1492,7 +1492,7 @@ REQUIREMENTS FOR SUMMARIZATION/ANALYSIS/REVIEW:\n\
 - If you receive truncation warnings when reading the file, reduce the chunk size until you have read 100% of the content without truncation.\n\
 - Before producing ANY summary or analysis, you MUST explicitly describe what portion of the content you have read. ***If you did not read the entire content, you MUST explicitly state this.***\n\
 - If after a few attempts you cannot read the file (file not found, lines too long for Read's offset/limit, no shell access), STOP retrying. Summarize what you were able to read, explicitly state which portion you could not read and why, and proceed.\n";
-        assert_eq!(s, expected);
+        assert_eq!(s.string_at(""), Some(expected));
     }
 
     #[test]

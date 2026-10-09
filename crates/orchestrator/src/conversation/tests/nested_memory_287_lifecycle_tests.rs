@@ -1,15 +1,27 @@
 //! Current nested-memory dedup survives real JSONL and lifecycle transitions.
 
 use super::*;
-use crate::resume::{ReplayedSession, replay_session_state};
+use crate::resume::{replay_session_state, ReplayedSession};
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_core::host::{FileSystem, OrchestratorHandle};
 use platform_posix::fs::PosixFileSystem;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tool_api::Tool;
+
+type SourceJson = lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+fn source_json(value: &Value) -> SourceJson {
+    SourceJson::from_serde_value(value).expect("test JSON is valid source")
+}
+
+fn attachment_source(row: &session::JsonlMessage) -> SourceJson {
+    row.extra
+        .subprojection("/attachment")
+        .expect("attachment row has a source payload")
+}
 
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -155,7 +167,7 @@ async fn read_trigger(root: &ConversationOrchestrator, fixture: &Fixture) {
     ctx.read_file_state = root.prompt_runtime.read_state_map.clone();
     tool_file::FileReadTool::new(ctx)
         .call(
-            json!({"file_path": fixture.trigger}),
+            source_json(&json!({"file_path": fixture.trigger})),
             {
                 let mut call = tool_api::test_support::fresh_ctx();
                 call.nested_memory_triggers = root.prompt_runtime.nested_memory_triggers.clone();
@@ -196,20 +208,17 @@ fn nested_rows(rows: &[session::JsonlMessage]) -> Vec<&session::JsonlMessage> {
     rows.iter()
         .filter(|row| {
             row.message_type == "attachment"
-                && row
-                    .extra
-                    .get("attachment")
-                    .is_some_and(|value| value["type"] == "nested_memory")
+                && row.extra.string_at("/attachment/type") == Some("nested_memory")
         })
         .collect()
 }
 
-fn attachment_for<'a>(rows: &'a [session::JsonlMessage], path: &Path) -> &'a Value {
-    &nested_rows(rows)
+fn attachment_for<'a>(rows: &'a [session::JsonlMessage], path: &Path) -> SourceJson {
+    let row = nested_rows(rows)
         .into_iter()
-        .find(|row| row.extra["attachment"]["path"] == json!(path))
-        .expect("one persisted attachment per acquired file")
-        .extra["attachment"]
+        .find(|row| row.extra.string_at("/attachment/path") == path.to_str())
+        .expect("one persisted attachment per acquired file");
+    attachment_source(row)
 }
 
 fn assert_restored_file_row<'a>(
@@ -221,8 +230,8 @@ fn assert_restored_file_row<'a>(
         .iter()
         .filter(|row| {
             row.message_type == "attachment"
-                && row.extra["attachment"]["type"] == "file"
-                && row.extra["attachment"]["filename"] == json!(fixture.memory)
+                && row.extra.string_at("/attachment/type") == Some("file")
+                && row.extra.string_at("/attachment/filename") == fixture.memory.to_str()
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -231,18 +240,30 @@ fn assert_restored_file_row<'a>(
         "one durable file row owns both API text blocks"
     );
     let row = restored[0];
-    assert!(row.message.is_null());
-    let attachment = &row.extra["attachment"];
-    assert_eq!(attachment["content"]["type"], "text");
-    let file = &attachment["content"]["file"];
-    assert_eq!(file["filePath"], json!(fixture.memory));
-    assert_eq!(file["content"], body);
-    assert_eq!(file["startLine"], 1);
-    assert_eq!(file["numLines"], body.split('\n').count());
-    assert_eq!(file["totalLines"], body.split('\n').count());
+    assert!(row
+        .message
+        .at_pointer("")
+        .is_some_and(|value| value.is_null()));
+    let attachment = attachment_source(row);
+    assert_eq!(attachment.string_at("/content/type"), Some("text"));
     assert_eq!(
-        attachment["displayPath"],
-        format!("pkg/{}", branding::MEMORY_FILE)
+        attachment.string_at("/content/file/filePath"),
+        fixture.memory.to_str()
+    );
+    assert_eq!(attachment.string_at("/content/file/content"), Some(body));
+    assert_eq!(attachment.number_at("/content/file/startLine"), Some(1.0));
+    let line_count = body.split('\n').count() as f64;
+    assert_eq!(
+        attachment.number_at("/content/file/numLines"),
+        Some(line_count)
+    );
+    assert_eq!(
+        attachment.number_at("/content/file/totalLines"),
+        Some(line_count)
+    );
+    assert_eq!(
+        attachment.string_at("/displayPath"),
+        Some(format!("pkg/{}", branding::MEMORY_FILE).as_str())
     );
     row
 }
@@ -305,33 +326,43 @@ async fn filesystem_imports_persist_per_file_bytes_and_dedup_after_cold_and_hot_
     assert_eq!(raw.len(), 2);
     for (row, message) in raw.iter().zip(&messages) {
         assert_eq!(row.uuid, message.id().as_uuid().to_string());
-        assert!(row.message.is_null());
-        let attachment = &row.extra["attachment"];
-        let file = &attachment["content"];
-        assert_eq!(attachment["path"], file["path"]);
-        assert_eq!(file["type"], "Project");
-        assert_eq!(file["contentDiffersFromDisk"], false);
-        assert!(file.get("rawContent").is_none());
+        assert!(row
+            .message
+            .at_pointer("")
+            .is_some_and(|value| value.is_null()));
+        let attachment = attachment_source(row);
+        assert_eq!(
+            attachment.string_at("/path"),
+            attachment.string_at("/content/path")
+        );
+        assert_eq!(attachment.string_at("/content/type"), Some("Project"));
+        assert_eq!(
+            attachment
+                .at_pointer("/content/contentDiffersFromDisk")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(attachment.at_pointer("/content/rawContent").is_none());
         assert_eq!(
             message.text_content(),
             format!(
                 "<system-reminder>\nContents of {}:\n\n{}\n</system-reminder>",
-                file["path"].as_str().unwrap(),
-                file["content"].as_str().unwrap()
+                attachment.string_at("/content/path").unwrap(),
+                attachment.string_at("/content/content").unwrap()
             )
         );
     }
     let parent = attachment_for(&rows, &fixture.memory);
-    assert_eq!(parent["content"]["content"], parent_body);
-    assert!(parent["content"].get("parent").is_none());
+    assert_eq!(parent.string_at("/content/content"), Some(parent_body));
+    assert!(parent.at_pointer("/content/parent").is_none());
     assert_eq!(
-        parent["displayPath"],
-        format!("pkg/{}", branding::MEMORY_FILE)
+        parent.string_at("/displayPath"),
+        Some(format!("pkg/{}", branding::MEMORY_FILE).as_str())
     );
     let child = attachment_for(&rows, &imported);
-    assert_eq!(child["content"]["content"], child_body);
-    assert_eq!(child["content"]["parent"], json!(fixture.memory));
-    assert_eq!(child["displayPath"], "pkg/imported.md");
+    assert_eq!(child.string_at("/content/content"), Some(child_body));
+    assert_eq!(child.string_at("/content/parent"), fixture.memory.to_str());
+    assert_eq!(child.string_at("/displayPath"), Some("pkg/imported.md"));
 
     let cold = fixture.cold().await;
     assert!(
@@ -357,10 +388,10 @@ async fn filesystem_imports_persist_per_file_bytes_and_dedup_after_cold_and_hot_
     let sidecars = root.transcript.model_reminder_attachments.lock().unwrap();
     for row in raw {
         let id = MessageId::from_uuid(uuid::Uuid::parse_str(&row.uuid).unwrap());
-        assert_eq!(sidecars[&id], row.extra["attachment"]);
+        assert_eq!(sidecars[&id], attachment_source(row));
         assert_eq!(
-            serde_json::to_vec(&sidecars[&id]).unwrap(),
-            serde_json::to_vec(&row.extra["attachment"]).unwrap()
+            sidecars[&id].to_json_string().unwrap(),
+            attachment_source(row).to_json_string().unwrap()
         );
     }
     drop(sidecars);
@@ -403,8 +434,14 @@ async fn changed_body_after_cold_or_hot_resume_emits_new_raw_body_once() {
         let rows = nested_rows(&replayed.messages);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].uuid, emitted[0].id().as_uuid().to_string());
-        assert!(rows[1].message.is_null());
-        assert_eq!(rows[1].extra["attachment"]["content"]["content"], changed);
+        assert!(rows[1]
+            .message
+            .at_pointer("")
+            .is_some_and(|value| value.is_null()));
+        assert_eq!(
+            rows[1].extra.string_at("/attachment/content/content"),
+            Some(changed)
+        );
         assert_eq!(
             resumed.nested_memory_history().await.nested[&fixture.memory],
             "changed guidance"
@@ -431,8 +468,8 @@ async fn compact(root: &ConversationOrchestrator, messages_to_preserve: Vec<Conv
         compaction_usage: None,
         compaction_model: None,
     };
-    assert!(
-        root.apply_post_compact(
+    assert!(root
+        .apply_post_compact(
             result,
             compaction::CompactTrigger::Manual,
             10_000,
@@ -442,8 +479,7 @@ async fn compact(root: &ConversationOrchestrator, messages_to_preserve: Vec<Conv
             None
         )
         .await
-        .is_some()
-    );
+        .is_some());
 }
 
 #[tokio::test]
@@ -473,11 +509,11 @@ async fn retained_raw_nested_memory_survives_real_compaction_and_cold_or_hot_res
         assert_linear_active_parent_chain(&replayed.messages);
         let restored_file = assert_restored_file_row(&replayed.messages, &fixture, body);
         let restored_id = MessageId::from_uuid(uuid::Uuid::parse_str(&restored_file.uuid).unwrap());
-        let restored_payload = restored_file.extra["attachment"].clone();
+        let restored_payload = attachment_source(restored_file);
         let raw = nested_rows(&replayed.messages);
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].uuid, original.id().as_uuid().to_string());
-        assert_eq!(raw[0].extra["attachment"], original_payload);
+        assert_eq!(attachment_source(raw[0]), original_payload);
         let resumed = if cold_resume {
             fixture.cold().await
         } else {
@@ -511,10 +547,11 @@ async fn retained_raw_nested_memory_survives_real_compaction_and_cold_or_hot_res
                 .unwrap()
             );
         }
-        assert!(
-            tool_api::read_file_state::get(&resumed.prompt_runtime.read_state_map, &fixture.memory)
-                .is_none()
-        );
+        assert!(tool_api::read_file_state::get(
+            &resumed.prompt_runtime.read_state_map,
+            &fixture.memory
+        )
+        .is_none());
         read_trigger(&resumed, &fixture).await;
         assert!(
             resumed.nested_memory_reminder_messages().await.is_empty(),
@@ -548,7 +585,7 @@ async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold
         assert_linear_active_parent_chain(&replayed_after_compact.messages);
         let restored = assert_restored_file_row(&replayed_after_compact.messages, &fixture, body);
         let restored_id = MessageId::from_uuid(uuid::Uuid::parse_str(&restored.uuid).unwrap());
-        let restored_payload = restored.extra["attachment"].clone();
+        let restored_payload = attachment_source(restored);
         assert!(
             nested_rows(&replayed_after_compact.messages).is_empty(),
             "the resumable chain excludes the discarded row"
@@ -567,10 +604,11 @@ async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold
                 .unwrap()[&restored_id],
             restored_payload
         );
-        assert!(
-            tool_api::read_file_state::get(&resumed.prompt_runtime.read_state_map, &fixture.memory)
-                .is_none()
-        );
+        assert!(tool_api::read_file_state::get(
+            &resumed.prompt_runtime.read_state_map,
+            &fixture.memory
+        )
+        .is_none());
         // Archived sidecars alone must never revive a discarded baseline.
         resumed
             .restore_resume_prompt_metadata(&fixture.rows().await)
@@ -590,8 +628,14 @@ async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold
         let raw = nested_rows(&replayed.messages);
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].uuid, emitted[0].id().as_uuid().to_string());
-        assert!(raw[0].message.is_null());
-        assert_eq!(raw[0].extra["attachment"]["content"]["content"], body);
+        assert!(raw[0]
+            .message
+            .at_pointer("")
+            .is_some_and(|value| value.is_null()));
+        assert_eq!(
+            raw[0].extra.string_at("/attachment/content/content"),
+            Some(body)
+        );
         assert_eq!(nested_rows(&fixture.rows().await).len(), 2);
     }
 }
@@ -628,12 +672,11 @@ async fn later_memory_creation_requires_a_new_read_trigger() {
     let root = fixture.root();
     read_trigger(&root, &fixture).await;
     assert!(root.nested_memory_reminder_messages().await.is_empty());
-    assert!(
-        root.prompt_runtime
-            .nested_memory_triggers
-            .queued()
-            .is_empty()
-    );
+    assert!(root
+        .prompt_runtime
+        .nested_memory_triggers
+        .queued()
+        .is_empty());
     write(&fixture.memory, "new guidance");
     assert!(
         root.nested_memory_reminder_messages().await.is_empty(),
@@ -676,11 +719,9 @@ async fn trigger_survives_cache_eviction_before_attachment_acquisition() {
     );
     let messages = root.nested_memory_reminder_messages().await;
     assert_eq!(messages.len(), 1);
-    assert!(
-        messages[0]
-            .text_content()
-            .contains("guidance after eviction")
-    );
+    assert!(messages[0]
+        .text_content()
+        .contains("guidance after eviction"));
 }
 
 #[tokio::test]
@@ -734,22 +775,19 @@ async fn failed_and_unchanged_reads_do_not_enqueue_nested_memory() {
     let mut context = tool_api::test_support::fresh_ctx();
     context.nested_memory_triggers = root.prompt_runtime.nested_memory_triggers.clone();
     let missing = fixture.cwd.join("pkg/api/missing.rs");
-    assert!(
-        tool_file::FileReadTool::new(builtin)
-            .call(
-                json!({"file_path":missing}),
-                context,
-                tool_api::test_support::fresh_tx()
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        root.prompt_runtime
-            .nested_memory_triggers
-            .queued()
-            .is_empty()
-    );
+    assert!(tool_file::FileReadTool::new(builtin)
+        .call(
+            source_json(&json!({"file_path":missing})),
+            context,
+            tool_api::test_support::fresh_tx()
+        )
+        .await
+        .is_err());
+    assert!(root
+        .prompt_runtime
+        .nested_memory_triggers
+        .queued()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -767,7 +805,7 @@ async fn child_read_context_does_not_enqueue_the_main_context() {
     let queue = child.nested_memory_triggers.clone();
     tool_file::FileReadTool::new(builtin)
         .call(
-            json!({"file_path":fixture.trigger}),
+            source_json(&json!({"file_path":fixture.trigger})),
             child,
             tool_api::test_support::fresh_tx(),
         )

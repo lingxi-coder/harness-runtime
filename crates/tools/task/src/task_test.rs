@@ -4,6 +4,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
 
     fn source_value(value: &Value) -> Utf16JsonProjection {
         generated_builtin_result(value)
@@ -357,8 +358,8 @@ Running background agents: a1b2c3d4e (survey the crate)"
         let mut expected = "No task found with ID: missing. Running background agents: "
             .encode_utf16()
             .collect::<Vec<_>>();
-        expected.extend_from_slice(lone_surrogate.string_units("").unwrap());
-        assert_eq!(message.string_units(""), Some(expected.as_slice()));
+        expected.extend(lone_surrogate.string_units("").unwrap());
+        assert_eq!(message.string_units(""), Some(expected));
     }
 
     // ── Input coercion / steering (claude-code POe / Cce / yDn) ──────────
@@ -1302,7 +1303,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
             assert_eq!(from, "scribe", "from = acting teammate display name");
             assert_ne!(from, &sender.to_string(), "sender is NOT the agent:<uuid>");
 
-            let body: Value = serde_json::from_str(&msg.content).unwrap();
+            let body: Value = serde_json::from_str(&msg.content.to_json_string().unwrap()).unwrap();
             assert_eq!(body["type"], "task_assignment");
             assert_eq!(body["taskId"], id);
             assert_eq!(body["subject"], "Ship the feature");
@@ -1344,7 +1345,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 from, "team-lead",
                 "unnamed sender → literal team-lead label"
             );
-            let body: Value = serde_json::from_str(&msg.content).unwrap();
+            let body: Value = serde_json::from_str(&msg.content.to_json_string().unwrap()).unwrap();
             assert_eq!(body["assignedBy"], "team-lead");
         }
 
@@ -1790,11 +1791,12 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     ..Default::default()
                 })
                 .await;
+            let prompt = p.string_at("").expect("prompt is a source string");
             assert_eq!(
-                p, TASK_LIST_PROMPT,
+                prompt, TASK_LIST_PROMPT,
                 "disabled variant is byte-identical to base"
             );
-            assert!(!p.contains("## Teammate Workflow"));
+            assert!(!prompt.contains("## Teammate Workflow"));
         }
 
         #[tokio::test]
@@ -1809,11 +1811,14 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     ..Default::default()
                 })
                 .await;
-            assert_eq!(p, TASK_LIST_PROMPT_SWARM);
-            assert!(p.contains("## Teammate Workflow"));
-            assert!(p.contains("- Before assigning tasks to teammates, to see what's available"));
+            let prompt = p.string_at("").expect("prompt is a source string");
+            assert_eq!(prompt, TASK_LIST_PROMPT_SWARM);
+            assert!(prompt.contains("## Teammate Workflow"));
+            assert!(
+                prompt.contains("- Before assigning tasks to teammates, to see what's available")
+            );
             // The base body is preserved verbatim up to the workflow section.
-            assert!(p.starts_with("Use this tool to list all tasks in the task list."));
+            assert!(prompt.starts_with("Use this tool to list all tasks in the task list."));
         }
 
         #[tokio::test]
@@ -1828,11 +1833,12 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     ..Default::default()
                 })
                 .await;
+            let prompt = p.string_at("").expect("prompt is a source string");
             assert_eq!(
-                p, TASK_CREATE_PROMPT,
+                prompt, TASK_CREATE_PROMPT,
                 "disabled variant is byte-identical to base"
             );
-            assert!(!p.contains("and potentially assigned to teammates"));
+            assert!(!prompt.contains("and potentially assigned to teammates"));
         }
 
         #[tokio::test]
@@ -1847,14 +1853,15 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     ..Default::default()
                 })
                 .await;
-            assert_eq!(p, TASK_CREATE_PROMPT_SWARM);
-            assert!(p.contains(
+            let prompt = p.string_at("").expect("prompt is a source string");
+            assert_eq!(prompt, TASK_CREATE_PROMPT_SWARM);
+            assert!(prompt.contains(
                 "Tasks that require careful planning or multiple operations and potentially assigned to teammates"
             ));
-            assert!(p.contains(
+            assert!(prompt.contains(
                 "- Include enough detail in the description for another agent to understand and complete the task"
             ));
-            assert!(p.contains(
+            assert!(prompt.contains(
                 "- New tasks are created with status 'pending' and no owner - use TaskUpdate with the `owner` parameter to assign them"
             ));
         }
@@ -2004,13 +2011,20 @@ Running background agents: a1b2c3d4e (survey the crate)"
             last_created: std::sync::Mutex<
                 Option<(
                     String,
-                    String,
-                    Option<String>,
+                    Utf16JsonProjection,
+                    Option<Utf16JsonProjection>,
                     Option<String>,
                     Option<String>,
                 )>,
             >,
-            last_completed: std::sync::Mutex<Option<(String, String, String, Option<String>)>>,
+            last_completed: std::sync::Mutex<
+                Option<(
+                    String,
+                    String,
+                    Utf16JsonProjection,
+                    Option<Utf16JsonProjection>,
+                )>,
+            >,
             last_completed_identity: std::sync::Mutex<Option<(Option<String>, Option<String>)>>,
         }
         #[async_trait]
@@ -2018,21 +2032,21 @@ Running background agents: a1b2c3d4e (survey the crate)"
             async fn fire_task_created(
                 &self,
                 task_id: &str,
-                subject: &str,
-                description: Option<&str>,
+                subject: &Utf16JsonProjection,
+                description: Option<&Utf16JsonProjection>,
                 teammate_name: Option<&str>,
                 team_name: Option<&str>,
-            ) -> Result<(), String> {
+            ) -> Result<(), Utf16JsonProjection> {
                 self.created_calls.fetch_add(1, Ordering::SeqCst);
                 *self.last_created.lock().unwrap() = Some((
                     task_id.into(),
-                    subject.into(),
-                    description.map(str::to_string),
+                    subject.clone(),
+                    description.cloned(),
                     teammate_name.map(str::to_string),
                     team_name.map(str::to_string),
                 ));
                 match &self.block_created {
-                    Some(reason) => Err(reason.clone()),
+                    Some(reason) => Err(reason.clone().into()),
                     None => Ok(()),
                 }
             }
@@ -2040,24 +2054,24 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 &self,
                 task_id: &str,
                 status: &str,
-                subject: &str,
-                description: Option<&str>,
+                subject: &Utf16JsonProjection,
+                description: Option<&Utf16JsonProjection>,
                 teammate_name: Option<&str>,
                 team_name: Option<&str>,
-            ) -> Result<(), String> {
+            ) -> Result<(), Utf16JsonProjection> {
                 self.completed_calls.fetch_add(1, Ordering::SeqCst);
                 *self.last_completed.lock().unwrap() = Some((
                     task_id.into(),
                     status.into(),
-                    subject.into(),
-                    description.map(str::to_string),
+                    subject.clone(),
+                    description.cloned(),
                 ));
                 *self.last_completed_identity.lock().unwrap() = Some((
                     teammate_name.map(str::to_string),
                     team_name.map(str::to_string),
                 ));
                 match &self.block_completed {
-                    Some(reason) => Err(reason.clone()),
+                    Some(reason) => Err(reason.clone().into()),
                     None => Ok(()),
                 }
             }
@@ -2096,8 +2110,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                     // T24: the blocking reason is prefixed `TaskCreated hook
                     // feedback:\n` (claude-code `getTaskCreatedHookMessage`).
                     assert_eq!(
-                        s.string_at(""),
-                        Some("TaskCreated hook feedback:\ncreation blocked by policy"),
+                        s, "TaskCreated hook feedback:\ncreation blocked by policy",
                         "the hook reason surfaces with the TaskCreated feedback prefix"
                     )
                 }
@@ -2105,8 +2118,11 @@ Running background agents: a1b2c3d4e (survey the crate)"
             }
             // The fire saw the (task_id, subject, description) payload.
             let (_id, subj, desc, _tm, _team) = firer.last_created.lock().unwrap().clone().unwrap();
-            assert_eq!(subj, "Ship it");
-            assert_eq!(desc.as_deref(), Some("do the work"));
+            assert_eq!(subj.string_at(""), Some("Ship it"));
+            assert_eq!(
+                desc.as_ref().and_then(|value| value.string_at("")),
+                Some("do the work")
+            );
             // CRITICAL: the just-created task was rolled back — the store is empty.
             let store = TodoStore::for_list(&list);
             assert!(
@@ -2250,8 +2266,11 @@ Running background agents: a1b2c3d4e (survey the crate)"
             // The fire saw the EXISTING subject/description + the terminal status.
             let (_id, status, subj, desc) = firer.last_completed.lock().unwrap().clone().unwrap();
             assert_eq!(status, "completed");
-            assert_eq!(subj, "Ship it");
-            assert_eq!(desc.as_deref(), Some("the description"));
+            assert_eq!(subj.string_at(""), Some("Ship it"));
+            assert_eq!(
+                desc.as_ref().and_then(|value| value.string_at("")),
+                Some("the description")
+            );
             // CRITICAL: the status was NOT applied — still pending.
             let after = store.get(&id).await.unwrap();
             assert_eq!(
@@ -2645,7 +2664,7 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 status: Some(status.into()),
                 exit_code: None,
                 done,
-                error: error.map(str::to_string),
+                error: error.map(str::to_owned),
                 prompt: Some("do the thing".into()),
                 result: result.map(Utf16JsonProjection::from),
                 harness_head: None,
@@ -2663,10 +2682,11 @@ Running background agents: a1b2c3d4e (survey the crate)"
 
         fn err_msg(e: ToolError) -> String {
             match e {
-                ToolError::InvalidInput(s) | ToolError::Internal(s) => s
+                ToolError::InvalidInput(s) => s
                     .string_at("")
                     .expect("tool errors carry root-string source")
                     .to_owned(),
+                ToolError::Internal(s) => s,
                 other => panic!("unexpected error variant: {other:?}"),
             }
         }
@@ -3513,15 +3533,18 @@ Running background agents: a1b2c3d4e (survey the crate)"
 
         #[test]
         fn semantic_bool_coerces_string_literals() {
-            let view = |value: Value| source_value(&value).at_pointer("").unwrap();
-            assert_eq!(semantic_bool(view(json!(true))), Some(true));
-            assert_eq!(semantic_bool(view(json!(false))), Some(false));
-            assert_eq!(semantic_bool(view(json!("true"))), Some(true));
-            assert_eq!(semantic_bool(view(json!("false"))), Some(false));
+            fn coerce(value: Value) -> Option<bool> {
+                let source = source_value(&value);
+                semantic_bool(source.at_pointer("").unwrap())
+            }
+            assert_eq!(coerce(json!(true)), Some(true));
+            assert_eq!(coerce(json!(false)), Some(false));
+            assert_eq!(coerce(json!("true")), Some(true));
+            assert_eq!(coerce(json!("false")), Some(false));
             // Anything else passes through to the inner schema (→ None here).
-            assert_eq!(semantic_bool(view(json!("FALSE"))), None);
-            assert_eq!(semantic_bool(view(json!("maybe"))), None);
-            assert_eq!(semantic_bool(view(json!(1))), None);
+            assert_eq!(coerce(json!("FALSE")), None);
+            assert_eq!(coerce(json!("maybe")), None);
+            assert_eq!(coerce(json!(1)), None);
         }
 
         #[tokio::test]

@@ -222,6 +222,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::TerminalApiError {
                 api_error_status: Some(413),
                 terminal_reason: "image_error".into(),
+                stop_reason: "stop_sequence".into(),
             },
         ),
         (
@@ -244,6 +245,13 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 plugin: "review".to_string(),
                 text: "Found a mismatch".into(),
                 timeout_ms: 4000,
+            },
+        ),
+        (
+            "event/ui_notify.json",
+            ClientEvent::UiNotify {
+                plugin: "review".to_string(),
+                text: "Background update is ready".into(),
             },
         ),
         (
@@ -855,7 +863,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 hooks: vec![HookDto {
                     name: "format-on-write".to_string(),
                     event: "PostToolUse".to_string(),
-                    matcher: Some("Write|Edit".to_string()),
+                    matcher: Some("Write|Edit".into()),
                     timeout_ms: 60_000,
                     hook_type: Some("command".to_string()),
                     source: Some("User settings (~/.lingxi/settings.json)".to_string()),
@@ -866,7 +874,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     priority: Some(0),
                     async_rewake: Some(false),
                     async_timeout_ms: None,
-                    if_condition: Some("Write(*.ts)".to_string()),
+                    if_condition: Some("Write(*.ts)".into()),
                 }],
             },
         ),

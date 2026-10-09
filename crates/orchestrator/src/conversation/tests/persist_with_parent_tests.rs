@@ -1,8 +1,17 @@
 use super::*;
-use crate::OrchestratorConfig;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+
+// Only generated fixture literals enter this constructor; source payloads stay
+// in their existing carrier throughout persistence and assertions.
+macro_rules! source_fixture {
+    ($($tokens:tt)*) => {
+        Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)*)).unwrap()
+    };
+}
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use hooks::attachment::HookPublicationGuard;
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::SessionId;
@@ -82,7 +91,7 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
         "interleaved-append-log",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        source_fixture!({}),
     )
     .await
     .expect("load session.append Mod");
@@ -129,7 +138,7 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: tool_use_id.clone(),
             name: "Read".into(),
-            input: serde_json::json!({"file_path":"fixture.txt"}),
+            input: source_fixture!({"file_path":"fixture.txt"}),
             provider_id: None,
         }],
         stop_reason: Some("tool_use".into()),
@@ -152,7 +161,7 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
     let attachment = hooks::attachment::deferred_tool_attachment(
         tool_use_id.as_str(),
         "Read",
-        &serde_json::json!({"file_path":"fixture.txt"}),
+        &source_fixture!({"file_path":"fixture.txt"}),
         "PreToolUse:Read",
         "default",
         None,
@@ -160,8 +169,7 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
     let attachment_orch = Arc::clone(&orch);
     let attachment_fence = fence.clone();
     let mut attachment_write = tokio::spawn(async move {
-        let persist =
-            attachment_orch.persist_hook_attachment_to_jsonl(attachment, Default::default());
+        let persist = attachment_orch.persist_hook_attachment_to_jsonl(attachment);
         attachment_fence.commit_if_current(Box::pin(persist)).await
     });
     assert!(
@@ -187,7 +195,10 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
     let rows = read_jsonl(&session_path);
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[1].message_type, "attachment");
-    assert_eq!(rows[1].extra["attachment"]["type"], "hook_deferred_tool");
+    assert_eq!(
+        rows[1].extra.subprojection("/attachment/type").unwrap(),
+        source_fixture!("hook_deferred_tool")
+    );
     assert_eq!(rows[2].message_type, "assistant");
     assert_eq!(rows[2].parent_uuid.as_deref(), Some(rows[1].uuid.as_str()));
     assert_eq!(
@@ -224,8 +235,11 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
     let rows = read_jsonl(&session_path);
     assert_eq!(rows[3].parent_uuid.as_deref(), Some(rows[2].uuid.as_str()));
     assert_eq!(
-        rows[3].extra["sourceToolAssistantUUID"],
-        serde_json::Value::String(rows[2].uuid.clone())
+        rows[3]
+            .extra
+            .subprojection("/sourceToolAssistantUUID")
+            .unwrap(),
+        source_fixture!(serde_json::Value::String(rows[2].uuid.clone()))
     );
 
     let stale_root = lingxi_core::host::CancellationToken::new();
@@ -380,7 +394,8 @@ async fn manual_compaction_owns_snapshot_and_commit_before_queued_fusion() {
         .iter()
         .position(|row| {
             row.message
-                .to_string()
+                .to_json_string()
+                .unwrap()
                 .contains("retained manual compaction summary")
         })
         .expect("cold replay retains the committed summary");
@@ -500,16 +515,12 @@ async fn external_history_and_fusion_share_chain_ownership_in_both_orders() {
             let (chain, _) =
                 session::jsonl::loader::build_conversation_chain(&loaded, &id.to_string());
             assert_eq!(chain.len(), 4);
-            assert!(
-                chain
-                    .iter()
-                    .any(|row| row.uuid == fusion.id().as_uuid().to_string())
-            );
-            assert!(
-                chain
-                    .iter()
-                    .any(|row| row.uuid == external_id.as_uuid().to_string())
-            );
+            assert!(chain
+                .iter()
+                .any(|row| row.uuid == fusion.id().as_uuid().to_string()));
+            assert!(chain
+                .iter()
+                .any(|row| row.uuid == external_id.as_uuid().to_string()));
         }
     }
 }
@@ -637,11 +648,9 @@ async fn check_fusion_unacknowledged_resume_chain(foreground_before_retry: bool)
     let loaded = session::jsonl::reader::route_lines(&std::fs::read_to_string(&path).unwrap());
     let (chain, _) = session::jsonl::loader::build_conversation_chain(&loaded, &id.to_string());
     assert_eq!(chain.len(), messages.len());
-    assert!(
-        chain
-            .iter()
-            .any(|row| row.uuid == fusion.id().as_uuid().to_string())
-    );
+    assert!(chain
+        .iter()
+        .any(|row| row.uuid == fusion.id().as_uuid().to_string()));
 }
 
 #[tokio::test]
@@ -809,7 +818,7 @@ async fn fusion_meta_appends_only_to_launch_session_and_stays_out_of_model_conte
     .with_config_home(home)
     .with_session_id(active);
 
-    orch.append_meta_user_message_to_session(&launch.to_string(), "<fusion_result />")
+    orch.append_meta_user_message_to_session(&launch.to_string(), &"<fusion_result />".into())
         .await
         .expect("append to launch session");
 
@@ -821,12 +830,15 @@ async fn fusion_meta_appends_only_to_launch_session_and_stays_out_of_model_conte
     assert_eq!(launch_lines.len(), 1);
     assert_eq!(launch_lines[0].session_id, launch.to_string());
     assert_eq!(
-        launch_lines[0].extra.get("isModelContextExcluded"),
-        Some(&serde_json::Value::Bool(true))
+        launch_lines[0]
+            .extra
+            .get_property("isModelContextExcluded")
+            .and_then(JsonValueView::as_bool),
+        Some(true)
     );
     assert!(orch.session.lock().await.history.is_empty());
 
-    orch.append_meta_user_message_to_session(&active.to_string(), "<fusion_result />")
+    orch.append_meta_user_message_to_session(&active.to_string(), &"<fusion_result />".into())
         .await
         .expect("append to active session");
     let state = orch.session.lock().await;
@@ -841,10 +853,10 @@ async fn fusion_command_messages_remain_in_model_context_and_durable_history() {
     let orch = orch_with_writer(dir.path(), path.clone());
     let id = orch.current_session_id().await;
     let prompt = "/fusion --quality explain the cursor issue\nPreserve these details.";
-    orch.append_fusion_command_message(&id.to_string(), prompt, true)
+    orch.append_fusion_command_message(&id.to_string(), &prompt.into(), true)
         .await
         .expect("persist original request");
-    orch.append_fusion_command_message(&id.to_string(), "Fusion started: task-1", false)
+    orch.append_fusion_command_message(&id.to_string(), &"Fusion started: task-1".into(), false)
         .await
         .expect("persist launch reply");
     let state = orch.session.lock().await;
@@ -861,19 +873,19 @@ async fn fusion_command_messages_remain_in_model_context_and_durable_history() {
     assert_eq!(lines.len(), 2);
     for line in &lines {
         assert_ne!(
-            line.extra.get("isModelContextExcluded"),
-            Some(&serde_json::Value::Bool(true))
+            line.extra
+                .get_property("isModelContextExcluded")
+                .and_then(JsonValueView::as_bool),
+            Some(true)
         );
     }
     assert_eq!(
         lines[1].parent_uuid.as_deref(),
         Some(lines[0].uuid.as_str())
     );
-    assert!(
-        std::fs::read_to_string(path)
-            .unwrap()
-            .contains("Preserve these details.")
-    );
+    assert!(std::fs::read_to_string(path)
+        .unwrap()
+        .contains("Preserve these details."));
 }
 
 #[tokio::test]
@@ -886,7 +898,7 @@ async fn fusion_command_off_session_reply_does_not_leak_into_active_history() {
     let cursor = orch.transcript.last_jsonl_uuid.lock().await.clone();
     orch.append_fusion_command_message(
         &launch.to_string(),
-        "fusion failed to start: unavailable model",
+        &"fusion failed to start: unavailable model".into(),
         false,
     )
     .await
@@ -901,8 +913,11 @@ async fn fusion_command_off_session_reply_does_not_leak_into_active_history() {
     let lines = read_jsonl(&target);
     assert_eq!(lines.len(), 1);
     assert_ne!(
-        lines[0].extra.get("isModelContextExcluded"),
-        Some(&serde_json::Value::Bool(true))
+        lines[0]
+            .extra
+            .get_property("isModelContextExcluded")
+            .and_then(JsonValueView::as_bool),
+        Some(true)
     );
 }
 
@@ -1188,7 +1203,7 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: tuid.clone(),
             name: "Bash".into(),
-            input: serde_json::json!({"command":"ls"}),
+            input: source_fixture!({"command":"ls"}),
             provider_id: None,
         }],
         stop_reason: None,
@@ -1206,7 +1221,7 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
     // 2. The tool's structured result, recorded at dispatch.
     orch.record_tool_use_result(
         &tuid,
-        projection_from_value(&serde_json::json!({"stdout":"a\n","stderr":"","interrupted":false})),
+        source_fixture!({"stdout":"a\n","stderr":"","interrupted":false}),
     )
     .await;
 
@@ -1265,7 +1280,7 @@ async fn error_tool_result_persists_the_bare_error_string() {
     let orch = orch_with_writer(dir.path(), session_path.clone());
 
     let tuid = lingxi_core::types::ToolUseId::new();
-    orch.record_tool_use_result(&tuid, projection_string("Error: boom"))
+    orch.record_tool_use_result(&tuid, "Error: boom".into())
         .await;
 
     let msg = ConversationMessage::User {
@@ -1309,16 +1324,10 @@ async fn mcp_result_line_carries_mcp_meta_as_a_top_level_sibling() {
     let orch = orch_with_writer(dir.path(), session_path.clone());
 
     let tuid = lingxi_core::types::ToolUseId::new();
-    orch.record_tool_use_result(
-        &tuid,
-        projection_from_value(&serde_json::json!([{"type":"text","text":"hi"}])),
-    )
-    .await;
-    orch.record_tool_use_mcp_meta(
-        &tuid,
-        projection_from_value(&serde_json::json!({"_meta":{"claude/endTurn":true}})),
-    )
-    .await;
+    orch.record_tool_use_result(&tuid, source_fixture!([{"type":"text","text":"hi"}]))
+        .await;
+    orch.record_tool_use_mcp_meta(&tuid, source_fixture!({"_meta":{"claude/endTurn":true}}))
+        .await;
 
     let msg = ConversationMessage::User {
         id: lingxi_core::types::MessageId::new(),
@@ -1361,16 +1370,10 @@ async fn mcp_end_turn_result_persists_only_mcp_meta() {
     let orch = orch_with_writer(dir.path(), session_path.clone());
 
     let tuid = lingxi_core::types::ToolUseId::new();
-    orch.record_tool_use_result(
-        &tuid,
-        projection_from_value(&serde_json::json!([{"type":"text","text":"hi"}])),
-    )
-    .await;
-    orch.record_tool_use_mcp_meta(
-        &tuid,
-        projection_from_value(&serde_json::json!({"_meta":{"claude/endTurn":true}})),
-    )
-    .await;
+    orch.record_tool_use_result(&tuid, source_fixture!([{"type":"text","text":"hi"}]))
+        .await;
+    orch.record_tool_use_mcp_meta(&tuid, source_fixture!({"_meta":{"claude/endTurn":true}}))
+        .await;
     orch.record_pending_tool_result_turn_end(
         &tuid,
         tool_api::tool_trait::ToolResultTurnEnd {
@@ -1417,11 +1420,8 @@ async fn native_end_turn_result_persists_tool_ends_turn() {
     let orch = orch_with_writer(dir.path(), session_path.clone());
 
     let tuid = lingxi_core::types::ToolUseId::new();
-    orch.record_tool_use_result(
-        &tuid,
-        projection_from_value(&serde_json::json!({"ok": true})),
-    )
-    .await;
+    orch.record_tool_use_result(&tuid, source_fixture!({"ok": true}))
+        .await;
     orch.record_pending_tool_result_turn_end(
         &tuid,
         tool_api::tool_trait::ToolResultTurnEnd {
@@ -1508,16 +1508,10 @@ async fn two_tool_results_in_one_user_message_get_no_head_keys() {
 
     let a = lingxi_core::types::ToolUseId::new();
     let b = lingxi_core::types::ToolUseId::new();
-    orch.record_tool_use_result(
-        &a,
-        projection_from_value(&serde_json::json!({"stdout":"a"})),
-    )
-    .await;
-    orch.record_tool_use_result(
-        &b,
-        projection_from_value(&serde_json::json!({"stdout":"b"})),
-    )
-    .await;
+    orch.record_tool_use_result(&a, source_fixture!({"stdout":"a"}))
+        .await;
+    orch.record_tool_use_result(&b, source_fixture!({"stdout":"b"}))
+        .await;
     orch.record_source_tool_assistant_uuid(&a, "aaa".into())
         .await;
 
@@ -1694,7 +1688,9 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
 
         resumable: None,
     };
-    let usage = serde_json::json!({ "input_tokens": 5, "output_tokens": 3 });
+    let usage =
+        lingxi_llm_client::protocol::JsonPayload::parse(r#"{"input_tokens":5,"output_tokens":3}"#)
+            .unwrap();
 
     // Real path (model + usage supplied) → full BetaMessage envelope, in the
     // claude-code / golden-fixture key order.
@@ -1713,12 +1709,19 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
     );
     // The real-response path stamps the top-level `requestId` (via `extra`).
     assert_eq!(
-        jmsg.extra.get("requestId").and_then(|v| v.as_str()),
+        jmsg.extra
+            .get_property("requestId")
+            .and_then(|v| v.as_str()),
         Some("req_test123"),
         "real assistant line carries the top-level requestId"
     );
-    let inner = jmsg.message.as_object().expect("inner is an object");
-    let keys: Vec<&str> = inner.keys().map(String::as_str).collect();
+    let inner = &jmsg.message;
+    let keys: Vec<&str> = inner
+        .object_entries()
+        .expect("inner object")
+        .into_iter()
+        .map(|entry| entry.display_key)
+        .collect();
     assert_eq!(
         keys,
         vec![
@@ -1733,13 +1736,34 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
         ],
         "BetaMessage envelope key order"
     );
-    assert_eq!(inner["id"], serde_json::json!("inner-abc"));
-    assert_eq!(inner["type"], serde_json::json!("message"));
-    assert_eq!(inner["role"], serde_json::json!("assistant"));
-    assert_eq!(inner["model"], serde_json::json!("claude-opus-4-8"));
-    assert_eq!(inner["stop_reason"], serde_json::json!("end_turn"));
-    assert_eq!(inner["stop_sequence"], serde_json::Value::Null);
-    assert_eq!(inner["usage"], usage);
+    assert_eq!(
+        inner.subprojection("/id").unwrap(),
+        source_fixture!("inner-abc")
+    );
+    assert_eq!(
+        inner.subprojection("/type").unwrap(),
+        source_fixture!("message")
+    );
+    assert_eq!(
+        inner.subprojection("/role").unwrap(),
+        source_fixture!("assistant")
+    );
+    assert_eq!(
+        inner.subprojection("/model").unwrap(),
+        source_fixture!("claude-opus-4-8")
+    );
+    assert_eq!(
+        inner.subprojection("/stop_reason").unwrap(),
+        source_fixture!("end_turn")
+    );
+    assert_eq!(
+        inner.subprojection("/stop_sequence").unwrap(),
+        source_fixture!(null)
+    );
+    assert_eq!(
+        inner.subprojection("/usage").unwrap(),
+        Utf16JsonProjection::parse(usage.as_json_source()).unwrap()
+    );
 
     // Synthetic path (no model/usage) → the synthetic BetaMessage envelope.
     // SC-05: re-derived from claude-code 2.1.238 `Mqm` (cc-238 @296633254).
@@ -1764,11 +1788,16 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
     );
     // No request_id supplied → no top-level `requestId` (the synthetic case).
     assert!(
-        !plain.extra.contains_key("requestId"),
+        !plain.extra.contains_property("requestId"),
         "synthetic line omits requestId"
     );
-    let pinner = plain.message.as_object().unwrap();
-    let pkeys: Vec<&str> = pinner.keys().map(String::as_str).collect();
+    let pinner = &plain.message;
+    let pkeys: Vec<&str> = pinner
+        .object_entries()
+        .expect("inner object")
+        .into_iter()
+        .map(|entry| entry.display_key)
+        .collect();
     assert_eq!(
         pkeys,
         vec![
@@ -1787,21 +1816,58 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
         ],
         "synthetic BetaMessage envelope key order"
     );
-    assert_eq!(pinner["id"], serde_json::json!("inner-abc"));
-    assert_eq!(pinner["model"], serde_json::json!("<synthetic>"));
-    assert_eq!(pinner["container"], serde_json::Value::Null);
-    assert_eq!(pinner["role"], serde_json::json!("assistant"));
-    assert_eq!(pinner["stop_details"], serde_json::Value::Null);
-    // Hardcoded "stop_sequence", NOT the message's own "end_turn".
-    assert_eq!(pinner["stop_reason"], serde_json::json!("stop_sequence"));
-    assert_eq!(pinner["stop_sequence"], serde_json::json!(""));
-    assert_eq!(pinner["type"], serde_json::json!("message"));
-    assert_eq!(pinner["context_management"], serde_json::Value::Null);
-    // `usage` is PRESENT and is `Mqm`'s zeroed default, key order included.
-    assert_eq!(pinner["diagnostics"], serde_json::Value::Null);
-    let pusage = pinner["usage"].as_object().expect("synthetic usage object");
     assert_eq!(
-        pusage.keys().map(String::as_str).collect::<Vec<_>>(),
+        pinner.subprojection("/id").unwrap(),
+        source_fixture!("inner-abc")
+    );
+    assert_eq!(
+        pinner.subprojection("/model").unwrap(),
+        source_fixture!("<synthetic>")
+    );
+    assert_eq!(
+        pinner.subprojection("/container").unwrap(),
+        source_fixture!(null)
+    );
+    assert_eq!(
+        pinner.subprojection("/role").unwrap(),
+        source_fixture!("assistant")
+    );
+    assert_eq!(
+        pinner.subprojection("/stop_details").unwrap(),
+        source_fixture!(null)
+    );
+    // Hardcoded "stop_sequence", NOT the message's own "end_turn".
+    assert_eq!(
+        pinner.subprojection("/stop_reason").unwrap(),
+        source_fixture!("stop_sequence")
+    );
+    assert_eq!(
+        pinner.subprojection("/stop_sequence").unwrap(),
+        source_fixture!("")
+    );
+    assert_eq!(
+        pinner.subprojection("/type").unwrap(),
+        source_fixture!("message")
+    );
+    assert_eq!(
+        pinner.subprojection("/context_management").unwrap(),
+        source_fixture!(null)
+    );
+    // `usage` is PRESENT and is `Mqm`'s zeroed default, key order included.
+    assert_eq!(
+        pinner.subprojection("/diagnostics").unwrap(),
+        source_fixture!(null)
+    );
+    let pusage = pinner
+        .subprojection("/usage")
+        .expect("synthetic usage object");
+    assert_eq!(
+        pusage
+            .object_entries()
+            .expect("usage object")
+            .into_iter()
+            .map(|entry| entry.display_key)
+            .collect::<Vec<_>>(),
         vec![
             "output_tokens_details",
             "input_tokens",
@@ -1817,22 +1883,37 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
         ],
         "Mqm default usage key order"
     );
-    assert_eq!(pusage["output_tokens_details"], serde_json::Value::Null);
-    assert_eq!(pusage["input_tokens"], serde_json::json!(0));
-    assert_eq!(pusage["output_tokens"], serde_json::json!(0));
     assert_eq!(
-        pusage["server_tool_use"],
-        serde_json::json!({"web_search_requests": 0, "web_fetch_requests": 0})
+        pusage.subprojection("/output_tokens_details").unwrap(),
+        source_fixture!(null)
     );
     assert_eq!(
-        pusage["cache_creation"],
-        serde_json::json!({
+        pusage.subprojection("/input_tokens").unwrap(),
+        source_fixture!(0)
+    );
+    assert_eq!(
+        pusage.subprojection("/output_tokens").unwrap(),
+        source_fixture!(0)
+    );
+    assert_eq!(
+        pusage.subprojection("/server_tool_use").unwrap(),
+        source_fixture!({"web_search_requests": 0, "web_fetch_requests": 0})
+    );
+    assert_eq!(
+        pusage.subprojection("/cache_creation").unwrap(),
+        source_fixture!({
             "ephemeral_1h_input_tokens": 0,
             "ephemeral_5m_input_tokens": 0
         })
     );
-    assert_eq!(pinner["content"][0]["type"], serde_json::json!("text"));
-    assert_eq!(pinner["content"][0]["text"], serde_json::json!("hi"));
+    assert_eq!(
+        pinner.subprojection("/content/0/type").unwrap(),
+        source_fixture!("text")
+    );
+    assert_eq!(
+        pinner.subprojection("/content/0/text").unwrap(),
+        source_fixture!("hi")
+    );
 }
 
 #[tokio::test]
@@ -1867,18 +1948,20 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
         Some(&ApiErrorEnvelope::default()),
     );
     assert_eq!(
-        bare.extra.get("isApiErrorMessage"),
-        Some(&serde_json::Value::Bool(true)),
+        bare.extra
+            .get_property("isApiErrorMessage")
+            .and_then(JsonValueView::as_bool),
+        Some(true),
         "isApiErrorMessage is always stamped"
     );
-    assert!(!bare.extra.contains_key("error"), "no error category");
+    assert!(!bare.extra.contains_property("error"), "no error category");
     assert!(
-        !bare.extra.contains_key("apiErrorStatus"),
+        !bare.extra.contains_property("apiErrorStatus"),
         "no apiErrorStatus"
     );
     assert_eq!(
-        bare.message["stop_reason"],
-        serde_json::json!("stop_sequence"),
+        bare.message.subprojection("/stop_reason").unwrap(),
+        source_fixture!("stop_sequence"),
         "no-override keeps the synthetic stop_sequence"
     );
 
@@ -1899,15 +1982,18 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             api_error_status: None,
             inner_stop_reason: None,
             truncated_after_output: false,
+            terminal_reason: None,
         }),
     );
     assert_eq!(
-        cap.extra.get("error").and_then(|v| v.as_str()),
+        cap.extra.get_property("error").and_then(|v| v.as_str()),
         Some("max_output_tokens")
     );
     assert_eq!(
-        cap.extra.get("isApiErrorMessage"),
-        Some(&serde_json::Value::Bool(true))
+        cap.extra
+            .get_property("isApiErrorMessage")
+            .and_then(JsonValueView::as_bool),
+        Some(true)
     );
 
     // 3. Refusal: `error:"invalid_request"` + inner `stop_reason:"refusal"`.
@@ -1927,15 +2013,16 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             api_error_status: None,
             inner_stop_reason: Some("refusal"),
             truncated_after_output: false,
+            terminal_reason: None,
         }),
     );
     assert_eq!(
-        refusal.extra.get("error").and_then(|v| v.as_str()),
+        refusal.extra.get_property("error").and_then(|v| v.as_str()),
         Some("invalid_request")
     );
     assert_eq!(
-        refusal.message["stop_reason"],
-        serde_json::json!("refusal"),
+        refusal.message.subprojection("/stop_reason").unwrap(),
+        source_fixture!("refusal"),
         "refusal overrides the inner stop_reason"
     );
 
@@ -1956,14 +2043,18 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             api_error_status: Some(429),
             inner_stop_reason: None,
             truncated_after_output: false,
+            terminal_reason: None,
         }),
     );
     assert_eq!(
-        with_status.extra.get("apiErrorStatus"),
-        Some(&serde_json::Value::Number(429.into()))
+        with_status
+            .extra
+            .get_property("apiErrorStatus")
+            .and_then(JsonValueView::as_number),
+        Some(429.0)
     );
     assert!(
-        !with_status.extra.contains_key("truncatedAfterOutput"),
+        !with_status.extra.contains_property("truncatedAfterOutput"),
         "truncatedAfterOutput is omitted when false"
     );
 
@@ -1984,17 +2075,21 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             api_error_status: None,
             inner_stop_reason: None,
             truncated_after_output: true,
+            terminal_reason: None,
         }),
     );
     assert_eq!(
-        truncated.extra.get("truncatedAfterOutput"),
-        Some(&serde_json::Value::Bool(true))
+        truncated
+            .extra
+            .get_property("truncatedAfterOutput")
+            .and_then(JsonValueView::as_bool),
+        Some(true)
     );
 
     // 5. A normal (non-api-error) assistant line stamps NOTHING.
     let normal = orch.to_jsonl_message(&msg, "sess", None, None, None, None);
-    assert!(!normal.extra.contains_key("isApiErrorMessage"));
-    assert!(!normal.extra.contains_key("error"));
+    assert!(!normal.extra.contains_property("isApiErrorMessage"));
+    assert!(!normal.extra.contains_property("error"));
 }
 
 // ── per-request api-error classifier (`Flp`/`KNn`) ────────────────────────
@@ -2220,16 +2315,20 @@ fn classified_envelope_stamps_jsonl_top_level_fields() {
         Some(&env),
     );
     assert_eq!(
-        line.extra.get("error").and_then(|v| v.as_str()),
+        line.extra.get_property("error").and_then(|v| v.as_str()),
         Some("invalid_request")
     );
     assert_eq!(
-        line.extra.get("isApiErrorMessage"),
-        Some(&serde_json::Value::Bool(true))
+        line.extra
+            .get_property("isApiErrorMessage")
+            .and_then(JsonValueView::as_bool),
+        Some(true)
     );
     assert_eq!(
-        line.extra.get("apiErrorStatus"),
-        Some(&serde_json::Value::Number(400.into()))
+        line.extra
+            .get_property("apiErrorStatus")
+            .and_then(JsonValueView::as_number),
+        Some(400.0)
     );
 
     // A no-status category (server_error from transport) OMITS apiErrorStatus.
@@ -2250,11 +2349,11 @@ fn classified_envelope_stamps_jsonl_top_level_fields() {
         Some(&env2),
     );
     assert_eq!(
-        line2.extra.get("error").and_then(|v| v.as_str()),
+        line2.extra.get_property("error").and_then(|v| v.as_str()),
         Some("server_error")
     );
     assert!(
-        !line2.extra.contains_key("apiErrorStatus"),
+        !line2.extra.contains_property("apiErrorStatus"),
         "no-status category must omit apiErrorStatus"
     );
 }
@@ -2336,13 +2435,13 @@ async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_repare
             lingxi_core::types::ContentBlock::ToolUse {
                 id: id_a.clone(),
                 name: "Alpha".into(),
-                input: serde_json::json!({}),
+                input: source_fixture!({}),
                 provider_id: None,
             },
             lingxi_core::types::ContentBlock::ToolUse {
                 id: id_b.clone(),
                 name: "Bravo".into(),
-                input: serde_json::json!({}),
+                input: source_fixture!({}),
                 provider_id: None,
             },
         ],
@@ -2382,14 +2481,15 @@ async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_repare
         "third block should chain from second block uuid"
     );
     for (i, l) in asst_lines.iter().enumerate() {
-        let blocks = l
+        let block_count = l
             .message
-            .get("content")
-            .and_then(|c| c.as_array())
+            .array_len("/content")
             .unwrap_or_else(|| panic!("line {i} content must be an array"));
-        assert_eq!(blocks.len(), 1, "line {i} must carry exactly one block");
+        assert_eq!(block_count, 1, "line {i} must carry exactly one block");
         assert_eq!(
-            l.extra.get("modelProfile").and_then(|value| value.as_str()),
+            l.extra
+                .get_property("modelProfile")
+                .and_then(|value| value.as_str()),
             Some("deepseek"),
             "line {i} must persist the provider profile used for the response"
         );
@@ -2400,7 +2500,7 @@ async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_repare
         .iter()
         .map(|l| {
             l.message
-                .get("id")
+                .get_property("id")
                 .and_then(|v| v.as_str())
                 .expect("inner message.id present")
         })
@@ -2549,7 +2649,7 @@ async fn stitched_stream_rows_keep_provider_identity_and_supersedes_order() {
             content: vec![lingxi_core::types::ContentBlock::ToolUse {
                 id: tool_use_id.clone(),
                 name: "Run".into(),
-                input: serde_json::json!({}),
+                input: source_fixture!({}),
                 provider_id: Some("provider-tool-id".into()),
             }],
             session_append_dispatched: false,
@@ -2575,35 +2675,34 @@ async fn stitched_stream_rows_keep_provider_identity_and_supersedes_order() {
     assert_eq!(
         assistant_lines[0]
             .message
-            .get("id")
+            .get_property("id")
             .and_then(|id| id.as_str()),
         Some("provider-message-7")
     );
     assert_eq!(
         assistant_lines[0]
             .message
-            .get("model")
+            .get_property("model")
             .and_then(|model| model.as_str()),
         Some("fallback-model-7")
     );
     assert_eq!(
         assistant_lines[0]
             .extra
-            .get("modelProfile")
+            .get_property("modelProfile")
             .and_then(|profile| profile.as_str()),
         Some("accepted-hop-profile")
     );
     let supersedes = assistant_lines[0]
         .extra
-        .get("supersedesUuids")
-        .and_then(|ids| ids.as_array())
+        .subprojection("/supersedesUuids")
         .expect("stitched row records source rows in order");
     assert_eq!(
         supersedes,
-        &vec![
-            serde_json::Value::String(old_text_id.as_uuid().to_string()),
-            serde_json::Value::String(old_metadata_id.as_uuid().to_string()),
-        ]
+        source_fixture!([
+            old_text_id.as_uuid().to_string(),
+            old_metadata_id.as_uuid().to_string()
+        ])
     );
     let expected_tool_parent = tool_row_id.as_uuid().to_string();
     assert_eq!(
@@ -2668,13 +2767,15 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
     );
     row.stop_reason = Some("end_turn".into());
     let mut usage = llm_runtime::ExecutionUsage::default();
-    usage.provider_metadata = serde_json::json!({
-        "input_tokens": 11,
-        "output_tokens": 3,
-        "stream": {"llm_client": {"server_fallback_cost_quote": {"quote": {"total": 999}}}},
-        "llm_client": {"history_usage": {"input_tokens": 11}},
-        "upstreamUsageState": "complete"
-    });
+    usage.provider_metadata =
+        lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!({
+            "input_tokens": 11,
+            "output_tokens": 3,
+            "stream": {"llm_client": {"server_fallback_cost_quote": {"quote": {"total": 999}}}},
+            "llm_client": {"history_usage": {"input_tokens": 11}},
+            "upstreamUsageState": "complete"
+        }))
+        .unwrap();
     row.usage = Some(usage);
     let link = orch
         .persist_completed_assistant_row(&mut row, None)
@@ -2710,7 +2811,7 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: tool_use_id.clone(),
             name: "Run".into(),
-            input: serde_json::json!({}),
+            input: source_fixture!({}),
             provider_id: Some("provider-tool-id".into()),
         }],
         session_append_dispatched: false,
@@ -2743,24 +2844,58 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
     assert_eq!(assistant_rows.len(), 2);
     assert_eq!(assistant_rows[0].uuid, row_uuid);
     assert_eq!(assistant_rows[0].parent_uuid, Some(parent_uuid));
-    assert_eq!(assistant_rows[0].message["id"], "provider-response-1");
-    assert_eq!(assistant_rows[0].message["model"], "served-model");
-    assert_eq!(assistant_rows[0].message["stop_reason"], "end_turn");
-    assert_eq!(assistant_rows[0].message["usage"]["input_tokens"], 11);
-    assert_eq!(assistant_rows[0].message["usage"]["output_tokens"], 3);
-    assert!(assistant_rows[0].message["usage"].get("stream").is_none());
-    assert!(
-        assistant_rows[0].message["usage"]
-            .get("llm_client")
-            .is_none()
+    assert_eq!(
+        assistant_rows[0].message.subprojection("/id").unwrap(),
+        source_fixture!("provider-response-1")
     );
-    assert!(
-        assistant_rows[0].message["usage"]
-            .get("upstreamUsageState")
-            .is_none()
+    assert_eq!(
+        assistant_rows[0].message.subprojection("/model").unwrap(),
+        source_fixture!("served-model")
     );
+    assert_eq!(
+        assistant_rows[0]
+            .message
+            .subprojection("/stop_reason")
+            .unwrap(),
+        source_fixture!("end_turn")
+    );
+    assert_eq!(
+        assistant_rows[0]
+            .message
+            .subprojection("/usage/input_tokens")
+            .unwrap(),
+        source_fixture!(11)
+    );
+    assert_eq!(
+        assistant_rows[0]
+            .message
+            .subprojection("/usage/output_tokens")
+            .unwrap(),
+        source_fixture!(3)
+    );
+    assert!(assistant_rows[0]
+        .message
+        .subprojection("/usage")
+        .unwrap()
+        .get_property("stream")
+        .is_none());
+    assert!(assistant_rows[0]
+        .message
+        .subprojection("/usage")
+        .unwrap()
+        .get_property("llm_client")
+        .is_none());
+    assert!(assistant_rows[0]
+        .message
+        .subprojection("/usage")
+        .unwrap()
+        .get_property("upstreamUsageState")
+        .is_none());
     assert_eq!(assistant_rows[0].timestamp, "2026-10-03T12:00:00.000Z");
-    assert_eq!(assistant_rows[0].extra["requestId"], "request-1");
+    assert_eq!(
+        assistant_rows[0].extra.subprojection("/requestId").unwrap(),
+        source_fixture!("request-1")
+    );
     assert_eq!(assistant_rows[1].uuid, tool_row_uuid);
     assert_eq!(
         assistant_rows[1].parent_uuid.as_deref(),
@@ -2798,7 +2933,7 @@ async fn completed_row_mod_content_rewrite_preserves_response_envelope() {
         "completed-row-rewrite",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        source_fixture!({}),
     )
     .await
     .expect("load session.append Mod");
@@ -2809,15 +2944,17 @@ async fn completed_row_mod_content_rewrite_preserves_response_envelope() {
 
     let row_id = lingxi_core::types::MessageId::new();
     let mut usage = llm_runtime::ExecutionUsage::default();
-    usage.provider_metadata = serde_json::json!({
-        "input_tokens": 17,
-        "output_tokens": 6,
-        "cache_creation_input_tokens": 2,
-        "cache_read_input_tokens": 3,
-        "stream": {"llm_client": {"server_fallback_cost_quote": {"quote": {"total": 999}}}},
-        "llm_client": {"history_usage": {"input_tokens": 17}},
-        "upstreamUsageState": "complete"
-    });
+    usage.provider_metadata =
+        lingxi_llm_client::protocol::JsonPayload::from_generated_value(&serde_json::json!({
+            "input_tokens": 17,
+            "output_tokens": 6,
+            "cache_creation_input_tokens": 2,
+            "cache_read_input_tokens": 3,
+            "stream": {"llm_client": {"server_fallback_cost_quote": {"quote": {"total": 999}}}},
+            "llm_client": {"history_usage": {"input_tokens": 17}},
+            "upstreamUsageState": "complete"
+        }))
+        .unwrap();
     let stop_details = llm_runtime::HistoryStopDetails {
         category: Some("cyber".into()),
         explanation: Some("source response details".into()),
@@ -2862,30 +2999,80 @@ async fn completed_row_mod_content_rewrite_preserves_response_envelope() {
     assert_eq!(rows.len(), 1);
     let persisted = &rows[0];
     assert_eq!(persisted.uuid, row_id.as_uuid().to_string());
-    assert_eq!(persisted.message["id"], "physical-provider-message");
-    assert_eq!(persisted.message["model"], "physical-response-model");
-    assert_eq!(persisted.message["stop_reason"], "refusal");
     assert_eq!(
-        persisted.message["stop_details"],
-        serde_json::to_value(stop_details).unwrap()
+        persisted.message.subprojection("/id").unwrap(),
+        source_fixture!("physical-provider-message")
     );
     assert_eq!(
-        persisted.message["content"][0]["text"],
-        "mod rewritten text"
+        persisted.message.subprojection("/model").unwrap(),
+        source_fixture!("physical-response-model")
     );
-    assert_eq!(persisted.message["usage"]["input_tokens"], 17);
-    assert_eq!(persisted.message["usage"]["output_tokens"], 6);
-    assert_eq!(persisted.message["usage"]["cache_creation_input_tokens"], 2);
-    assert_eq!(persisted.message["usage"]["cache_read_input_tokens"], 3);
-    assert!(persisted.message["usage"].get("stream").is_none());
-    assert!(persisted.message["usage"].get("llm_client").is_none());
-    assert!(
-        persisted.message["usage"]
-            .get("upstreamUsageState")
-            .is_none()
+    assert_eq!(
+        persisted.message.subprojection("/stop_reason").unwrap(),
+        source_fixture!("refusal")
     );
-    assert_eq!(persisted.extra["requestId"], "physical-request-id");
-    assert_eq!(persisted.extra["modelProfile"], "physical-route-profile");
+    assert_eq!(
+        persisted.message.subprojection("/stop_details").unwrap(),
+        source_fixture!(serde_json::to_value(stop_details).unwrap())
+    );
+    assert_eq!(
+        persisted.message.subprojection("/content/0/text").unwrap(),
+        source_fixture!("mod rewritten text")
+    );
+    assert_eq!(
+        persisted
+            .message
+            .subprojection("/usage/input_tokens")
+            .unwrap(),
+        source_fixture!(17)
+    );
+    assert_eq!(
+        persisted
+            .message
+            .subprojection("/usage/output_tokens")
+            .unwrap(),
+        source_fixture!(6)
+    );
+    assert_eq!(
+        persisted
+            .message
+            .subprojection("/usage/cache_creation_input_tokens")
+            .unwrap(),
+        source_fixture!(2)
+    );
+    assert_eq!(
+        persisted
+            .message
+            .subprojection("/usage/cache_read_input_tokens")
+            .unwrap(),
+        source_fixture!(3)
+    );
+    assert!(persisted
+        .message
+        .subprojection("/usage")
+        .unwrap()
+        .get_property("stream")
+        .is_none());
+    assert!(persisted
+        .message
+        .subprojection("/usage")
+        .unwrap()
+        .get_property("llm_client")
+        .is_none());
+    assert!(persisted
+        .message
+        .subprojection("/usage")
+        .unwrap()
+        .get_property("upstreamUsageState")
+        .is_none());
+    assert_eq!(
+        persisted.extra.subprojection("/requestId").unwrap(),
+        source_fixture!("physical-request-id")
+    );
+    assert_eq!(
+        persisted.extra.subprojection("/modelProfile").unwrap(),
+        source_fixture!("physical-route-profile")
+    );
     assert_eq!(persisted.timestamp, "2026-10-03T12:34:56.789Z");
 }
 
@@ -2920,7 +3107,7 @@ async fn preappended_stream_result_keeps_raw_query_history_and_dispatches_append
         "stream-result-rewrite",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        source_fixture!({}),
     )
     .await
     .expect("load session.append Mod");
@@ -2966,7 +3153,10 @@ async fn preappended_stream_result_keeps_raw_query_history_and_dispatches_append
     assert_eq!(rows[0].uuid, raw.id().as_uuid().to_string());
     assert_eq!(rows[0].parent_uuid.as_deref(), Some(parent.as_str()));
     assert_eq!(rows[0].timestamp, timestamp);
-    assert_eq!(rows[0].message["content"][0]["content"], "stored result 1");
+    assert_eq!(
+        rows[0].message.subprojection("/content/0/content").unwrap(),
+        source_fixture!("stored result 1")
+    );
 }
 
 #[tokio::test]
@@ -2999,7 +3189,7 @@ async fn preappended_api_error_retains_native_identity_metadata_and_raw_query_ro
         "error-row-rewrite",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        source_fixture!({}),
     )
     .await
     .expect("load session.append Mod");
@@ -3040,16 +3230,46 @@ async fn preappended_api_error_retains_native_identity_metadata_and_raw_query_ro
     let inner_uuid = row.message.id.as_uuid().to_string();
     assert_eq!(rows[0].uuid, outer_uuid);
     assert_eq!(rows[0].timestamp, row.timestamp);
-    assert_eq!(rows[0].message["id"], inner_uuid);
-    assert_ne!(rows[0].message["id"], rows[0].uuid);
-    assert_eq!(rows[0].message["model"], "<synthetic>");
-    assert_eq!(rows[0].message["content"][0]["text"], "stored decline 1");
-    assert_eq!(rows[0].message["stop_reason"], "refusal");
-    assert_eq!(rows[0].message["stop_details"], details);
-    assert_eq!(rows[0].message["usage"], row.message.usage);
-    assert_eq!(rows[0].extra["requestId"], "event-request-id");
-    assert_eq!(rows[0].extra["error"], "invalid_request");
-    assert_eq!(rows[0].extra["isApiErrorMessage"], true);
+    assert_eq!(
+        rows[0].message.subprojection("/id").unwrap(),
+        source_fixture!(inner_uuid)
+    );
+    assert_ne!(
+        rows[0].message.subprojection("/id").unwrap(),
+        source_fixture!(rows[0].uuid)
+    );
+    assert_eq!(
+        rows[0].message.subprojection("/model").unwrap(),
+        source_fixture!("<synthetic>")
+    );
+    assert_eq!(
+        rows[0].message.subprojection("/content/0/text").unwrap(),
+        source_fixture!("stored decline 1")
+    );
+    assert_eq!(
+        rows[0].message.subprojection("/stop_reason").unwrap(),
+        source_fixture!("refusal")
+    );
+    assert_eq!(
+        rows[0].message.subprojection("/stop_details").unwrap(),
+        details
+    );
+    assert_eq!(
+        rows[0].message.subprojection("/usage").unwrap(),
+        Utf16JsonProjection::from_serde_value(&row.message.usage).unwrap()
+    );
+    assert_eq!(
+        rows[0].extra.subprojection("/requestId").unwrap(),
+        source_fixture!("event-request-id")
+    );
+    assert_eq!(
+        rows[0].extra.subprojection("/error").unwrap(),
+        source_fixture!("invalid_request")
+    );
+    assert_eq!(
+        rows[0].extra.subprojection("/isApiErrorMessage").unwrap(),
+        source_fixture!(true)
+    );
     assert_eq!(
         orch.transcript.last_jsonl_uuid.lock().await.as_deref(),
         Some(rows[0].uuid.as_str())
@@ -3083,13 +3303,13 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
         lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::from("toolu_shared"),
             name: "Echo".into(),
-            input: serde_json::json!({ "x": 1 }),
+            input: source_fixture!({ "x": 1 }),
             provider_id: None,
         },
         lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::from("toolu_followup"),
             name: "Echo".into(),
-            input: serde_json::json!({ "x": 2 }),
+            input: source_fixture!({ "x": 2 }),
             provider_id: None,
         },
     ];
@@ -3124,13 +3344,13 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
             lingxi_core::types::ContentBlock::ToolUse {
                 id: lingxi_core::types::ToolUseId::from("toolu_shared"),
                 name: "Echo".into(),
-                input: serde_json::json!({ "x": 1 }),
+                input: source_fixture!({ "x": 1 }),
                 provider_id: None,
             },
             lingxi_core::types::ContentBlock::ToolUse {
                 id: lingxi_core::types::ToolUseId::from("toolu_followup"),
                 name: "Echo".into(),
-                input: serde_json::json!({ "x": 2 }),
+                input: source_fixture!({ "x": 2 }),
                 provider_id: None,
             },
         ],
@@ -3163,7 +3383,8 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::from("toolu_ordered"),
             name: "Echo".into(),
-            input: serde_json::Value::Object(input_tool_4),
+            input: Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(input_tool_4))
+                .unwrap(),
             provider_id: None,
         }],
         stop_reason: Some("tool_use".into()),
@@ -3175,7 +3396,8 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::from("toolu_ordered"),
             name: "Echo".into(),
-            input: serde_json::Value::Object(input_tool_5),
+            input: Utf16JsonProjection::from_serde_value(&serde_json::Value::Object(input_tool_5))
+                .unwrap(),
             provider_id: None,
         }],
         stop_reason: Some("tool_use".into()),
@@ -3278,7 +3500,7 @@ async fn merged_assistant_persists_model_profile_for_resume() {
     assert_eq!(
         lines[0]
             .extra
-            .get("modelProfile")
+            .get_property("modelProfile")
             .and_then(|value| value.as_str()),
         Some("openrouter")
     );
@@ -3297,13 +3519,13 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
             lingxi_core::types::ContentBlock::ToolUse {
                 id: mcp_id.clone(),
                 name: "McpEnd".into(),
-                input: serde_json::json!({}),
+                input: source_fixture!({}),
                 provider_id: None,
             },
             lingxi_core::types::ContentBlock::ToolUse {
                 id: native_id.clone(),
                 name: "NativeEnd".into(),
-                input: serde_json::json!({}),
+                input: source_fixture!({}),
                 provider_id: None,
             },
         ],
@@ -3314,16 +3536,10 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
     orch.persist_assistant_merged(&assistant, None, None, None)
         .await;
 
-    orch.record_tool_use_result(
-        &mcp_id,
-        projection_from_value(&serde_json::json!({"mcp": true})),
-    )
-    .await;
-    orch.record_tool_use_mcp_meta(
-        &mcp_id,
-        projection_from_value(&serde_json::json!({"_meta":{"claude/endTurn":true}})),
-    )
-    .await;
+    orch.record_tool_use_result(&mcp_id, source_fixture!({"mcp": true}))
+        .await;
+    orch.record_tool_use_mcp_meta(&mcp_id, source_fixture!({"_meta":{"claude/endTurn":true}}))
+        .await;
     orch.record_pending_tool_result_turn_end(
         &mcp_id,
         tool_api::tool_trait::ToolResultTurnEnd {
@@ -3331,11 +3547,8 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
         },
     )
     .await;
-    orch.record_tool_use_result(
-        &native_id,
-        projection_from_value(&serde_json::json!({"native": true})),
-    )
-    .await;
+    orch.record_tool_use_result(&native_id, source_fixture!({"native": true}))
+        .await;
     orch.record_pending_tool_result_turn_end(
         &native_id,
         tool_api::tool_trait::ToolResultTurnEnd {
@@ -3379,10 +3592,13 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
             .map(|projection| projection.to_json_string().unwrap()),
         Some(r#"{"_meta":{"claude/endTurn":true}}"#.to_owned())
     );
-    assert!(lines[1].extra.get("toolEndsTurn").is_none());
+    assert!(lines[1].extra.get_property("toolEndsTurn").is_none());
     assert_eq!(
-        lines[2].extra.get("toolEndsTurn"),
-        Some(&serde_json::Value::Bool(true))
+        lines[2]
+            .extra
+            .get_property("toolEndsTurn")
+            .and_then(JsonValueView::as_bool),
+        Some(true)
     );
     assert!(lines[2].mcp_meta_projection.is_none());
 }
@@ -3432,14 +3648,26 @@ async fn scheduled_persistence_keeps_actual_settings_separate_from_session_defau
             .iter()
             .find(|row| row.message_type == "assistant")
             .unwrap();
-        assert_eq!(row.message["model"], "claude-opus-4-6");
-        assert_eq!(row.extra["modelProfile"], "anthropic");
-        assert_eq!(row.extra["effort"], "high");
         assert_eq!(
-            row.extra["reasoningSelection"],
-            serde_json::json!({"type":"level","id":"high"})
+            row.message.subprojection("/model").unwrap(),
+            source_fixture!("claude-opus-4-6")
         );
-        assert_eq!(row.extra["perTurnSettings"], true);
+        assert_eq!(
+            row.extra.subprojection("/modelProfile").unwrap(),
+            source_fixture!("anthropic")
+        );
+        assert_eq!(
+            row.extra.subprojection("/effort").unwrap(),
+            source_fixture!("high")
+        );
+        assert_eq!(
+            row.extra.subprojection("/reasoningSelection").unwrap(),
+            source_fixture!({"type":"level","id":"high"})
+        );
+        assert_eq!(
+            row.extra.subprojection("/perTurnSettings").unwrap(),
+            source_fixture!(true)
+        );
         assert_eq!(orch.session().lock().await.model, "claude-sonnet-4-6");
     }
 }
@@ -3482,23 +3710,33 @@ async fn loop_wakeup_survives_jsonl_resume_without_entering_model_context() {
     let rows = read_jsonl(&path);
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[1].parent_uuid.as_deref(), Some(rows[0].uuid.as_str()));
-    assert_eq!(rows[1].extra["subtype"], "scheduled_task_fire");
-    assert_eq!(rows[1].extra["noOpStreak"], 1);
     assert_eq!(
-        rows[1].extra["foldedUuids"],
-        serde_json::json!([rows[0].uuid])
+        rows[1].extra.subprojection("/subtype").unwrap(),
+        source_fixture!("scheduled_task_fire")
     );
-    assert!(rows[1].extra.get("loopWakeup").is_none());
-    assert!(rows[1].extra.get("isModelContextExcluded").is_none());
-    assert_eq!(rows[2].extra["turnCompanion"], true);
+    assert_eq!(
+        rows[1].extra.subprojection("/noOpStreak").unwrap(),
+        source_fixture!(1)
+    );
+    assert_eq!(
+        rows[1].extra.subprojection("/foldedUuids").unwrap(),
+        source_fixture!([rows[0].uuid])
+    );
+    assert!(rows[1].extra.get_property("loopWakeup").is_none());
+    assert!(rows[1]
+        .extra
+        .get_property("isModelContextExcluded")
+        .is_none());
+    assert_eq!(
+        rows[2].extra.subprojection("/turnCompanion").unwrap(),
+        source_fixture!(true)
+    );
     let restored = crate::resume::state_from_messages(Uuid::new_v4(), &rows);
     assert_eq!(restored.history.len(), 3);
     assert_eq!(restored.model_context_excluded_messages.len(), 2);
-    assert!(
-        !restored
-            .model_context_excluded_messages
-            .contains(&restored.history[2].id())
-    );
+    assert!(!restored
+        .model_context_excluded_messages
+        .contains(&restored.history[2].id()));
 }
 
 #[tokio::test]
@@ -3529,13 +3767,16 @@ async fn fixed_scheduled_fire_omits_loop_only_fields() {
         "streakStartedAt",
         "foldedUuids",
     ] {
-        assert!(!rows[0].extra.contains_key(field), "{field} is loop-only");
+        assert!(
+            !rows[0].extra.contains_property(field),
+            "{field} is loop-only"
+        );
     }
     let restored = crate::resume::state_from_messages(Uuid::new_v4(), &rows);
     assert_eq!(restored.history.len(), 1);
     assert!(
         matches!(&restored.history[0], ConversationMessage::System { content, .. }
-        if content == "Running scheduled task")
+        if content.string_at("") == Some("Running scheduled task"))
     );
 }
 
@@ -3582,8 +3823,8 @@ async fn scheduled_fire_producer_matches_oracle_envelope() {
 #[tokio::test]
 async fn scheduled_streaming_turn_preserves_meta_origin_in_jsonl_and_history() {
     use crate::test_support_stream::{
-        MockStreamingApiClient, content_block_start_text, content_block_stop, message_delta_stop,
-        message_start, message_stop, text_delta,
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
     };
     for in_human_turn in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -3630,8 +3871,8 @@ async fn scheduled_streaming_turn_preserves_meta_origin_in_jsonl_and_history() {
         assert_eq!(
             input
                 .extra
-                .get("isMeta")
-                .and_then(serde_json::Value::as_bool)
+                .get_property("isMeta")
+                .and_then(JsonValueView::as_bool)
                 .unwrap_or(false),
             !in_human_turn
         );
@@ -3647,10 +3888,8 @@ async fn scheduled_streaming_turn_preserves_meta_origin_in_jsonl_and_history() {
         assert_eq!(sent.len(), 1);
         // Provider conversion does not retain internal UUID/meta attributes;
         // those are asserted on the committed classifier history above.
-        assert!(
-            serde_json::to_string(&sent[0].messages)
-                .unwrap()
-                .contains("scheduled origin fixture")
-        );
+        assert!(serde_json::to_string(&sent[0].messages)
+            .unwrap()
+            .contains("scheduled origin fixture"));
     }
 }

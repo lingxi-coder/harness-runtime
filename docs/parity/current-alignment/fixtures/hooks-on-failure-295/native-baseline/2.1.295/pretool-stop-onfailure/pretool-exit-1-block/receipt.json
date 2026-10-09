@@ -1,0 +1,401 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "case": {
+    "id": "pretool-exit-1-block",
+    "event": "PreToolUse",
+    "on_failure": "block",
+    "session_id": "00000000-0000-4000-8000-000000002f42"
+  },
+  "settings": {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/bin/sh",
+              "args": [
+                "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/run-output/pretool-exit-1-block/hook-failure.sh"
+              ],
+              "timeout": 5,
+              "onFailure": "block"
+            }
+          ],
+          "matcher": "Bash"
+        }
+      ]
+    }
+  },
+  "hook_script": {
+    "path": "hook-failure.sh",
+    "bytes": 540,
+    "sha256": "1f4dc93d111c5fed291578e554052b2182575cceabcf8aaae96d54b22507901b"
+  },
+  "settings_sha256": "388dcdcb918e9bd475c092aa1548272a1a3de7deb96f5378d85e04f457e7b98f",
+  "argv": [
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "--setting-sources",
+    "project",
+    "--settings",
+    "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/run-output/pretool-exit-1-block/settings.json",
+    "--strict-mcp-config",
+    "--print",
+    "--output-format",
+    "json",
+    "--tools",
+    "Bash",
+    "--max-turns",
+    "3",
+    "--max-budget-usd",
+    "1",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002f42",
+    "--debug",
+    "hooks",
+    "--allowedTools",
+    "Bash",
+    "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
+    "Run the supplied harmless Bash command once, then finish."
+  ],
+  "public_entrypoint": "Native 2.1.295 --print --output-format json with isolated classic PreToolUse or Stop command hook and local Messages stub",
+  "network_boundary": {
+    "provider": "loopback only",
+    "dummy_key_only": true,
+    "hook_process": "local /bin/sh",
+    "isolated_home_config_cwd": true,
+    "nonessential_traffic_disabled": true
+  },
+  "timeout_seconds": 45,
+  "max_turns": 3,
+  "native_exit_code": 0,
+  "timed_out": false,
+  "stdout": {
+    "path": "native.stdout.raw.json",
+    "bytes": 1996,
+    "sha256": "857ae99157e0eaf68f22fd5d13565a553333469beceab398c54439527c14abae"
+  },
+  "stdout_json_error": null,
+  "stdout_summary": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "FIXED_HOOK_EVENT_ON_FAILURE_FINAL",
+    "session_id": "00000000-0000-4000-8000-000000002f42",
+    "num_turns": 2,
+    "stop_reason": "end_turn"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "http_requests": [
+    {
+      "sequence": 1,
+      "route": "anthropic_messages",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted_dummy_key_loopback": true,
+      "request_bytes": 54008,
+      "request_sha256": "8b5425de8450e185baff4e861b11e029f53574cf661a2b8b9ffce8d73996ccb8",
+      "request_path": "model-request-01.raw.json",
+      "headers_observed_in_order": [
+        [
+          "Accept",
+          "application/json"
+        ],
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "User-Agent",
+          "claude-cli/2.1.295 (external, sdk-cli)"
+        ],
+        [
+          "X-Claude-Code-Session-Id",
+          "00000000-0000-4000-8000-000000002f42"
+        ],
+        [
+          "X-Stainless-Arch",
+          "arm64"
+        ],
+        [
+          "X-Stainless-Lang",
+          "js"
+        ],
+        [
+          "X-Stainless-OS",
+          "MacOS"
+        ],
+        [
+          "X-Stainless-Package-Version",
+          "0.128.0"
+        ],
+        [
+          "X-Stainless-Retry-Count",
+          "0"
+        ],
+        [
+          "X-Stainless-Runtime",
+          "node"
+        ],
+        [
+          "X-Stainless-Runtime-Version",
+          "v26.3.0"
+        ],
+        [
+          "X-Stainless-Timeout",
+          "600"
+        ],
+        [
+          "anthropic-beta",
+          "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "native-hook-event-onfailure-295-dummy-key"
+        ],
+        [
+          "x-app",
+          "cli"
+        ],
+        [
+          "Connection",
+          "keep-alive"
+        ],
+        [
+          "Host",
+          "127.0.0.1:61849"
+        ],
+        [
+          "Accept-Encoding",
+          "gzip, deflate, br, zstd"
+        ],
+        [
+          "Content-Length",
+          "54008"
+        ]
+      ]
+    },
+    {
+      "sequence": 2,
+      "route": "anthropic_messages",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted_dummy_key_loopback": true,
+      "request_bytes": 55050,
+      "request_sha256": "e2428e8899ffc29b19856d8ffa1018bfb442ce0f343463176a0d9d49ef8d65ea",
+      "request_path": "model-request-02.raw.json",
+      "headers_observed_in_order": [
+        [
+          "Accept",
+          "application/json"
+        ],
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "User-Agent",
+          "claude-cli/2.1.295 (external, sdk-cli)"
+        ],
+        [
+          "X-Claude-Code-Session-Id",
+          "00000000-0000-4000-8000-000000002f42"
+        ],
+        [
+          "X-Stainless-Arch",
+          "arm64"
+        ],
+        [
+          "X-Stainless-Lang",
+          "js"
+        ],
+        [
+          "X-Stainless-OS",
+          "MacOS"
+        ],
+        [
+          "X-Stainless-Package-Version",
+          "0.128.0"
+        ],
+        [
+          "X-Stainless-Retry-Count",
+          "0"
+        ],
+        [
+          "X-Stainless-Runtime",
+          "node"
+        ],
+        [
+          "X-Stainless-Runtime-Version",
+          "v26.3.0"
+        ],
+        [
+          "X-Stainless-Timeout",
+          "600"
+        ],
+        [
+          "anthropic-beta",
+          "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "native-hook-event-onfailure-295-dummy-key"
+        ],
+        [
+          "x-app",
+          "cli"
+        ],
+        [
+          "Connection",
+          "keep-alive"
+        ],
+        [
+          "Host",
+          "127.0.0.1:61849"
+        ],
+        [
+          "Accept-Encoding",
+          "gzip, deflate, br, zstd"
+        ],
+        [
+          "Content-Length",
+          "55050"
+        ]
+      ]
+    }
+  ],
+  "http_responses": [
+    {
+      "sequence": 1,
+      "path": "model-response-01.raw.sse",
+      "bytes": 1182,
+      "sha256": "efee95f9883a32fc8a0aa73eb1a0b9bada69406f4bb65b4ee4f8b403a633fd75",
+      "kind": "tool_use",
+      "tool_use_id": "toolu_native_pretool_failure_295",
+      "text": null
+    },
+    {
+      "sequence": 2,
+      "path": "model-response-02.raw.sse",
+      "bytes": 818,
+      "sha256": "47540c9f6157c973a15477b7ef7af0094dd035bdddd661a0c1efb00f758b51af",
+      "kind": "text",
+      "tool_use_id": null,
+      "text": "FIXED_HOOK_EVENT_ON_FAILURE_FINAL"
+    }
+  ],
+  "request_message_summaries": [
+    {
+      "sequence": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "user",
+          "content": [
+            {
+              "kind": "text",
+              "text": "Run the supplied harmless Bash command once, then finish."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "sequence": 2,
+      "messages": [
+        {
+          "index": 0,
+          "role": "user",
+          "content": [
+            {
+              "kind": "text",
+              "text": "Run the supplied harmless Bash command once, then finish."
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "role": "assistant",
+          "content": [
+            {
+              "kind": "tool_use",
+              "content": {
+                "type": "tool_use",
+                "id": "toolu_native_pretool_failure_295",
+                "name": "Bash",
+                "input": {
+                  "command": "printf 'PRETOOL_SIDE_EFFECT' > /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/run-output/pretool-exit-1-block/bash-side-effect.marker; printf 'PRETOOL_STDOUT\\n'",
+                  "description": "fixed harmless marker write"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "index": 2,
+          "role": "user",
+          "content": [
+            {
+              "kind": "tool_result",
+              "content": {
+                "type": "tool_result",
+                "content": "PreToolUse:Bash hook error: [/bin/sh /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/run-output/pretool-exit-1-block/hook-failure.sh]: failed; blocking because onFailure is \"block\"\nFIXED_PRETOOL_HOOK_STDERR\n\n<system-reminder>\n<total_tokens>14999988 tokens left</total_tokens>\n</system-reminder>\n\n<system-reminder>\nUSD budget: $0.000084/$1; $0.999916 remaining\n</system-reminder>",
+                "is_error": true,
+                "tool_use_id": "toolu_native_pretool_failure_295",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "hook_inputs": [
+    {
+      "path": "pretool-hook-input.raw.json",
+      "bytes": 1187,
+      "sha256": "1896e5855ae970c0f6ca5c840e5f576a1058465509fc5984c4c6ab225c5057e8"
+    }
+  ],
+  "hook_invocation_marker_count": 1,
+  "hook_invocation_markers": [
+    {
+      "path": "pretool-hook-invocation.marker",
+      "bytes": 4,
+      "sha256": "f4472a14b6160e58b35bfeb710d23d240ab59402cc84bc7b5a579c7373849295"
+    }
+  ],
+  "bash_side_effect": null,
+  "session_jsonl": {
+    "path": "native-session.raw.jsonl",
+    "bytes": 116187,
+    "sha256": "8dcf4c84f23b674e23a667b69a7867e307803358f3988fd393ffee3563462900"
+  },
+  "scope": "Native classic hook failure policy for the named event and exit-1 command only; request/IDs/timestamps remain captured raw, not normalized."
+}

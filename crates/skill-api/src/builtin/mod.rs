@@ -25,6 +25,24 @@ pub fn register_mobile(reg: &mut SkillRegistry) {
     register_slice(reg, BUILTIN_MOBILE);
 }
 
+/// Return a parsed desktop builtin skill by its registered name. Command
+/// handlers use the same compiled source as the `Skill` tool so slash
+/// invocation and tool discovery cannot drift apart.
+#[must_use]
+pub fn desktop_builtin_skill(name: &str) -> Option<Skill> {
+    BUILTIN_DESKTOP
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(parse_builtin)
+}
+
+/// Return the exact prompt body for a desktop builtin skill by its registered
+/// name.
+#[must_use]
+pub fn desktop_builtin_skill_content(name: &str) -> Option<Utf16JsonProjection> {
+    desktop_builtin_skill(name).map(|skill| skill.content)
+}
+
 fn register_slice(reg: &mut SkillRegistry, slice: &[BundledSkill]) {
     for entry in slice {
         reg.register(parse_builtin(entry));
@@ -76,7 +94,7 @@ mod tests {
         assert_eq!(r.names().len(), BUILTIN_DESKTOP.len());
         let mut names = r.names();
         names.sort_unstable();
-        assert_eq!(names, vec!["claude-api"]);
+        assert_eq!(names, vec!["claude-api", "plugin-authoring"]);
         let skill = r.get("claude-api").expect("registered bundled skill");
         assert_eq!(skill.source, SkillSource::Bundled);
         assert_eq!(skill.loaded_from, LoadedFrom::Bundled);
@@ -116,5 +134,27 @@ mod tests {
                 .any(|skill| skill.name == "claude-api"),
             "claude-api should be discoverable from its builtin command surface"
         );
+    }
+
+    #[test]
+    fn plugin_authoring_builtin_is_shared_with_command_surface() {
+        let mut registry = SkillRegistry::new();
+        register_desktop(&mut registry);
+
+        let skill = registry
+            .get("plugin-authoring")
+            .expect("registered desktop plugin-authoring skill");
+        let command_content = desktop_builtin_skill_content("plugin-authoring")
+            .expect("bundled command uses the same source body");
+
+        assert_eq!(skill.content, command_content);
+        assert!(skill
+            .content
+            .string_at("")
+            .is_some_and(|content| content.contains(".lingxi-plugin/plugin.json")));
+        assert!(registry
+            .discover("write a LingXi plugin with a hooks module")
+            .iter()
+            .any(|discovered| discovered.name == "plugin-authoring"));
     }
 }

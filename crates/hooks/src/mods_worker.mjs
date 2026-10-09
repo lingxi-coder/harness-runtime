@@ -39,8 +39,8 @@ let parentUiPressCounter = 0;
 const context = createContext({ AbortController, AbortSignal });
 const invocationSlot = `__lingxi_mod_call_${randomUUID().replaceAll('-', '')}`;
 const invokeScript = new Script(`globalThis[${JSON.stringify(invocationSlot)}].fn(...globalThis[${JSON.stringify(invocationSlot)}].args)`);
-const supportedEvents = new Set(['plugin.register', 'tool.call', 'tool.check', 'tool.describe', 'tool.list', 'tool.register', 'command.list', 'command.register', 'command.run', 'command.describe', 'prompt.submit', 'prompt.context', 'prompt.attachment', 'prompt.section', 'prompt.compose', 'session.start', 'session.receive', 'session.end', 'session.compact', 'session.measure', 'session.append', 'session.attach', 'session.detach', 'turn.start', 'turn.step', 'turn.complete', 'agent.offer', 'agent.spawn', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.render', 'ui.resolve', 'ui.press', 'ui.input', 'ui.select', 'ui.message', 'ui.fault', 'ui.selection', 'ui.log', 'ui.toast', 'ui.status', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
-const operationEvents = new Set(['tool.check', 'tool.list', 'tool.register', 'command.list', 'command.register', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.log', 'ui.toast', 'ui.status', 'ui.selection', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.receive', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
+const supportedEvents = new Set(['plugin.register', 'tool.call', 'tool.check', 'tool.describe', 'tool.list', 'tool.register', 'command.list', 'command.register', 'command.run', 'command.describe', 'prompt.submit', 'prompt.context', 'prompt.attachment', 'prompt.section', 'prompt.compose', 'session.start', 'session.receive', 'session.end', 'session.compact', 'session.measure', 'session.append', 'session.attach', 'session.detach', 'turn.start', 'turn.step', 'turn.complete', 'agent.offer', 'agent.spawn', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.render', 'ui.resolve', 'ui.press', 'ui.input', 'ui.select', 'ui.message', 'ui.fault', 'ui.selection', 'ui.log', 'ui.toast', 'ui.notify', 'ui.status', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
+const operationEvents = new Set(['tool.check', 'tool.list', 'tool.register', 'command.list', 'command.register', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.log', 'ui.toast', 'ui.notify', 'ui.status', 'ui.selection', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.receive', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
 const commandRunHeldEvents = new Set(['tool.call', 'prompt.context', 'prompt.section', 'prompt.compose', 'command.run']);
 const promptSubmitHeldEvents = new Set([
   'classic.PreToolUse', 'tool.call', 'agent.spawn', 'session.send', 'prompt.section',
@@ -1138,6 +1138,7 @@ function validOperationResult(event, input, result, downstream = []) {
     case 'telemetry.log':
     case 'telemetry.mark':
     case 'ui.toast':
+    case 'ui.notify':
     case 'ui.status':
     case 'clock.sleep':
     case 'clock.after':
@@ -1696,6 +1697,7 @@ function plainJson(value, depth = 0) {
 
 function validUiProps(type, props) {
   const keys = type === 'Box' ? new Set(['flexDirection', 'columnGap'])
+    : type === 'Text' ? new Set(['bold'])
     : type === 'Button' ? new Set(['key', 'label', 'hotkey', 'action', 'plain',
       'dimColor', 'variant', 'role', 'autoFocus']) : new Set();
   if (Object.keys(props).some(key => !keys.has(key))) return false;
@@ -1704,6 +1706,7 @@ function validUiProps(type, props) {
     return props.columnGap === undefined
       || Number.isSafeInteger(props.columnGap) && props.columnGap >= 0 && props.columnGap <= 16;
   }
+  if (type === 'Text') return props.bold === undefined || typeof props.bold === 'boolean';
   if (type !== 'Button') return Object.keys(props).length === 0;
   return typeof props.key === 'string' && props.key.length > 0
     && typeof props.label === 'string'
@@ -2109,16 +2112,15 @@ function makeUiButtonElement(props) {
       'dimColor', 'variant', 'role', 'autoFocus', 'onPress'].includes(key))) {
     throw new TypeError('Button props are outside the terminal AbovePrompt subset');
   }
-  const childLabel = childList.length === 1 && typeof childList[0] === 'string'
-    ? childList[0] : undefined;
-  const label = inputProps.label ?? childLabel;
+  const label = inputProps.label ?? (childList.length > 0
+    ? childList.map(uiChildText).join('') : undefined);
   const key = inputProps.key ?? label;
   if (typeof label !== 'string' || typeof key !== 'string' || key.length === 0
       || typeof onPress !== 'function') {
     throw new TypeError('Button needs a non-empty key, a string label, and an onPress callback');
   }
-  if (childList.length > 0 && (childLabel === undefined || inputProps.label !== undefined)) {
-    throw new TypeError('Button takes one string child as its label, or no children');
+  if (childList.some(child => typeof child !== 'string' && !validTerminalButtonTextChild(child))) {
+    throw new TypeError('Button children must be strings or Text elements');
   }
   const publicProps = { key, label };
   for (const name of ['hotkey', 'action', 'plain', 'dimColor', 'variant', 'role', 'autoFocus']) {
@@ -2127,7 +2129,24 @@ function makeUiButtonElement(props) {
   if (!plainJson(publicProps) || !validUiProps('Button', publicProps)) {
     throw new TypeError('Button props are outside the terminal AbovePrompt subset');
   }
-  return { type: 'Button', props: publicProps, children: [], onPress };
+  const foldStringChild = inputProps.label === undefined
+    && childList.length === 1 && typeof childList[0] === 'string';
+  return { type: 'Button', props: publicProps,
+    ...(childList.length > 0 && !foldStringChild ? { children: childList } : {}), onPress };
+}
+
+function validTerminalButtonTextChild(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.type !== 'Text'
+      || Object.keys(value).some(key => !['type', 'props', 'children'].includes(key))) return false;
+  const props = value.props ?? {};
+  return (value.props === undefined || validUiProps('Text', props))
+    && Array.isArray(value.children) && value.children.every(child => typeof child === 'string'
+      && child.length <= 10000);
+}
+
+function uiChildText(value) {
+  if (typeof value === 'string') return value;
+  return validTerminalButtonTextChild(value) ? value.children.join('') : '';
 }
 
 function makeUiElement(type, props) {
@@ -2148,7 +2167,8 @@ function makeUiElement(type, props) {
   if (!plainJson(elementProps) || !validUiProps(type, elementProps)) {
     throw new TypeError(`${type} props are outside the terminal AbovePrompt subset`);
   }
-  return freeze({ type, props: elementProps, children: normalizedChildren });
+  return freeze({ type, ...(Object.keys(elementProps).length > 0 && { props: elementProps }),
+    children: normalizedChildren });
 }
 
 function nextParentPressToken(plugin) {
@@ -2187,7 +2207,8 @@ function bindUiElementTable(table, context) {
           component: context.component, requestId: context.requestId, key: element.props.key,
           elementType: 'Button', onPress: element.onPress,
         });
-        return freeze({ type: 'Button', props: element.props, children: [], press: token });
+        return freeze({ type: 'Button', props: element.props,
+          ...(element.children === undefined ? {} : { children: element.children }), press: token });
       };
       continue;
     }
@@ -2264,7 +2285,7 @@ function validUiTree(value, depth = 0, count = { value: 0 }, surface = 'terminal
       || Array.isArray(value) || !uiTreeElements.has(value.type)
       || value.props !== undefined && (!value.props || typeof value.props !== 'object'
         || Array.isArray(value.props) || !plainJson(value.props))) return false;
-  if (surface === 'terminal' && value.props === undefined) return false;
+  if (surface === 'terminal' && value.props === undefined && value.type !== 'Text') return false;
   if (surface !== 'terminal') {
     if (value.type === 'engine') {
       return Object.keys(value).length === 2
@@ -2320,14 +2341,21 @@ function validUiTree(value, depth = 0, count = { value: 0 }, surface = 'terminal
       && value.children.every(child => typeof child === 'string' && child.length <= 10000);
     return true;
   }
-  if (!Array.isArray(value.children) || !validUiProps(value.type, value.props)) return false;
+  const terminalProps = value.props ?? {};
+  const childrenInvalid = value.type === 'Button'
+    ? value.children !== undefined && !Array.isArray(value.children)
+    : !Array.isArray(value.children);
+  if (childrenInvalid || !validUiProps(value.type, terminalProps)) return false;
   if (value.type === 'Text') return value.children.every(child => typeof child === 'string'
     && child.length <= 10000);
   if (value.type === 'Button') {
     const press = value.press;
-    return value.children.length === 0
+    const childrenValid = value.children === undefined
+      || Array.isArray(value.children) && value.children.every(child => typeof child === 'string'
+        ? child.length <= 10000 : validTerminalButtonTextChild(child));
+    return childrenValid
       && Object.keys(value).every(key => ['type', 'props', 'children', 'press'].includes(key))
-      && validUiProps('Button', value.props)
+      && validUiProps('Button', terminalProps)
       && press && typeof press === 'object' && !Array.isArray(press)
       && Object.keys(press).every(key => ['plugin', 'handle', 'workerEpoch', 'renderRevision'].includes(key))
       && typeof press.plugin === 'string' && press.plugin.length > 0
@@ -2879,6 +2907,7 @@ function makeApi(plugin, storageId, tier, root, requestId, budget, hookId, heldE
             message: String(error?.message || error) }));
         trackVoidCall(requestId, queued);
       },
+      notify: text => call('ui.notify', { text }).then(() => undefined),
       status: text => {
         const queued = call('ui.status', {
           text,
@@ -3371,6 +3400,14 @@ async function dispatch(message) {
                 plugin, text: event.text, timeoutMs: event.timeoutMs ?? 4000,
                 generationContextTicket: message.generationContextTicket });
             }
+            returned = { value: undefined };
+          } else if (message.event === 'ui.notify') {
+            if (typeof event?.text !== 'string') {
+              throw new Error('ui.notify takes a string text');
+            }
+            send({ id: message.logRouteId ?? message.id, kind: 'notify',
+              plugin: message.origin?.plugin ?? 'engine', text: event.text,
+              generationContextTicket: message.generationContextTicket });
             returned = { value: undefined };
           } else if (message.event === 'ui.log') {
             if (typeof event?.text !== 'string' || event.text.length > 4096) {
@@ -4245,7 +4282,7 @@ input.on('line', line => {
       // value of a successful fs.write core result inside the Mod chain.
       if (['store.get', 'env.get', 'ui.selection', 'telemetry.log', 'telemetry.mark'].includes(reply.event) && !Object.hasOwn(message.result ?? {}, 'value')) {
         reply.accept({ value: undefined });
-      } else if (['fs.write', 'ui.toast', 'ui.status', 'clock.sleep', 'clock.after', 'clock.every', 'store.set', 'store.delete', 'env.set'].includes(reply.event) && message.result?.value === null) {
+      } else if (['fs.write', 'ui.toast', 'ui.notify', 'ui.status', 'clock.sleep', 'clock.after', 'clock.every', 'store.set', 'store.delete', 'env.set'].includes(reply.event) && message.result?.value === null) {
         reply.accept({ value: undefined });
       } else reply.accept(message.result);
     }

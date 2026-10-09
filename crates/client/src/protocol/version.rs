@@ -131,4 +131,15 @@
 /// complete synthetic API-error metadata, and child tombstones delete by UUID.
 /// The snapshot element and native binding layouts change; no old row format
 /// is accepted by this current contract.
-pub const CLIENT_PROTOCOL_VERSION: &str = "19.0.0";
+/// Bumped to 20.0.0 because `TerminalApiError` now requires the provider's
+/// `stop_reason` alongside API status and native terminal reason. This changes
+/// an existing serialized event layout and distinguishes statusless refusals
+/// from provider API errors without inferring from rendered text.
+///
+/// Bumped to 21.0.0 because the existing `UiLog`, `UiToast` and `UiStatus`
+/// text fields now use `ClientTextDto` so isolated UTF-16 code units survive
+/// the native client boundary. `AppAgentTurnResponseDto.text` also uses the
+/// source-preserving `ClientTextDto` introduced by the UTF-16 carrier update.
+/// These retyped fields change generated UniFFI record layouts. `UiNotify` is
+/// appended and does not add another breaking change.
+pub const CLIENT_PROTOCOL_VERSION: &str = "21.0.0";

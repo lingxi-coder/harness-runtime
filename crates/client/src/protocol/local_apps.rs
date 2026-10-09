@@ -670,6 +670,7 @@ pub struct AppAgentTerminalErrorDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_error_status: Option<u16>,
     pub terminal_reason: String,
+    pub stop_reason: String,
 }
 
 /// Result returned by the app-owned Agent `send` and `stream` operations.
@@ -737,6 +738,7 @@ pub enum AppBridgeStreamFrameDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_error_status: Option<u16>,
         terminal_reason: String,
+        stop_reason: String,
     },
 }
 
@@ -1899,10 +1901,12 @@ mod tests {
             seq: 4,
             api_error_status: None,
             terminal_reason: "api_error".into(),
+            stop_reason: "stop_sequence".into(),
         };
         let value = serde_json::to_value(&frame).unwrap();
         assert_eq!(value["type"], "terminal_api_error");
         assert_eq!(value["terminalReason"], "api_error");
+        assert_eq!(value["stopReason"], "stop_sequence");
         assert!(value.get("apiErrorStatus").is_none());
         assert_eq!(
             serde_json::from_value::<AppBridgeStreamFrameDto>(value).unwrap(),
@@ -1921,11 +1925,13 @@ mod tests {
             terminal_error: Some(AppAgentTerminalErrorDto {
                 api_error_status: Some(413),
                 terminal_reason: "image_error".into(),
+                stop_reason: "stop_sequence".into(),
             }),
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains(r#""text":"a\ud800b""#), "{json}");
         assert!(json.contains(r#""terminalReason":"image_error""#), "{json}");
+        assert!(json.contains(r#""stopReason":"stop_sequence""#), "{json}");
         let decoded: AppAgentTurnResponseDto = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, response);
     }

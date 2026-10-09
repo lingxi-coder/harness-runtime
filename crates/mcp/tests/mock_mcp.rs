@@ -937,7 +937,10 @@ async fn get_prompt_sends_name_and_arguments() {
 
     client.initialize().await.expect("init");
     let resp = client
-        .get_prompt("summarize", source_json(&json!({"target": "rust"})))
+        .get_prompt(
+            &Utf16JsonProjection::from("summarize"),
+            source_json(&json!({"target": "rust"})),
+        )
         .await
         .expect("get");
     assert!(resp.at_pointer("/messages").is_some());
@@ -1054,6 +1057,206 @@ async fn list_resources_aggregates_paginated_pages() {
 }
 
 #[tokio::test]
+async fn list_tools_stop_after_repeated_cursor_in_legacy_and_modern_modes() {
+    let _capture = list_paginated_capture_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    install_list_paginated_capture();
+
+    for modern in [false, true] {
+        clear_list_paginated_rows();
+        let page = Arc::new(AtomicUsize::new(0));
+        let page_clone = page.clone();
+        let (client, captured, _handle) = make_client_against_mock(
+            "filesystem",
+            std::path::PathBuf::from("/tmp/work"),
+            move |req| {
+                let id = req["id"].clone();
+                let method = req["method"].as_str().unwrap_or("");
+                let result = match method {
+                    "initialize" => json!({
+                        "protocolVersion": if modern { "2026-07-28" } else { "2025-11-25" },
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "m", "version": "0" }
+                    }),
+                    "tools/list" => {
+                        let index = page_clone.fetch_add(1, Ordering::SeqCst);
+                        match index {
+                            0 => assert!(req["params"].get("cursor").is_none()),
+                            1 => assert_eq!(req["params"]["cursor"], json!("same-cursor")),
+                            other => panic!("unexpected repeated-cursor request {other}"),
+                        }
+                        let mut result = json!({
+                            "tools": [{
+                                "name": format!("page_tool_0{index}"),
+                                "description": "Read",
+                                "inputSchema": { "type": "object" }
+                            }],
+                            "nextCursor": "same-cursor"
+                        });
+                        if modern {
+                            result["resultType"] = json!("complete");
+                            result["ttlMs"] = json!(0);
+                            result["cacheScope"] = json!("private");
+                        }
+                        result
+                    }
+                    _ => return None,
+                };
+                Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+            },
+        )
+        .await;
+        let client = if modern {
+            client.with_negotiated_protocol(McpNegotiatedProtocol {
+                era: McpProtocolEra::Modern,
+                version: "2026-07-28".to_string(),
+            })
+        } else {
+            client
+        };
+
+        client.initialize().await.expect("initialize");
+        let tools = client.list_tools().await.expect("partial tools list");
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.tool_name())
+                .collect::<Vec<_>>(),
+            vec!["page_tool_00", "page_tool_01"],
+            "both pages remain available for modern={modern}"
+        );
+        assert_eq!(
+            page.load(Ordering::SeqCst),
+            2,
+            "Native stops after the repeated cursor for modern={modern}"
+        );
+        assert_eq!(
+            captured.snapshot().await.len(),
+            3,
+            "initialize plus two tools/list requests for modern={modern}"
+        );
+        assert_contains_single_list_paginated_row(ListPaginatedRow {
+            event: telemetry::tengu::mcp::LIST_PAGINATED.to_string(),
+            method: "tools/list".to_string(),
+            page_count: (!modern).then_some(2),
+            item_count: Some(2),
+            outcome: "complete".to_string(),
+            source: Some(if modern { "aggregate" } else { "pages" }.to_string()),
+        });
+    }
+}
+
+#[tokio::test]
+async fn prompts_and_resources_stop_after_repeated_cursor_and_keep_both_pages() {
+    let _capture = list_paginated_capture_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    install_list_paginated_capture();
+    clear_list_paginated_rows();
+    let prompt_page = Arc::new(AtomicUsize::new(0));
+    let resource_page = Arc::new(AtomicUsize::new(0));
+    let prompt_page_clone = prompt_page.clone();
+    let resource_page_clone = resource_page.clone();
+    let (client, captured, _handle) = make_client_against_mock(
+        "catalog",
+        std::path::PathBuf::from("/tmp/work"),
+        move |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": { "prompts": {}, "resources": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "prompts/list" => {
+                    let index = prompt_page_clone.fetch_add(1, Ordering::SeqCst);
+                    match index {
+                        0 => assert!(req["params"].get("cursor").is_none()),
+                        1 => assert_eq!(req["params"]["cursor"], json!("same-cursor")),
+                        other => panic!("unexpected repeated prompts/list request {other}"),
+                    }
+                    json!({
+                        "prompts": [{ "name": format!("prompt_page_0{index}") }],
+                        "nextCursor": "same-cursor"
+                    })
+                }
+                "resources/list" => {
+                    let index = resource_page_clone.fetch_add(1, Ordering::SeqCst);
+                    match index {
+                        0 => assert!(req["params"].get("cursor").is_none()),
+                        1 => assert_eq!(req["params"]["cursor"], json!("same-cursor")),
+                        other => panic!("unexpected repeated resources/list request {other}"),
+                    }
+                    json!({
+                        "resources": [{
+                            "uri": format!("file:///page_0{index}.txt"),
+                            "name": format!("resource_page_0{index}")
+                        }],
+                        "nextCursor": "same-cursor"
+                    })
+                }
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        },
+    )
+    .await;
+
+    client.initialize().await.expect("initialize");
+    let prompts = client.list_prompts().await.expect("partial prompts list");
+    let resources = client
+        .list_resources()
+        .await
+        .expect("partial resources list");
+    assert_eq!(
+        prompts
+            .iter()
+            .map(|prompt| prompt.name.string_at("").unwrap_or(""))
+            .collect::<Vec<_>>(),
+        vec!["prompt_page_00", "prompt_page_01"]
+    );
+    assert_eq!(
+        resources
+            .iter()
+            .map(|resource| resource.uri.string_at("").unwrap_or(""))
+            .collect::<Vec<_>>(),
+        vec!["file:///page_00.txt", "file:///page_01.txt"]
+    );
+    assert_eq!(prompt_page.load(Ordering::SeqCst), 2);
+    assert_eq!(resource_page.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        captured.snapshot().await.len(),
+        5,
+        "initialize and two requests for each list method"
+    );
+
+    let rows = take_list_paginated_rows();
+    assert_eq!(
+        rows,
+        vec![
+            ListPaginatedRow {
+                event: telemetry::tengu::mcp::LIST_PAGINATED.to_string(),
+                method: "prompts/list".to_string(),
+                page_count: Some(2),
+                item_count: Some(2),
+                outcome: "complete".to_string(),
+                source: Some("pages".to_string()),
+            },
+            ListPaginatedRow {
+                event: telemetry::tengu::mcp::LIST_PAGINATED.to_string(),
+                method: "resources/list".to_string(),
+                page_count: Some(2),
+                item_count: Some(2),
+                outcome: "complete".to_string(),
+                source: Some("pages".to_string()),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn list_tools_emits_capped_paginated_telemetry() {
     let _capture = list_paginated_capture_lock()
         .lock()
@@ -1153,7 +1356,7 @@ async fn list_prompts_emits_error_paginated_telemetry() {
     client.initialize().await.expect("init");
     let err = client.list_prompts().await.expect_err("second page fails");
     assert!(
-        matches!(err, mcp::McpClientError::Rpc(ref message) if message.display().contains("invalid cursor")),
+        matches!(err, mcp::McpClientError::Rpc(ref message) if message.string_at("").is_some_and(|text| text.contains("invalid cursor"))),
         "unexpected error: {err:?}"
     );
     assert_contains_single_list_paginated_row(ListPaginatedRow {

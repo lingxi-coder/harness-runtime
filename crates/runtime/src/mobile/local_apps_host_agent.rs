@@ -21,9 +21,9 @@ use local_apps::{
     AgentBudget, AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppAgentProfileProposal,
     AppCapability, RUNTIME_CONTRACT_SCHEMA_VERSION,
 };
-use serde_json::{Value, json};
-use std::sync::Arc;
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -287,10 +287,16 @@ fn agent_turn_response_source(
 
 #[async_trait]
 impl OutputStream for AgentOutputStream {
-    async fn emit_terminal_api_error(&self, api_error_status: Option<u16>, terminal_reason: &str) {
+    async fn emit_terminal_api_error(
+        &self,
+        api_error_status: Option<u16>,
+        terminal_reason: &str,
+        stop_reason: &str,
+    ) {
         let terminal_error = AppAgentTerminalErrorDto {
             api_error_status,
             terminal_reason: terminal_reason.to_owned(),
+            stop_reason: stop_reason.to_owned(),
         };
         *self.terminal_error.lock().await = Some(terminal_error.clone());
         let Some(stream_id) = &self.stream_id else {
@@ -305,6 +311,7 @@ impl OutputStream for AgentOutputStream {
                 seq,
                 api_error_status: terminal_error.api_error_status,
                 terminal_reason: terminal_error.terminal_reason,
+                stop_reason: terminal_error.stop_reason,
             },
         )
         .await;
@@ -407,10 +414,15 @@ impl AgentOutputRouter {
 
 #[async_trait]
 impl OutputStream for AgentOutputRouter {
-    async fn emit_terminal_api_error(&self, api_error_status: Option<u16>, terminal_reason: &str) {
+    async fn emit_terminal_api_error(
+        &self,
+        api_error_status: Option<u16>,
+        terminal_reason: &str,
+        stop_reason: &str,
+    ) {
         if let Some(target) = self.target().await {
             target
-                .emit_terminal_api_error(api_error_status, terminal_reason)
+                .emit_terminal_api_error(api_error_status, terminal_reason, stop_reason)
                 .await;
         }
     }
@@ -1233,7 +1245,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentOutputStream, LocalAppsAgentExecutor, source_text, update_agent_session_after_turn,
+        source_text, update_agent_session_after_turn, AgentOutputStream, LocalAppsAgentExecutor,
     };
     use crate::mobile::local_apps_host::LocalAppsHostBroker;
     use async_trait::async_trait;
@@ -1245,14 +1257,14 @@ mod tests {
     };
     use lingxi_core::host::OutputStream;
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
-    use local_apps::mailbox::{MAX_MAILBOX_EVENTS, load_mailbox};
+    use local_apps::mailbox::{load_mailbox, MAX_MAILBOX_EVENTS};
     use local_apps::test_support::FixedClock;
     use local_apps::{
-        AgentSessionRecord, AgentSessionStatus, AppAgentProfile, AppCapability, AppLayout,
-        AppService, NoopAppEventObserver, load_manifest, load_permissions, save_manifest,
-        save_permissions,
+        load_manifest, load_permissions, save_manifest, save_permissions, AgentSessionRecord,
+        AgentSessionStatus, AppAgentProfile, AppCapability, AppLayout, AppService,
+        NoopAppEventObserver,
     };
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -1644,11 +1656,10 @@ mod tests {
     async fn agent_send_and_stream_use_host_owned_session_lifecycle() {
         let h = harness().await;
         declare_and_grant_agent_sessions(&h);
-        assert!(
-            h.broker
-                .attach_agent_executor(Arc::new(EchoAgentExecutor))
-                .is_ok()
-        );
+        assert!(h
+            .broker
+            .attach_agent_executor(Arc::new(EchoAgentExecutor))
+            .is_ok());
         let session = h
             .broker
             .agent_session_create_value(json!({"app_id": h.app_id}))
@@ -1701,11 +1712,10 @@ mod tests {
     async fn agent_send_source_result_preserves_lone_surrogate_text() {
         let h = harness().await;
         declare_and_grant_agent_sessions(&h);
-        assert!(
-            h.broker
-                .attach_agent_executor(Arc::new(LoneSurrogateAgentExecutor))
-                .is_ok()
-        );
+        assert!(h
+            .broker
+            .attach_agent_executor(Arc::new(LoneSurrogateAgentExecutor))
+            .is_ok());
         let session = h
             .broker
             .agent_session_create_value(json!({"app_id": h.app_id}))
@@ -1745,11 +1755,10 @@ mod tests {
     async fn agent_session_budget_is_cumulative_and_closed_is_terminal() {
         let h = harness().await;
         declare_and_grant_agent_sessions(&h);
-        assert!(
-            h.broker
-                .attach_agent_executor(Arc::new(EchoAgentExecutor))
-                .is_ok()
-        );
+        assert!(h
+            .broker
+            .attach_agent_executor(Arc::new(EchoAgentExecutor))
+            .is_ok());
         let session = h
             .broker
             .agent_session_create_value(json!({
@@ -1890,7 +1899,7 @@ mod tests {
         );
         output.started().await;
         output
-            .emit_terminal_api_error(Some(413), "image_error")
+            .emit_terminal_api_error(Some(413), "image_error", "stop_sequence")
             .await;
         output.completed().await;
 
@@ -1911,8 +1920,9 @@ mod tests {
                 seq: 0,
                 api_error_status: Some(413),
                 ref terminal_reason,
+                ref stop_reason,
                 ..
-            } if terminal_reason == "image_error"
+            } if terminal_reason == "image_error" && stop_reason == "stop_sequence"
         ));
         assert!(frames[1].1.contains("terminalReason"));
         assert!(frames[1].1.contains("image_error"));
@@ -1937,10 +1947,13 @@ mod tests {
             Some(AppAgentTerminalErrorDto {
                 api_error_status: None,
                 terminal_reason: "api_error".into(),
+                stop_reason: "stop_sequence".into(),
             }),
         );
         let json = response.to_json_string().unwrap();
-        assert!(json.contains(r#""terminalError":{"terminalReason":"api_error"}"#));
+        assert!(json.contains(
+            r#""terminalError":{"terminalReason":"api_error","stopReason":"stop_sequence"}"#
+        ));
         let decoded: AppAgentTurnResponseDto = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.text.code_units, units);
         assert_eq!(
@@ -1948,6 +1961,7 @@ mod tests {
             Some(AppAgentTerminalErrorDto {
                 api_error_status: None,
                 terminal_reason: "api_error".into(),
+                stop_reason: "stop_sequence".into(),
             })
         );
     }

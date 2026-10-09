@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -120,6 +121,26 @@ impl BudgetEnforcerHandle for DummyBudget {
 struct QueueApi {
     responses: Mutex<VecDeque<llm_runtime::HistoryResponse>>,
     calls: AtomicUsize,
+}
+
+struct FailingApi;
+
+#[async_trait]
+impl crate::api::SubagentApiClient for FailingApi {
+    async fn stream(
+        &self,
+        _request: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        Err(llm_runtime::LlmError::InvalidRequest {
+            message: "fixture model failure".into(),
+        })
+    }
 }
 
 struct BlockingObserver;
@@ -254,6 +275,10 @@ fn restored_observer_index_counts_only_client_visible_messages() {
         is_meta: false,
         is_compact_summary: true,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     let transcript_only = ConversationMessage::User {
         id: MessageId::new(),
@@ -261,6 +286,10 @@ fn restored_observer_index_counts_only_client_visible_messages() {
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: true,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     let lifecycle = ConversationMessage::System {
         id: MessageId::new(),
@@ -300,9 +329,11 @@ async fn spawn_without_registry_cannot_launch_an_unmanaged_observer() {
     let spawner = test_spawner(pool).with_api_client(api.clone());
     let request = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".into(),
         prompt: "do work".into(),
+        parent_native_query_depth: None,
         observer: Some(lingxi_core::host::subagent_spawn::ObserverSpec::new(
             "Explore",
         )),
@@ -374,11 +405,8 @@ async fn spawn_without_registry_cannot_launch_an_unmanaged_observer() {
     // must not consume its response or graft its answer onto the child.
     // The positive one-shot + persistent wiring is covered by
     // real_spawn_paths_feed_observer_sidecars_without_changing_child_result.
-    assert_eq!(
-        content.get("text").and_then(Value::as_str),
-        Some("worker result")
-    );
-    assert!(content.get("observer").is_none());
+    assert_eq!(content.string_at("/text"), Some("worker result"));
+    assert!(content.subprojection("/observer").is_err());
     assert_eq!(api.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         api.responses.lock().unwrap().len(),
@@ -608,9 +636,10 @@ async fn agent_scoped_mcp_tools_reach_the_wire_and_are_torn_down_on_exit() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
 
-    let seen_tools: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_tools: Arc<Mutex<Vec<llm_runtime::ToolDeclaration>>> =
+        Arc::new(Mutex::new(Vec::new()));
     struct CapturingApi {
-        seen_tools: Arc<Mutex<Vec<Value>>>,
+        seen_tools: Arc<Mutex<Vec<llm_runtime::ToolDeclaration>>>,
     }
     #[async_trait]
     impl crate::api::SubagentApiClient for CapturingApi {
@@ -700,7 +729,7 @@ async fn agent_scoped_mcp_tools_reach_the_wire_and_are_torn_down_on_exit() {
         .lock()
         .unwrap()
         .iter()
-        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .map(|tool| tool.name.clone())
         .collect();
     assert!(
         names.contains(&"mcp__fake__tool".to_string()),
@@ -872,11 +901,15 @@ async fn observer_receives_resolved_type_and_ordered_terminal_event() {
     let spawner = test_spawner(pool)
         .with_api_client(api)
         .with_spawn_observer(observer.clone());
-    let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    let token = statistics.prepare_spawn("general-purpose".into(), Some(false), false, 1);
+    let mut request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
         "subagent_type": "unknown-agent-type",
         "prompt": "finish"
     }))
     .expect("minimal spawn request");
+    request.agent_spawn_token = Some(token);
 
     spawner
         .spawn(
@@ -909,6 +942,35 @@ async fn observer_receives_resolved_type_and_ordered_terminal_event() {
         events.last(),
         Some(SubagentObservation::Completed { .. })
     ));
+    let snapshot = statistics.snapshot();
+    assert_eq!(snapshot.spawned, 1);
+    assert_eq!(snapshot.requested.foreground, 1);
+    assert_eq!(snapshot.started_in_background, 0);
+    assert_eq!(snapshot.completed, 1);
+    assert_eq!(snapshot.failed, 0);
+    assert_eq!(snapshot.by_type, vec![("general-purpose".into(), 1)]);
+}
+
+#[tokio::test]
+async fn agent_spawn_statistics_count_failed_model_execution() {
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let pool = Arc::new(StateMachinePool::new(runtime, 4));
+    let spawner = test_spawner(pool).with_api_client(Arc::new(FailingApi));
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    let token = statistics.prepare_spawn("general-purpose".into(), Some(false), false, 1);
+    let mut request = minimal_spawn_request("fail once");
+    request.agent_spawn_token = Some(token);
+
+    let result = spawner
+        .spawn(request, dummy_inherit())
+        .await
+        .expect("model failure is returned as a terminal subagent result");
+    assert!(matches!(result, SubagentResult::Failed { .. }));
+    let snapshot = statistics.snapshot();
+    assert_eq!(snapshot.spawned, 1);
+    assert_eq!(snapshot.completed, 0);
+    assert_eq!(snapshot.failed, 1);
 }
 
 /// A `SubagentApiClient` whose model round-trip never resolves — pins a
@@ -1029,7 +1091,7 @@ async fn dropped_spawn_future_during_mcp_cleanup_still_emits_one_terminal_event(
 }
 
 #[tokio::test]
-async fn persistent_spawn_forwards_progress_to_observer_and_task_consumer() {
+async fn persistent_spawn_forwards_progress_and_leaves_kill_reason_to_task_owner() {
     let pool = Arc::new(StateMachinePool::new(
         Arc::new(MockRuntimeSpawner::default()),
         4,
@@ -1044,8 +1106,14 @@ async fn persistent_spawn_forwards_progress_to_observer_and_task_consumer() {
             calls: AtomicUsize::new(0),
         }))
         .with_spawn_observer(observer.clone());
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    let token = statistics.prepare_spawn("general-purpose".into(), Some(true), true, 1);
+    let mut request = minimal_spawn_request("go");
+    request.run_in_background = true;
+    request.agent_spawn_token = Some(token.clone());
     let (agent_id, mut events) = spawner
-        .spawn_persistent(minimal_spawn_request("go"), dummy_inherit())
+        .spawn_persistent(request, dummy_inherit())
         .await
         .unwrap();
     let mut consumer_progress = Vec::new();
@@ -1077,7 +1145,31 @@ async fn persistent_spawn_forwards_progress_to_observer_and_task_consumer() {
     })
     .await
     .expect("task consumer and observer receive the completed turn");
+    assert_eq!(statistics.snapshot().spawned, 1);
+    assert_eq!(
+        statistics.snapshot().completed,
+        0,
+        "a persistent agent's Completed event ends one rest, not the agent"
+    );
     spawner.stop(&agent_id).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            match events.recv().await {
+                Some(SubagentEvent::Killed { .. }) => break,
+                Some(_) => {}
+                None => panic!("persistent runner closed before its Killed event"),
+            }
+        }
+    })
+    .await
+    .expect("the runner emits its terminal Killed event");
+    assert_eq!(statistics.snapshot().killed.user, 0);
+    assert_eq!(statistics.snapshot().killed.parent, 0);
+    // The task-status owner can now apply its authoritative reason. The
+    // persistent stream forwarder must not race it with a generic User receipt.
+    token.killed(lingxi_core::host::agent_statistics::AgentKillReason::Parent);
+    assert_eq!(statistics.snapshot().killed.parent, 1);
+    assert_eq!(statistics.snapshot().killed.user, 0);
     let observed_progress = observer
         .events
         .lock()
@@ -1107,6 +1199,9 @@ async fn persistent_stop_flushes_cancelled_transcript_before_deallocation() {
         4,
     ));
     let observer = Arc::new(RecordingLifecycleObserver::default());
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    let token = statistics.prepare_spawn("general-purpose".into(), Some(true), true, 1);
     let spawner = test_spawner(pool.clone())
         .with_api_client(Arc::new(HangingApi))
         .with_spawn_observer(observer.clone())
@@ -1116,8 +1211,11 @@ async fn persistent_stop_flushes_cancelled_transcript_before_deallocation() {
             Some(dir.path().to_path_buf()),
         )
         .with_transcript_fs(fs);
+    let mut request = minimal_spawn_request("go");
+    request.run_in_background = true;
+    request.agent_spawn_token = Some(token);
     let (agent_id, mut events) = spawner
-        .spawn_persistent(minimal_spawn_request("go"), dummy_inherit())
+        .spawn_persistent(request, dummy_inherit())
         .await
         .unwrap();
     let transcript_path = dir.path().join(format!("agent-{agent_id}.jsonl"));
@@ -1166,6 +1264,17 @@ async fn persistent_stop_flushes_cancelled_transcript_before_deallocation() {
     .await
     .expect("persistent stop delivers its cancelled lifecycle");
     assert!(pool.agent_runner_finished(&agent_id).await);
+    let snapshot = statistics.snapshot();
+    assert_eq!(snapshot.spawned, 1);
+    assert_eq!(snapshot.requested.background, 1);
+    assert_eq!(snapshot.started_in_background, 1);
+    // This direct persistent-spawner test has no TaskRegistry attached. The
+    // runner publishes `Killed`, but only TaskRegistry knows whether the
+    // authoritative reason was User, Parent, or System, so this token remains
+    // un-settled at this layer.
+    assert_eq!(snapshot.killed.user, 0);
+    assert_eq!(snapshot.killed.parent, 0);
+    assert_eq!(snapshot.killed.system, 0);
     // Repeated cleanup is still safe after the slot is gone.
     spawner.stop(&agent_id).await.unwrap();
 }
@@ -1196,11 +1305,16 @@ async fn dropped_spawn_future_lets_runner_reach_cancelled_before_hard_abort() {
             Some(dir.path().to_path_buf()),
         )
         .with_transcript_fs(fs);
-    let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    let token = statistics.prepare_spawn("general-purpose".into(), Some(true), true, 1);
+    let mut request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
         "subagent_type": "general-purpose",
-        "prompt": "go"
+        "prompt": "go",
+        "run_in_background": true
     }))
     .expect("minimal spawn request");
+    request.agent_spawn_token = Some(token);
 
     let spawn_result = tokio::time::timeout(
         std::time::Duration::from_millis(50),
@@ -1280,6 +1394,11 @@ async fn dropped_spawn_future_lets_runner_reach_cancelled_before_hard_abort() {
         "the runner must reach its own cooperative terminal write before the hard-abort \
          fallback, not get killed mid-turn with the transcript stuck \"running\": {body}"
     );
+    let snapshot = statistics.snapshot();
+    assert_eq!(snapshot.spawned, 1);
+    assert_eq!(snapshot.requested.background, 1);
+    assert_eq!(snapshot.started_in_background, 1);
+    assert_eq!(snapshot.killed.user, 1);
 }
 
 /// [round-3 finding 17] `SpawnDeallocGuard`'s early-drop path must tear
@@ -1500,7 +1619,7 @@ async fn handback_spawn_keeps_registered_sender_separate_from_anonymous_type_dis
         assert!(ctx
             .tool_schemas
             .iter()
-            .any(|tool| tool["name"] == lingxi_core::host::handback::HANDBACK_TOOL_NAME));
+            .any(|tool| tool.name == lingxi_core::host::handback::HANDBACK_TOOL_NAME));
     }
 }
 
@@ -2024,9 +2143,22 @@ impl Tool for StubTool {
     fn aliases(&self) -> &[&str] {
         self.aliases
     }
-    fn input_schema(&self) -> &Value {
-        static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-        SCHEMA.get_or_init(|| serde_json::json!({"type": "object"}))
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        static SCHEMA: std::sync::OnceLock<Utf16JsonProjection> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            Utf16JsonProjection::parse(r#"{"type":"object"}"#)
+                .expect("stub tool schema is valid JSON")
+        })
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &tool_api::tool_trait::ToolStaticContext) -> bool {
         true
@@ -2037,15 +2169,15 @@ impl Tool for StubTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
     async fn check_permissions(
         &self,
-        _input: &Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -2059,17 +2191,17 @@ impl Tool for StubTool {
     }
     async fn description(
         &self,
-        _input: &Value,
+        _input: &Utf16JsonProjection,
         _opts: &tool_api::tool_trait::DescriptionOptions,
     ) -> String {
         self.name.into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        format!("{} tool prompt", self.name)
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+        Utf16JsonProjection::from(format!("{} tool prompt", self.name))
     }
     async fn call(
         &self,
-        _input: Value,
+        _input: Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: tool_api::progress::ToolProgressSender,
     ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
@@ -2433,10 +2565,7 @@ async fn production_spawner_filters_shared_comms_tools_for_coordinator_workers()
         )
         .await
         .expect("coordinator worker tool resolution should succeed");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|tool| tool["name"].as_str().expect("tool name"))
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, vec!["Read", "mcp__inline__read"]);
     assert_eq!(
         allowed,
@@ -2481,10 +2610,7 @@ async fn production_spawner_filters_generic_mcp_routing_for_coordinator_workers(
         )
         .await
         .expect("coordinator worker tool resolution should succeed");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|tool| tool["name"].as_str().expect("tool name"))
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     for denied in ["MCP", "McpAuth", "mcp__comms__send"] {
         assert!(!names.contains(&denied), "coordinator must hide {denied}");
         assert!(!allowed.iter().any(|name| name == denied));
@@ -2518,10 +2644,7 @@ async fn production_spawner_filters_generic_mcp_routing_for_coordinator_workers(
         )
         .await
         .expect("ordinary worker tool resolution should succeed");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|tool| tool["name"].as_str().expect("tool name"))
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     for retained in ["MCP", "McpAuth", "mcp__comms__send"] {
         assert!(
             names.contains(&retained),
@@ -2547,10 +2670,7 @@ async fn production_spawner_exact_policy_filters_generic_mcp_routing_only_for_co
         .resolve_tools(&exact, 0, &[])
         .await
         .expect("coordinator exact resolution should succeed");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|tool| tool["name"].as_str().expect("tool name"))
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     for denied in ["MCP", "McpAuth", "mcp__comms__send"] {
         assert!(
             !names.contains(&denied),
@@ -2571,10 +2691,7 @@ async fn production_spawner_exact_policy_filters_generic_mcp_routing_only_for_co
         .resolve_tools(&exact, 0, &[])
         .await
         .expect("ordinary exact resolution should succeed");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|tool| tool["name"].as_str().expect("tool name"))
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     for retained in ["MCP", "McpAuth", "mcp__comms__send"] {
         assert!(names.contains(&retained), "ordinary exact keeps {retained}");
         assert!(allowed.iter().any(|name| name == retained));
@@ -2602,10 +2719,7 @@ async fn production_spawner_retains_shared_comms_tools_outside_coordinator_mode(
         )
         .await
         .expect("ordinary subagent tool resolution should succeed");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|tool| tool["name"].as_str().expect("tool name"))
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, vec!["mcp__comms__send", "Read", "mcp__inline__send"]);
     assert_eq!(
         allowed,
@@ -2654,10 +2768,7 @@ async fn resolve_tools_all_policy_advertises_full_set_and_allow_list() {
         .expect("all policy should resolve");
     // Full set, and allow-list = resolved names — both in the faithful
     // `assembleToolPool` order (builtins sorted by name).
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, vec!["Bash", "Read"]);
     // allow-list mirrors the resolved order, which now follows
     // `available_tools()`'s locale-sorted order (Bash < Read).
@@ -2680,10 +2791,7 @@ async fn resolve_tools_explicit_policy_filters_advertised_and_allow_list() {
         )
         .await
         .expect("explicit Read should resolve");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, vec!["Read"]);
     assert_eq!(allowed, vec!["Read".to_string()]);
 }
@@ -2729,10 +2837,7 @@ async fn resolve_tools_strips_tool_wide_denied_tool_from_subagent_pool() {
         )
         .await
         .expect("all policy should resolve with tool-wide deny");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(
         names,
         vec!["Bash", "Read"],
@@ -2768,10 +2873,7 @@ async fn resolve_tools_mcp_server_deny_strips_all_server_tools_from_subagent() {
         )
         .await
         .expect("all policy should resolve with mcp server deny");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert!(
         !names.contains(&"mcp__github__issue"),
         "mcp__github deny must strip mcp__github__issue, got: {names:?}"
@@ -2846,10 +2948,7 @@ async fn resolve_tools_includes_aliases_in_allow_list() {
         .await
         .expect("all policy should resolve with aliases");
     // Advertised: canonical name only.
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, vec!["Bash"]);
     // Allow-list: canonical name AND the alias.
     assert_eq!(allowed, vec!["Bash".to_string(), "Shell".to_string()]);
@@ -2883,10 +2982,7 @@ async fn resolve_tools_gates_agent_by_depth() {
         .resolve_tools(&policy(), 0, &[])
         .await
         .expect("depth 0 should resolve");
-    let names0: Vec<&str> = schemas0
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names0: Vec<&str> = schemas0.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names0, vec!["Agent"], "Agent kept at depth 0");
     assert!(allowed0.contains(&"Agent".to_string()));
     assert!(
@@ -2926,10 +3022,7 @@ async fn resolve_tools_all_policy_keeps_agent_at_depth_0() {
         )
         .await
         .expect("all policy should resolve at depth 0");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, vec!["Agent", "Bash", "Read"]);
     assert!(allowed.contains(&"Agent".to_string()));
     assert!(allowed.contains(&"Bash".to_string()));
@@ -2958,10 +3051,7 @@ async fn resolve_tools_plan_mode_keeps_only_readonly() {
         )
         .await
         .expect("plan-mode all policy should resolve");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     // available_tools() locale-sorts the builtin set (Grep < Read < WebFetch).
     assert_eq!(names, vec!["Grep", "Read", "WebFetch"]);
     assert!(!allowed.contains(&"Bash".to_string()));
@@ -2992,10 +3082,7 @@ async fn resolve_tools_except_policy() {
         )
         .await
         .expect("except policy should resolve");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, vec!["Edit", "Read"]); // sorted by name
                                              // resolved/allow-list order = available_tools() locale sort (Edit < Read)
     assert_eq!(allowed, vec!["Edit".to_string(), "Read".to_string()]);
@@ -3590,9 +3677,11 @@ async fn build_subagent_context_inherit_resolves_to_parent_model_override() {
     let spawner = test_spawner(pool).with_default_model("claude-opus-4-7");
     let req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -3666,9 +3755,11 @@ async fn effective_parent_model_precedence_override_then_live_then_boot() {
         .with_default_model_provider(Arc::new(|| Some("live-model".to_string())));
     let mut req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: Utf16JsonProjection::from(""),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -4152,6 +4243,7 @@ fn make_subagent_context_fork_seeds_prefix_and_empty_prompt_messages() {
                 citations: None,
             }],
             stop_reason: Some("tool_use".to_string()),
+            resumable: None,
         },
         ConversationMessage::user(MessageId::new(), "directive prefix".to_string()),
     ];
@@ -4159,7 +4251,7 @@ fn make_subagent_context_fork_seeds_prefix_and_empty_prompt_messages() {
         def,
         "unused",
         Some(prefix.clone()),
-        Some("parent sys".to_string()),
+        Some(Utf16JsonProjection::from("parent sys")),
     );
     assert!(
         ctx.prompt_messages.is_empty(),
@@ -4186,10 +4278,7 @@ async fn explore_definition_narrows_resolved_tools_to_read_only() {
         .resolve_tools(&def, 0, &[])
         .await
         .expect("Explore tool set should resolve");
-    let names: Vec<&str> = schemas
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
     assert_eq!(names, vec!["Grep", "Read"]); // sorted; Edit+Write dropped
     assert!(allowed.contains(&"Read".to_string()));
     assert!(allowed.contains(&"Grep".to_string()));
@@ -4618,9 +4707,11 @@ async fn spawn_request_model_override_takes_precedence() {
     // concrete haiku id (different tier from the opus parent).
     let mut req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -4760,9 +4851,11 @@ async fn build_subagent_context_ignores_deprecated_mode_param() {
     };
     let base_req = || SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -4891,9 +4984,11 @@ async fn build_subagent_context_definition_plan_mode_overrides() {
     // No `mode` call param — the override must come purely from frontmatter.
     let req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -4979,9 +5074,11 @@ async fn build_subagent_context_plan_mode_narrows_advertised_schemas() {
     };
     let req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -5040,7 +5137,7 @@ async fn build_subagent_context_plan_mode_narrows_advertised_schemas() {
     let names: Vec<&str> = ctx
         .tool_schemas
         .iter()
-        .map(|tool| tool["name"].as_str().unwrap())
+        .map(|tool| tool.name.as_str())
         .collect();
     assert_eq!(names, vec!["Grep", "Read"]);
     assert_eq!(ctx.permission_mode_override.as_deref(), Some("plan"));
@@ -5059,9 +5156,11 @@ async fn build_subagent_context_threads_persistent_flag() {
     let spawner = test_spawner(pool);
     let req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -5150,6 +5249,7 @@ async fn build_subagent_context_copies_structured_output_parse_retries() {
     let request = SubagentSpawnRequest {
         subagent_type: "general-purpose".into(),
         prompt: "design".into(),
+        parent_native_query_depth: None,
         schema: Some("{}".into()),
         structured_output_parse_retries: 2,
         ..Default::default()
@@ -5181,9 +5281,11 @@ async fn build_subagent_context_copies_correlation_id() {
     let spawner = test_spawner(pool);
     let req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -5495,9 +5597,11 @@ async fn spawn_persistent_cancellation_cleans_up_runner_started_during_allocate(
 
     let req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -5614,9 +5718,11 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
     };
     let mut req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -5735,9 +5841,11 @@ async fn build_subagent_context_preserves_spawn_name_and_team() {
     let spawner = test_spawner(pool);
     let request = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
-        prompt: "go".to_string(),
+        prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,
@@ -6199,11 +6307,13 @@ async fn real_spawn_paths_feed_observer_sidecars_without_changing_child_result()
         panic!("scripted model agent completes")
     };
     assert!(
-        content.get("observer").is_none(),
+        !content.contains_property("observer"),
         "observer output must not be appended to the child's answer"
     );
     assert_eq!(
-        content.get("text").and_then(Value::as_str),
+        content
+            .get_property("text")
+            .and_then(|value| value.as_str()),
         Some("child answer")
     );
     let (persistent, mut events) = spawner
@@ -6363,9 +6473,11 @@ async fn spawn_async_default_returns_internal_error() {
     let budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(DummyBudget);
     let req = SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".into(),
         prompt: "go".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         description: None,

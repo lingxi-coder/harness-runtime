@@ -36,7 +36,7 @@ async fn single_turn_conversation_against_mock_http() {
     }
     let mut saw_send_request = false;
     for e in &effects {
-        if let Effect::SendApiRequest {
+        if let Effect::RequestModel {
             request_id: rid, ..
         } = e
         {
@@ -66,9 +66,11 @@ async fn single_turn_conversation_against_mock_http() {
     let final_message = ConversationMessage::Assistant {
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "Hello!".into(), citations: None,
+            text: "Hello!".into(),
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
+        resumable: None,
     };
     let (next, effects) = reduce(
         state,

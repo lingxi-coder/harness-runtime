@@ -33,9 +33,9 @@ use uuid::Uuid;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
+    generated_builtin_schema, source_text_projection, source_text_projection_units,
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
     ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
-    generated_builtin_schema, source_text_projection, source_text_projection_units,
 };
 
 use crate::mailbox::{MessageSender, TeammateMessage};
@@ -315,6 +315,7 @@ mod tests {
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
             agent_spawn_provenance: Default::default(),
+            native_query_depth: None,
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
@@ -479,12 +480,11 @@ mod tests {
             .await
             .expect_err("invalid agent_id must fail");
         assert!(matches!(err, ToolError::InvalidInput(_)));
-        assert!(
-            err.model_facing_message()
-                .string_at("")
-                .unwrap()
-                .contains("not a valid UUID")
-        );
+        assert!(err
+            .model_facing_message()
+            .string_at("")
+            .unwrap()
+            .contains("not a valid UUID"));
     }
 
     #[tokio::test]
@@ -503,12 +503,11 @@ mod tests {
             .await
             .expect_err("unknown worker must fail");
         assert!(matches!(err, ToolError::InvalidInput(_)));
-        assert!(
-            err.model_facing_message()
-                .string_at("")
-                .unwrap()
-                .contains("unknown worker agent id")
-        );
+        assert!(err
+            .model_facing_message()
+            .string_at("")
+            .unwrap()
+            .contains("unknown worker agent id"));
     }
 
     #[tokio::test]

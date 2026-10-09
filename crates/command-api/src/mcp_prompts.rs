@@ -284,7 +284,7 @@ mod tests {
             )
         );
         assert_eq!(
-            commands[0].description.as_ref().unwrap().string_units(""),
+            commands[0].description.string_units(""),
             Some(vec![b'd' as u16, 0xd800])
         );
         assert_eq!(
@@ -305,8 +305,8 @@ mod tests {
             commands[0].name.string_units("")
         );
         assert_eq!(
-            decoded.description.unwrap().string_units(""),
-            commands[0].description.as_ref().unwrap().string_units("")
+            decoded.description.string_units(""),
+            commands[0].description.string_units("")
         );
     }
 

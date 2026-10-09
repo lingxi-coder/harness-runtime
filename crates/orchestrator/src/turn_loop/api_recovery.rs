@@ -106,6 +106,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // of the session. Re-appended below wherever the request is rebuilt from
     // raw `session.history`.
     mut turn_reminders: Vec<ConversationMessage>,
+    tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
     guarded_async_hook_reminders: &mut Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
     context_announcements: &crate::conversation::PreparedContextAnnouncements,
     // Exact originating-session accounting authority captured before the
@@ -113,6 +114,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
     // resolving whichever session happens to be active later.
     cost_scope: Option<&cost::CostSessionScope>,
 ) -> Result<PtlCallOutcome, OrchestratorError> {
+    let request_dispatch_observer = orch.turn_request_dispatch_observer();
     crate::prompt::async_hook_response::retain_current_async_hook_reminders(
         &mut history_snapshot,
         &mut turn_reminders,
@@ -264,7 +266,9 @@ pub(crate) async fn call_api_with_ptl_recovery(
         history_snapshot,
         tools.clone(),
     );
+    request.opts.request_dispatch_observer = request_dispatch_observer.clone();
     request.opts.skip_global_cache_for_system_prompt = skip_global_cache_for_system_prompt;
+    request.opts.tool_result_reminder_suffixes = tool_result_reminder_suffixes;
     request.opts.query_source =
         Some(crate::config::sanitize_query_source(&orch.config.query_source).to_string());
     apply_main_request_options(
@@ -392,6 +396,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                         retry,
                         tools.clone(),
                     );
+                    request.opts.request_dispatch_observer = request_dispatch_observer.clone();
                     request.opts.skip_global_cache_for_system_prompt =
                         skip_global_cache_for_system_prompt;
                     request.opts.query_source = Some(
@@ -490,6 +495,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     retry,
                     tools.clone(),
                 );
+                request.opts.request_dispatch_observer = request_dispatch_observer.clone();
                 request.opts.query_source = Some(
                     crate::config::sanitize_query_source(&orch.config.query_source).to_string(),
                 );
@@ -765,6 +771,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     history,
                     tools,
                 );
+                request.opts.request_dispatch_observer = request_dispatch_observer.clone();
                 request.opts.query_source = Some(
                     crate::config::sanitize_query_source(&orch.config.query_source).to_string(),
                 );

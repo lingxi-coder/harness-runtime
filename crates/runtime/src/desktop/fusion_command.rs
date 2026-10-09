@@ -695,14 +695,21 @@ mod tests {
             ),
         ];
         for (index, (raw, expected_prefix)) in invocations.iter().enumerate() {
-            let result = command.handle(&parse_slash_command(raw).unwrap()).await;
+            let result = command
+                .handle(&parse_slash_command(&(*raw).into()).unwrap())
+                .await;
             let CommandResult::Done {
                 display: Some(display),
             } = result
             else {
                 panic!("expected a command reply")
             };
-            assert!(display.starts_with(expected_prefix), "{display}");
+            assert!(
+                display
+                    .string_at("")
+                    .is_some_and(|text| text.starts_with(expected_prefix)),
+                "{display:?}"
+            );
             let text = std::fs::read_to_string(&transcript_path).unwrap();
             let rows: Vec<serde_json::Value> = text
                 .lines()
@@ -711,8 +718,8 @@ mod tests {
             assert_eq!(rows.len(), (index + 1) * 2);
             assert_eq!(rows[index * 2]["message"]["content"][0]["text"], *raw);
             assert_eq!(
-                rows[index * 2 + 1]["message"]["content"][0]["text"],
-                display
+                rows[index * 2 + 1]["message"]["content"][0]["text"].as_str(),
+                display.string_at("")
             );
             assert_eq!(
                 handle.get_status_snapshot().await.n_messages,
@@ -723,7 +730,9 @@ mod tests {
         for (raw, _) in invocations {
             let CommandResult::Done {
                 display: Some(display),
-            } = disabled.handle(&parse_slash_command(raw).unwrap()).await
+            } = disabled
+                .handle(&parse_slash_command(&raw.into()).unwrap())
+                .await
             else {
                 panic!("expected a persistence failure")
             };
@@ -749,11 +758,18 @@ mod tests {
         for (raw, _) in invocations {
             let CommandResult::Done {
                 display: Some(display),
-            } = unavailable.handle(&parse_slash_command(raw).unwrap()).await
+            } = unavailable
+                .handle(&parse_slash_command(&raw.into()).unwrap())
+                .await
             else {
                 panic!("expected a storage failure")
             };
-            assert!(display.starts_with("fusion failed to start:"), "{display}");
+            assert!(
+                display
+                    .string_at("")
+                    .is_some_and(|text| text.starts_with("fusion failed to start:")),
+                "{display:?}"
+            );
         }
         assert_eq!(handle.get_status_snapshot().await.n_messages, 10);
     }
@@ -809,8 +825,8 @@ mod tests {
     #[test]
     fn publication_retry_is_strictly_local_and_mutex_with_run_arguments() {
         let run_id = "fu_0123456789abcdef0123456789abcdef";
-        let retry =
-            parse_slash_command(&format!("/fusion --retry-publication {run_id}")).expect("slash");
+        let retry = parse_slash_command(&format!("/fusion --retry-publication {run_id}").into())
+            .expect("slash");
         assert_eq!(
             publication_retry_run_id(&retry)
                 .expect("valid retry")
@@ -824,7 +840,7 @@ mod tests {
             format!("/fusion --retry-publication {run_id} prompt"),
             "/fusion --retry-publication not-a-run-id".to_string(),
         ] {
-            let parsed = parse_slash_command(&invocation).expect("slash");
+            let parsed = parse_slash_command(&invocation.clone().into()).expect("slash");
             assert!(
                 publication_retry_run_id(&parsed).is_err(),
                 "retry must reject provider-bearing prompt/flag input: {invocation}"
@@ -881,13 +897,17 @@ mod tests {
         let notices = mock.background_notices();
         assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
         assert!(
-            notices[0].contains("Fusion run finished"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| text.contains("Fusion run finished")),
             "got: {notices:?}"
         );
         // Content-free: no panel text leaks into the live notice — the
         // material reaches the main model through the task notification.
         assert!(
-            !notices[0].contains("the secret panel answer"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| !text.contains("the secret panel answer")),
             "notice must not leak panel text: {notices:?}"
         );
 
@@ -909,7 +929,9 @@ mod tests {
         let notices = mock.background_notices();
         assert_eq!(notices.len(), 1);
         assert!(
-            notices[0].contains("without an analysis"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| text.contains("without an analysis")),
             "got: {notices:?}"
         );
     }
@@ -1059,15 +1081,21 @@ mod tests {
         let notices = mock.background_notices();
         assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
         assert!(
-            !notices[0].contains("handed to the main model"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| !text.contains("handed to the main model")),
             "the result is NOT in this conversation — that copy is false here: {notices:?}"
         );
         assert!(
-            notices[0].contains("saved to the conversation it was started in"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| text.contains("saved to the conversation it was started in")),
             "the notice must say where the result actually went: {notices:?}"
         );
         assert!(
-            notices[0].contains("11112222"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| text.contains("11112222")),
             "the notice must name the originating session so the user can find it: {notices:?}"
         );
         // The pointer must be usable against `/resume`'s listing, which keys
@@ -1076,11 +1104,15 @@ mod tests {
         // inside an 8-character budget spends 5 of them on a constant and
         // leaves 3 hex digits of the real id.
         assert!(
-            !notices[0].contains("sess:"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| !text.contains("sess:")),
             "the id prefix must be stripped, not truncated into: {notices:?}"
         );
         assert!(
-            !notices[0].contains("could not be recorded"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| !text.contains("could not be recorded")),
             "the append SUCCEEDED — the unrecorded copy would be wrong too: {notices:?}"
         );
     }
@@ -1108,7 +1140,9 @@ mod tests {
         let notices = mock.background_notices();
         assert_eq!(notices.len(), 1, "exactly one notice: {notices:?}");
         assert!(
-            notices[0].contains("handed to the main model"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| text.contains("handed to the main model")),
             "got: {notices:?}"
         );
     }
@@ -1173,7 +1207,9 @@ mod tests {
             "an append failure must still surface a live notice, not silence: {notices:?}"
         );
         assert!(
-            notices[0].contains("could not be recorded"),
+            notices[0]
+                .string_at("")
+                .is_some_and(|text| text.contains("could not be recorded")),
             "the failure notice must not claim the result was appended to \
              this conversation (it was not): {notices:?}"
         );

@@ -1,0 +1,262 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "e1601ca2a939ef5bd59bdffe960915e6b17c4552c7b8bebb824f4fcc3a79147a",
+  "fixture_sha256": "cb19698a417c3209a18d17a56131830f738a0de04240751e34c3419f20cab44e",
+  "fixed_inputs": {
+    "session_id": "00000000-0000-4000-8000-000000002940",
+    "model": "claude-sonnet-4-5",
+    "prompt": "Reply with the fixed cancellation probe result.",
+    "signal": "SIGINT",
+    "max_retries": 0
+  },
+  "network_boundary": "127.0.0.1 loopback only; isolated HOME/config; dummy key; stub withheld its response until after SIGINT",
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 28918,
+      "request_sha256": "0390178a6605f4bea88c0699d32c2beb25ee4a3aa15ad5bea70c20c457e31e8a",
+      "stream": true
+    }
+  ],
+  "stub_response_sent": false,
+  "sigint_sent_after_request": true,
+  "elapsed_seconds": 0.448,
+  "native_exit_code": 0,
+  "timed_out_after_sigint": false,
+  "cleanup_signal": null,
+  "stdout": {
+    "path": "stdout.raw",
+    "bytes": 1241,
+    "sha256": "589d30e369a75200eef22c16e72fc068716736f988352f1748991f9a559525c2"
+  },
+  "stderr": {
+    "path": "stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stdout_result": {
+    "type": "result",
+    "is_error": true,
+    "terminal_reason": "aborted_streaming",
+    "subtype": "error_during_execution",
+    "stop_reason": null,
+    "num_turns": 2,
+    "session_id": "00000000-0000-4000-8000-000000002940",
+    "errors": [
+      "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"
+    ]
+  },
+  "session": {
+    "present": true,
+    "path": "session.raw.jsonl",
+    "bytes": 33344,
+    "sha256": "53d3ff545e230d139f88b9bac804465c0f99b5a3c2346db28ccdb627393d4be2",
+    "rows": [
+      {
+        "index": 0,
+        "type": "queue-operation",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 1,
+        "type": "queue-operation",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 2,
+        "type": "user",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": "user",
+        "text_units": [
+          [
+            82,
+            101,
+            112,
+            108,
+            121,
+            32,
+            119,
+            105,
+            116,
+            104,
+            32,
+            116,
+            104,
+            101,
+            32,
+            102,
+            105,
+            120,
+            101,
+            100,
+            32,
+            99,
+            97,
+            110,
+            99,
+            101,
+            108,
+            108,
+            97,
+            116,
+            105,
+            111,
+            110,
+            32,
+            112,
+            114,
+            111,
+            98,
+            101,
+            32,
+            114,
+            101,
+            115,
+            117,
+            108,
+            116,
+            46
+          ]
+        ]
+      },
+      {
+        "index": 3,
+        "type": "attachment",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 4,
+        "type": "attachment",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 5,
+        "type": "attachment",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 6,
+        "type": "atis-latch",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 7,
+        "type": "attachment",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 8,
+        "type": "attachment",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 9,
+        "type": "attachment",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 10,
+        "type": "user",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": "user",
+        "text_units": [
+          [
+            91,
+            82,
+            101,
+            113,
+            117,
+            101,
+            115,
+            116,
+            32,
+            105,
+            110,
+            116,
+            101,
+            114,
+            114,
+            117,
+            112,
+            116,
+            101,
+            100,
+            32,
+            98,
+            121,
+            32,
+            117,
+            115,
+            101,
+            114,
+            93
+          ]
+        ]
+      },
+      {
+        "index": 11,
+        "type": "last-prompt",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      },
+      {
+        "index": 12,
+        "type": "cost-state",
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "role": null,
+        "text_units": []
+      }
+    ],
+    "fixed_prompt_user_rows": 1,
+    "interrupt_user_rows": 1,
+    "assistant_rows": 0
+  },
+  "checks": {
+    "all_session_rows_use_bare_uuid": true,
+    "one_accepted_dummy_key_request": true,
+    "sigint_was_sent": true,
+    "native_exited_without_forced_cleanup": true,
+    "json_result_is_aborted_streaming_error": true,
+    "session_keeps_prompt_then_interrupt": true
+  },
+  "scope": "One public Native 2.1.295 CLI process, fixed session ID and prompt, one in-flight loopback Anthropic Messages request, then SIGINT. This observes the CLI interruption/output/persistence boundary only; it does not prove Harness turn cancellation-token parity, tool side-effect rollback, retry behavior without the explicit zero-retry setting, or Native module unload.",
+  "session_capture_ignored_path": "run-output/sigint-209m41vq/session.raw.jsonl",
+  "request_capture_ignored_path": "run-output/sigint-209m41vq/request-01.raw.json",
+  "selected_fixed_rows": [
+    {
+      "row_index": 2,
+      "kind": "prompt",
+      "raw_content_matches_293": true
+    },
+    {
+      "row_index": 10,
+      "kind": "interrupt",
+      "raw_content_matches_293": true
+    }
+  ],
+  "candidate_verdict": "Not established by this Native-only capture; candidate gate current_alignment_cancel is queued.",
+  "raw_comparison": "Prompt and interruption content slices match historical 2.1.293 exactly; full envelopes are constraint checks only."
+}

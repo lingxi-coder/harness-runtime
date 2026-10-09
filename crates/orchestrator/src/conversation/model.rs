@@ -1,7 +1,7 @@
 //! Model-call preparation, model controls, usage accounting, and error handling.
 
 use super::*;
-use lingxi_core::types::{ContentBlock, utf16_json::Utf16JsonProjection};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock};
 use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 
 fn mod_projection_display(input: &Utf16JsonProjection, pointer: &str) -> Option<String> {
@@ -740,6 +740,7 @@ impl ConversationOrchestrator {
         input: Utf16JsonProjection,
         plugin: &str,
     ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        let safety_observer = self.model_safety_observer().await;
         let plugin_error = |message: String| hooks::mods::ModError::Native(message);
         let model = mod_projection_display(&input, "/model")
             .filter(|model| !model.is_empty())
@@ -904,7 +905,10 @@ impl ConversationOrchestrator {
         let outcome = match timeout_ms {
             Some(ms) => match tokio::time::timeout(
                 std::time::Duration::from_millis(ms.min(600_000)),
-                runner.query_mod_complete(request),
+                lingxi_core::host::model_safety::bind_model_safety(
+                    safety_observer.clone(),
+                    runner.query_mod_complete(request),
+                ),
             )
             .await
             {
@@ -918,7 +922,13 @@ impl ConversationOrchestrator {
                     }));
                 }
             },
-            None => runner.query_mod_complete(request).await,
+            None => {
+                lingxi_core::host::model_safety::bind_model_safety(
+                    safety_observer.clone(),
+                    runner.query_mod_complete(request),
+                )
+                .await
+            }
         };
         let response = match outcome {
             Ok(result) => {
@@ -971,6 +981,7 @@ impl ConversationOrchestrator {
         &self,
         input: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        let safety_observer = self.model_safety_observer().await;
         let prompt_units = input
             .string_units("/prompt")
             .filter(|units| !String::from_utf16_lossy(units).trim().is_empty())
@@ -1061,7 +1072,12 @@ impl ConversationOrchestrator {
             query_source: sidequery::QuerySource::Custom("hook_prompt".into()),
             max_output_tokens: None,
         };
-        let first = match runner.run(request.clone()).await {
+        let first = match lingxi_core::host::model_safety::bind_model_safety(
+            safety_observer.clone(),
+            runner.run(request.clone()),
+        )
+        .await
+        {
             Ok(result) => result,
             Err(error) => {
                 let mut response = generated_mod_projection(&serde_json::json!({
@@ -1123,7 +1139,12 @@ impl ConversationOrchestrator {
                     *content = denied;
                 }
                 request.prompt_messages.push(denied_message);
-                match runner.run(request).await {
+                match lingxi_core::host::model_safety::bind_model_safety(
+                    safety_observer.clone(),
+                    runner.run(request),
+                )
+                .await
+                {
                     Ok(second) => {
                         usage.add(&second.usage);
                         if !source_text_is_empty(&second.final_text) {
@@ -1534,6 +1555,7 @@ impl ConversationOrchestrator {
         &self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<lingxi_core::host::RecapOutcome, lingxi_core::host::HandleError> {
+        let safety_observer = self.model_safety_observer().await;
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed("recap unavailable".into())
         })?;
@@ -1571,7 +1593,7 @@ impl ConversationOrchestrator {
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(lingxi_core::host::RecapOutcome::Cancelled),
-            r = runner.run(req) => match r {
+            r = lingxi_core::host::model_safety::bind_model_safety(safety_observer, runner.run(req)) => match r {
                 Ok(res) => Ok(lingxi_core::host::RecapOutcome::Text(source_trimmed_text(&res.final_text))),
                 Err(e) => Err(lingxi_core::host::HandleError::ActionFailed(e.to_string())),
             }
@@ -1619,6 +1641,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         &self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Option<Utf16JsonProjection>, lingxi_core::host::HandleError> {
+        let safety_observer = self.model_safety_observer().await;
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed(
                 "session name generation unavailable".into(),
@@ -1655,7 +1678,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(None),
-            result = runner.run(req) => match result {
+            result = lingxi_core::host::model_safety::bind_model_safety(safety_observer, runner.run(req)) => match result {
                 Ok(result) => parse_generated_session_name(&result.final_text)
                     .map(Some)
                     .ok_or_else(|| lingxi_core::host::HandleError::ActionFailed(
@@ -1671,6 +1694,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         &self,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Option<String>, lingxi_core::host::HandleError> {
+        let safety_observer = self.model_safety_observer().await;
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed(
                 "prompt suggestion generation unavailable".into(),
@@ -1744,7 +1768,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(None),
-            result = runner.run(req) => match result {
+            result = lingxi_core::host::model_safety::bind_model_safety(safety_observer, runner.run(req)) => match result {
                 Ok(result) => Ok(mod_projection_display(&result.final_text, "").as_deref().and_then(parse_prompt_suggestion_response)),
                 Err(error) => Err(lingxi_core::host::HandleError::ActionFailed(error.to_string())),
             }
@@ -1771,6 +1795,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         question: &Utf16JsonProjection,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<lingxi_core::host::RecapOutcome, lingxi_core::host::HandleError> {
+        let safety_observer = self.model_safety_observer().await;
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed("side question unavailable".into())
         })?;
@@ -1840,7 +1865,7 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         tokio::select! {
             biased;
             () = cancel.cancelled() => Ok(lingxi_core::host::RecapOutcome::Cancelled),
-            r = runner.run(req) => match r {
+            r = lingxi_core::host::model_safety::bind_model_safety(safety_observer, runner.run(req)) => match r {
                 Ok(res) => {
                     // Claude's extractor prefers any non-empty text block and
                     // only surfaces a denied tool call when the assistant had
@@ -2163,7 +2188,8 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
         // Pin the tracker view to the session id captured above. Clear/resume
         // can switch the active projection between awaits; reading the active
         // tracker here would otherwise return session B's costs labeled as A.
-        let state = tracker.scoped(session_id).snapshot().await;
+        let scoped_tracker = tracker.scoped(session_id);
+        let state = scoped_tracker.snapshot().await;
         // Sum per-model usage into aggregate token counters. api_calls comes
         // from our own counter because cost::Usage does not carry a
         // per-call count (its `add()` merges token totals only).
@@ -2243,6 +2269,18 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                     cache_read_input_tokens: state.last_cache_read_input_tokens,
                     cache_creation_input_tokens: state.last_cache_creation_input_tokens,
                 }),
+            current_usage_details: state.last_usage.map(|usage| {
+                lingxi_core::host::orchestrator::ResponseUsageDetailsSnapshot {
+                    reasoning_tokens: usage.tokens.reasoning_output,
+                    web_search_requests: usage
+                        .server_tool_use
+                        .map_or(0, |tools| u64::from(tools.web_search_requests)),
+                    cache_creation_1h_input_tokens: usage.tokens.cache_write_1h,
+                    cache_creation_5m_input_tokens: usage.tokens.cache_write,
+                    fast_mode: usage.speed == Some(cost::usage::ApiSpeed::Fast),
+                }
+            }),
+            safety_stops: Some(scoped_tracker.safety_stops()),
             loops,
         }
     }
@@ -2548,6 +2586,15 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         match err.classification_source() {
             LlmError::ModelUnavailable => {
                 let model = self.session.lock().await.model.clone();
+                if err.native_anthropic_error_facts().is_some() {
+                    return crate::turn_loop::orchestrator_error_text_source(
+                        &OrchestratorError::Streaming(err.clone()),
+                        &model,
+                    )
+                    .string_at("")
+                    .expect("Native model error is a source string")
+                    .to_owned();
+                }
                 format!(
                     "model unavailable: the provider does not serve '{model}' (HTTP 404). Pick another model with /model."
                 )
@@ -2724,7 +2771,16 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     )
                 }
             }
-            other => other.to_string(),
+            _ => {
+                let model = self.session.lock().await.model.clone();
+                crate::turn_loop::orchestrator_error_text_source(
+                    &OrchestratorError::Streaming(err.clone()),
+                    &model,
+                )
+                .string_at("")
+                .expect("model error is a source string")
+                .to_owned()
+            }
         }
     }
 
@@ -2734,7 +2790,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     /// represented as ordinary UTF-8-derived units.
     pub(crate) async fn model_error_source(&self, err: &LlmError) -> Utf16JsonProjection {
         let display = self.model_error_text(err).await;
-        let source = llm_runtime::error_display_source(err);
+        let model = self.session.lock().await.model.clone();
+        let source = crate::turn_loop::orchestrator_error_text_source(
+            &OrchestratorError::Streaming(err.clone()),
+            &model,
+        );
         if source.string_at("") == Some(display.as_str()) {
             source
         } else {
@@ -2939,6 +2999,28 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         self.api.set_thinking_config(thinking);
     }
 
+    /// Capture the originating session's safety observation capability before
+    /// invoking hooks or transferring model work to another task.
+    pub async fn model_safety_observer(
+        &self,
+    ) -> Option<lingxi_core::host::model_safety::ModelSafetyObserver> {
+        if let Some(origin) = lingxi_core::host::model_safety::current_model_safety_observer() {
+            return Some(origin);
+        }
+        let pinned = self
+            .model_runtime
+            .cost_scope
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(pinned) = pinned {
+            return Some(pinned.model_safety_observer());
+        }
+        let tracker = self.model_runtime.cost_tracker.as_ref()?;
+        let session_id = self.session.lock().await.session_id;
+        Some(tracker.session_scope(session_id).model_safety_observer())
+    }
+
     pub(crate) fn scope_api_session<'a, F: std::future::Future + 'a>(
         &'a self,
         non_interactive: bool,
@@ -2980,6 +3062,23 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
                     })
                 }));
             }
+            let request_session_id =
+                match lingxi_core::host::session_flags::current_request_session_id() {
+                    Some(id) => id,
+                    None => self.session.lock().await.session_id,
+                };
+            let safety_observer = self.model_safety_observer().await;
+            let future = async {
+                if let Some(observer) = safety_observer {
+                    lingxi_core::host::model_safety::scope_model_safety(observer, future).await
+                } else {
+                    future.await
+                }
+            };
+            let future = lingxi_core::host::session_flags::scope_request_session_id(
+                request_session_id,
+                future,
+            );
             llm_runtime::thinking_scope::scope_thinking_recovery(
                 scope,
                 lingxi_core::host::session_flags::scope_non_interactive_session(
@@ -3878,8 +3977,8 @@ mod live_permission_mode_tests;
 #[cfg(test)]
 mod session_sidecar_tests {
     use super::{
-        SidecarCopyError, copy_then_cleanup_with, last_response_is_api_error,
-        move_session_sidecar_best_effort, parse_prompt_suggestion_response,
+        copy_then_cleanup_with, last_response_is_api_error, move_session_sidecar_best_effort,
+        parse_prompt_suggestion_response, SidecarCopyError,
     };
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 

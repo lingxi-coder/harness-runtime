@@ -288,6 +288,10 @@ async fn prompt_origin_survives_compaction_and_durable_task_notifications_in_bot
                         is_meta: false,
                         is_compact_summary: false,
                         is_visible_in_transcript_only: false,
+                        turn_companion: None,
+                        usage_limit_note: None,
+                        origin: None,
+                        turn_origin: None,
                     }
                 };
                 session.history.push(incoming);

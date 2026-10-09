@@ -70,9 +70,14 @@ async fn build_orchestrator(
     root: &std::path::Path,
 ) -> Arc<ConversationOrchestrator> {
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load(plugin, root, module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        plugin,
+        root,
+        module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
+    )
+    .await
+    .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let session_trait: Arc<dyn hooks::mods::ModSessionContext> = session.clone();
@@ -98,7 +103,8 @@ async fn settle_main_turn(
     answer: &str,
     is_aborted: bool,
 ) {
-    orchestrator.fire_mod_turn_start("question", turn_id).await;
+    let question: lingxi_core::types::utf16_json::Utf16JsonProjection = "question".into();
+    orchestrator.fire_mod_turn_start(&question, turn_id).await;
     let response = ConversationMessage::Assistant {
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
@@ -106,6 +112,7 @@ async fn settle_main_turn(
             citations: None,
         }],
         stop_reason: Some("end_turn".to_owned()),
+        resumable: None,
     };
     orchestrator.record_mod_turn_response(
         &response,
@@ -212,7 +219,7 @@ async fn turn_complete_queue_is_fifo_nonblocking_and_emits_once() {
         Some(crate::conversation::ModTurnFacts {
             id: cancelled_turn_id.to_owned(),
             started_at: std::time::Instant::now(),
-            answer: String::new(),
+            answer: String::new().into(),
             usage: None,
             refusal: None,
             error: false,
@@ -261,7 +268,7 @@ async fn turn_complete_queue_is_fifo_nonblocking_and_emits_once() {
     assert!(output.snapshot().await.iter().any(|event| matches!(
         event,
         lingxi_core::host::OutputEvent::SystemNotice { body, .. }
-            if body == "queue-mod: queued summary"
+            if body.string_at("") == Some("queue-mod: queued summary")
     )));
     let history = format!("{:?}", orchestrator.session.lock().await.history);
     assert!(history.contains("first answer"));

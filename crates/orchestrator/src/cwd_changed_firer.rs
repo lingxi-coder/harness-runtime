@@ -306,8 +306,8 @@ mod tests {
             }
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: None,
             }
@@ -347,6 +347,7 @@ mod tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
 
         // Build a fresh executor over the populated registry. The Builtin arm

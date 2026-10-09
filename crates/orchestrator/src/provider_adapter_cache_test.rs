@@ -194,8 +194,12 @@ async fn assert_diagnostics(streaming: bool) {
         // Changing only the system prompt must not report a message rewrite.
         assert!(!attribution.causes.contains(&MissCause::MessagesRewritten));
         let requests = seen.lock().unwrap();
-        let previous_user = &requests[1].body_json["messages"][2]["content"];
-        let current_user = &requests[2].body_json["messages"][2]["content"];
+        let previous_body: serde_json::Value =
+            serde_json::from_str(requests[1].body_json.as_json_source()).unwrap();
+        let current_body: serde_json::Value =
+            serde_json::from_str(requests[2].body_json.as_json_source()).unwrap();
+        let previous_user = &previous_body["messages"][2]["content"];
+        let current_user = &current_body["messages"][2]["content"];
         assert_eq!(previous_user[0]["text"], "continue\n");
         assert!(previous_user[1]["text"]
             .as_str()
@@ -213,11 +217,7 @@ async fn assert_diagnostics(streaming: bool) {
             .unwrap()
             .remove("cache_control");
         assert_eq!(current_user, &prior_without_checkpoint);
-        let new_tail = requests[2].body_json["messages"]
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap();
+        let new_tail = current_body["messages"].as_array().unwrap().last().unwrap();
         assert_eq!(
             new_tail["content"].as_array().unwrap().last().unwrap()["cache_control"],
             old_checkpoint,
@@ -354,15 +354,20 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for ChildInstructionInheritanc
     async fn invoke(
         &self,
         _: &str,
-        _: serde_json::Value,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+    ) -> Result<
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    > {
         unreachable!("this fixture produces text responses only")
     }
 }
 
 fn prepared_child_text(request: &ProviderRequest) -> String {
-    request.body_json["messages"]
+    let body: serde_json::Value =
+        serde_json::from_str(request.body_json.as_json_source()).expect("request JSON");
+    body["messages"]
         .as_array()
         .unwrap()
         .iter()
@@ -487,6 +492,10 @@ async fn child_announcements_reach_prepared_wire_and_cold_resume_reloads_policy(
         announcement_history: rows
             .iter()
             .filter_map(|row| row.get("attachment").cloned())
+            .map(|attachment| {
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&attachment)
+                    .expect("fixture attachment is source-representable")
+            })
             .collect(),
         ..Default::default()
     });

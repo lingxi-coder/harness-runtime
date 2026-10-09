@@ -155,6 +155,16 @@ fn native_result_units(baseline: &std::path::Path, case: &str) -> Vec<u16> {
         .expect("Native result text")
 }
 
+fn native_result_stop_reason(baseline: &std::path::Path, case: &str) -> String {
+    let raw = std::fs::read_to_string(baseline.join(case).join("native.stdout.json.raw"))
+        .expect("checked-in raw Native JSON stdout");
+    Utf16JsonProjection::parse(&raw)
+        .expect("Native JSON parses while retaining escaped lone surrogates")
+        .string_at("/stop_reason")
+        .expect("Native stop reason")
+        .to_owned()
+}
+
 fn native_status_result_units(baseline: &std::path::Path, status: u16) -> Vec<u16> {
     let raw = std::fs::read_to_string(
         baseline
@@ -252,6 +262,7 @@ async fn native_http_error_bodies_reach_real_orchestrator_output_and_jsonl() {
         // text also contains this outer prefix, so compare the full text at
         // the production output and transcript boundaries.
         let expected_native_text_units = result_units.clone();
+        let expected_native_stop_reason = native_result_stop_reason(&fixture_root, case);
         for streaming in [false, true] {
             let dir = tempdir().expect("isolated transcript directory");
             let transcript_path = dir.path().join("session.jsonl");
@@ -267,24 +278,26 @@ async fn native_http_error_bodies_reach_real_orchestrator_output_and_jsonl() {
             });
             let adapter = Arc::new(ProviderApiAdapter::new(api_service(transport.clone())));
             let output = Arc::new(MockOutputStream::new());
-            let orchestrator = ConversationOrchestrator::new_with_streaming(
-                OrchestratorConfig {
-                    model: MODEL.to_owned(),
-                    max_turns: 1,
-                    system_prompt_override: Some("Fixed provider error test prompt.".into()),
-                    ..OrchestratorConfig::default()
-                },
-                adapter.clone(),
-                adapter,
-                Arc::new(ToolRegistry::new()),
-                noop_hook_executor(),
-                Arc::new(NoOpPermissionGate),
-                output.clone(),
-                Arc::new(StaticMemoryProvider::empty()),
-                dir.path().to_path_buf(),
-            )
-            .with_session_id(fixed_session_id())
-            .with_jsonl_writer(writer);
+            let orchestrator = ConversationOrchestrator::into_shared(
+                ConversationOrchestrator::new_with_streaming(
+                    OrchestratorConfig {
+                        model: MODEL.to_owned(),
+                        max_turns: 1,
+                        system_prompt_override: Some("Fixed provider error test prompt.".into()),
+                        ..OrchestratorConfig::default()
+                    },
+                    adapter.clone(),
+                    adapter,
+                    Arc::new(ToolRegistry::new()),
+                    noop_hook_executor(),
+                    Arc::new(NoOpPermissionGate),
+                    output.clone(),
+                    Arc::new(StaticMemoryProvider::empty()),
+                    dir.path().to_path_buf(),
+                )
+                .with_session_id(fixed_session_id())
+                .with_jsonl_writer(writer),
+            );
 
             let outcome = if streaming {
                 orchestrator.run_turn_streaming(PROMPT).await
@@ -293,6 +306,26 @@ async fn native_http_error_bodies_reach_real_orchestrator_output_and_jsonl() {
             }
             .expect("generic HTTP 400 is surfaced as a completed model-error turn");
             assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+            let native_result = Utf16JsonProjection::parse(
+                &std::fs::read_to_string(case_root.join("native.stdout.json.raw"))
+                    .expect("original Native result envelope"),
+            )
+            .expect("source-preserving Native envelope");
+            let metrics = orchestrator
+                .completed_turn_metrics()
+                .expect("completed error turn publishes its own execution metrics");
+            assert_eq!(
+                Some(f64::from(metrics.num_turns)),
+                native_result
+                    .get_property("num_turns")
+                    .and_then(|value| value.as_number()),
+                "failed requests still count their admitted query: {case} streaming={streaming}"
+            );
+            assert_eq!(metrics.api_error_status, Some(400));
+            assert_eq!(
+                metrics.api_error_stop_reason.as_deref(),
+                Some("stop_sequence")
+            );
             assert_eq!(
                 transport.calls.load(Ordering::SeqCst),
                 1,
@@ -304,8 +337,8 @@ async fn native_http_error_bodies_reach_real_orchestrator_output_and_jsonl() {
                 events.iter().any(|event| matches!(
                     event,
                     OutputEvent::TerminalApiError {
-                        api_error_status: Some(400), terminal_reason,
-                    } if terminal_reason == "api_error"
+                        api_error_status: Some(400), terminal_reason, stop_reason,
+                    } if terminal_reason == "api_error" && stop_reason == "stop_sequence"
                 )),
                 "typed terminal API status/reason must survive the output boundary: {case} streaming={streaming}: {events:#?}"
             );
@@ -376,7 +409,7 @@ async fn native_http_error_bodies_reach_real_orchestrator_output_and_jsonl() {
             );
             assert_eq!(
                 assistant_rows[0].message.string_at("/stop_reason"),
-                Some("model_error"),
+                Some(expected_native_stop_reason.as_str()),
                 "{case} streaming={streaming}"
             );
         }
@@ -412,23 +445,25 @@ async fn native_http_status_controls_reach_real_orchestrator_output() {
             });
             let adapter = Arc::new(ProviderApiAdapter::new(api_service(transport.clone())));
             let output = Arc::new(MockOutputStream::new());
-            let orchestrator = ConversationOrchestrator::new_with_streaming(
-                OrchestratorConfig {
-                    model: MODEL.to_owned(),
-                    max_turns: 1,
-                    system_prompt_override: Some("Fixed provider status test prompt.".into()),
-                    ..OrchestratorConfig::default()
-                },
-                adapter.clone(),
-                adapter,
-                Arc::new(ToolRegistry::new()),
-                noop_hook_executor(),
-                Arc::new(NoOpPermissionGate),
-                output.clone(),
-                Arc::new(StaticMemoryProvider::empty()),
-                dir.path().to_path_buf(),
-            )
-            .with_session_id(fixed_session_id_with(session_id));
+            let orchestrator = ConversationOrchestrator::into_shared(
+                ConversationOrchestrator::new_with_streaming(
+                    OrchestratorConfig {
+                        model: MODEL.to_owned(),
+                        max_turns: 1,
+                        system_prompt_override: Some("Fixed provider status test prompt.".into()),
+                        ..OrchestratorConfig::default()
+                    },
+                    adapter.clone(),
+                    adapter,
+                    Arc::new(ToolRegistry::new()),
+                    noop_hook_executor(),
+                    Arc::new(NoOpPermissionGate),
+                    output.clone(),
+                    Arc::new(StaticMemoryProvider::empty()),
+                    dir.path().to_path_buf(),
+                )
+                .with_session_id(fixed_session_id_with(session_id)),
+            );
 
             let outcome = if streaming {
                 orchestrator.run_turn_streaming(PROMPT).await
@@ -462,8 +497,8 @@ async fn native_http_status_controls_reach_real_orchestrator_output() {
             assert!(
                 events.iter().any(|event| matches!(
                     event,
-                    OutputEvent::TerminalApiError { api_error_status: Some(actual), terminal_reason }
-                        if *actual == status && terminal_reason == expected_terminal_reason
+                    OutputEvent::TerminalApiError { api_error_status: Some(actual), terminal_reason, stop_reason }
+                        if *actual == status && terminal_reason == expected_terminal_reason && stop_reason == "stop_sequence"
                 )),
                 "typed terminal API status/reason must survive the output boundary: status={status} streaming={streaming}: {events:#?}"
             );
@@ -530,24 +565,28 @@ async fn native_retry_header_401_and_500_reach_real_orchestrator_output() {
                 &base_url,
             )));
             let output = Arc::new(MockOutputStream::new());
-            let orchestrator = ConversationOrchestrator::new_with_streaming(
-                OrchestratorConfig {
-                    model: MODEL.to_owned(),
-                    max_turns: 1,
-                    system_prompt_override: Some("Fixed retry-header status test prompt.".into()),
-                    ..OrchestratorConfig::default()
-                },
-                adapter.clone(),
-                adapter,
-                Arc::new(ToolRegistry::new()),
-                noop_hook_executor(),
-                Arc::new(NoOpPermissionGate),
-                output.clone(),
-                Arc::new(StaticMemoryProvider::empty()),
-                dir.path().to_path_buf(),
-            )
-            .with_session_id(fixed_session_id_with(session_id))
-            .with_jsonl_writer(writer);
+            let orchestrator = ConversationOrchestrator::into_shared(
+                ConversationOrchestrator::new_with_streaming(
+                    OrchestratorConfig {
+                        model: MODEL.to_owned(),
+                        max_turns: 1,
+                        system_prompt_override: Some(
+                            "Fixed retry-header status test prompt.".into(),
+                        ),
+                        ..OrchestratorConfig::default()
+                    },
+                    adapter.clone(),
+                    adapter,
+                    Arc::new(ToolRegistry::new()),
+                    noop_hook_executor(),
+                    Arc::new(NoOpPermissionGate),
+                    output.clone(),
+                    Arc::new(StaticMemoryProvider::empty()),
+                    dir.path().to_path_buf(),
+                )
+                .with_session_id(fixed_session_id_with(session_id))
+                .with_jsonl_writer(writer),
+            );
 
             let outcome = if streaming {
                 orchestrator.run_turn_streaming(PROMPT).await
@@ -581,8 +620,8 @@ async fn native_retry_header_401_and_500_reach_real_orchestrator_output() {
             assert!(
                 events.iter().any(|event| matches!(
                     event,
-                    OutputEvent::TerminalApiError { api_error_status: Some(actual), terminal_reason }
-                        if *actual == status && terminal_reason == "api_error"
+                    OutputEvent::TerminalApiError { api_error_status: Some(actual), terminal_reason, stop_reason }
+                        if *actual == status && terminal_reason == "api_error" && stop_reason == "stop_sequence"
                 )),
                 "typed retry-header status must reach output: status={status} streaming={streaming}: {events:#?}"
             );

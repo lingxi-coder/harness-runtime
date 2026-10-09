@@ -311,10 +311,19 @@ mod tests {
         assert_eq!(
             native_context,
             vec![
-                serde_json::json!({"type":"session_context","context":{}}),
-                serde_json::json!({"type":"date","date":crate::prompt::env_meta::current_date_string()}),
-                serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
-            ]
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"type":"session_context","context":{}}),
+                )
+                .unwrap(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"type":"date","date":crate::prompt::env_meta::current_date_string()}),
+                )
+                .unwrap(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+                )
+                .unwrap(),
+            ],
         );
         let normalized =
             llm_runtime::convert::normalize_messages_for_api(calls[0].messages.clone());

@@ -9,7 +9,7 @@ impl lingxi_core::host::permission_gate::PermissionGate for DenyOneType {
     async fn check(
         &self,
         _name: &str,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> lingxi_core::host::permission_gate::PermissionDecision {
         lingxi_core::host::permission_gate::PermissionDecision::Allow
     }

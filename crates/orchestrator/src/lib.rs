@@ -67,6 +67,7 @@ mod messages_288_fixture;
 mod query_model;
 #[cfg(test)]
 mod refusal_resume_288_tests;
+mod request_context;
 pub mod resume;
 mod scheduled_turn;
 pub(crate) mod schema_validation;
@@ -112,7 +113,7 @@ pub use config::{
 pub use conversation::{
     AppAgentPromptProfile, ConversationOrchestrator, ConversationOutcome, HookPromptRequest,
     OrchestratorApiClient, OrchestratorApiRequest, SessionMemoryHandle, StreamingApiClient,
-    TurnOutcome,
+    TurnExecutionMetrics, TurnOutcome,
 };
 pub use conversation::{QueuedPromptInput, ScheduledLoopFire};
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;

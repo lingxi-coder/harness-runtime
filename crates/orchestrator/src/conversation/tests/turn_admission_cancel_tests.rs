@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-    StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, MockStreamingApiClient,
+    NoOpPermissionGate, StaticMemoryProvider,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -38,14 +38,15 @@ async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
     }
     let image_root = tempfile::tempdir().unwrap();
     let image_paths = [image_root.path().join("missing.png")];
-    let mut waiter: Pin<Box<dyn Future<Output = Result<TurnOutcome, OrchestratorError>>>> =
+    let queued_prompt: lingxi_core::types::utf16_json::Utf16JsonProjection = "queued".into();
+    let mut waiter: Pin<Box<dyn Future<Output = Result<TurnOutcome, OrchestratorError>> + '_>> =
         match entry {
             Entry::Batched => Box::pin(orch.run_turn_with_cancel("queued", cancel.clone())),
             Entry::Streaming => {
                 Box::pin(orch.run_turn_streaming_with_cancel("queued", cancel.clone()))
             }
             Entry::Images => Box::pin(orch.run_turn_streaming_with_cancel_images(
-                "queued",
+                queued_prompt,
                 &image_paths,
                 cancel.clone(),
             )),

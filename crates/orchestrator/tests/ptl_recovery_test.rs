@@ -5,8 +5,8 @@ use lingxi_core::host::OutputEvent;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use orchestrator::test_support::{
-    MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, mock_message_response,
-    noop_hook_executor,
+    mock_message_response, noop_hook_executor, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig};
 use std::collections::VecDeque;
@@ -152,7 +152,7 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
                 ),
                 citations: None,
             }],
-            stop_reason: Some("end_turn".to_string()),
+            stop_reason: Some("end_turn".into()),
             resumable: None,
         });
     }
@@ -169,7 +169,7 @@ async fn unwired_ptl_does_not_truncate_or_retry_the_main_request() {
     assert_eq!(orch.session().lock().await.history[..before.len()], before);
     assert!(
         output.snapshot().await.iter().any(
-            |event| matches!(event, OutputEvent::Text { text } if text == "Prompt is too long")
+            |event| matches!(event, OutputEvent::Text { text } if text.string_at("") == Some("Prompt is too long"))
         )
     );
 }
@@ -211,9 +211,9 @@ async fn reactive_summary_success_retries_once_below_the_local_auto_threshold() 
             .snapshot()
             .await
             .iter()
-            .any(|event| matches!(event, OutputEvent::Text { text } if text == "recovered"))
+            .any(|event| matches!(event, OutputEvent::Text { text } if text.string_at("") == Some("recovered")))
     );
-    assert!(orch.session().lock().await.history.iter().any(|message| matches!(message, ConversationMessage::System { content, .. } if content == "Conversation compacted")));
+    assert!(orch.session().lock().await.history.iter().any(|message| matches!(message, ConversationMessage::System { content, .. } if content.string_at("") == Some("Conversation compacted"))));
 }
 
 #[tokio::test]
@@ -234,12 +234,10 @@ async fn failed_reactive_summary_keeps_all_original_messages_and_does_not_retry(
     assert_eq!(summary.requests.lock().unwrap().len(), 1);
     assert_eq!(api.call_lens().await.len(), 1);
     assert_eq!(orch.session().lock().await.history[..before.len()], before);
-    assert!(output.snapshot().await.iter().any(|event| matches!(event, OutputEvent::Text { text } if text == "Prompt is too long · automatic compaction failed: summarization produced empty response")));
-    assert!(
-        !output
-            .snapshot()
-            .await
-            .iter()
-            .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. }))
-    );
+    assert!(output.snapshot().await.iter().any(|event| matches!(event, OutputEvent::Text { text } if text.string_at("") == Some("Prompt is too long · automatic compaction failed: summarization produced empty response"))));
+    assert!(!output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
 }

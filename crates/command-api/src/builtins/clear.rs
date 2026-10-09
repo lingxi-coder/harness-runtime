@@ -79,7 +79,7 @@ mod tests {
         let h = ClearHandler::new(mock.clone());
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Conversation cleared.");
+                assert_eq!(s, "Conversation cleared.".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -95,7 +95,7 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
                     s,
-                    "Could not clear conversation: handle action failed: disk full"
+                    "Could not clear conversation: handle action failed: disk full".into()
                 );
             }
             other => panic!("expected Done with error display, got {other:?}"),

@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use platform_posix::fs::PosixFileSystem;
 use std::sync::Arc;

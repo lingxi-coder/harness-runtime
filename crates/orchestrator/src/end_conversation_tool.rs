@@ -235,7 +235,8 @@ mod tests {
             content: vec![ContentBlock::ToolUse {
                 id: Default::default(),
                 name: "EndConversation".into(),
-                input: json!({}),
+                input: Utf16JsonProjection::from_serde_value(&json!({}))
+                    .expect("empty tool input is valid JSON"),
                 provider_id: None,
             }],
             stop_reason: None,

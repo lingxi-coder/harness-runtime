@@ -101,14 +101,22 @@ mod tests {
                             content_block: ContentBlock::ServerToolUse {
                                 id: "server-1".into(),
                                 name: "web_search".into(),
-                                input: serde_json::json!({}),
+                                input:
+                                    lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                                        &serde_json::json!({}),
+                                    )
+                                    .unwrap(),
                             },
                         },
                         "mcp_tool_use" => HistoryEvent::ContentBlockStart {
                             index,
                             content_block: ContentBlock::ProviderContent {
                                 protocol: "anthropic_messages".into(),
-                                value: frame["content_block"].clone(),
+                                value:
+                                    lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                                        &frame["content_block"],
+                                    )
+                                    .unwrap(),
                             },
                         },
                         unknown => panic!("uncovered actual native kind {unknown}"),

@@ -315,6 +315,7 @@ mod tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
         let reg = Arc::new(RwLock::new(registry));
         Arc::new(

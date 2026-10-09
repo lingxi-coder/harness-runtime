@@ -57,8 +57,9 @@ async fn run_turn_streaming_with_cancel_returns_endturn_on_normal_completion() {
     let api = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
     let orch = build_orch(api);
     let cancel = CancellationToken::new();
+    let prompt = lingxi_core::types::utf16_json::Utf16JsonProjection::from("hi");
     let outcome = orch
-        .run_turn_streaming_with_cancel("hi", cancel)
+        .run_turn_streaming_with_cancel(&prompt, cancel)
         .await
         .unwrap();
     assert_eq!(outcome, TurnOutcome::EndTurn);
@@ -79,7 +80,10 @@ async fn run_turn_streaming_with_cancel_returns_cancelled_when_token_fires_befor
     let cancel = CancellationToken::new();
     cancel.cancel(); // pre-cancel → should return Cancelled immediately
     let outcome = orch
-        .run_turn_streaming_with_cancel("hi", cancel)
+        .run_turn_streaming_with_cancel(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("hi"),
+            cancel,
+        )
         .await
         .unwrap();
     assert_eq!(outcome, TurnOutcome::Cancelled);
@@ -103,7 +107,10 @@ async fn handle_trait_run_turn_streaming_with_cancel_pre_cancelled_returns_cance
     let cancel = CancellationToken::new();
     cancel.cancel();
     let outcome = handle
-        .run_turn_streaming_with_cancel("hi", cancel)
+        .run_turn_streaming_with_cancel(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from("hi"),
+            cancel,
+        )
         .await
         .unwrap();
     assert!(matches!(outcome, lingxi_core::host::TurnOutcome::Cancelled));
@@ -130,10 +137,20 @@ impl Tool for CancelBlockingTool {
     fn name(&self) -> &str {
         "CancelTool"
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -141,25 +158,31 @@ impl Tool for CancelBlockingTool {
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
-    fn interrupt_behavior(&self, _input: &serde_json::Value) -> InterruptBehavior {
+    fn interrupt_behavior(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> InterruptBehavior {
         InterruptBehavior::Cancel
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -171,7 +194,11 @@ impl Tool for CancelBlockingTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "cancel-tool".into()
     }
     async fn prompt(
@@ -182,7 +209,7 @@ impl Tool for CancelBlockingTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -195,11 +222,14 @@ impl Tool for CancelBlockingTool {
             // No token (non-streaming) → just run to "end" so the test fails loudly
             // if the token is not threaded through.
             None => Ok(ToolCallResult {
-                data: json!({ "content": "cancel-tool-ran-to-end" }),
+                data: tool_api::tool_trait::generated_builtin_result(
+                    &json!({ "content": "cancel-tool-ran-to-end" }),
+                ),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
+                subagent_hooks_fired: false,
                 mcp_meta: None,
             }),
         }
@@ -305,7 +335,8 @@ async fn user_interrupt_rejects_in_flight_tool_and_stops_turn_no_extra_model_cal
         reject.expect("interrupted tool_result must be recorded in history (no turn drop)");
     assert!(is_error, "user-interrupted tool_result must be is_error");
     assert_eq!(
-        content, REJECT_MESSAGE,
+        content.string_at(""),
+        Some(REJECT_MESSAGE),
         "in-flight Cancel tool must get the bare REJECT_MESSAGE on user interrupt"
     );
 }

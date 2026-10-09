@@ -318,8 +318,8 @@ mod tests {
             task_id: "b1".into(),
             task_type: "local_bash".into(),
             status: "running".into(),
-            description: long.clone(),
-            command: Some(long.clone()),
+            description: long.clone().into(),
+            command: Some(long.clone().into()),
             agent_facts: None,
             ..Default::default()
         };
@@ -389,7 +389,7 @@ mod tests {
                 id: "c2".into(),
                 cron: "* * * * *".into(),
                 recurring: None,
-                prompt: long,
+                prompt: long.into(),
             },
         ];
         let out = build_session_crons(&crons);

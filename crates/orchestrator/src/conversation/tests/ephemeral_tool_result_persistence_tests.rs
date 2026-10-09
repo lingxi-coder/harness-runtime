@@ -1,4 +1,5 @@
 use super::redact_ephemeral_tool_result_images;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use serde_json::json;
 
@@ -10,14 +11,21 @@ fn tool_result(
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
             tool_use_id: ToolUseId::new(),
-            content,
+            content: content.into(),
             is_error: Some(false),
             provider_tool_use_id: None,
-            content_blocks,
+            content_blocks: content_blocks.map(|blocks| {
+                Utf16JsonProjection::from_serde_value(&serde_json::Value::Array(blocks))
+                    .expect("test tool blocks are valid JSON")
+            }),
         }],
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     }
 }
 
@@ -50,7 +58,7 @@ fn ephemeral_images_are_removed_only_from_the_persisted_clone() {
     else {
         panic!("expected tool result");
     };
-    assert_eq!(content, "Temporary screenshot omitted.");
+    assert_eq!(content.string_at(""), Some("Temporary screenshot omitted."));
     assert!(content_blocks.is_none());
     let ConversationMessage::User {
         content: original_blocks,

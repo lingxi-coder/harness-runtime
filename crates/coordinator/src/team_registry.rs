@@ -617,12 +617,8 @@ mod tests {
         let store = task_store::TodoStore::for_list_at(home.path(), "session");
         let mut ids = Vec::new();
         for subject in ["first", "second"] {
-            let mut task = task_store::TodoTask::new(
-                subject.into(),
-                String::new(),
-                None,
-                serde_json::Map::new(),
-            );
+            let mut task =
+                task_store::TodoTask::new(subject.into(), String::new().into(), None, None);
             task.owner = Some("nova".into());
             ids.push(store.create(task).await.unwrap());
         }
@@ -686,9 +682,11 @@ mod tests {
                 },
             ],
         );
-        let content = messages[0].content.to_json_string().unwrap();
-        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(value["message"], expected);
+        let value = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            &messages[0].content.to_json_string().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value.string_units("/message"), expected.string_units(""));
     }
 
     #[tokio::test]

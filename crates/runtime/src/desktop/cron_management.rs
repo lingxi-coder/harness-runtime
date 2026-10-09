@@ -921,7 +921,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(jobs[0].id, id);
-        assert_eq!(source_display(&jobs[0].prompt), "Changed");
+        assert_eq!(jobs[0].prompt, "Changed");
         let mut delete = request("delete");
         delete.id = Some(id);
         assert!(manage(&fs, temp.path(), delete, &registry, "session-test")

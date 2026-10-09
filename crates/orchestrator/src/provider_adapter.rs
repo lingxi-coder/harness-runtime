@@ -157,6 +157,7 @@ impl ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<llm_runtime::ToolDeclaration>,
         max_tokens: Option<u32>,
+        tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
     ) -> Result<llm_runtime::LlmRequest, LlmError> {
         let route = crate::query_model::current();
         if let Some(route) = route.as_ref() {
@@ -175,6 +176,7 @@ impl ProviderApiAdapter {
             tools,
         );
         request.opts.max_output_tokens = max_tokens;
+        request.opts.tool_result_reminder_suffixes = tool_result_reminder_suffixes;
         request.opts.skip_global_cache_for_system_prompt = skip_global_cache_for_system_prompt;
         request.opts.query_source = Some("scheduled_task".into());
         self.service
@@ -446,6 +448,7 @@ impl OrchestratorApiClient for ProviderApiAdapter {
                         messages,
                         tools,
                         opts.max_output_tokens,
+                        opts.tool_result_reminder_suffixes,
                     )?;
                     canonical.input.controls.anthropic.context_hint =
                         opts.context_hint.map(|value| {
@@ -1092,9 +1095,11 @@ impl StreamingApiClient for ProviderApiAdapter {
             messages,
             tools,
             None,
+            Vec::new(),
             query_source,
             skip_global_cache_for_system_prompt,
             request_dispatch_admission,
+            None,
         )
         .await
     }
@@ -1107,9 +1112,11 @@ impl StreamingApiClient for ProviderApiAdapter {
         messages: Vec<ConversationMessage>,
         tools: Vec<llm_runtime::ToolDeclaration>,
         effort: Option<&str>,
+        tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
         query_source: &str,
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+        request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
     ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         if let Some(settings) = crate::scheduled_turn::current() {
             let request = self.build_scheduled_request(
@@ -1119,11 +1126,13 @@ impl StreamingApiClient for ProviderApiAdapter {
                 messages,
                 tools,
                 None,
+                tool_result_reminder_suffixes,
             )?;
             let mut request = request;
             request
                 .execution
                 .set_request_dispatch_admission(request_dispatch_admission);
+            request.execution.request_dispatch_observer = request_dispatch_observer;
             return self.service.stream_request(request).await;
         }
         // (M4 cc2.1.198) The MAIN loop carries the session's initial effort
@@ -1157,6 +1166,8 @@ impl StreamingApiClient for ProviderApiAdapter {
                 skip_global_cache_for_system_prompt,
                 Some(query_source),
                 request_dispatch_admission,
+                tool_result_reminder_suffixes,
+                request_dispatch_observer,
             )
             .await
     }
@@ -1238,6 +1249,32 @@ mod tests {
             .unwrap()
             .pop()
             .unwrap()
+    }
+
+    fn request_content_block_type_count(
+        body: &lingxi_llm_client::protocol::JsonPayload,
+        expected: &str,
+    ) -> usize {
+        let Some(messages) = body.payload_at("/messages") else {
+            return 0;
+        };
+        (0..messages.array_len("").unwrap_or_default())
+            .filter_map(|index| messages.array_item(index))
+            .filter_map(|message| message.payload_at("/content"))
+            .flat_map(|content| {
+                (0..content.array_len("").unwrap_or_default())
+                    .filter_map(|index| content.array_item(index))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|block| block.string_at("/type").as_deref() == Some(expected))
+            .count()
+    }
+
+    fn request_has_content_block_type(
+        body: &lingxi_llm_client::protocol::JsonPayload,
+        expected: &str,
+    ) -> bool {
+        request_content_block_type_count(body, expected) > 0
     }
 
     // ── FakeTransport (duplicated into the orchestrator-domain tests) ─────────────
@@ -1788,7 +1825,7 @@ mod tests {
                 assert_eq!(seen.len(), 3);
                 let models: Vec<_> = seen
                     .iter()
-                    .map(|request| request.body_json["model"].as_str().unwrap())
+                    .map(|request| request.body_json.string_at("/model").unwrap())
                     .collect();
                 assert_eq!(
                     models,
@@ -1800,11 +1837,20 @@ mod tests {
                     "the prior streaming 529 must consume the first overload slot"
                 );
                 for wire in seen.iter() {
-                    assert_eq!(wire.body_json["max_tokens"], 4096);
-                    assert_eq!(wire.body_json.get("context_hint"), offer.as_ref());
+                    assert_eq!(
+                        wire.body_json.unsigned_integer_at("/max_tokens"),
+                        Some(4096)
+                    );
+                    assert_eq!(
+                        wire.body_json
+                            .payload_at("/context_hint")
+                            .as_ref()
+                            .map(|p| p.as_json_source()),
+                        offer.as_ref().map(serde_json::Value::to_string).as_deref()
+                    );
                     assert!(wire
                         .body_json
-                        .pointer("/context_hint/context_hint")
+                        .payload_at("/context_hint/context_hint")
                         .is_none());
                     let beta = wire
                         .headers
@@ -1839,13 +1885,12 @@ mod tests {
         adapter
             .service
             .set_thinking(llm_runtime::model::thinking::ThinkingConfig::Disabled);
-        let tool = serde_json::json!({"name":"StructuredOutput", "description":"schema", "input_schema":{"type":"object", "properties":{}}});
         let main = llm_runtime::MessagesCreateRequest::new(
             "claude-sonnet-4-6",
             Some("anthropic"),
             None,
             Vec::new(),
-            vec![tool],
+            vec![structured_output_tool()],
         );
         let main_error = adapter
             .messages_create(crate::OrchestratorApiRequest::Main(main))
@@ -1902,7 +1947,10 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse {
             status: 200,
             headers: BTreeMap::new(),
-            body_json: ok_response_json(),
+            body_json: lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                &ok_response_json(),
+            )
+            .expect("generated fixture response is valid JSON"),
             request_id: None,
         });
         let adapter =
@@ -1931,8 +1979,13 @@ mod tests {
             )
             .await;
         let request = transport.seen.lock().unwrap()[0].body_json.clone();
-        assert_eq!(request["model"], "claude-sonnet-4-20250514");
-        assert!(request["output_config"]["effort"].is_null());
+        assert_eq!(
+            request.string_at("/model").as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
+        assert!(request
+            .payload_at("/output_config/effort")
+            .is_some_and(|value| value.as_json_source() == "null"));
         assert!(crate::scheduled_turn::current().is_none());
         assert_eq!(adapter.current_effort(), Some(serde_json::json!("low")));
     }
@@ -2219,12 +2272,7 @@ mod tests {
                 request: &'a ProviderRequest,
             ) -> BoxFuture<'a, Result<ProviderResponse, LlmError>> {
                 Box::pin(async move {
-                    let thinking = request.body_json["messages"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .flat_map(|m| m["content"].as_array().unwrap())
-                        .any(|b| b["type"] == "thinking");
+                    let thinking = request_has_content_block_type(&request.body_json, "thinking");
                     if thinking {
                         Ok(ProviderResponse::json(
                             400,
@@ -2364,14 +2412,8 @@ mod tests {
                     tokio::task::yield_now().await;
                     self.seen.lock().unwrap().push(request.clone());
                     let body = &request.body_json;
-                    let rejecting = body["system"].to_string().contains("reject-session");
-                    let has_thinking = body["messages"].as_array().unwrap().iter().any(|m| {
-                        m["content"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .any(|b| b["type"] == "thinking")
-                    });
+                    let rejecting = body.as_json_source().contains("reject-session");
+                    let has_thinking = request_has_content_block_type(body, "thinking");
                     Ok(if rejecting && has_thinking {
                         ProviderResponse::json(
                             400,
@@ -2505,17 +2547,11 @@ mod tests {
             let seen = transport.seen.lock().unwrap();
             let body = &seen
                 .iter()
-                .find(|r| r.body_json["system"].to_string().contains(label))
+                .find(|r| r.body_json.as_json_source().contains(label))
                 .unwrap()
                 .body_json;
-            let thinking = body["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|m| m["content"].as_array().unwrap())
-                .filter(|b| b["type"] == "thinking")
-                .count();
-            assert_eq!(thinking, expected, "{label}: {body}");
+            let thinking = request_content_block_type_count(body, "thinking");
+            assert_eq!(thinking, expected, "{label}: {}", body.as_json_source());
         }
         assert!(!a.messages().contains_key(&fresh.id()));
         assert!(b.messages().is_empty());
@@ -2649,13 +2685,10 @@ mod tests {
             .last()
             .unwrap_or_else(|| panic!("auto request did not dispatch: {auto_error:?}"));
         assert_eq!(
-            auto_request
-                .body_json
-                .get("max_tokens")
-                .and_then(serde_json::Value::as_u64),
+            auto_request.body_json.unsigned_integer_at("/max_tokens"),
             Some(777),
             "wire max_tokens must equal the requested ceiling, not the model's auto default; body: {}",
-            auto_request.body_json
+            auto_request.body_json.as_json_source()
         );
         drop(auto_seen);
 
@@ -2684,13 +2717,10 @@ mod tests {
             .last()
             .expect("the forced opts-aware call reached the transport");
         assert_eq!(
-            forced_request
-                .body_json
-                .get("max_tokens")
-                .and_then(serde_json::Value::as_u64),
+            forced_request.body_json.unsigned_integer_at("/max_tokens"),
             Some(321),
             "forced opts-aware wire max_tokens must equal the requested ceiling; body: {}",
-            forced_request.body_json
+            forced_request.body_json.as_json_source()
         );
     }
 
@@ -2733,12 +2763,21 @@ mod tests {
             .service
             .set_thinking(llm_runtime::model::thinking::ThinkingConfig::Disabled);
         let child_seam: &dyn agent::SubagentApiClient = &adapter;
-        let tool = |name| {
-            serde_json::json!({
-                "name": name,
-                "description": "Test tool",
-                "input_schema": {"type": "object", "properties": {}}
-            })
+        let tool = |name: &str| {
+            let source = lingxi_core::host::SourceToolWireDefinition {
+                name: name.into(),
+                description: lingxi_core::types::utf16_json::Utf16JsonProjection::from("Test tool"),
+                input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"type":"object","properties":{}}"#,
+                )
+                .unwrap(),
+                strict: false,
+                defer_loading: false,
+            };
+            llm_runtime::convert::to_tool_declarations(vec![source])
+                .unwrap()
+                .pop()
+                .unwrap()
         };
         let cases = [
             ("ordinary-child", None, vec!["Read"], 111),
@@ -2760,7 +2799,7 @@ mod tests {
                         lingxi_core::types::MessageId::new(),
                         label.into(),
                     )],
-                    tools: tool_names.iter().map(|name| tool(*name)).collect(),
+                    tools: tool_names.iter().map(|name| tool(name)).collect(),
                     forced_tool: forced_tool.map(str::to_string),
                     effort: None,
                     opts: agent::api::SubagentApiCallOpts {
@@ -3192,7 +3231,10 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse {
             status: 200,
             headers,
-            body_json: ok_response_json(),
+            body_json: lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                &ok_response_json(),
+            )
+            .expect("generated fixture response is valid JSON"),
             request_id: None,
         });
         let adapter = make_adapter(transport);

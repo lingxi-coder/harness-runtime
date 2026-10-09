@@ -201,13 +201,17 @@ impl PermissionGate for ReportingGate {
             .into(),
         )
     }
-    async fn check(&self, _: &str, _: &serde_json::Value) -> PermissionDecision {
+    async fn check(
+        &self,
+        _: &str,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionDecision {
         panic!("saved ordinary allow must not authorize a classifier-only report")
     }
     async fn check_classifier_only_with_context_or_abort(
         &self,
         name: &str,
-        input: &serde_json::Value,
+        input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         context: &PermissionCheckContext,
         policy: ClassifierOnlyPolicy,
         request: &ClassifierOnlyReviewRequest,
@@ -218,7 +222,7 @@ impl PermissionGate for ReportingGate {
             context.mode_override.is_none(),
             "Bubble inherits the enforcing live mode instead of pinning a launch-time Auto override"
         );
-        assert!(input.get("recipient").is_none());
+        assert!(input.get_property("recipient").is_none());
         self.requests.lock().unwrap().push(request.clone());
         Ok(ClassifierOnlyOutcome {
             permission: PermissionOutcome::Allow {
@@ -474,6 +478,8 @@ async fn handback_independent_turn_end_gate_and_security_frame_survive_actual_di
         .starts_with(HANDBACK_FRAME));
     assert!(admitted[0]
         .body
+        .string_at("")
+        .unwrap()
         .split_once('\n')
         .unwrap()
         .1
@@ -544,7 +550,10 @@ async fn handback_native_schema_strips_authority_fields_and_separates_blank_vali
     ))
     .unwrap();
     for case in fixture["pure_source"]["schema_cases"].as_array().unwrap() {
-        let parsed = tool_api::Tool::parse_native_input(&tool, &case["input"]).unwrap();
+        let input =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&case["input"])
+                .unwrap();
+        let parsed = tool_api::Tool::parse_native_input(&tool, &input).unwrap();
         assert_eq!(
             parsed.is_ok(),
             case["expected"]["success"].as_bool().unwrap(),
@@ -552,16 +561,32 @@ async fn handback_native_schema_strips_authority_fields_and_separates_blank_vali
             case["name"]
         );
         if let Ok(parsed) = parsed {
-            assert_eq!(parsed, case["expected"]["data"], "{}", case["name"]);
+            assert!(
+                parsed.semantically_eq(
+                    &lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &case["expected"]["data"]
+                    )
+                    .unwrap()
+                ),
+                "{}",
+                case["name"]
+            );
         }
     }
     let tool_ctx = tool_api::ToolUseContext::model_seed("test".into());
     assert_eq!(
-        tool_api::Tool::validate_input(&tool, &serde_json::json!({"message":" \n\t"}), &tool_ctx)
-            .await
-            .unwrap_err()
-            .0,
-        "message must not be empty"
+        tool_api::Tool::validate_input(
+            &tool,
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"message":" \n\t"}),
+            )
+            .unwrap(),
+            &tool_ctx,
+        )
+        .await
+        .unwrap_err()
+        .0,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from("message must not be empty")
     );
 }
 
@@ -654,26 +679,46 @@ async fn handback_supplied_dispatch_native_model_result_bytes_match_pinned_fixtu
             let prior = invoker
                 .invoke_supplied_detailed(
                     HANDBACK_TOOL_NAME,
-                    serde_json::json!({"message":"prior report"}),
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"message":"prior report"}),
+                    )
+                    .unwrap(),
                     invocation.clone(),
                     None,
                     Arc::new(tool_api::tool_invoker_impl::SuppliedTool(tool.clone())),
                 )
                 .await
                 .unwrap();
-            assert_eq!(prior.data["success"], true);
+            assert_eq!(
+                prior
+                    .data
+                    .get_property("success")
+                    .and_then(|value| value.as_bool()),
+                Some(true)
+            );
         }
         let result = invoker
             .invoke_supplied_detailed(
                 HANDBACK_TOOL_NAME,
-                serde_json::json!({"message":"report"}),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"message":"report"}),
+                )
+                .unwrap(),
                 invocation,
                 None,
                 Arc::new(tool_api::tool_invoker_impl::SuppliedTool(tool)),
             )
             .await
             .unwrap();
-        assert_eq!(result.data, case["expected"]["result"]["data"], "{name}");
+        assert!(
+            result.data.semantically_eq(
+                &lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &case["expected"]["result"]["data"]
+                )
+                .unwrap()
+            ),
+            "{name}"
+        );
         assert!(
             !result.is_error,
             "logical native failure stays a normal tool result: {name}"
@@ -683,7 +728,7 @@ async fn handback_supplied_dispatch_native_model_result_bytes_match_pinned_fixtu
             .as_ref()
             .expect("faithful Handback model string");
         assert_eq!(
-            text.as_bytes(),
+            text.string_at("").unwrap().as_bytes(),
             case["expected"]["model_result"]["content"][0]["text"]
                 .as_str()
                 .unwrap()
@@ -1061,7 +1106,8 @@ async fn handback_report_collision_accepts_regular_single_link_and_rejects_other
         .expect("metadata-only native collision check accepts a regular single-link file");
     assert!(pointer
         .text
-        .contains(&regular.to_string_lossy().to_string()));
+        .string_at("")
+        .is_some_and(|text| text.contains(&regular.to_string_lossy().to_string())));
     assert_eq!(std::fs::read(&regular).unwrap(), binary);
     let original_permissions = std::fs::metadata(&regular).unwrap().permissions();
     std::fs::set_permissions(&regular, std::fs::Permissions::from_mode(0o0)).unwrap();
@@ -1109,11 +1155,13 @@ async fn handback_offered_child_schema_has_native_message_description() {
     let offered = api.last_tools.lock().unwrap();
     let schema = offered
         .iter()
-        .find(|tool| tool["name"] == HANDBACK_TOOL_NAME)
+        .find(|tool| tool.name == HANDBACK_TOOL_NAME)
         .expect("actual child API request offers Handback");
     assert_eq!(
-        schema["input_schema"]["properties"]["message"]["description"],
-        "Your full report for your caller"
+        schema
+            .input_schema
+            .string_at("/properties/message/description"),
+        Some("Your full report for your caller".to_owned())
     );
 }
 
@@ -1536,9 +1584,27 @@ async fn handback_durable_peer_sync_failure_and_partial_append_retry_after_resta
             .collect();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1]["type"], "attachment");
+        let expected_message = envelope.model_message();
+        let expected_units = super::user_text_units(&expected_message)
+            .expect("handback model message has source text");
+        let persisted_message = &rows[1]["message"];
+        assert_eq!(persisted_message["role"], "user");
         assert_eq!(
-            rows[1]["message"],
-            serde_json::to_value(envelope.model_message()).unwrap()
+            persisted_message["id"],
+            expected_message.id().as_uuid().to_string()
+        );
+        assert_eq!(persisted_message["is_meta"], true);
+        assert_eq!(persisted_message["content"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            persisted_message["content"][0]["type"], "text",
+            "Native JSONL projects internal TextJsUtf16 blocks as native text rows"
+        );
+        let persisted_text = persisted_message["content"][0]["text"]
+            .as_str()
+            .expect("Native JSONL message text is a JSON string");
+        assert_eq!(
+            persisted_text.encode_utf16().collect::<Vec<_>>(),
+            expected_units
         );
         assert_eq!(fs.truncations.load(Ordering::SeqCst), usize::from(partial));
         // Even a restored history entry needs durable typed-row verification
@@ -1585,7 +1651,20 @@ async fn handback_durable_peer_jsonl_preserves_lone_utf16_and_retries_exact_row(
     .unwrap();
     assert!(envelope.validate());
     let message = envelope.model_message();
-    let attachment = serde_json::json!({"type":"subagent_handback","envelope":envelope});
+    let attachment = lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+        (
+            "type".into(),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from("subagent_handback"),
+        ),
+        (
+            "envelope".into(),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                &serde_json::to_string(&envelope).unwrap(),
+            )
+            .unwrap(),
+        ),
+    ])
+    .unwrap();
     let fs = Arc::new(HandbackFaultFs {
         inner: platform_posix::PosixFileSystem::new(dir.path().to_path_buf()),
         fail_sync: AtomicBool::new(true),
@@ -1621,8 +1700,9 @@ async fn handback_durable_peer_jsonl_preserves_lone_utf16_and_retries_exact_row(
             envelope.body.string_units("").unwrap().as_slice()
         )
     );
+    let restored_source = attachment.subprojection("/envelope").unwrap();
     let restored: HandbackEnvelope =
-        serde_json::from_value(decoded.value["attachment"]["envelope"].clone()).unwrap();
+        serde_json::from_str(&restored_source.to_json_string().unwrap()).unwrap();
     assert_eq!(restored, envelope);
     assert_eq!(restored.model_message(), message);
     drop(writer);

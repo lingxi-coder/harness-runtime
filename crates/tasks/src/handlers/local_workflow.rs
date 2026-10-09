@@ -1645,6 +1645,7 @@ fn make_request(
     }
 
     SubagentSpawnRequest {
+        agent_spawn_token: None,
         handback_opt_in: false,
         parent_permission_mode: None,
         handback_enabled: None,

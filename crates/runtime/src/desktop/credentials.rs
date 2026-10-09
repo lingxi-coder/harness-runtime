@@ -1596,6 +1596,14 @@ pub fn api_service_from_stack(
     })
     .retain_account_change_observer(stack.subscription_refresh_generation.clone());
 
+    let service = if let Some(metadata) = &cfg.anthropic_client_metadata {
+        service
+            .with_anthropic_client_metadata(metadata.clone())
+            .with_native_anthropic_endpoint(cfg.api_base.clone())
+    } else {
+        service
+    };
+
     match aws_auth_refresher(cfg, cwd, analytics_bus) {
         Some(refresher) => service.with_aws_auth(refresher),
         None => service,

@@ -536,7 +536,9 @@ pub fn sanitize_blocks(texts: &[Vec<u16>]) -> SanitizeResult {
     if findings.iter().any(|finding| finding.reportable) {
         content.insert(
             0,
-            format!("{}\n", warning_body(&findings)).encode_utf16().collect(),
+            format!("{}\n", warning_body(&findings))
+                .encode_utf16()
+                .collect(),
         );
     }
     SanitizeResult { content, findings }

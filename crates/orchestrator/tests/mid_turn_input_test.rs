@@ -15,7 +15,9 @@
 //!    injected — today's behavior unchanged.
 
 use async_trait::async_trait;
-use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, ToolUseId};
+use lingxi_core::types::{
+    utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, ToolUseId,
+};
 use orchestrator::prompt::mid_turn_input::{CancelReason, CancelReasonFlag, MidTurnInputSource};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
@@ -51,12 +53,13 @@ impl Tool for CancelBlockingTool {
         "CancelTool"
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
-        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> = once_cell::sync::Lazy::new(|| {
-            tool_api::tool_trait::generated_builtin_schema(&json!({
-                "type": "object",
-                "properties": {}
-            }))
-        });
+        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_schema(&json!({
+                    "type": "object",
+                    "properties": {}
+                }))
+            });
         &SCHEMA
     }
     fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
@@ -95,11 +98,18 @@ impl Tool for CancelBlockingTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &Utf16JsonProjection, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "cancel-tool".into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -195,7 +205,9 @@ impl ScriptedSource {
 
 #[async_trait]
 impl MidTurnInputSource for ScriptedSource {
-    async fn take_mid_turn_input(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    async fn take_mid_turn_input(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         self.0.lock().unwrap().pop_front().map(source_text)
     }
 }
@@ -216,7 +228,9 @@ impl DelayedOnceSource {
 
 #[async_trait]
 impl MidTurnInputSource for DelayedOnceSource {
-    async fn take_mid_turn_input(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    async fn take_mid_turn_input(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         let mut state = self.0.lock().unwrap();
         if state.0 != 0 {
             state.0 -= 1;
@@ -557,7 +571,9 @@ impl CountingSource {
 
 #[async_trait]
 impl MidTurnInputSource for CountingSource {
-    async fn take_mid_turn_input(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    async fn take_mid_turn_input(
+        &self,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         None
     }
@@ -572,12 +588,13 @@ impl Tool for EndTurnTool {
         "EndsTurn"
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
-        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> = once_cell::sync::Lazy::new(|| {
-            tool_api::tool_trait::generated_builtin_schema(&json!({
-                "type": "object",
-                "properties": {}
-            }))
-        });
+        static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_schema(&json!({
+                    "type": "object",
+                    "properties": {}
+                }))
+            });
         &SCHEMA
     }
     fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
@@ -613,11 +630,18 @@ impl Tool for EndTurnTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &Utf16JsonProjection, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         String::new()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
-        String::new()
+    async fn prompt(
+        &self,
+        _opts: &PromptOptions,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        String::new().into()
     }
     async fn call(
         &self,
@@ -625,9 +649,9 @@ impl Tool for EndTurnTool {
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        let mut result = ToolCallResult::from_data(
-            tool_api::tool_trait::generated_builtin_result(&json!({ "content": "done" })),
-        );
+        let mut result = ToolCallResult::from_data(tool_api::tool_trait::generated_builtin_result(
+            &json!({ "content": "done" }),
+        ));
         result.mcp_meta = Some(tool_api::tool_trait::generated_builtin_result(&json!({
             "_meta": { "claude/endTurn": true }
         })));

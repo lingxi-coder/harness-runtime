@@ -230,7 +230,10 @@ mod tests {
         lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::new(),
             name: "ToolSearch".into(),
-            input: serde_json::json!({}),
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({}),
+            )
+            .expect("generated tool fixture is representable"),
             provider_id: None,
         }
     }

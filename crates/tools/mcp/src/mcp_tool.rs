@@ -3420,10 +3420,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap as StdHashMap;
 
-    fn fixture_projection(value: &Value) -> UJP {
-        UJP::from_serde_value(value).expect("ordinary test fixture is representable as source JSON")
-    }
-
     fn fixture_json(source: &str) -> UJP {
         UJP::parse(source).expect("test JSON source is valid")
     }
@@ -3526,7 +3522,7 @@ mod tests {
             ctx(),
             "mcp__srv__interactive".into(),
             "d".into(),
-            fixture_projection(&serde_json::json!({})),
+            source_fixture(&serde_json::json!({})),
             None,
             None,
             None,
@@ -3534,12 +3530,15 @@ mod tests {
             true,
         );
         let decision = interactive
-            .check_permissions(&fixture_projection(&serde_json::json!({})), &use_ctx)
+            .check_permissions(&source_fixture(&serde_json::json!({})), &use_ctx)
             .await;
         let PermissionResult::Ask { reason, prompt, .. } = decision else {
             panic!("a requiresUserInteraction tool must ASK, got: {decision:?}");
         };
-        assert!(prompt.message.contains("requires approval"));
+        assert!(prompt
+            .message
+            .string_at("")
+            .is_some_and(|message| message.contains("requires approval")));
         assert_eq!(prompt.options, vec!["Allow once", "Deny"]);
         assert!(
             matches!(&reason, PermissionDecisionReason::PermissionPromptTool { tool_name } if tool_name == "mcp__srv__interactive"),
@@ -3551,7 +3550,7 @@ mod tests {
             ctx(),
             "mcp__srv__plain".into(),
             "d".into(),
-            fixture_projection(&serde_json::json!({})),
+            source_fixture(&serde_json::json!({})),
             None,
             None,
             None,
@@ -3560,7 +3559,7 @@ mod tests {
         );
         assert!(matches!(
             plain
-                .check_permissions(&fixture_projection(&serde_json::json!({})), &use_ctx)
+                .check_permissions(&source_fixture(&serde_json::json!({})), &use_ctx)
                 .await,
             PermissionResult::Allow { .. }
         ));
@@ -3577,7 +3576,7 @@ mod tests {
             ctx,
             "mcp__srv__blocked".into(),
             "blocked".into(),
-            fixture_projection(&json!({"type": "object"})),
+            source_fixture(&json!({"type": "object"})),
             None,
             None,
             None,
@@ -3587,7 +3586,7 @@ mod tests {
         .with_mcp_permission_ceiling(lingxi_core::host::McpPermissionCeiling::Deny);
         assert!(matches!(
             tool.check_permissions(
-                &fixture_projection(&serde_json::json!({})),
+                &source_fixture(&serde_json::json!({})),
                 &tool_api::test_support::fresh_ctx()
             )
             .await,
@@ -3612,7 +3611,7 @@ mod tests {
             ctx(),
             "mcp__srv__plain".into(),
             "d".into(),
-            fixture_projection(&serde_json::json!({})),
+            source_fixture(&serde_json::json!({})),
             None,
             None,
             None,
@@ -3625,7 +3624,7 @@ mod tests {
             ctx(),
             "mcp__srv__interactive".into(),
             "d".into(),
-            fixture_projection(&serde_json::json!({})),
+            source_fixture(&serde_json::json!({})),
             None,
             None,
             None,
@@ -3680,7 +3679,7 @@ mod tests {
             ("[1,2]", "[1,2]"),
         ] {
             let output = normalize_empty_schema_arguments(Some(&schema), fixture_json(input));
-            assert_eq!(output.to_json_string().as_deref(), Some(expected));
+            assert_eq!(output.to_json_string().unwrap(), expected);
         }
     }
 
@@ -3689,12 +3688,12 @@ mod tests {
         let empty_schema = fixture_json("{}");
         let invalid =
             normalize_empty_schema_arguments(Some(&empty_schema), fixture_json(r#""not-json""#));
-        assert_eq!(invalid.to_json_string().as_deref(), Some(r#""not-json""#));
+        assert_eq!(invalid.to_json_string().unwrap(), r#""not-json""#);
 
         let object_schema = fixture_json(r#"{"type":"object","properties":{}}"#);
         let unchanged =
             normalize_empty_schema_arguments(Some(&object_schema), fixture_json(r#""[1,2]""#));
-        assert_eq!(unchanged.to_json_string().as_deref(), Some(r#""[1,2]""#));
+        assert_eq!(unchanged.to_json_string().unwrap(), r#""[1,2]""#);
     }
 
     #[test]
@@ -3703,7 +3702,7 @@ mod tests {
         let decoded =
             normalize_empty_schema_arguments(Some(&empty_schema), fixture_json(r#""\ud800""#));
         assert_eq!(decoded.string_units(""), Some(vec![0xd800]));
-        assert_eq!(decoded.to_json_string().as_deref(), Some(r#""\ud800""#));
+        assert_eq!(decoded.to_json_string().unwrap(), r#""\ud800""#);
     }
 
     #[test]
@@ -3896,10 +3895,8 @@ mod tests {
         let structured = fixture_json(r#"{"rows":[{"id":7}],"total":1}"#);
         let out = build_mcp_meta(Some(meta), Some(structured)).expect("Some when present");
         assert_eq!(
-            out.to_json_string().as_deref(),
-            Some(
-                r#"{"_meta":{"anthropic/trace":"abc","nested":{"k":[1,2,3]}},"structuredContent":{"rows":[{"id":7}],"total":1}}"#
-            )
+            out.to_json_string().unwrap(),
+            r#"{"_meta":{"anthropic/trace":"abc","nested":{"k":[1,2,3]}},"structuredContent":{"rows":[{"id":7}],"total":1}}"#
         );
     }
 
@@ -3907,10 +3904,7 @@ mod tests {
     fn build_mcp_meta_only_meta() {
         let meta = fixture_json(r#"{"x":1}"#);
         let out = build_mcp_meta(Some(meta), None).expect("Some when _meta present");
-        assert_eq!(
-            out.to_json_string().as_deref(),
-            Some(r#"{"_meta":{"x":1}}"#)
-        );
+        assert_eq!(out.to_json_string().unwrap(), r#"{"_meta":{"x":1}}"#);
         assert!(!out.contains_property("structuredContent"));
     }
 
@@ -3919,8 +3913,8 @@ mod tests {
         let structured = fixture_json(r#"{"y":2}"#);
         let out = build_mcp_meta(None, Some(structured)).expect("Some when present");
         assert_eq!(
-            out.to_json_string().as_deref(),
-            Some(r#"{"structuredContent":{"y":2}}"#)
+            out.to_json_string().unwrap(),
+            r#"{"structuredContent":{"y":2}}"#
         );
         assert!(!out.contains_property("_meta"));
     }
@@ -3966,13 +3960,13 @@ mod tests {
     #[test]
     fn build_mcp_meta_preserves_explicit_null_and_lone_source_units() {
         let out = build_mcp_meta(Some(fixture_json("null")), None).expect("explicit null present");
-        assert_eq!(out.to_json_string().as_deref(), Some(r#"{"_meta":null}"#));
+        assert_eq!(out.to_json_string().unwrap(), r#"{"_meta":null}"#);
 
         let raw = fixture_json(r#"{"unknown":"\ud800","\udfff":1}"#);
         let out = build_mcp_meta(Some(raw), Some(fixture_json("null"))).unwrap();
         assert_eq!(
-            out.to_json_string().as_deref(),
-            Some(r#"{"_meta":{"unknown":"\ud800","\udfff":1},"structuredContent":null}"#)
+            out.to_json_string().unwrap(),
+            r#"{"_meta":{"unknown":"\ud800","\udfff":1},"structuredContent":null}"#
         );
     }
 
@@ -4088,7 +4082,7 @@ mod tests {
             context(),
             "mcp__srv__write".into(),
             "write".into(),
-            fixture_projection(&json!({"type":"object"})),
+            source_fixture(&json!({"type":"object"})),
             None,
             Some(McpPermissionCeiling::Ask),
             None,
@@ -4097,7 +4091,7 @@ mod tests {
         );
         assert_eq!(
             local_only
-                .tool_check_permission_ceiling(&fixture_projection(&json!({})))
+                .tool_check_permission_ceiling(&source_fixture(&json!({})))
                 .await,
             None,
             "an enforcement ceiling alone is not organization provenance"
@@ -4107,7 +4101,7 @@ mod tests {
             context(),
             "mcp__srv__write".into(),
             "write".into(),
-            fixture_projection(&json!({"type":"object"})),
+            source_fixture(&json!({"type":"object"})),
             None,
             Some(McpPermissionCeiling::Ask),
             None,
@@ -4117,7 +4111,7 @@ mod tests {
         .with_organization_max_permission(McpPermissionCeiling::Ask);
         assert_eq!(
             org_capped
-                .tool_check_permission_ceiling(&fixture_projection(&json!({})))
+                .tool_check_permission_ceiling(&source_fixture(&json!({})))
                 .await,
             Some(McpPermissionCeiling::Ask)
         );
@@ -4135,10 +4129,13 @@ mod tests {
         let PermissionDecisionReason::Other { reason } = reason else {
             panic!("organization Ask must use the Native Other decision reason");
         };
-        assert_eq!(reason, "Your organization requires approval for this tool");
         assert_eq!(
-            prompt.message,
-            "Your organization requires approval for this tool"
+            reason.string_at(""),
+            Some("Your organization requires approval for this tool")
+        );
+        assert_eq!(
+            prompt.message.string_at(""),
+            Some("Your organization requires approval for this tool")
         );
     }
 
@@ -4153,7 +4150,7 @@ mod tests {
             ctx,
             "mcp__srv__write".into(),
             "write".into(),
-            fixture_projection(&json!({"type": "object"})),
+            source_fixture(&json!({"type": "object"})),
             None,
             Some(McpPermissionCeiling::Ask),
             None,
@@ -4162,7 +4159,7 @@ mod tests {
         );
         assert!(matches!(
             tool.check_permissions(
-                &fixture_projection(&json!({})),
+                &source_fixture(&json!({})),
                 &tool_api::test_support::fresh_ctx()
             )
             .await,
@@ -4173,7 +4170,7 @@ mod tests {
             tool.ctx.clone(),
             "mcp__srv__interactive".into(),
             "interactive".into(),
-            fixture_projection(&json!({"type": "object"})),
+            source_fixture(&json!({"type": "object"})),
             None,
             None,
             None,
@@ -4182,7 +4179,7 @@ mod tests {
         );
         assert!(matches!(
             interaction_tool
-                .check_permissions(&fixture_projection(&json!({})), &tool_api::test_support::fresh_ctx())
+                .check_permissions(&source_fixture(&json!({})), &tool_api::test_support::fresh_ctx())
                 .await,
             PermissionResult::Ask {
                 reason: PermissionDecisionReason::PermissionPromptTool { tool_name },
@@ -4194,7 +4191,7 @@ mod tests {
             tool.ctx.clone(),
             "mcp__srv__blocked".into(),
             "blocked".into(),
-            fixture_projection(&json!({"type": "object"})),
+            source_fixture(&json!({"type": "object"})),
             None,
             Some(McpPermissionCeiling::Deny),
             None,
@@ -4203,7 +4200,7 @@ mod tests {
         );
         assert!(matches!(
             tool.check_permissions(
-                &fixture_projection(&json!({})),
+                &source_fixture(&json!({})),
                 &tool_api::test_support::fresh_ctx()
             )
             .await,
@@ -4434,7 +4431,9 @@ pub(crate) mod cached_resource_test_support {
                 .unwrap()
                 .get(registry_key)
                 .cloned()
-                .ok_or_else(|| McpError::Internal(format!("no behavior for {registry_key}")))?;
+                .ok_or_else(|| {
+                    McpError::Internal(format!("no behavior for {registry_key}").into())
+                })?;
             *self
                 .connect_calls
                 .lock()
@@ -4442,7 +4441,7 @@ pub(crate) mod cached_resource_test_support {
                 .entry(registry_key.clone())
                 .or_insert(0) += 1;
             if let Some(error) = &behavior.connect_error {
-                return Err(McpError::Connection(error.clone()));
+                return Err(McpError::Connection(error.clone().into()));
             }
             let conn_id = McpConnectionId::new();
             let conn =
@@ -4473,7 +4472,7 @@ pub(crate) mod cached_resource_test_support {
                 .unwrap()
                 .get(&server)
                 .map(|behavior| behavior.live_capabilities.clone())
-                .ok_or_else(|| McpError::Internal(format!("no behavior for {server}")))
+                .ok_or_else(|| McpError::Internal(format!("no behavior for {server}").into()))
         }
 
         async fn list_tools(&self, _conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
@@ -4497,7 +4496,7 @@ pub(crate) mod cached_resource_test_support {
                 .unwrap()
                 .get(&server)
                 .cloned()
-                .ok_or_else(|| McpError::Internal(format!("no behavior for {server}")))?;
+                .ok_or_else(|| McpError::Internal(format!("no behavior for {server}").into()))?;
             *self
                 .rpc_calls
                 .lock()
@@ -4602,8 +4601,8 @@ pub(crate) mod cached_resource_test_support {
             prompts: false,
             logging: false,
             directory_read,
-            experimental: HashMap::new(),
-            extensions: HashMap::new(),
+            experimental: source_fixture(&json!({})),
+            extensions: source_fixture(&json!({})),
         }
     }
 
@@ -4812,7 +4811,7 @@ mod input_missing_required_preflight_tests {
             ctx,
             "mcp__slow__slowtool".into(),
             "slow tool".into(),
-            fixture_projection(&json!({
+            source_fixture(&json!({
                 "type": "object",
                 "required": ["token"],
                 "properties": {
@@ -4845,7 +4844,7 @@ mod input_missing_required_preflight_tests {
             peer_tx.send(Bytes::from(bytes)).await.unwrap();
         });
         tool.call(
-            fixture_projection(&json!({"note":"leftover </token>"})),
+            source_fixture(&json!({"note":"leftover </token>"})),
             use_ctx,
             tool_api::test_support::fresh_tx(),
         )
@@ -4925,8 +4924,8 @@ mod input_missing_required_preflight_tests {
         );
         assert_eq!(tool.input_schema(), &schema);
         assert_eq!(
-            tool.input_validation_schema().to_json_string().as_deref(),
-            Some(r#"{"type":"object"}"#)
+            tool.input_validation_schema().to_json_string().unwrap(),
+            r#"{"type":"object"}"#
         );
     }
 
@@ -5272,7 +5271,7 @@ mod auto_background_race_tests {
     }
 
     fn call_input() -> UJP {
-        fixture_projection(&json!({ "full_name": "mcp__slow__slowtool", "arguments": {} }))
+        source_fixture(&json!({ "full_name": "mcp__slow__slowtool", "arguments": {} }))
     }
 
     // Drive the peer: read the client's `tools/call` request frame and answer it
@@ -6015,8 +6014,8 @@ mod resource_tool_gating_tests {
             prompts: false,
             logging: false,
             directory_read: false,
-            experimental: std::collections::HashMap::new(),
-            extensions: std::collections::HashMap::new(),
+            experimental: source_fixture(&json!({})),
+            extensions: source_fixture(&json!({})),
         }
     }
 

@@ -51,7 +51,10 @@ async fn ui_lifecycle_updates_roster_before_events_and_survives_in_place_switche
         "surface-lifecycle",
         directory.path(),
         &module,
-        serde_json::json!({}),
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+            {}
+        ))
+        .expect("generated Mod options are representable"),
     )
     .await
     .unwrap();

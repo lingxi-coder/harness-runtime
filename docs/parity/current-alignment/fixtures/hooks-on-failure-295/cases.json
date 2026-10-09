@@ -1,0 +1,17 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Run the fixed hook failure-policy fixture and finish.",
+  "main_response_text": "FIXED_MAIN_RESPONSE_HOOK_ON_FAILURE_295",
+  "dummy_api_key": "native-hook-onfailure-295-dummy-key",
+  "timeout_seconds": 45,
+  "cases": [
+    {"id":"command-spawn-default","family":"command-spawn","on_failure":null,"session_id":"00000000-0000-4000-8000-000000002f31"},
+    {"id":"command-spawn-block","family":"command-spawn","on_failure":"block","session_id":"00000000-0000-4000-8000-000000002f32"},
+    {"id":"command-exit-1-default","family":"command-exit-1","on_failure":null,"session_id":"00000000-0000-4000-8000-000000002f33"},
+    {"id":"command-exit-1-block","family":"command-exit-1","on_failure":"block","session_id":"00000000-0000-4000-8000-000000002f34"},
+    {"id":"http-503-default","family":"http-503","on_failure":null,"session_id":"00000000-0000-4000-8000-000000002f35"},
+    {"id":"http-503-block","family":"http-503","on_failure":"block","session_id":"00000000-0000-4000-8000-000000002f36"}
+  ]
+}

@@ -442,12 +442,12 @@ mod tests {
     async fn bundled_preload_uses_the_non_invoking_builder_entry() {
         struct PreloadOnly;
         impl command_api::BundledPromptFn for PreloadOnly {
-            fn build(&self, _: &str) -> String {
+            fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
                 panic!("agent preload must not invoke the command");
             }
-            fn build_for_preload(&self, args: &str) -> String {
-                assert!(args.is_empty());
-                "preloaded instructions".into()
+            fn build_for_preload(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+                assert_eq!(args.string_at(""), Some(""));
+                Utf16JsonProjection::from("preloaded instructions")
             }
         }
         let mut reg = CommandRegistry::new();
@@ -473,19 +473,20 @@ mod tests {
     async fn checked_preload_propagates_error_with_root_and_live_cwd() {
         struct Checked;
         impl command_api::BundledPromptFn for Checked {
-            fn build(&self, _: &str) -> String {
+            fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
                 panic!("unchecked preload");
             }
             fn try_build_at(
                 &self,
-                args: &str,
+                args: &Utf16JsonProjection,
                 context: command_api::BundledPromptContext<'_>,
-            ) -> std::io::Result<String> {
+            ) -> std::io::Result<Utf16JsonProjection> {
                 let root = context.project_root;
                 let cwd = context.cwd;
                 let preload = context.is_preload;
                 assert_eq!(context.main_loop_model, Some("claude-fable-5"));
-                assert!(args.is_empty() && preload);
+                assert_eq!(args.string_at(""), Some(""));
+                assert!(preload);
                 assert_eq!(root, std::path::Path::new("/project"));
                 assert_eq!(cwd, std::path::Path::new("/project/subdir"));
                 Err(std::io::Error::new(

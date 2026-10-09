@@ -1162,7 +1162,7 @@ impl SubagentSpawner for CancelOnFirstAllocationSpawner {
 
 struct FakeSpawner {
     by_model: Mutex<HashMap<String, FakePanel>>,
-    prompts: Mutex<Vec<String>>,
+    prompts: Mutex<Vec<Utf16JsonProjection>>,
     requests: Mutex<Vec<SubagentSpawnRequest>>,
     live: AtomicUsize,
     peak: AtomicUsize,
@@ -1246,7 +1246,7 @@ impl FakeSpawner {
     fn live(&self) -> usize {
         self.live.load(Ordering::SeqCst)
     }
-    fn prompts(&self) -> Vec<String> {
+    fn prompts(&self) -> Vec<Utf16JsonProjection> {
         self.prompts.lock().unwrap().clone()
     }
 }
@@ -2190,10 +2190,11 @@ async fn three_panels_concurrent_and_mutually_invisible() {
     let prompts = spawner.prompts();
     assert_eq!(prompts.len(), 3);
     for prompt in &prompts {
-        assert!(prompt.contains("review the lock"));
-        assert!(!prompt.contains("ANSWER_A"));
-        assert!(!prompt.contains("ANSWER_B"));
-        assert!(!prompt.contains("ANSWER_C"));
+        let text = prompt.string_at("").expect("generated fixture prompt");
+        assert!(text.contains("review the lock"));
+        assert!(!text.contains("ANSWER_A"));
+        assert!(!text.contains("ANSWER_B"));
+        assert!(!text.contains("ANSWER_C"));
     }
 }
 
@@ -7228,7 +7229,7 @@ to the shipped default's behaviour"
 /// Answers the host's evidence `Grep` calls from a fixed workspace: only
 /// `src/lib.rs` exists.
 struct WorkspaceGrep {
-    calls: Mutex<Vec<(String, Value, bool, bool)>>,
+    calls: Mutex<Vec<(String, Utf16JsonProjection, bool, bool)>>,
 }
 
 #[async_trait]
@@ -7236,20 +7237,23 @@ impl ToolInvoker for WorkspaceGrep {
     async fn invoke(
         &self,
         name: &str,
-        input: Value,
+        input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
         self.calls.lock().unwrap().push((
             name.to_string(),
             input.clone(),
             ctx.is_non_interactive_session,
             ctx.can_show_permission_prompts,
         ));
-        match input["path"].as_str() {
-            Some("src/lib.rs") => Ok(json!({ "mode": "count", "numMatches": 3 })),
-            Some(path) => Err(ToolInvokerError::InvalidInput(format!(
-                "Path does not exist: {path}."
-            ))),
+        match input.string_at("/path") {
+            Some("src/lib.rs") => Ok(Utf16JsonProjection::from_serde_value(
+                &json!({ "mode": "count", "numMatches": 3 }),
+            )
+            .expect("fixture result is valid JSON")),
+            Some(path) => Err(ToolInvokerError::InvalidInput(
+                format!("Path does not exist: {path}.").into(),
+            )),
             None => Err(ToolInvokerError::InvalidInput("path is required".into())),
         }
     }
@@ -7291,9 +7295,9 @@ async fn evidence_checks_reach_the_analyst_the_material_and_telemetry() {
     let calls = grep.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 3, "one existence check per panel: {calls:?}");
     for (name, input, non_interactive, can_prompt) in &calls {
-        assert_eq!(name, "Grep", "the host never uses Read: {input}");
+        assert_eq!(name, "Grep", "the host never uses Read: {input:?}");
         assert!(*non_interactive && !*can_prompt);
-        assert_eq!(input["output_mode"], "count");
+        assert_eq!(input.string_at("/output_mode"), Some("count"));
     }
 
     let user = side.last_analyst_user.lock().unwrap().clone().unwrap();
@@ -7559,7 +7563,11 @@ async fn implement_mode_collects_patches_verifies_them_and_feeds_the_analyst() {
     cwds.sort();
     cwds.dedup();
     assert_eq!(cwds.len(), 3, "one worktree per panel");
-    assert!(spawner.prompts().iter().all(|p| p.contains("add a retry")));
+    assert!(spawner.prompts().iter().all(|prompt| {
+        prompt
+            .string_at("")
+            .is_some_and(|text| text.contains("add a retry"))
+    }));
 
     // Patches and verification come from the host, per panel.
     let changed: Vec<_> = result
@@ -7859,14 +7867,18 @@ async fn a_tool_analyst_runs_as_a_subagent_and_only_well_formed_claim_checks_sur
         .collect();
     assert_eq!(analyst_spawns.len(), 1);
     assert_eq!(analyst_spawns[0].max_turns_override, Some(5));
-    assert!(analyst_spawns[0].prompt.contains("Read, Grep, Glob"));
+    let analyst_prompt = analyst_spawns[0]
+        .prompt
+        .string_at("")
+        .expect("generated analyst prompt");
+    assert!(analyst_prompt.contains("Read, Grep, Glob"));
     assert!(analyst_spawns[0]
         .schema
         .as_ref()
         .unwrap()
         .contains("verified_claims"));
     // Nothing names a provider or model to the analyst.
-    assert!(!analyst_spawns[0].prompt.contains("deepseek"));
+    assert!(!analyst_prompt.contains("deepseek"));
 
     let analysis = result.analysis.clone().expect("analysis");
     let kept: Vec<(&str, lingxi_core::host::ClaimVerdict)> = analysis

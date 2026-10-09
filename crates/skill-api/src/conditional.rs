@@ -201,6 +201,7 @@ fn build_matcher(root: &Path, patterns: &[String]) -> ignore::gitignore::Gitigno
 mod tests {
     use super::{is_conditional, ConditionalSkills};
     use crate::model::{LoadedFrom, Skill, SkillFrontmatter, SkillSource};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use std::path::{Path, PathBuf};
 
     fn skill(name: &str, paths: Option<Vec<&str>>) -> Skill {

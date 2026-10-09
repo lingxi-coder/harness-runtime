@@ -279,11 +279,9 @@ mod tests {
                 snapshot(3, None, None, None),
             )
             .unwrap();
-        assert!(
-            sampler
-                .prepare(&limits_only_ignores_that_same_context_change)
-                .is_none()
-        );
+        assert!(sampler
+            .prepare(&limits_only_ignores_that_same_context_change)
+            .is_none());
         assert!(sampler.finish_one().is_none());
     }
 
@@ -321,22 +319,18 @@ mod tests {
                 snapshot(1, Some(10.0), None, Some("allowed")),
             )
             .unwrap();
-        assert!(
-            sampler
-                .enqueue(
-                    ModSessionMeasureReason::Limits,
-                    snapshot(2, Some(10.5), None, Some("allowed")),
-                )
-                .is_none()
-        );
-        assert!(
-            sampler
-                .enqueue(
-                    ModSessionMeasureReason::Turn,
-                    snapshot(3, Some(11.0), Some(0.25), Some("allowed")),
-                )
-                .is_none()
-        );
+        assert!(sampler
+            .enqueue(
+                ModSessionMeasureReason::Limits,
+                snapshot(2, Some(10.5), None, Some("allowed")),
+            )
+            .is_none());
+        assert!(sampler
+            .enqueue(
+                ModSessionMeasureReason::Turn,
+                snapshot(3, Some(11.0), Some(0.25), Some("allowed")),
+            )
+            .is_none());
         sampler.prepare(&first);
 
         let pending = sampler.finish_one().unwrap();
@@ -349,13 +343,11 @@ mod tests {
         );
         assert!(sampler.finish_one().is_none());
 
-        assert!(
-            sampler
-                .enqueue(
-                    ModSessionMeasureReason::Limits,
-                    snapshot(4, Some(12.0), Some(0.25), Some("allowed")),
-                )
-                .is_some()
-        );
+        assert!(sampler
+            .enqueue(
+                ModSessionMeasureReason::Limits,
+                snapshot(4, Some(12.0), Some(0.25), Some("allowed")),
+            )
+            .is_some());
     }
 }

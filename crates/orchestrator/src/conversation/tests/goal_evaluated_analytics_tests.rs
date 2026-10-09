@@ -18,13 +18,13 @@
 //! branch; and `iterations` is bumped only by the three verdict outcomes, so a
 //! deferred or cancelled dispatch must report the count unchanged.
 
+use crate::conversation::hooks_impl::GoalEvalOutcome;
+use crate::conversation::MessageId;
+use crate::test_support::{
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+};
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
-use crate::conversation::MessageId;
-use crate::conversation::hooks_impl::GoalEvalOutcome;
-use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
-};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;

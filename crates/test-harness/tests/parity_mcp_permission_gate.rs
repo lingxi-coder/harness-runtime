@@ -24,6 +24,7 @@
 use std::sync::Arc;
 
 use lingxi_core::host::{McpTransport, McpTransportSpec, OutputEvent};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::ToolUseId;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use mcp::{ConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
@@ -36,7 +37,6 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use permission::gate::{PermissionDecision, PermissionGate};
 use permission::loader::permission_rules_from_settings_json;
 use permission::{PermissionMode, PermissionPolicy, PermissionRuleSource, PolicyPermissionGate};
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 use test_harness::mocks::MockMcpTransport;
 use tool_api::registry::ToolRegistry;
@@ -183,9 +183,10 @@ async fn gate_denies_fqn_but_not_builtin_short_name() {
     // FQN → Deny (rule), with a rendered reason.
     match gate.check("mcp__mock__a", &source_json!({})).await {
         PermissionDecision::Deny { reason } => {
+            let reason_text = reason.string_at("").expect("denial reason root string");
             assert!(
-                reason.contains("mcp__mock__a"),
-                "deny reason names the FQN rule: {reason}"
+                reason_text.contains("mcp__mock__a"),
+                "deny reason names the FQN rule: {reason_text}"
             );
         }
         PermissionDecision::Allow => panic!("expected Deny for the FQN, got Allow"),
@@ -234,14 +235,18 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
             vec![LlmContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: "mcp__mock__a".into(),
-                input: serde_json::json!({ "x": 1 }),
+                input: lingxi_llm_client::protocol::JsonPayload::parse(
+                    &serde_json::json!({ "x": 1 }).to_string(),
+                )
+                .unwrap(),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "recovered".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -271,8 +276,7 @@ async fn denied_fqn_tool_use_yields_permission_denied_result_and_skips_server() 
         })
         .expect("a ToolResult for the denied tool must be emitted");
     let err = result
-        .get("error")
-        .and_then(|v| v.as_str())
+        .string_at("/error")
         .expect("denied result carries an `error` string");
     assert!(
         err == "Permission to use mcp__mock__a has been denied.",
@@ -311,14 +315,18 @@ async fn allowed_fqn_tool_use_reaches_server_inner() {
             vec![LlmContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: "mcp__mock__b".into(),
-                input: serde_json::json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse(
+                    &serde_json::json!({}).to_string(),
+                )
+                .unwrap(),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -349,11 +357,13 @@ async fn allowed_fqn_tool_use_reaches_server_inner() {
     // DIRECTLY — a successful call carries the content (not an error string) and
     // has no `is_error` wrapper key.
     assert!(
-        tool_result.get("is_error").is_none(),
+        tool_result.get_property("is_error").is_none(),
         "the unwrapped result data has no is_error wrapper key"
     );
     assert!(
-        !tool_result.is_null(),
+        !tool_result
+            .at_pointer("")
+            .is_some_and(|value| value.is_null()),
         "an allowed, successful MCP call carries the server's content"
     );
 }

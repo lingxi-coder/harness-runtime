@@ -509,6 +509,10 @@ mod tests {
             is_meta,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 

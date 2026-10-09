@@ -12,12 +12,16 @@
 
 use std::path::{Path, PathBuf};
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::prompt::{
     assemble_system_prompt, assemble_system_prompt_with_style, env_meta, ActiveOutputStyle,
     FileTree, SystemPromptContext,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tool_api::tool_trait::{
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+};
 fn prompt_tool_names() -> Vec<String> {
     [
         "Agent",
@@ -118,17 +122,19 @@ fn live_prompt_normalization_removes_host_os_version() {
 }
 
 struct PromptAgentTool {
-    schema: Value,
+    schema: Utf16JsonProjection,
 }
 
 impl PromptAgentTool {
     fn new() -> Self {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        });
         Self {
-            schema: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
+            schema: Utf16JsonProjection::from_serde_value(&schema)
+                .expect("generated prompt tool schema is valid"),
         }
     }
 }
@@ -139,8 +145,16 @@ impl tool_api::Tool for PromptAgentTool {
         "Agent"
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &self.schema
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _ctx: &tool_api::ToolStaticContext) -> bool {
@@ -151,22 +165,22 @@ impl tool_api::Tool for PromptAgentTool {
         1_024
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
 
     async fn check_permissions(
         &self,
-        input: &Value,
+        input: &Utf16JsonProjection,
         _ctx: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
             reason: permission::PermissionDecisionReason::Other {
-                reason: "parity fixture".to_string(),
+                reason: "parity fixture".into(),
             },
             updated_input: Some(input.clone()),
             update_destination: None,
@@ -174,28 +188,28 @@ impl tool_api::Tool for PromptAgentTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &tool_api::DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &tool_api::DescriptionOptions,
+    ) -> String {
         "Deterministic Agent fixture".to_string()
     }
 
-    async fn prompt(&self, _opts: &tool_api::PromptOptions) -> String {
-        "Deterministic Agent fixture".to_string()
+    async fn prompt(&self, _opts: &tool_api::PromptOptions) -> Utf16JsonProjection {
+        "Deterministic Agent fixture".into()
     }
 
     async fn call(
         &self,
-        _input: Value,
+        _input: Utf16JsonProjection,
         _ctx: tool_api::ToolUseContext,
         _progress_tx: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
-        Ok(tool_api::ToolCallResult {
-            data: serde_json::json!({"ok": true}),
-            model_content: None,
-            new_messages: Vec::new(),
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-        })
+        Ok(tool_api::ToolCallResult::from_data(
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({ "ok": true }))
+                .expect("generated tool fixture is valid"),
+        ))
     }
 }
 
@@ -361,14 +375,23 @@ fn production_prompt_bodies_match_their_byte_locks() {
             lingxi_llm_client::protocol::ProtocolFamily::AnthropicMessages,
             Default::default(),
         );
-        assert_eq!(blocks.len(), 1, "{model}: no provider metadata in this fixture");
-        assert_eq!(blocks[0].block.text, assembled);
-        let body_text = blocks[0]
-            .block
-            .text
+        assert_eq!(
+            blocks.len(),
+            1,
+            "{model}: no provider metadata in this fixture"
+        );
+        let expected_units = assembled.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            blocks[0].block.text_payload().root_string_code_units(),
+            Some(expected_units)
+        );
+        let body_text = assembled
             .strip_prefix("You are LingXi, an agentic command-line coding assistant.\n\n")
             .expect("brand header followed by the complete two-LF section separator");
-        assert!(body_text.starts_with('\n'), "{model}: body retains leading LF");
+        assert!(
+            body_text.starts_with('\n'),
+            "{model}: body retains leading LF"
+        );
 
         let body = normalize_prompt_body(body_text, &cwd, &memory_dir);
         assert_eq!(body.len(), expected_len, "{model}: body length drifted");
@@ -559,10 +582,12 @@ fn production_output_style_bodies_match_their_byte_locks() {
             Default::default(),
         );
         assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].block.text, assembled);
-        let body_text = blocks[0]
-            .block
-            .text
+        let expected_units = assembled.encode_utf16().collect::<Vec<_>>();
+        assert_eq!(
+            blocks[0].block.text_payload().root_string_code_units(),
+            Some(expected_units)
+        );
+        let body_text = assembled
             .strip_prefix("You are LingXi, an agentic command-line coding assistant.\n\n")
             .expect("brand header followed by the complete two-LF section separator");
 

@@ -1,0 +1,206 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "b39eedea58a058e25e3115013bbbd7fa53f6e245acbddb468da28fc5b45b9611",
+  "gateway_authority": "127.0.0.1:52478",
+  "cases": [
+    {
+      "case": "nested-error-message-lone-surrogate",
+      "status": 400,
+      "exit_code": 1,
+      "session_id": "00000000-0000-4000-8000-000000029500",
+      "requests": [
+        {
+          "model": "claude-sonnet-4-5",
+          "stream": true,
+          "body_sha256": "840287b2332720a97a9a2655033ce8380e346bfcd2716eaf34760c5facf79bc3",
+          "body_bytes": 41503
+        }
+      ],
+      "assistant_rows": [
+        "assistant-0.jsonl.raw"
+      ],
+      "stdout_sha256": "9aba6028415533236a5517d11a8e2809b7c58edcbfb9bf2096c8c39563ed66e9",
+      "response_sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510",
+      "no_retry_header": false,
+      "result": "API Error: 400 fixture provider error \ud800 tail",
+      "is_error": true,
+      "stop_reason": "stop_sequence",
+      "terminal_reason": "api_error"
+    },
+    {
+      "case": "empty-response-body",
+      "status": 400,
+      "exit_code": 1,
+      "session_id": "00000000-0000-4000-8000-000000029501",
+      "requests": [
+        {
+          "model": "claude-sonnet-4-5",
+          "stream": true,
+          "body_sha256": "38c2ca7a440ec61c188c884313c37b11bc841ea016c87a3aa7a9ddb378d653be",
+          "body_bytes": 41471
+        }
+      ],
+      "assistant_rows": [
+        "assistant-0.jsonl.raw"
+      ],
+      "stdout_sha256": "a1a6e9a27955ffdd1b8ceec3323ef635a06bb6c056a5c2e0a7ff6b7965cadbd7",
+      "response_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "no_retry_header": false,
+      "result": "API Error: 400 status code (no body)",
+      "is_error": true,
+      "stop_reason": "stop_sequence",
+      "terminal_reason": "api_error"
+    },
+    {
+      "case": "nested-error-message-null",
+      "status": 400,
+      "exit_code": 1,
+      "session_id": "00000000-0000-4000-8000-000000029502",
+      "requests": [
+        {
+          "model": "claude-sonnet-4-5",
+          "stream": true,
+          "body_sha256": "ae2cb1bc3269d1e09253d13bcc30c4c699eca41f55a2443457878651f4cea358",
+          "body_bytes": 41483
+        }
+      ],
+      "assistant_rows": [
+        "assistant-0.jsonl.raw"
+      ],
+      "stdout_sha256": "1b022ddeeac13aa897491250ac4882e70426867de9b19e30472a5bcf36ad14fb",
+      "response_sha256": "1174517f76141f4982c7a7f5496692168ac66b2fd3e8eaddd804352fb2fae934",
+      "no_retry_header": false,
+      "result": "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":null}}",
+      "is_error": true,
+      "stop_reason": "stop_sequence",
+      "terminal_reason": "api_error"
+    },
+    {
+      "case": "http-403",
+      "status": 403,
+      "exit_code": 1,
+      "session_id": "00000000-0000-4000-8000-000000029503",
+      "requests": [
+        {
+          "model": "claude-sonnet-4-5",
+          "stream": true,
+          "body_sha256": "0c3b20572d6ae8334748c4f6595d27b05dbc332c7471e2cff8d4c8a286cfa2b1",
+          "body_bytes": 41449
+        }
+      ],
+      "assistant_rows": [
+        "assistant-0.jsonl.raw"
+      ],
+      "stdout_sha256": "26c52c20eec0222faf243f9b86bbd4fd97eb189a9c7fbc430023337d7871fb9d",
+      "response_sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510",
+      "no_retry_header": false,
+      "result": "Failed to authenticate. API Error: 403 fixture provider error \ud800 tail",
+      "is_error": true,
+      "stop_reason": "stop_sequence",
+      "terminal_reason": "api_error"
+    },
+    {
+      "case": "http-404",
+      "status": 404,
+      "exit_code": 1,
+      "session_id": "00000000-0000-4000-8000-000000029504",
+      "requests": [
+        {
+          "model": "claude-sonnet-4-5",
+          "stream": true,
+          "body_sha256": "280097c2c32cb8400ca6fd5acb9a5b79c261de70016b53e606aebfd5cc48bb8d",
+          "body_bytes": 41449
+        },
+        {
+          "model": "claude-sonnet-4-5",
+          "stream": false,
+          "body_sha256": "3bd6d8fae770dcee3f1b9334b625704afba9ae93471bf63e8738defda93b6741",
+          "body_bytes": 41450
+        }
+      ],
+      "assistant_rows": [
+        "assistant-0.jsonl.raw"
+      ],
+      "stdout_sha256": "7f4305fbb4b95c97b31d8710d9d4680f18326bb6abbef067bdc21d890668b1b8",
+      "response_sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510",
+      "no_retry_header": false,
+      "result": "There's an issue with the selected model (claude-sonnet-4-5). It may not exist or you may not have access to it. Run --model to pick a different model.",
+      "is_error": true,
+      "stop_reason": "stop_sequence",
+      "terminal_reason": "api_error"
+    },
+    {
+      "case": "http-413",
+      "status": 413,
+      "exit_code": 1,
+      "session_id": "00000000-0000-4000-8000-000000029505",
+      "requests": [
+        {
+          "model": "claude-sonnet-4-5",
+          "stream": true,
+          "body_sha256": "2ea9b555f0c0b66ca3c0eac8f4d8748c5bd2ec6b2c8094e2cf5900d3a434ba55",
+          "body_bytes": 41449
+        }
+      ],
+      "assistant_rows": [
+        "assistant-0.jsonl.raw"
+      ],
+      "stdout_sha256": "1ed1e1d81306c666539c1b173a5e5ea8d89cc1c38940b5cfea35738734e1d13c",
+      "response_sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510",
+      "no_retry_header": false,
+      "result": "Request too large (max 32MB). Accumulated images and attachments in the conversation pushed the request over the limit. Remove older images or compact the conversation.",
+      "is_error": true,
+      "stop_reason": "stop_sequence",
+      "terminal_reason": "image_error"
+    },
+    {
+      "case": "http-401",
+      "status": 401,
+      "exit_code": 1,
+      "session_id": "00000000-0000-4000-8000-000000029506",
+      "requests": [
+        {
+          "model": "claude-sonnet-4-5",
+          "stream": true,
+          "body_sha256": "986bb726d52129ba4e3b53316cf69d243057577e1a593c545b6d5d1b44741bbb",
+          "body_bytes": 41449
+        }
+      ],
+      "assistant_rows": [
+        "assistant-0.jsonl.raw"
+      ],
+      "stdout_sha256": "fb43bac9d6727c1b7f94897ddfd4fa26f39fdf51053601d7aae26c81d91f4dc9",
+      "response_sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510",
+      "no_retry_header": true,
+      "result": "Failed to authenticate. API Error: 401 fixture provider error \ud800 tail",
+      "is_error": true,
+      "stop_reason": "stop_sequence",
+      "terminal_reason": "api_error"
+    },
+    {
+      "case": "http-500",
+      "status": 500,
+      "exit_code": 1,
+      "session_id": "00000000-0000-4000-8000-000000029507",
+      "requests": [
+        {
+          "model": "claude-sonnet-4-5",
+          "stream": true,
+          "body_sha256": "93b9ad4ebf9113032447edade41fa236e826c2a9b173b93d74561858e8277564",
+          "body_bytes": 41449
+        }
+      ],
+      "assistant_rows": [
+        "assistant-0.jsonl.raw"
+      ],
+      "stdout_sha256": "eb0cd80932bc82e3441e4093b94754c65e6cbe4d7520ebe2c0f4a257c8d55c64",
+      "response_sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510",
+      "no_retry_header": true,
+      "result": "API Error: 500 fixture provider error \ud800 tail. This is a server-side issue, usually temporary \u2014 try again in a moment. If it persists, check your inference gateway (127.0.0.1:52478).",
+      "is_error": true,
+      "stop_reason": "stop_sequence",
+      "terminal_reason": "api_error"
+    }
+  ]
+}

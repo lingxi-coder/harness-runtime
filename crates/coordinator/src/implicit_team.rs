@@ -5,6 +5,7 @@ use lingxi_core::host::subagent_spawn::{
 };
 use lingxi_core::host::team_spawn::{TeamSpawnSeam, TeammateLaunch};
 use lingxi_core::host::{OutputStream, RuntimeSpawner};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 
 /// Coordinates identity reservation, task startup and mailbox delivery.
@@ -461,7 +462,7 @@ mod tests {
             _: AgentId,
             _: String,
             _: String,
-            _: String,
+            _: Utf16JsonProjection,
         ) -> Result<String, TeamSpawnError> {
             if self.block_spawn.load(Ordering::SeqCst) {
                 self.started.notify_one();
@@ -540,15 +541,15 @@ mod tests {
             &self,
             _: &lingxi_core::types::ToolUseId,
             _: &str,
-            _: &serde_json::Value,
+            _: &Utf16JsonProjection,
         ) {
         }
         async fn emit_tool_result(
             &self,
             _: &lingxi_core::types::ToolUseId,
             _: &str,
-            _: &str,
-            _: &serde_json::Value,
+            _: &Utf16JsonProjection,
+            _: &Utf16JsonProjection,
         ) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
@@ -558,10 +559,11 @@ mod tests {
         async fn invoke(
             &self,
             _: &str,
-            _: serde_json::Value,
+            _: Utf16JsonProjection,
             _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
-            Ok(serde_json::Value::Null)
+        ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError>
+        {
+            Ok(Utf16JsonProjection::parse("null").expect("null source"))
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self

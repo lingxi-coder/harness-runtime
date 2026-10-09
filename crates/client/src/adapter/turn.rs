@@ -686,7 +686,10 @@ mod tests {
         let block = ContentBlock::ToolUse {
             id: id.clone(),
             name: "Read".into(),
-            input: serde_json::json!({"file_path": "/tmp/x"}),
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"file_path": "/tmp/x"}),
+            )
+            .unwrap(),
             provider_id: None,
         };
         match lower_content_block(&block).expect("lowered") {
@@ -739,8 +742,9 @@ mod tests {
         assert_eq!(
             parse_mod_ui_control_request(payload, "ui_message")
                 .unwrap()
-                .value,
-            serde_json::json!({"subtype":"ui_message","data":{"value":1}})
+                .to_json_string()
+                .unwrap(),
+            r#"{"subtype":"ui_message","data":{"value":1}}"#
         );
         assert!(parse_mod_ui_control_request(payload, "ui_client_fault")
             .unwrap_err()
@@ -757,8 +761,8 @@ mod tests {
             assert_eq!(
                 parse_mod_ui_control_request(&payload, subtype)
                     .unwrap()
-                    .value["subtype"],
-                subtype
+                    .string_at("/subtype"),
+                Some(subtype)
             );
             assert!(parse_mod_ui_control_request(&payload, "ui_client_press").is_err());
         }
@@ -769,8 +773,9 @@ mod tests {
         assert_eq!(
             parse_mod_ui_client_operation(r#"{"subtype":"mount","target":null}"#)
                 .unwrap()
-                .value,
-            serde_json::json!({"subtype":"mount","target":null})
+                .to_json_string()
+                .unwrap(),
+            r#"{"subtype":"mount","target":null}"#
         );
         assert!(parse_mod_ui_client_operation("{").is_err());
     }
@@ -783,9 +788,11 @@ mod tests {
             .emit_mod_ui_control_result(
                 "render-request-7",
                 Ok(ModUiControlOutcome {
-                    response: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
-                        serde_json::json!({"tree":{"type":"text"}}),
-                    ),
+                    response:
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({"tree":{"type":"text"}}),
+                        )
+                        .expect("generated Mod UI response"),
                     render_revision: Some(7),
                     client_runtime_epochs: std::collections::BTreeMap::from([("review".into(), 3)]),
                     client_state_token: Some("42".into()),
@@ -832,9 +839,12 @@ mod tests {
         wrapper
             .emit_mod_ui_client_operation_result(
                 "operation-request-3",
-                Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
-                    serde_json::json!({"handled":true}),
-                )),
+                Ok(
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &serde_json::json!({"handled":true}),
+                    )
+                    .expect("generated Mod UI operation response"),
+                ),
             )
             .await;
 

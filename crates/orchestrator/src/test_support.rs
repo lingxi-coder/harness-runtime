@@ -611,13 +611,19 @@ impl OutputStream for MockOutputStream {
                 message_id: *message_id,
             });
     }
-    async fn emit_terminal_api_error(&self, api_error_status: Option<u16>, terminal_reason: &str) {
+    async fn emit_terminal_api_error(
+        &self,
+        api_error_status: Option<u16>,
+        terminal_reason: &str,
+        stop_reason: &str,
+    ) {
         self.events
             .lock()
             .await
             .push(OutputEvent::TerminalApiError {
                 api_error_status,
                 terminal_reason: terminal_reason.into(),
+                stop_reason: stop_reason.into(),
             });
     }
 
@@ -654,6 +660,17 @@ impl OutputStream for MockOutputStream {
             plugin: plugin.to_string(),
             text: text.clone(),
             timeout_ms,
+        });
+    }
+
+    async fn emit_mod_notify(
+        &self,
+        plugin: &str,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        self.events.lock().await.push(OutputEvent::ModNotify {
+            plugin: plugin.to_string(),
+            text: text.clone(),
         });
     }
 
@@ -1951,11 +1968,14 @@ mod tests {
     async fn mock_output_stream_captures_tool_lifecycle() {
         let m = MockOutputStream::new();
         let id = lingxi_core::types::ToolUseId::new();
-        let input = serde_json::json!({"file_path": "/tmp/x"});
-        let result = serde_json::json!({"content": "ok"});
+        let input =
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({"file_path": "/tmp/x"}))
+                .unwrap();
+        let result =
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({"content": "ok"})).unwrap();
         m.emit_tool_call(&id, "Read", &input).await;
         m.emit_tool_heartbeat(&id, "Read", 1_250).await;
-        m.emit_tool_result(&id, "Read", "ok", &result).await;
+        m.emit_tool_result(&id, "Read", &"ok".into(), &result).await;
         let snap = m.snapshot().await;
         assert_eq!(snap.len(), 3);
         assert!(matches!(&snap[0], OutputEvent::ToolCall { id: gid, .. } if *gid == id));
@@ -2001,7 +2021,7 @@ mod tests {
         let h = noop_hook_executor();
         let event = hooks::events::HookEvent::PreToolUse {
             tool_name: "Read".into(),
-            tool_input: serde_json::json!({}),
+            tool_input: Utf16JsonProjection::parse("{}").unwrap(),
             tool_use_id: lingxi_core::types::ToolUseId::new(),
         };
         let ctx = hooks::registry::HookContext::default();
@@ -2014,7 +2034,7 @@ mod tests {
     #[tokio::test]
     async fn noop_permission_gate_always_allows() {
         let g = NoOpPermissionGate;
-        let v = serde_json::json!({});
+        let v = Utf16JsonProjection::parse("{}").unwrap();
         assert_eq!(g.check("Read", &v).await, PermissionDecision::Allow);
         assert_eq!(g.check("Bash", &v).await, PermissionDecision::Allow);
     }

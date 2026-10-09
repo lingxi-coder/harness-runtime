@@ -1,0 +1,137 @@
+{
+  "scope": "Native public Stop prompt-hook captures only; no candidate parity claim.",
+  "versions": {
+    "2.1.293": {
+      "native_version": "2.1.293 (Claude Code)",
+      "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+      "hook_request_count": 1,
+      "hook_marker_observed": true,
+      "native_exit_code": 0,
+      "stdout_result": "FIXED_MAIN_RESPONSE_STOP_HOOK_RELEASE_FIXTURE"
+    },
+    "2.1.294": {
+      "native_version": "2.1.294 (Claude Code)",
+      "native_sha256": "def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53",
+      "hook_request_count": 1,
+      "hook_marker_observed": true,
+      "native_exit_code": 0,
+      "stdout_result": "FIXED_MAIN_RESPONSE_STOP_HOOK_RELEASE_FIXTURE"
+    },
+    "2.1.295": {
+      "native_version": "2.1.295 (Claude Code)",
+      "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+      "hook_request_count": 1,
+      "hook_marker_observed": true,
+      "native_exit_code": 0,
+      "stdout_result": "FIXED_MAIN_RESPONSE_STOP_HOOK_RELEASE_FIXTURE"
+    }
+  },
+  "request_fields": {
+    "system": {
+      "raw_bytes_equal_to_2.1.293": {
+        "2.1.293": true,
+        "2.1.294": false,
+        "2.1.295": false
+      },
+      "raw": {
+        "2.1.293": {
+          "path": "native-baseline/2.1.293/requests/request-02.system.raw.json",
+          "bytes": 1789,
+          "sha256": "1b9c0e6d9d470c5532402da067cf30d65066a59ea0fedbcff166000fdb11eda9"
+        },
+        "2.1.294": {
+          "path": "native-baseline/2.1.294/requests/request-02.system.raw.json",
+          "bytes": 2262,
+          "sha256": "1f48b0d1067c590148f7c1d94b0c7e10390ea9af4562b378b5c6f415c87a770b"
+        },
+        "2.1.295": {
+          "path": "native-baseline/2.1.295/requests/request-02.system.raw.json",
+          "bytes": 2262,
+          "sha256": "f75d733728207922dc6b95694cdcbcdc55129404cb8dccc884e0bbf9c15113db"
+        }
+      }
+    },
+    "messages": {
+      "raw_bytes_equal_to_2.1.293": {
+        "2.1.293": true,
+        "2.1.294": false,
+        "2.1.295": false
+      },
+      "raw": {
+        "2.1.293": {
+          "path": "native-baseline/2.1.293/requests/request-02.messages.raw.json",
+          "bytes": 15206,
+          "sha256": "28bc66ac2f1b15863b3d6d804fc9382dcfa95d07fc5585d84c5df86bc9fa8b42"
+        },
+        "2.1.294": {
+          "path": "native-baseline/2.1.294/requests/request-02.messages.raw.json",
+          "bytes": 15206,
+          "sha256": "05af542f41e5a39672c674d493cb171aca08f40cf33a69fe0c441944033ba0d5"
+        },
+        "2.1.295": {
+          "path": "native-baseline/2.1.295/requests/request-02.messages.raw.json",
+          "bytes": 15208,
+          "sha256": "c275793e274756aebb4b2a8a0d1de81323b944343d07a86766fadc29bc6b1a72"
+        }
+      }
+    }
+  },
+  "system_content_observations": {
+    "captured_billing_header_by_run": {
+      "2.1.293": "cc_version=2.1.293.aaa; cc_entrypoint=sdk-cli;",
+      "2.1.294": "cc_version=2.1.294.128; cc_entrypoint=sdk-cli;",
+      "2.1.295": "cc_version=2.1.295.fbb; cc_entrypoint=sdk-cli;"
+    },
+    "stop_evaluator_new_ok_policy_present": {
+      "2.1.293": false,
+      "2.1.294": true,
+      "2.1.295": true
+    },
+    "2.1.294_and_2.1.295_evaluator_prompt_text_equal": true,
+    "classification": "The evaluator allow/block and untrusted-event-JSON instructions appear in 2.1.294 and remain unchanged in the 2.1.295 captured system field. The billing text is recorded as captured; its suffix differs between fixtures even for the same binary, so it is not treated as a fixed version-only delta."
+  },
+  "messages_dynamic_and_runtime_constraints": {
+    "prompt_ids": {
+      "2.1.293": [
+        {
+          "value": "7a9ca853-9973-4faf-879d-962f00d872f3",
+          "uuid_v4_shape": true
+        }
+      ],
+      "2.1.294": [
+        {
+          "value": "d09d2ede-7550-4ed9-aac8-0669bdc6febe",
+          "uuid_v4_shape": true
+        }
+      ],
+      "2.1.295": [
+        {
+          "value": "b28d7560-8a3d-43e5-a7f4-99ab48ed79c0",
+          "uuid_v4_shape": true
+        }
+      ]
+    },
+    "context_observations": {
+      "2.1.293": {
+        "git_status_snapshot_present": true,
+        "injected_session_dates": [
+          "2026-10-08"
+        ]
+      },
+      "2.1.294": {
+        "git_status_snapshot_present": true,
+        "injected_session_dates": [
+          "2026-10-08"
+        ]
+      },
+      "2.1.295": {
+        "git_status_snapshot_present": true,
+        "injected_session_dates": [
+          "2026-10-09"
+        ]
+      }
+    },
+    "raw_fields_compared_without_normalization": true,
+    "classification": "The hook prompt_id is a generated UUID reference. The messages field also contains a captured git-status snapshot and injected date, which changed between runs; therefore whole messages bytes remain unequal and those context changes must not be attributed to the binary version."
+  }
+}

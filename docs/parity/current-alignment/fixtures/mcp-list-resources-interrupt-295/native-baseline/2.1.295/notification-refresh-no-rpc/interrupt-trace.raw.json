@@ -1,0 +1,11 @@
+{
+  "signal": "SIGINT",
+  "requested": false,
+  "discovery_mode": "legacy-notification-refresh",
+  "pending_observed": false,
+  "native_exit_code": 0,
+  "elapsed_since_launch_ms": 20699.461,
+  "elapsed_since_launch_epoch_ms": 20699.49,
+  "stdout_bytes": 1610,
+  "stderr_bytes": 0
+}

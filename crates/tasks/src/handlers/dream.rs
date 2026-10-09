@@ -51,6 +51,7 @@ use lingxi_core::host::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -298,6 +299,7 @@ impl Task for DreamHandler {
         //    passed.
         let request = SubagentSpawnRequest {
             agent_spawn_provenance: Default::default(),
+            agent_spawn_token: None,
             parent_native_query_depth: None,
             handback_opt_in: false,
             parent_permission_mode: None,

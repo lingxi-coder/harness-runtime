@@ -290,6 +290,7 @@ pub(crate) fn render(attachment: &Utf16JsonProjection) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn projection(value: &Value) -> Utf16JsonProjection {
         Utf16JsonProjection::from_serde_value(value).unwrap()
@@ -386,7 +387,8 @@ mod tests {
         )];
         assert!(attachment(&[], &eligible, &BUILTIN_CLIENT_BLOCKS, &prior, true).is_none());
         assert_eq!(
-            value(&attachment(&[], &[], &BUILTIN_CLIENT_BLOCKS, &prior, true).unwrap())["removedNames"],
+            value(&attachment(&[], &[], &BUILTIN_CLIENT_BLOCKS, &prior, true).unwrap())
+                ["removedNames"],
             json!(["computer-use"])
         );
         let server = vec![(

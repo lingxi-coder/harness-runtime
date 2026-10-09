@@ -1,5 +1,23 @@
 use super::*;
 
+type JsonSource = lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+fn generated_json_source(value: &serde_json::Value) -> JsonSource {
+    JsonSource::from_serde_value(value).expect("generated test JSON is valid")
+}
+
+fn source_object(fields: Vec<(String, JsonSource)>) -> JsonSource {
+    JsonSource::object(fields).expect("generated source object is valid")
+}
+
+fn generated_tool_repair_metadata() -> tool_api::tool_trait::ToolInputRepairMetadata {
+    tool_api::tool_trait::ToolInputRepairMetadata::Known {
+        schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+        schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+        exempt_top_level_keys: None,
+    }
+}
+
 struct NativeEffectsTool {
     modifier_applied: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -38,12 +56,12 @@ struct ApiCatalogTool {
     name: &'static str,
     aliases: &'static [&'static str],
     marker: &'static str,
-    schema: serde_json::Value,
+    schema: JsonSource,
     wrapper: WrapperShape,
     deny_permission: bool,
     permission_checks: Arc<std::sync::atomic::AtomicUsize>,
     calls: Arc<std::sync::atomic::AtomicUsize>,
-    observed_inputs: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    observed_inputs: Arc<std::sync::Mutex<Vec<JsonSource>>>,
     observed_permission_messages:
         Arc<std::sync::Mutex<Vec<Vec<lingxi_core::types::ConversationMessage>>>>,
     observed_tool_use_ids: Arc<std::sync::Mutex<Vec<Option<lingxi_core::types::ToolUseId>>>>,
@@ -58,7 +76,7 @@ impl ApiCatalogTool {
             name,
             aliases,
             marker,
-            schema: serde_json::json!({"type":"object"}),
+            schema: generated_json_source(&serde_json::json!({"type":"object"})),
             wrapper: WrapperShape::default(),
             deny_permission: false,
             permission_checks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -94,11 +112,15 @@ impl tool_api::Tool for ApiCatalogTool {
         }
     }
 
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &JsonSource {
         if let Some(on_schema) = &self.on_schema {
             on_schema();
         }
         &self.schema
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_tool_repair_metadata()
     }
 
     fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
@@ -109,17 +131,17 @@ impl tool_api::Tool for ApiCatalogTool {
         1024
     }
 
-    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _: &JsonSource) -> bool {
         false
     }
 
-    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _: &JsonSource) -> bool {
         false
     }
 
     async fn check_permissions(
         &self,
-        _: &serde_json::Value,
+        _: &JsonSource,
         context: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         self.permission_checks
@@ -144,7 +166,9 @@ impl tool_api::Tool for ApiCatalogTool {
                 reason: permission::PermissionDecisionReason::Other {
                     reason: "tool-owned denial".into(),
                 },
-                explanation: Some(format!("Permission to use {} has been denied.", self.name)),
+                explanation: Some(
+                    format!("Permission to use {} has been denied.", self.name).into(),
+                ),
                 metadata: permission::result::PermissionMetadata::default(),
             };
         }
@@ -158,7 +182,7 @@ impl tool_api::Tool for ApiCatalogTool {
         }
     }
 
-    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+    async fn description(&self, _: &JsonSource, _: &tool_api::DescriptionOptions) -> String {
         format!("{} test tool", self.name)
     }
 
@@ -171,20 +195,17 @@ impl tool_api::Tool for ApiCatalogTool {
 
     async fn call(
         &self,
-        input: serde_json::Value,
+        input: JsonSource,
         _: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.observed_inputs.lock().unwrap().push(input.clone());
-        Ok(tool_api::ToolCallResult {
-            data: serde_json::json!({"marker": self.marker, "input": input}),
-            model_content: Some(self.marker.to_owned()),
-            new_messages: Vec::new(),
-            context_modifier: None,
-            mcp_meta: None,
-            is_error: false,
-        })
+        let data = source_object(vec![
+            ("marker".into(), self.marker.into()),
+            ("input".into(), input),
+        ]);
+        Ok(tool_api::ToolCallResult::from_data(data).with_model_text(self.marker))
     }
 }
 
@@ -194,10 +215,15 @@ impl tool_api::Tool for AsyncAgentTool {
         "Agent"
     }
 
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| serde_json::json!({"type":"object"}));
+    fn input_schema(&self) -> &JsonSource {
+        static SCHEMA: once_cell::sync::Lazy<JsonSource> = once_cell::sync::Lazy::new(|| {
+            generated_json_source(&serde_json::json!({"type":"object"}))
+        });
         &SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_tool_repair_metadata()
     }
 
     fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
@@ -208,21 +234,21 @@ impl tool_api::Tool for AsyncAgentTool {
         1024
     }
 
-    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _: &JsonSource) -> bool {
         false
     }
 
-    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _: &JsonSource) -> bool {
         false
     }
 
-    fn interrupt_behavior(&self, _: &serde_json::Value) -> tool_api::InterruptBehavior {
+    fn interrupt_behavior(&self, _: &JsonSource) -> tool_api::InterruptBehavior {
         tool_api::InterruptBehavior::Cancel
     }
 
     async fn check_permissions(
         &self,
-        _: &serde_json::Value,
+        _: &JsonSource,
         _: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -235,7 +261,7 @@ impl tool_api::Tool for AsyncAgentTool {
         }
     }
 
-    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+    async fn description(&self, _: &JsonSource, _: &tool_api::DescriptionOptions) -> String {
         "Launch an Agent for the projection test".into()
     }
 
@@ -248,7 +274,7 @@ impl tool_api::Tool for AsyncAgentTool {
 
     async fn call(
         &self,
-        _: serde_json::Value,
+        _: JsonSource,
         context: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
@@ -256,19 +282,13 @@ impl tool_api::Tool for AsyncAgentTool {
             .lock()
             .unwrap()
             .push(context.agent_spawn_provenance);
-        Ok(tool_api::ToolCallResult {
-            data: serde_json::json!({
-                "status": "async_launched",
-                "agentId": self.agent_id.clone(),
-                "resolvedModel": "model-from-launch",
-                "discardedLaunchField": "must not escape",
-            }),
-            model_content: Some("Agent launched".into()),
-            new_messages: Vec::new(),
-            context_modifier: None,
-            mcp_meta: None,
-            is_error: false,
-        })
+        let data = source_object(vec![
+            ("status".into(), "async_launched".into()),
+            ("agentId".into(), self.agent_id.clone().into()),
+            ("resolvedModel".into(), "model-from-launch".into()),
+            ("discardedLaunchField".into(), "must not escape".into()),
+        ]);
+        Ok(tool_api::ToolCallResult::from_data(data).with_model_text("Agent launched"))
     }
 }
 
@@ -403,16 +423,20 @@ impl tool_api::Tool for SignalAwareTool {
         "Slow"
     }
 
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| {
-                serde_json::json!({
-                    "type":"object",
-                    "properties":{"path":{"type":"string"}},
-                    "required":["path"]
-                })
+    fn input_schema(&self) -> &JsonSource {
+        static SCHEMA: once_cell::sync::Lazy<JsonSource> = once_cell::sync::Lazy::new(|| {
+            let schema = serde_json::json!({
+                "type":"object",
+                "properties":{"path":{"type":"string"}},
+                "required":["path"]
             });
+            generated_json_source(&schema)
+        });
         &SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_tool_repair_metadata()
     }
 
     fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
@@ -423,21 +447,21 @@ impl tool_api::Tool for SignalAwareTool {
         1024
     }
 
-    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _: &JsonSource) -> bool {
         false
     }
 
-    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _: &JsonSource) -> bool {
         false
     }
 
-    fn interrupt_behavior(&self, _: &serde_json::Value) -> tool_api::InterruptBehavior {
+    fn interrupt_behavior(&self, _: &JsonSource) -> tool_api::InterruptBehavior {
         tool_api::InterruptBehavior::Cancel
     }
 
     async fn check_permissions(
         &self,
-        _: &serde_json::Value,
+        _: &JsonSource,
         _: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -450,7 +474,7 @@ impl tool_api::Tool for SignalAwareTool {
         }
     }
 
-    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+    async fn description(&self, _: &JsonSource, _: &tool_api::DescriptionOptions) -> String {
         "Waits for caller cancellation".into()
     }
 
@@ -463,13 +487,12 @@ impl tool_api::Tool for SignalAwareTool {
 
     async fn call(
         &self,
-        input: serde_json::Value,
+        input: JsonSource,
         context: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
         let marker = input
-            .get("path")
-            .and_then(serde_json::Value::as_str)
+            .string_at("/path")
             .ok_or_else(|| tool_api::ToolError::InvalidInput("path required".into()))?;
         let cancellation = context
             .cancel
@@ -488,10 +511,15 @@ impl tool_api::Tool for NativeEffectsTool {
         "Effects"
     }
 
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| serde_json::json!({"type":"object"}));
+    fn input_schema(&self) -> &JsonSource {
+        static SCHEMA: once_cell::sync::Lazy<JsonSource> = once_cell::sync::Lazy::new(|| {
+            generated_json_source(&serde_json::json!({"type":"object"}))
+        });
         &SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        generated_tool_repair_metadata()
     }
 
     fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
@@ -502,17 +530,17 @@ impl tool_api::Tool for NativeEffectsTool {
         1024
     }
 
-    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _: &JsonSource) -> bool {
         false
     }
 
-    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _: &JsonSource) -> bool {
         false
     }
 
     async fn check_permissions(
         &self,
-        _: &serde_json::Value,
+        _: &JsonSource,
         _: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -525,7 +553,7 @@ impl tool_api::Tool for NativeEffectsTool {
         }
     }
 
-    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+    async fn description(&self, _: &JsonSource, _: &tool_api::DescriptionOptions) -> String {
         "Returns a raw payload and deferred effects".into()
     }
 
@@ -542,7 +570,7 @@ impl tool_api::Tool for NativeEffectsTool {
 
     async fn call(
         &self,
-        input: serde_json::Value,
+        input: JsonSource,
         _: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
@@ -551,21 +579,30 @@ impl tool_api::Tool for NativeEffectsTool {
             lingxi_core::types::MessageId::new(),
             "inner virtual message".into(),
         );
-        Ok(tool_api::ToolCallResult {
-            data: serde_json::json!({"raw": "structured", "logical_error": input["logical_error"]}),
-            model_content: Some(if input["logical_error"] == true {
-                "logical error text".into()
+        let logical_error = input
+            .get_property("logical_error")
+            .is_some_and(|value| value.as_bool() == Some(true));
+        let data = source_object(vec![
+            ("raw".into(), "structured".into()),
+            (
+                "logical_error".into(),
+                generated_json_source(&serde_json::json!(logical_error)),
+            ),
+        ]);
+        let mut result =
+            tool_api::ToolCallResult::from_data(data).with_model_text(if logical_error {
+                "logical error text"
             } else {
-                "model-facing text".into()
-            }),
-            new_messages: vec![injected],
-            context_modifier: Some(Box::new(move |context| {
-                modifier_applied.store(true, std::sync::atomic::Ordering::SeqCst);
-                context
-            })),
-            mcp_meta: Some(serde_json::json!({"server": "inner"})),
-            is_error: input["logical_error"] == true,
-        })
+                "model-facing text"
+            });
+        result.new_messages = vec![injected];
+        result.context_modifier = Some(Box::new(move |context| {
+            modifier_applied.store(true, std::sync::atomic::Ordering::SeqCst);
+            context
+        }));
+        result.mcp_meta = Some(source_object(vec![("server".into(), "inner".into())]));
+        result.is_error = logical_error;
+        Ok(result)
     }
 }
 
@@ -614,9 +651,14 @@ async fn mod_agent_api_launch_returns_before_fresh_infinite_settlement() {
         }
     "#,
     );
-    host.load("direct-agent", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "direct-agent",
+        dir.path(),
+        &module,
+        generated_json_source(&serde_json::json!({})),
+    )
+    .await
+    .unwrap();
     let gate = Arc::new(tokio::sync::Notify::new());
     let entered = Arc::new(tokio::sync::Notify::new());
     let registry = Arc::new(AgentWaitRegistry {
@@ -660,7 +702,7 @@ async fn mod_agent_api_launch_returns_before_fresh_infinite_settlement() {
             &[(
                 ToolUseId::new(),
                 "Caller".into(),
-                serde_json::json!({}),
+                generated_json_source(&serde_json::json!({})),
                 None,
             )],
             None,
@@ -790,13 +832,14 @@ async fn dispatch_preflight_case(
     orch: &ConversationOrchestrator,
     target: &str,
     consent: Option<serde_json::Value>,
-) -> serde_json::Value {
+) -> JsonSource {
     let outer_id = lingxi_core::types::ToolUseId::new();
     let mut input = serde_json::json!({"target": target});
     if let Some(consent) = consent {
         input["consent"] = consent;
         input["hasConsent"] = serde_json::Value::Bool(true);
     }
+    let input = generated_json_source(&input);
     let dispatched = crate::turn_loop::dispatch_tool_uses_tracked_deferred(
         orch,
         &[(outer_id.clone(), "Caller".into(), input, None)],
@@ -841,7 +884,7 @@ async fn tool_call_api_preflight_matches_native_order_and_mx_catalog_filter() {
         "tool-call-preflight",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        generated_json_source(&serde_json::json!({})),
     )
     .await
     .expect("load preflight Mod");
@@ -909,46 +952,46 @@ async fn tool_call_api_preflight_matches_native_order_and_mx_catalog_filter() {
     let malformed_consent =
         dispatch_preflight_case(&orch, "Missing", Some(serde_json::json!(7))).await;
     assert_eq!(
-        malformed_consent["error"],
-        "tool-call-preflight: $.tool.call: consent, when given, is a string",
+        malformed_consent.string_at("/error"),
+        Some("tool-call-preflight: $.tool.call: consent, when given, is a string"),
         "consent type is checked before resolving the requested tool"
     );
 
     let unknown_in_projects =
         dispatch_preflight_case(&orch, "Missing", Some(serde_json::json!(""))).await;
     assert_eq!(
-        unknown_in_projects["error"],
-        "tool-call-preflight: $.tool.call: no tool named \"Missing\" in this session",
+        unknown_in_projects.string_at("/error"),
+        Some("tool-call-preflight: $.tool.call: no tool named \"Missing\" in this session"),
         "unknown tool is rejected before querying the Projects consent gate"
     );
 
     let projects_alias =
         dispatch_preflight_case(&orch, "fetchAlias", Some(serde_json::json!(""))).await;
     assert_eq!(
-        projects_alias["error"],
-        "tool-call-preflight: $.tool.call: WebFetch does not accept `consent` in a Projects session. Call it without `consent`, and the normal permission check will decide.",
+        projects_alias.string_at("/error"),
+        Some("tool-call-preflight: $.tool.call: WebFetch does not accept `consent` in a Projects session. Call it without `consent`, and the normal permission check will decide."),
         "Projects consent uses the resolved canonical tool name, even for an empty string"
     );
 
     let wrapped_alias =
         dispatch_preflight_case(&orch, "wrappedAlias", Some(serde_json::json!(""))).await;
     assert_eq!(
-        wrapped_alias["error"],
-        "tool-call-preflight: $.tool.call: no tool named \"wrappedAlias\" in this session",
+        wrapped_alias.string_at("/error"),
+        Some("tool-call-preflight: $.tool.call: no tool named \"wrappedAlias\" in this session"),
         "the Mx-complete wrapper is hidden before alias resolution"
     );
 
     let wrong_case_alias = dispatch_preflight_case(&orch, "READALIAS", None).await;
     assert_eq!(
-        wrong_case_alias["error"],
-        "tool-call-preflight: $.tool.call: no tool named \"READALIAS\" in this session",
+        wrong_case_alias.string_at("/error"),
+        Some("tool-call-preflight: $.tool.call: no tool named \"READALIAS\" in this session"),
         "aliases are matched case-sensitively"
     );
 
     let underlying_result = dispatch_preflight_case(&orch, "underlyingAlias", None).await;
-    assert_eq!(underlying_result["marker"], "underlying");
+    assert_eq!(underlying_result.string_at("/marker"), Some("underlying"));
     let partial_result = dispatch_preflight_case(&orch, "partialAlias", None).await;
-    assert_eq!(partial_result["marker"], "partial");
+    assert_eq!(partial_result.string_at("/marker"), Some("partial"));
 
     for tool in [&caller, &web_fetch, &wrapped, &read] {
         assert_eq!(
@@ -1053,7 +1096,7 @@ async fn tool_call_api_keeps_the_prepared_arc_across_catalog_replacement() {
         "tool-call-prepared-handle",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        generated_json_source(&serde_json::json!({})),
     )
     .await
     .expect("load prepared-handle Mod");
@@ -1064,11 +1107,11 @@ async fn tool_call_api_keeps_the_prepared_arc_across_catalog_replacement() {
     let tools = Arc::new(tool_registry);
     let connection_id = lingxi_core::types::McpConnectionId::new();
     let mut replacement = ApiCatalogTool::new("Read", &["readAlias"], "replacement");
-    replacement.schema = serde_json::json!({
+    replacement.schema = generated_json_source(&serde_json::json!({
         "type":"object",
         "properties":{"replacement_only":{"type":"string"}},
         "required":["replacement_only"]
-    });
+    }));
     let replacement = Arc::new(replacement);
     let registry_to_replace = tools.clone();
     let replacement_for_swap = replacement.clone();
@@ -1101,7 +1144,7 @@ async fn tool_call_api_keeps_the_prepared_arc_across_catalog_replacement() {
         &[(
             outer_id.clone(),
             "Caller".into(),
-            serde_json::Value::Object(serde_json::Map::new()),
+            generated_json_source(&serde_json::json!({})),
             None,
         )],
         None,
@@ -1119,10 +1162,10 @@ async fn tool_call_api_keeps_the_prepared_arc_across_catalog_replacement() {
         .get(outer_id.as_str())
         .cloned()
         .expect("outer result should be recorded");
-    assert_eq!(recorded["marker"], "original");
+    assert_eq!(recorded.string_at("/marker"), Some("original"));
     assert_eq!(
-        recorded["input"],
-        serde_json::json!({"value":"after-shadow"})
+        recorded.subprojection("/input").unwrap(),
+        generated_json_source(&serde_json::json!({"value":"after-shadow"}))
     );
     assert!(swapped.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(
@@ -1144,13 +1187,20 @@ async fn tool_call_api_keeps_the_prepared_arc_across_catalog_replacement() {
         0
     );
     assert_eq!(
-        original.observed_inputs.lock().unwrap().as_slice(),
-        &[
-            serde_json::json!({"value":"after-shadow"}),
-            serde_json::json!({"value":"after-shadow"})
-        ],
+        original.observed_inputs.lock().unwrap().len(),
+        2,
         "$shadowed overwrites ordinary arguments after top-level reserved fields are removed"
     );
+    assert!(original
+        .observed_inputs
+        .lock()
+        .unwrap()
+        .iter()
+        .all(
+            |input| input.semantically_eq(&generated_json_source(&serde_json::json!({
+                "value":"after-shadow"
+            })))
+        ));
     let virtual_ids = original
         .observed_tool_use_ids
         .lock()
@@ -1244,7 +1294,7 @@ async fn tool_call_api_projects_agent_terminal_results_from_native_transcript_fa
         "tool-call-agent-projection",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        generated_json_source(&serde_json::json!({})),
     )
     .await
     .expect("load Mod");
@@ -1353,12 +1403,12 @@ async fn tool_call_api_projects_agent_terminal_results_from_native_transcript_fa
             &[(
                 outer_id,
                 "Agent".into(),
-                serde_json::json!({
+                generated_json_source(&serde_json::json!({
                     "expectedText": expected_text,
                     "expectedError": expected_error,
                     "expectResult": expect_result,
                     "expectedAgentId": AGENT_ID,
-                }),
+                })),
                 None,
             )],
             None,
@@ -1413,9 +1463,14 @@ async fn tool_call_api_uses_permissioned_executor_without_publishing_virtual_row
         }
         "#,
     );
-    host.load("tool-call-api", dir.path(), &module, serde_json::json!({}))
-        .await
-        .expect("load Mod");
+    host.load(
+        "tool-call-api",
+        dir.path(),
+        &module,
+        generated_json_source(&serde_json::json!({})),
+    )
+    .await
+    .expect("load Mod");
 
     let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let output = Arc::new(crate::test_support::MockOutputStream::new());
@@ -1436,10 +1491,10 @@ async fn tool_call_api_uses_permissioned_executor_without_publishing_virtual_row
         &[(
             outer_id.clone(),
             "Schemic".into(),
-            serde_json::json!({
+            generated_json_source(&serde_json::json!({
                 "path": "/virtual",
                 "consent": "The permission gate must still decide",
-            }),
+            })),
             None,
         )],
         None,
@@ -1456,10 +1511,10 @@ async fn tool_call_api_uses_permissioned_executor_without_publishing_virtual_row
     assert!(!dispatched.prevent_continuation);
     let stored_results = orch.transcript.tool_use_results.lock().await;
     assert_eq!(stored_results.len(), 1, "only the outer row is retained");
-    assert_eq!(
-        stored_results.get(outer_id.as_str()),
-        Some(&serde_json::json!({"ok":true}))
-    );
+    assert!(stored_results
+        .get(outer_id.as_str())
+        .is_some_and(|result| result
+            .semantically_eq(&generated_json_source(&serde_json::json!({"ok":true})))));
     drop(stored_results);
 
     let events = output.snapshot().await;
@@ -1504,7 +1559,7 @@ async fn tool_call_api_denial_stays_distinct_and_consent_does_not_bypass_permiss
         "tool-call-denied",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        generated_json_source(&serde_json::json!({})),
     )
     .await
     .expect("load Mod");
@@ -1526,10 +1581,10 @@ async fn tool_call_api_denial_stays_distinct_and_consent_does_not_bypass_permiss
         &[(
             outer_id.clone(),
             "Schemic".into(),
-            serde_json::json!({
+            generated_json_source(&serde_json::json!({
                 "path": "/virtual",
                 "consent": "This is context, not permission",
-            }),
+            })),
             None,
         )],
         None,
@@ -1598,7 +1653,7 @@ async fn tool_call_api_projects_only_native_promise_fields_and_drops_virtual_fra
         "tool-call-effects",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        generated_json_source(&serde_json::json!({})),
     )
     .await
     .expect("load Mod");
@@ -1621,9 +1676,9 @@ async fn tool_call_api_projects_only_native_promise_fields_and_drops_virtual_fra
             &[(
                 outer_id.clone(),
                 "Effects".into(),
-                serde_json::json!({
+                generated_json_source(&serde_json::json!({
                     "logical_error": logical_error,
-                }),
+                })),
                 None,
             )],
             None,
@@ -1657,7 +1712,10 @@ async fn tool_call_api_projects_only_native_promise_fields_and_drops_virtual_fra
             .is_empty());
         let results = orch.transcript.tool_use_results.lock().await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results.get(outer_id.as_str()).unwrap()["raw"], "structured");
+        assert_eq!(
+            results.get(outer_id.as_str()).unwrap().string_at("/raw"),
+            Some("structured")
+        );
         drop(results);
 
         let events = output.snapshot().await;
@@ -1691,7 +1749,7 @@ async fn tool_call_context_keeps_exact_utf16_in_reminder_and_queued_attachment()
         "tool-call-utf16-context",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        generated_json_source(&serde_json::json!({})),
     )
     .await
     .expect("load Mod");
@@ -1711,7 +1769,7 @@ async fn tool_call_context_keeps_exact_utf16_in_reminder_and_queued_attachment()
         &[(
             tool_use_id.clone(),
             "Read".into(),
-            serde_json::json!({}),
+            generated_json_source(&serde_json::json!({})),
             None,
         )],
         None,
@@ -1765,7 +1823,7 @@ async fn dropping_outer_dispatch_cancels_virtual_tool_after_it_starts() {
         "tool-call-cancel",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        generated_json_source(&serde_json::json!({})),
     )
     .await
     .expect("load Mod");
@@ -1790,7 +1848,7 @@ async fn dropping_outer_dispatch_cancels_virtual_tool_after_it_starts() {
             &[(
                 outer_id,
                 "Slow".into(),
-                serde_json::json!({"path": "started.marker"}),
+                generated_json_source(&serde_json::json!({"path": "started.marker"})),
                 None,
             )],
             None,

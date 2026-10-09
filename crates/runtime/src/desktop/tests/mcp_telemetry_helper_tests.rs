@@ -63,10 +63,10 @@ fn mcp_tools_commands_loaded_uses_utf16_lengths_like_the_oracle_js_strings() {
         "srv".to_string(),
         McpConnectionId::new(),
         lingxi_core::host::McpPromptDto {
-            name: "emoji".to_string(),
-            description: Some("desc😀".to_string()),
+            name: "emoji".into(),
+            description: Some("desc😀".into()),
             arguments: vec![lingxi_core::host::McpPromptArgumentDto {
-                name: "旗".to_string(),
+                name: "旗".into(),
                 description: None,
                 required: true,
             }],

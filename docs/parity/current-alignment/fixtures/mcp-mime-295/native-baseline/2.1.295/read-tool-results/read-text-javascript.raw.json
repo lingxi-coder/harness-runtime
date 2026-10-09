@@ -1,0 +1,1 @@
+{"tool_use_id":"toolu_native_mcp_mime_295_read_text_javascript","type":"tool_result","content":"1\t// NATIVE_MIME_JAVASCRIPT\n2\tconst mimeFixture = \"js\";\n3\n\n<system-reminder>\n<total_tokens>14999976 tokens left</total_tokens>\n</system-reminder>","cache_control":{"type":"ephemeral"}}

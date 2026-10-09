@@ -77,7 +77,7 @@ mod tests {
         };
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)");
+                assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)".into());
             }
             other => panic!("expected Done{{display: Some((...).into())}}, got {other:?}"),
         }
@@ -94,13 +94,13 @@ mod tests {
     async fn empty_name_still_produces_locked_format() {
         let h = UnimplementedCommandHandler::new("", "");
         let args = ParsedSlashCommand {
-            name: String::new(),
+            name: String::new().into(),
             raw_args: String::new().into(),
             positional_args: vec![],
         };
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, ": not implemented in v0.6.0 (M5)");
+                assert_eq!(s, ": not implemented in v0.6.0 (M5)".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }

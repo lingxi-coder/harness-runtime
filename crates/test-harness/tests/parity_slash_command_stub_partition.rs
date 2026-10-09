@@ -38,6 +38,7 @@ use command_api::builtin_support::unimplemented::UnimplementedCommandHandler;
 use command_api::builtins::register_all_builtin_commands;
 use command_api::{CommandRegistry, RegistrySlashDispatcher};
 use lingxi_core::host::{SlashCommandDispatcher, SlashDispatchResult};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use tokio::sync::RwLock;
 
 fn names_of(table: &[(&'static str, &'static str)]) -> HashSet<&'static str> {
@@ -143,10 +144,14 @@ async fn every_correct_by_design_stub_still_returns_the_locked_literal() {
     let d = full_dispatcher();
     for (name, reason) in CORRECT_BY_DESIGN_STUBS {
         let expected = UnimplementedCommandHandler::stub_literal(name);
-        match d.dispatch(&format!("/{name}")).await {
+        match d
+            .dispatch(Utf16JsonProjection::from(format!("/{name}")))
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert_eq!(
-                    display, expected,
+                    display.string_at(""),
+                    Some(expected.as_str()),
                     "/{name} ({reason}) is a correct-by-design stub and must still return \
                      the locked literal; if it changed, it was turned into a half-implementation"
                 );
@@ -162,10 +167,14 @@ async fn host_bound_deferred_gaps_also_currently_stub_but_are_not_locked_as_fait
     let d = full_dispatcher();
     for (name, _reason) in HOST_BOUND_DEFERRED_GAPS {
         let expected = UnimplementedCommandHandler::stub_literal(name);
-        match d.dispatch(&format!("/{name}")).await {
+        match d
+            .dispatch(Utf16JsonProjection::from(format!("/{name}")))
+            .await
+        {
             SlashDispatchResult::Handled { display } => {
                 assert_eq!(
-                    display, expected,
+                    display.string_at(""),
+                    Some(expected.as_str()),
                     "/{name} currently stubbed (deferred host infra); flips when implemented"
                 );
             }

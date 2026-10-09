@@ -1,0 +1,6 @@
+{"jsonrpc":"2.0","id":"server-discover-probe-1","result":{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":true},"prompts":{"listChanged":false},"resources":{"listChanged":false,"subscribe":false}},"instructions":"Fixed local modern MCP listener fixture.","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"listener-fixture","version":"1.0.0"}},"resultType":"complete"}}
+{"jsonrpc":"2.0","id":"listen:0","error":{"code":-32000,"message":"ECONNRESET"}}
+{"jsonrpc":"2.0","id":0,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","prompts":[]}}
+{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","resources":[]}}
+{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[{"name":"listener_probe","description":"Returns a fixed marker after the modern catalog listener reports ECONNRESET.","inputSchema":{"type":"object","properties":{"marker":{"type":"string"}},"required":["marker"],"additionalProperties":false}}]}}
+{"jsonrpc":"2.0","id":3,"result":{"resultType":"complete","ttlMs":0,"cacheScope":"private","content":[{"type":"text","text":"MCP_LISTENER_TOOL_CALL_COMPLETED"}],"isError":false,"structuredContent":{"marker":"listener-probe"}}}

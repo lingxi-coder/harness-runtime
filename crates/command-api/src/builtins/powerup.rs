@@ -375,7 +375,10 @@ mod tests {
         match result {
             CommandResult::Done {
                 display: Some(display),
-            } => display,
+            } => display
+                .string_at("")
+                .expect("generated powerup display text")
+                .to_owned(),
             other => panic!("expected display result, got {other:?}"),
         }
     }

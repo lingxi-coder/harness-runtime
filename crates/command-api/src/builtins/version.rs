@@ -93,6 +93,7 @@ impl BuiltinCommandHandler for VersionHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     fn args() -> ParsedSlashCommand {
         ParsedSlashCommand {
@@ -107,9 +108,9 @@ mod tests {
         let h = VersionHandler::with_build_info(BuildInfo::new("9.8.7-host", "host123"));
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
             assert!(s.starts_with("lingxi-cli "));
-            assert!(s.ends_with(')'));
-            assert!(s.contains('('));
-            assert_eq!(s, "lingxi-cli 9.8.7-host (host123)");
+            assert!(s.ends_with(")"));
+            assert!(s.contains("("));
+            assert_eq!(s, "lingxi-cli 9.8.7-host (host123)".into());
         } else {
             panic!();
         }

@@ -861,9 +861,7 @@ async fn native_kill_switch_applies_per_attempt_before_validation_and_preserves_
         request
             .input
             .system
-            .push(lingxi_llm_client::protocol::SystemBlock {
-                text: "WIRE_SYSTEM".into(),
-            });
+            .push(lingxi_llm_client::protocol::SystemBlock::new("WIRE_SYSTEM"));
         service
             .execute_non_stream_request(
                 request,

@@ -809,7 +809,8 @@ mod tests {
         let msg = match err {
             ToolError::InvalidInput(message) => message
                 .string_at("")
-                .expect("invalid input is a JSON string"),
+                .expect("invalid input is a JSON string")
+                .to_owned(),
             other => panic!("unexpected error: {other:?}"),
         };
         assert!(

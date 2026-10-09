@@ -2673,6 +2673,20 @@ pub struct DesktopRuntime {
 }
 
 impl DesktopRuntime {
+    /// Current local Agent statistics, sampled when a result is published.
+    /// Tool selection does not disable the session's statistics owner: an
+    /// empty snapshot still comes from this runtime's real session registry.
+    pub async fn agent_session_statistics(
+        &self,
+    ) -> Option<lingxi_core::host::agent_statistics::AgentSessionStatisticsSnapshot> {
+        let session_id = self.orchestrator.current_session_id().await;
+        Some(
+            self.task_registry
+                .agent_session_statistics(session_id)
+                .snapshot(),
+        )
+    }
+
     /// The names of every tool this build registered, by value.
     ///
     /// The honest observation point for a capability-gated tool: the tool

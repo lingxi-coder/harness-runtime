@@ -1,15 +1,112 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use lingxi_core::host::{PromptSnapshot, PromptToolDescription};
-use serde_json::json;
+use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+use serde_json::{json, Value};
 use session::jsonl::JsonlMessage;
 use std::sync::{Arc, Mutex as StdMutex};
+use tool_api::context::ToolUseContext;
+use tool_api::progress::ToolProgressSender;
 use tool_api::registry::ToolRegistry;
+use tool_api::tool_trait::{
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
+    ValidationError,
+};
 
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+struct PromptSnapshotReadTool;
+
+#[async_trait]
+impl Tool for PromptSnapshotReadTool {
+    fn name(&self) -> &str {
+        "Read"
+    }
+
+    fn input_schema(&self) -> &Source {
+        static SCHEMA: once_cell::sync::Lazy<Source> = once_cell::sync::Lazy::new(|| {
+            tool_api::tool_trait::generated_builtin_result(
+                &serde_json::json!({"type":"object","properties":{}}),
+            )
+        });
+        &SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
+    fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+        true
+    }
+
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+
+    fn is_concurrency_safe(&self, _input: &Source) -> bool {
+        true
+    }
+
+    fn is_read_only(&self, _input: &Source) -> bool {
+        true
+    }
+
+    async fn validate_input(
+        &self,
+        _input: &Source,
+        _ctx: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
+        Ok(())
+    }
+
+    async fn check_permissions(
+        &self,
+        _input: &Source,
+        _ctx: &ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+
+    async fn description(&self, _input: &Source, _opts: &DescriptionOptions) -> String {
+        String::new()
+    }
+
+    async fn prompt(&self, _opts: &PromptOptions) -> Source {
+        String::new().into()
+    }
+
+    async fn call(
+        &self,
+        _input: Source,
+        _ctx: ToolUseContext,
+        _tx: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        Ok(ToolCallResult {
+            data: tool_api::tool_trait::generated_builtin_result(&serde_json::json!({})),
+            model_content: None,
+            new_messages: Vec::new(),
+            context_modifier: None,
+            is_error: false,
+            mcp_meta: None,
+            subagent_hooks_fired: false,
+        })
+    }
+}
 
 fn wire_tool(
     name: &str,
@@ -31,7 +128,7 @@ fn wire_tool(
 fn assert_recorded_host_branding_role(request: &crate::OrchestratorApiRequest) {
     use lingxi_llm_client::protocol::ProtocolFamily;
     use lingxi_llm_client::providers::anthropic::system_prompt::{
-        PromptText, SystemPromptInput, project_system_prompt,
+        project_system_prompt, PromptText, SystemPromptInput,
     };
 
     let crate::OrchestratorApiRequest::Main(request) = request else {
@@ -48,11 +145,9 @@ fn assert_recorded_host_branding_role(request: &crate::OrchestratorApiRequest) {
     };
     let expected = PromptText::from_string(crate::prompt::locked_templates::HEADER);
     assert_eq!(identity.utf16_code_units(), expected.utf16_code_units());
-    assert!(
-        elements
-            .iter()
-            .any(|element| element.utf16_code_units() == expected.utf16_code_units())
-    );
+    assert!(elements
+        .iter()
+        .any(|element| element.utf16_code_units() == expected.utf16_code_units()));
 
     // Feed the exact Host request object through the SDK's Anthropic projector.
     let blocks = project_system_prompt(
@@ -64,7 +159,14 @@ fn assert_recorded_host_branding_role(request: &crate::OrchestratorApiRequest) {
     );
     assert_eq!(blocks.len(), 2);
     assert_eq!(
-        blocks[0].block.text,
+        String::from_utf16(
+            &blocks[0]
+                .block
+                .text_payload()
+                .root_string_code_units()
+                .unwrap(),
+        )
+        .unwrap(),
         crate::prompt::locked_templates::HEADER
     );
 }
@@ -78,7 +180,7 @@ fn attachment(payload: serde_json::Value) -> JsonlMessage {
         timestamp: "2026-08-30T00:00:00.000Z".to_string(),
         cwd: "/tmp/project".to_string(),
         version: "0.12.0".to_string(),
-        message: serde_json::Value::Null,
+        message: Source::parse("null").unwrap(),
         is_sidechain: false,
         user_type: Some("external".to_string()),
         git_branch: None,
@@ -86,7 +188,11 @@ fn attachment(payload: serde_json::Value) -> JsonlMessage {
         slug: None,
         prompt_id: None,
         logical_parent_uuid: None,
-        extra: [("attachment".to_string(), payload)].into_iter().collect(),
+        extra: Source::object(vec![(
+            "attachment".to_string(),
+            Source::from_serde_value(&payload).expect("generated fixture JSON is valid"),
+        )])
+        .unwrap(),
 
         attachment_projection: None,
         tool_use_result_projection: None,
@@ -402,8 +508,8 @@ async fn the_off_flag_stops_recording_a_session_that_would_otherwise_record() {
 
 #[tokio::test]
 async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_request() {
-    use lingxi_core::host::FileSystem;
     use lingxi_core::host::instructions::InstructionRendering;
+    use lingxi_core::host::FileSystem;
     use platform_posix::fs::PosixFileSystem;
     use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
 
@@ -484,14 +590,20 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
         let rows = JsonlReader::new(path, fs.clone()).read_all().await.unwrap();
         let snapshots = rows
             .iter()
-            .filter_map(|row| row.extra.get("attachment"))
-            .filter(|payload| payload["type"] == "prompt_snapshot")
+            .filter_map(|row| row.extra.subprojection("/attachment").ok())
+            .filter(|payload| payload.string_at("/type") == Some("prompt_snapshot"))
             .collect::<Vec<_>>();
         assert_eq!(snapshots.len(), 2);
         for payload in snapshots {
-            assert_eq!(payload["contextRendering"], json!(rendering));
-            assert!(payload.get("hostBrandingIdentity").is_none());
-            assert!(payload.get("brandingIdentity").is_none());
+            assert_eq!(
+                payload.string_at("/contextRendering"),
+                Some(match rendering {
+                    InstructionRendering::Inline => "inline",
+                    InstructionRendering::Announced => "announced",
+                })
+            );
+            assert!(!payload.contains_property("hostBrandingIdentity"));
+            assert!(!payload.contains_property("brandingIdentity"));
         }
 
         let cold_marker = "policy loaded only after cold resume";
@@ -543,12 +655,10 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
             cold_snapshot.context_rendering,
             expected_snapshot.context_rendering
         );
-        assert!(
-            expected_snapshot
-                .system_prompt_utf16
-                .iter()
-                .all(Option::is_none)
-        );
+        assert!(expected_snapshot
+            .system_prompt_utf16
+            .iter()
+            .all(Option::is_none));
         assert!(
             cold_snapshot.system_prompt_utf16.is_empty(),
             "the Native snapshot attachment has no parallel UTF-16 sidecar field"
@@ -589,18 +699,16 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
                     .get(&policy_messages[0].0)
                     .cloned()
                     .expect("announced policy retains its typed attachment");
-                assert_eq!(raw_attachment["type"], "instructions");
+                assert_eq!(raw_attachment.string_at("/type"), Some("instructions"));
                 assert_eq!(
                     lingxi_core::host::instruction_announcements::render_instruction_attachment(
                         &raw_attachment,
                     ),
                     Some(policy_messages[0].1.clone())
                 );
-                assert!(
-                    !policy_messages[0]
-                        .1
-                        .contains("As you answer the user's questions")
-                );
+                assert!(!policy_messages[0]
+                    .1
+                    .contains("As you answer the user's questions"));
             }
         }
     }
@@ -651,12 +759,15 @@ async fn prompt_snapshot_writer_omits_absent_rendering_on_legacy_tool_update() {
     let rows = JsonlReader::new(path, fs).read_all().await.unwrap();
     let payload = rows
         .iter()
-        .filter_map(|row| row.extra.get("attachment"))
-        .find(|payload| payload["type"] == "prompt_snapshot")
+        .filter_map(|row| row.extra.subprojection("/attachment").ok())
+        .find(|payload| payload.string_at("/type") == Some("prompt_snapshot"))
         .unwrap();
-    assert!(payload.get("contextRendering").is_none());
-    assert_eq!(payload["systemPrompt"], json!(["legacy static prefix"]));
-    assert_eq!(payload["tools"][0]["name"], "Read");
+    assert!(!payload.contains_property("contextRendering"));
+    assert_eq!(
+        payload.string_at("/systemPrompt/0"),
+        Some("legacy static prefix")
+    );
+    assert_eq!(payload.string_at("/tools/0/name"), Some("Read"));
 }
 
 #[tokio::test]
@@ -750,10 +861,12 @@ async fn prompt_snapshot_keeps_raw_utf16_on_disk_but_cold_domain_uses_native_dis
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prompt-utf16.jsonl");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_owned()));
+    let mut tools = ToolRegistry::new();
+    tools.register_builtin(Arc::new(PromptSnapshotReadTool));
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
-        Arc::new(ToolRegistry::new()),
+        Arc::new(tools),
         noop_hook_executor(),
         Arc::new(NoOpPermissionGate),
         Arc::new(MockOutputStream::new()),
@@ -808,12 +921,13 @@ async fn prompt_snapshot_keeps_raw_utf16_on_disk_but_cold_domain_uses_native_dis
         .iter()
         .find(|row| {
             row.extra
-                .get("attachment")
-                .is_some_and(|payload| payload["type"] == "prompt_snapshot")
+                .subprojection("/attachment")
+                .ok()
+                .is_some_and(|payload| payload.string_at("/type") == Some("prompt_snapshot"))
         })
         .unwrap();
-    let attachment = &snapshot_row.extra["attachment"];
-    assert_eq!(attachment["systemPrompt"], json!(["�Ω�"]));
+    let attachment = snapshot_row.extra.subprojection("/attachment").unwrap();
+    assert_eq!(attachment.string_at("/systemPrompt/0"), Some("�Ω�"));
     assert_eq!(
         exact_json::message_utf16_overrides(snapshot_row)["/attachment/systemPrompt/0"],
         units
@@ -828,9 +942,7 @@ async fn prompt_snapshot_keeps_raw_utf16_on_disk_but_cold_domain_uses_native_dis
     );
 
     *orch.prompt_runtime.prompt_snapshot.lock().await = Some(cold);
-    let mut next_wire = vec![wire_tool("Read", "live description".into(), false)];
-    orch.apply_prompt_snapshot_tool_descriptions(&mut next_wire)
-        .await;
+    let (next_wire, _) = orch.build_wire_tools().await;
     let declarations = llm_runtime::convert::to_tool_declarations(next_wire).unwrap();
     assert_eq!(
         declarations[0]

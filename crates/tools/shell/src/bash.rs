@@ -2547,6 +2547,41 @@ impl Tool for BashTool {
         }
     }
 
+    fn native_input_validation(&self) -> bool {
+        true
+    }
+
+    fn parse_native_input(
+        &self,
+        input: &Utf16JsonProjection,
+    ) -> Option<Result<Utf16JsonProjection, tool_api::native_schema::NativeSchemaError>> {
+        // Native VF preprocesses numeric strings inside the schema, after
+        // coerceInput has moved aliases and before hooks/permission see y.data.
+        let mut parsed = input.clone();
+        if let Some(timeout) = input.string_at("/timeout") {
+            let timeout = lingxi_core::host::effort::trim_js_whitespace(timeout);
+            if is_vf_numeric_string(timeout) {
+                let number = timeout
+                    .parse::<f64>()
+                    .expect("VF's decimal grammar is a valid binary64 number");
+                let mut builder = lingxi_core::types::utf16_json::Utf16JsonBuilder::new();
+                let root = builder.push_number(number);
+                parsed
+                    .set_field("timeout", builder.finish(root).expect("numeric source"))
+                    .expect("a timeout property belongs to an object");
+            }
+        }
+        tool_api::native_schema::validate_flat_input(
+            self.name(),
+            self.input_validation_schema(),
+            &parsed,
+        )
+        .map(|result| {
+            result
+                .map(|()| tool_api::native_schema::normalize_flat_input(&parsed).unwrap_or(parsed))
+        })
+    }
+
     /// Claude Code 2.1.291 `TNr` refines the first `command` field with `hH`
     /// before `validateInput`. Native `Ha` permits TAB/LF and rejects the other
     /// C0 and C1 control characters; preserve its custom schema issue so the
@@ -2751,71 +2786,48 @@ impl Tool for BashTool {
         }
     }
 
-    /// BASH-18 — port of the oracle's Bash `coerceInput` (`Vmm`, 2.1.238 BIN off
-    /// **294485010**; identical in 2.1.220):
-    ///
-    /// ```js
-    /// function Vmm(e){if(!ni(e))return null;let t={...e},r=[];
-    ///  if("timeout_ms"in t&&!("timeout"in t)){let n=t.timeout_ms;
-    ///   if(typeof n==="number"||typeof n==="string"&&/^\d+$/.test(n))t.timeout=n,r.push("timeout_ms");
-    ///   delete t.timeout_ms}
-    ///  return r.length?{input:t,shapeClass:r.join(",")}:null}
-    /// ```
-    ///
-    /// Faithful details that are easy to get wrong:
-    /// * the rewrite is SKIPPED entirely when `timeout` is already present — the
-    ///   stray `timeout_ms` then survives into `safeParse` and (with the schema's
-    ///   `additionalProperties:false`) legitimately fails validation;
-    /// * a non-coercible `timeout_ms` (a float-shaped string, `true`, an object)
-    ///   deletes the key on the COPY but pushes nothing, so `r.length === 0` and
-    ///   the whole copy is DISCARDED (`null`) — the raw input, `timeout_ms` and
-    ///   all, is what reaches the schema. Returning the pruned copy here would be
-    ///   a silent divergence that turns a validation error into a success.
-    /// * the value is moved ACROSS AS-IS — a numeric STRING stays a string, which
-    ///   the Bash `timeout` schema then rejects/accepts exactly as the oracle's
-    ///   `VF(E.number())` coercion does.
-    ///
-    /// CALL SITE: `orchestrator::turn_loop::dispatch_tool_uses_tracked`, between
-    /// the unknown-tool arm and `validate_tool_input_schema` — the same slot the
-    /// oracle occupies in `checkPermissionsAndCallTool` (BIN off 294282716).
+    /// Native 2.1.295 repairs known model parameter names before schema,
+    /// hooks and permissions. Move source values without decoding their text.
     fn coerce_input(
         &self,
         input: &Utf16JsonProjection,
     ) -> Option<tool_api::tool_trait::CoercedInput> {
-        // `ni(e)` — plain-object guard.
         input.object_entries()?;
-        if !input.contains_property("timeout_ms") {
-            return None;
-        }
-        if input.contains_property("timeout") {
-            // The oracle never enters the branch, so `timeout_ms` is NOT deleted
-            // and no coercion is reported.
-            return None;
-        }
-        let raw = input.subprojection("/timeout_ms").ok()?;
-        let coercible = match input.at_pointer("/timeout_ms")? {
-            value if value.as_number().is_some() => true,
-            value if value.as_str().is_some() => value
-                .as_str()
-                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())),
-            _ => false,
-        };
-        if !coercible {
-            // `r.length === 0` ⇒ the oracle returns `null` and throws its pruned
-            // copy away.
-            return None;
-        }
-        // Rebuild in the oracle's key ORDER: `{...e}` keeps the original order,
-        // `t.timeout = n` APPENDS `timeout` at the end, `delete t.timeout_ms`
-        // drops that key in place. `serde_json` is built with `preserve_order`,
-        // so a `remove` + `insert` on a clone would be at the mercy of the map's
-        // removal strategy — rebuild explicitly instead.
         let mut coerced = input.clone();
-        coerced.remove_field("timeout_ms").ok()?;
-        coerced.set_field("timeout", raw).ok()?;
-        Some(tool_api::tool_trait::CoercedInput {
+        let mut shapes = Vec::new();
+        if input.contains_property("timeout_ms") && !input.contains_property("timeout") {
+            let value = input.at_pointer("/timeout_ms")?;
+            let coercible = value.as_number().is_some()
+                || value.as_str().is_some_and(|text| {
+                    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+                });
+            if coercible {
+                coerced
+                    .set_field("timeout", input.subprojection("/timeout_ms").ok()?)
+                    .ok()?;
+                coerced.remove_field("timeout_ms").ok()?;
+                shapes.push("timeout_ms");
+            }
+        }
+        if input.contains_property("command_description") {
+            if !input.contains_property("description")
+                && input.string_units("/command_description").is_some()
+            {
+                coerced
+                    .set_field(
+                        "description",
+                        input.subprojection("/command_description").ok()?,
+                    )
+                    .ok()?;
+                shapes.push("command_description");
+            } else {
+                shapes.push("command_description_dropped");
+            }
+            coerced.remove_field("command_description").ok()?;
+        }
+        (!shapes.is_empty()).then(|| tool_api::tool_trait::CoercedInput {
             input: coerced,
-            shape_class: "timeout_ms".to_string(),
+            shape_class: shapes.join(","),
         })
     }
 

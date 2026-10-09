@@ -70,7 +70,7 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = HooksHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "No hooks configured\n");
+            assert_eq!(s, "No hooks configured\n".into());
         } else {
             panic!();
         }
@@ -99,7 +99,7 @@ mod tests {
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
             assert_eq!(
                 s,
-                "Hooks (2):\n  fmt  PostToolUse  60000ms\n  lint  Stop  30000ms\n"
+                "Hooks (2):\n  fmt  PostToolUse  60000ms\n  lint  Stop  30000ms\n".into()
             );
         } else {
             panic!();

@@ -444,10 +444,10 @@ mod tests {
     #[test]
     fn active_goal_conversion_is_typed_and_roundtrips() {
         let goal = lingxi_core::session::ActiveGoalState {
-            condition: "ship only when tests pass".to_string(),
+            condition: "ship only when tests pass".into(),
             set_at: std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(1_700_000_000),
-            last_reason: Some("tests still running".to_string()),
+            last_reason: Some("tests still running".into()),
             iterations: 3,
             tokens_at_start: 42,
             // NOT the default: a roundtrip that drops `origin` would still

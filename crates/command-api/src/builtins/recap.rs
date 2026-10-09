@@ -202,6 +202,7 @@ mod tests {
                 citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
+            resumable: None,
         }
     }
 

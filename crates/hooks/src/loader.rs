@@ -69,7 +69,9 @@
 //! `query()`; LingXi spawns a named subagent), which is an architectural
 //! difference, not a dropped field.
 
-use crate::definition::{HookCondition, HookDefinition, HookExecutor, HookSource};
+use crate::definition::{
+    HookCondition, HookDefinition, HookExecutor, HookFailureBehavior, HookSource,
+};
 use crate::events::HookEventType;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::utf16_json::Utf16JsonProjectionError;
@@ -389,6 +391,10 @@ pub struct HookEntry {
         skip_serializing_if = "Option::is_none"
     )]
     pub status_message: Option<String>,
+    /// Failure behavior for a completed hook invocation (`continue` or
+    /// `block`); omitted settings keep the Native `continue` default.
+    #[serde(default, rename = "onFailure", skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<String>,
     /// claude-code per-hook `if` (`schemas/hooks.ts:35` `IfConditionSchema`):
     /// a permission-rule-syntax pattern (e.g. `"Bash(git push:*)"`) that gates
     /// the hook on the tool name + tool input matching. Parsed and carried onto
@@ -545,6 +551,10 @@ fn parse_into(raw: &str, source: HookSource) -> Result<Vec<HookDefinition>, serd
                     if_condition: condition,
                     executor,
                     source,
+                    on_failure: entry
+                        .on_failure
+                        .as_deref()
+                        .and_then(HookFailureBehavior::from_wire),
                     // claude routes an `async: true` settings hook to the
                     // background (non-blocking) path; `blocking == false` is that
                     // path here. Defaults to blocking when the field is absent.
@@ -600,6 +610,13 @@ pub(crate) fn build_condition(
 /// onto [`HookDefinition::timeout`] by the caller for every type uniformly, so
 /// the executor's per-hook-timeout logic applies identically across arms.
 pub(crate) fn build_executor(entry: &HookEntry) -> Option<(String, HookExecutor)> {
+    if entry
+        .on_failure
+        .as_deref()
+        .is_some_and(|value| HookFailureBehavior::from_wire(value).is_none())
+    {
+        return None;
+    }
     match entry.kind.as_deref() {
         Some("command") => {
             let command = entry.command.clone()?;
@@ -1081,7 +1098,8 @@ mod tests {
         let raw = r#"{
           "hooks": {
             "Stop": [{ "hooks": [
-              { "type": "command", "command": "cleanup.sh", "once": true }
+              { "type": "command", "command": "cleanup.sh", "once": true,
+                "onFailure": "block" }
             ]}]
           }
         }"#;
@@ -1094,6 +1112,11 @@ mod tests {
         assert!(
             hooks[0].once,
             "once:true must be carried onto the definition"
+        );
+        assert_eq!(
+            hooks[0].on_failure,
+            Some(HookFailureBehavior::Block),
+            "onFailure:block must be carried onto the definition"
         );
         assert_eq!(hooks[0].status_message, None);
     }
@@ -1108,6 +1131,7 @@ mod tests {
         .unwrap();
         assert_eq!(hooks.len(), 1);
         assert!(!hooks[0].once, "absent once must default to false");
+        assert_eq!(hooks[0].on_failure, None);
     }
 
     #[test]

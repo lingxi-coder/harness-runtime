@@ -340,6 +340,7 @@ mod tests {
                 citations: None,
             }],
             stop_reason: Some("end_turn".to_string()),
+            resumable: None,
         }
     }
 
@@ -370,6 +371,7 @@ mod tests {
                 },
             ],
             stop_reason: None,
+            resumable: None,
         }];
         let s = render_messages_to_plain_text(&msgs);
         let rendered = s.string_at("").expect("valid display string");
@@ -403,6 +405,10 @@ mod tests {
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }];
         let rendered = render_messages_to_plain_text(&msgs);
         assert_eq!(rendered.string_at(""), Some("User: hello"));
@@ -493,9 +499,10 @@ mod tests {
             other => panic!("{other:?}"),
         };
         let expected = dir.join("out.txt");
+        let expected_display = format!("Conversation exported to: {}", expected.display());
         assert!(
-            display == format!("Conversation exported to: {}", expected.display()),
-            "got {display}"
+            display.string_at("") == Some(expected_display.as_str()),
+            "got {display:?}"
         );
         assert!(expected.exists());
         let _ = std::fs::remove_dir_all(&dir);

@@ -390,9 +390,9 @@ impl Tool for ShellMobileTool {
         });
         if let Some(t) = timeout_ms {
             if t > SHELL_MAX_TIMEOUT_MS {
-                return Err(ToolError::InvalidInput(format!(
-                    "timeout {t} exceeds limit {SHELL_MAX_TIMEOUT_MS}"
-                )));
+                return Err(ToolError::InvalidInput(
+                    format!("timeout {t} exceeds limit {SHELL_MAX_TIMEOUT_MS}").into(),
+                ));
             }
         }
 
@@ -961,23 +961,28 @@ mod tests {
                 ..Default::default()
             })
             .await;
+        let prompt_text = prompt
+            .string_at("")
+            .expect("generated mobile Linux prompt is valid UTF-16");
         assert!(
-            prompt.contains("basic development environment"),
-            "prompt should describe the default capability shape: {prompt}"
+            prompt_text.contains("basic development environment"),
+            "prompt should describe the default capability shape: {prompt:?}"
         );
         assert!(
-            prompt.contains("one-time, session,") && prompt.contains("permanent approval"),
-            "prompt should describe the approval gate: {prompt}"
+            prompt_text.contains("one-time, session,")
+                && prompt_text.contains("permanent approval"),
+            "prompt should describe the approval gate: {prompt:?}"
         );
         assert!(
-            prompt.contains("iSH/OpenMinis cannot provide a true") && prompt.contains("advisory"),
-            "prompt should state iSH deny-net limitations: {prompt}"
+            prompt_text.contains("iSH/OpenMinis cannot provide a true")
+                && prompt_text.contains("advisory"),
+            "prompt should state iSH deny-net limitations: {prompt:?}"
         );
         assert!(
-            !prompt.contains("Android Computer Use is unavailable")
-                && !prompt.contains("adb/system")
-                && !prompt.contains("iOS host"),
-            "mobile-linux prompt should avoid platform-specific host wording: {prompt}"
+            !prompt_text.contains("Android Computer Use is unavailable")
+                && !prompt_text.contains("adb/system")
+                && !prompt_text.contains("iOS host"),
+            "mobile-linux prompt should avoid platform-specific host wording: {prompt:?}"
         );
     }
 }

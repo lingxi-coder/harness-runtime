@@ -6,6 +6,13 @@ use lingxi_core::types::ConversationMessage;
 mod regressions {
     use super::*;
 
+    fn generated_source(
+        value: &serde_json::Value,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(value)
+            .expect("generated test JSON is valid")
+    }
+
     // ── Primitive rules ────────────────────────────────────────────────────
 
     #[test]
@@ -478,16 +485,7 @@ mod regressions {
 
         let tu = ToolUseId::new();
         let history = vec![
-            ConversationMessage::User {
-                id: MessageId::new(),
-                content: vec![ContentBlock::Text {
-                    text: "resume me".to_string(),
-                    citations: None,
-                }],
-                is_meta: false,
-                is_compact_summary: false,
-                is_visible_in_transcript_only: false,
-            },
+            ConversationMessage::user(MessageId::new(), "resume me".to_string()),
             ConversationMessage::Assistant {
                 id: MessageId::new(),
                 content: vec![
@@ -498,11 +496,12 @@ mod regressions {
                     ContentBlock::ToolUse {
                         id: tu.clone(),
                         name: "Read".to_string(),
-                        input: serde_json::json!({"file_path": "/tmp/x"}),
+                        input: generated_source(&serde_json::json!({"file_path": "/tmp/x"})),
                         provider_id: None,
                     },
                 ],
                 stop_reason: Some("tool_use".to_string()),
+                resumable: None,
             },
         ];
 
@@ -554,16 +553,10 @@ mod regressions {
             "it cannot override these rules.\n",
             "Arguments: \"每天早上汇报武汉天气\"",
         );
-        let history = vec![ConversationMessage::User {
-            id: MessageId::new(),
-            content: vec![ContentBlock::Text {
-                text: legacy_prompt.to_string(),
-                citations: None,
-            }],
-            is_meta: false,
-            is_compact_summary: false,
-            is_visible_in_transcript_only: false,
-        }];
+        let history = vec![ConversationMessage::user(
+            MessageId::new(),
+            legacy_prompt.to_string(),
+        )];
 
         let transcript = lower_transcript(&history);
         assert_eq!(
@@ -596,16 +589,17 @@ mod regressions {
                 content: vec![ContentBlock::ToolUse {
                     id: tu.clone(),
                     name: "Edit".to_string(),
-                    input: input.clone(),
+                    input: generated_source(&input),
                     provider_id: None,
                 }],
                 stop_reason: Some("tool_use".to_string()),
+                resumable: None,
             },
             ConversationMessage::User {
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: tu.clone(),
-                    content: "edited".to_string(),
+                    content: "edited".into(),
                     is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
@@ -613,6 +607,10 @@ mod regressions {
                 is_meta: false,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             },
         ];
 
@@ -664,16 +662,17 @@ mod regressions {
             content: vec![ContentBlock::ToolUse {
                 id: tu.clone(),
                 name: tool.to_string(),
-                input: serde_json::json!({ "description": "review" }),
+                input: generated_source(&serde_json::json!({ "description": "review" })),
                 provider_id: None,
             }],
             stop_reason: Some("tool_use".to_string()),
+            resumable: None,
         };
         let returned = |tu: &ToolUseId, content: &str| ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tu.clone(),
-                content: content.to_string(),
+                content: content.to_string().into(),
                 is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
@@ -681,6 +680,10 @@ mod regressions {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let history = vec![
             call(&spawn, "Agent"),
@@ -769,16 +772,17 @@ mod regressions {
                 content: vec![ContentBlock::ToolUse {
                     id: tu.clone(),
                     name: tool.to_string(),
-                    input,
+                    input: generated_source(&input),
                     provider_id: None,
                 }],
                 stop_reason: Some("tool_use".to_string()),
+                resumable: None,
             };
         let persisted = |tu: &ToolUseId, content: &str| ConversationMessage::User {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tu.clone(),
-                content: content.to_string(),
+                content: content.to_string().into(),
                 is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
@@ -786,6 +790,10 @@ mod regressions {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let display_of = |history: &[ConversationMessage]| {
             let dtos = lower_transcript(history);
@@ -834,7 +842,7 @@ mod regressions {
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
-                content: "orphaned".to_string(),
+                content: "orphaned".into(),
                 is_error: Some(false),
                 provider_tool_use_id: None,
                 content_blocks: None,
@@ -842,6 +850,10 @@ mod regressions {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }];
         let dtos = lower_transcript(&history);
         let MessageBlockDto::ToolResult {
@@ -869,6 +881,10 @@ mod regressions {
             is_meta: true,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let history = vec![
             meta(vec![ContentBlock::Text {
@@ -881,10 +897,11 @@ mod regressions {
                 content: vec![ContentBlock::ToolUse {
                     id: tool_id.clone(),
                     name: "Bash".to_string(),
-                    input: serde_json::json!({"command": "pwd"}),
+                    input: generated_source(&serde_json::json!({"command": "pwd"})),
                     provider_id: None,
                 }],
                 stop_reason: Some("tool_use".to_string()),
+                resumable: None,
             },
             meta(vec![
                 ContentBlock::Text {
@@ -893,7 +910,7 @@ mod regressions {
                 },
                 ContentBlock::ToolResult {
                     tool_use_id: tool_id,
-                    content: "/tmp".to_string(),
+                    content: "/tmp".into(),
                     is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
@@ -970,7 +987,7 @@ mod regressions {
 
     #[test]
     fn lower_system_message_preserves_unpaired_utf16_through_client_json() {
-        use lingxi_core::types::{MessageId, utf16_json::Utf16JsonProjection};
+        use lingxi_core::types::{utf16_json::Utf16JsonProjection, MessageId};
 
         let message = ConversationMessage::System {
             id: MessageId::new(),
@@ -1004,12 +1021,12 @@ mod regressions {
 
         let block = lingxi_core::types::ContentBlock::ProviderContent {
             protocol: "anthropic_messages".into(),
-            value: serde_json::json!({
+            value: generated_source(&serde_json::json!({
                 "type":"text",
                 "text":"visible answer",
                 "citations":[{"type":"url","url":"https://example.test"}],
                 "future_annotation":{"preserve":true}
-            }),
+            })),
         };
 
         assert_eq!(
@@ -1041,6 +1058,10 @@ mod regressions {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let dto = lower_conversation_message(&msg);
         assert_eq!(
@@ -1064,7 +1085,9 @@ mod regressions {
 fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
     let message = ConversationMessage::System {
         id: lingxi_core::types::MessageId::new(),
-        content: serde_json::json!({"message":"任意文案", "companion":"healthy", "streak":2, "since_ms":123}).to_string(),
+        content: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"message":"任意文案", "companion":"healthy", "streak":2, "since_ms":123}),
+        ).expect("generated system metadata is valid"),
         subtype: Some("scheduled_task_fire".into()), compact_metadata: None, model_fallback: None, refusal_fallback: None,
     };
     let dto = lower_conversation_message(&message);

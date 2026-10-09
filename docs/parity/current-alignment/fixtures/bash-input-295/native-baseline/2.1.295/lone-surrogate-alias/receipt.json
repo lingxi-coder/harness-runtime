@@ -1,0 +1,30 @@
+{
+  "case": "lone-surrogate-alias",
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "session_id": "a7cb1abb-a83d-5883-b24f-66f49150628a",
+  "run_directory": "/private/tmp/claude-alignment-native-bash-295-wyfm_mvf/lone-surrogate-alias",
+  "exit_code": 0,
+  "requests": [
+    {
+      "index": 1,
+      "accepted": true,
+      "sha256": "11cdc9eadc2447a16df283cb9cb893a450e00c0e3156293b70514a38626c1565"
+    },
+    {
+      "index": 2,
+      "accepted": true,
+      "sha256": "b8bd7e6a26a2062a131091cfcaaef35f2ba96a1754429dede06ab36ffa9da059"
+    }
+  ],
+  "tool_input": {
+    "command": "printf BASH_295_ALIAS > probe.ok",
+    "command_description": "source-\ud800-tail"
+  },
+  "hook_ran": true,
+  "marker_bytes": "BASH_295_ALIAS",
+  "observed_hook_tool_input": {
+    "command": "printf BASH_295_ALIAS > probe.ok",
+    "description": "source-\ud800-tail"
+  }
+}

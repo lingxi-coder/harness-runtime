@@ -1,8 +1,8 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use hooks::mods::{ModHost, ModSessionContext};
 use std::sync::Arc;
 
@@ -89,7 +89,7 @@ async fn observed_rate_limit_changes_dispatch_measure_while_no_turn_is_running()
         "idle-measure",
         directory.path(),
         &module,
-        serde_json::json!({}),
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
     )
     .await
     .unwrap();

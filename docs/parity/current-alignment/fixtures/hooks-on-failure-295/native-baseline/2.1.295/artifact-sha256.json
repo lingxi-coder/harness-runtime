@@ -1,0 +1,178 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "artifacts": {
+    "command-exit-1-block": {
+      "command-hook-input.raw.json": {
+        "bytes": 852,
+        "sha256": "967afddca24ba8ce21196e1707ab56651ef285ee845af92b7b2e499134a0cbde"
+      },
+      "command-hook-ran.marker": {
+        "bytes": 4,
+        "sha256": "f4472a14b6160e58b35bfeb710d23d240ab59402cc84bc7b5a579c7373849295"
+      },
+      "failing-hook.sh": {
+        "bytes": 533,
+        "sha256": "5a22fcfb8e5e39538c70ccfcf9b372ae06ece907f1c5e98609f652bb9092d172"
+      },
+      "native.stderr.raw": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "native.stdout.raw": {
+        "bytes": 1435,
+        "sha256": "713a1f522638751286e1c11e91b183c9c546c8b927cd4f93b52f5f8313ef4e22"
+      },
+      "receipt.json": {
+        "bytes": 2873,
+        "sha256": "33528e4f7aaa3d8a9f57652b8738d9c176020319c47f390351a5d47a195de4b8"
+      },
+      "settings.json": {
+        "bytes": 489,
+        "sha256": "aa1210e39b6db88acba0514a4c3c353d9624b124fdeb934d33d3543f64cc88ff"
+      }
+    },
+    "command-exit-1-default": {
+      "command-hook-input.raw.json": {
+        "bytes": 858,
+        "sha256": "0bb88fe95f90b00690e5b4c7070c1d72dc5e7243cc1a8abe3478a677b98eaf05"
+      },
+      "command-hook-ran.marker": {
+        "bytes": 4,
+        "sha256": "f4472a14b6160e58b35bfeb710d23d240ab59402cc84bc7b5a579c7373849295"
+      },
+      "failing-hook.sh": {
+        "bytes": 537,
+        "sha256": "67dad1d140417a19fe9be367c9f348037310674e22f490625f9c0f93c7df9226"
+      },
+      "http-request-01.raw.body": {
+        "bytes": 41416,
+        "sha256": "2eef04bfdbbf05bca78c703de4d724b6f5ef1455303ea7f875c2af19f6a18d1f"
+      },
+      "http-response-01.raw.body": {
+        "bytes": 819,
+        "sha256": "7269ec1a2bc444a0a47de4b9b8b6982c4a5dbce3ee5c80ae48e3e6bdfa7b65a5"
+      },
+      "native.stderr.raw": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "native.stdout.raw": {
+        "bytes": 1602,
+        "sha256": "c0e2c4d09bb31dfc55ba97511526eea773eb356787b925574442d43ed7bee8cc"
+      },
+      "receipt.json": {
+        "bytes": 5122,
+        "sha256": "201c6b836d8b30e360c43ccf3c54996f60f83eecd9c75c81b0c2723919044403"
+      },
+      "settings.json": {
+        "bytes": 457,
+        "sha256": "9af7bda3d3bb57785860a942fc7c6fd714345e70a3764879e3b50d890dec0884"
+      }
+    },
+    "command-spawn-block": {
+      "native.stderr.raw": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "native.stdout.raw": {
+        "bytes": 1707,
+        "sha256": "839d49c69ed21b9dc1dc4f9880c09391e110652778a26aad32c59ee38293f47b"
+      },
+      "receipt.json": {
+        "bytes": 3117,
+        "sha256": "a3698e9e61a456ea3e7b849a741a220c68de7fde356f8d22424f3dd07da59f47"
+      },
+      "settings.json": {
+        "bytes": 463,
+        "sha256": "eab0e2af6fbdbc93296f6e4c2c082c585f442e47115d10bb39b21d31f04b9ce6"
+      }
+    },
+    "command-spawn-default": {
+      "http-request-01.raw.body": {
+        "bytes": 41414,
+        "sha256": "043bdae5d623f18b5bb08b3e52edafd98f2ece3fa067ff60aa2881ff3f3b1c34"
+      },
+      "http-response-01.raw.body": {
+        "bytes": 818,
+        "sha256": "ec54b9acf60055bc8d199dd77b1e60358fe686329f942ecf4707f22e5f9a3cef"
+      },
+      "native.stderr.raw": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "native.stdout.raw": {
+        "bytes": 1602,
+        "sha256": "1eb7a85f577547daac7f2eec5574a513de88a4999d4e6c778d2994e65251dddd"
+      },
+      "receipt.json": {
+        "bytes": 5093,
+        "sha256": "6ccf24f37ed17aa252b999336903b1be4c944ba169a50fa4ce3ab8780a8327bf"
+      },
+      "settings.json": {
+        "bytes": 431,
+        "sha256": "a8960c8e8ab47acb805635eb70b3a623da955578ba28ad84d683232a3bc36189"
+      }
+    },
+    "http-503-block": {
+      "http-request-01.raw.body": {
+        "bytes": 833,
+        "sha256": "c144a96d06542cd6deeafbda54e0897a1f1c2f2176ace1853987de3af7665876"
+      },
+      "http-response-01.raw.body": {
+        "bytes": 68,
+        "sha256": "a02e39613bb91b316a0985282c52ff5b268a5f2afeb7ef0e55e8cbf38acbbcb3"
+      },
+      "native.stderr.raw": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "native.stdout.raw": {
+        "bytes": 1299,
+        "sha256": "a7ad1147ddb6ca03706273176365b6c089135acf5ffc40341a4534549a0f7711"
+      },
+      "receipt.json": {
+        "bytes": 3811,
+        "sha256": "744327bf3ba7fa5f8bcfb881b9d5bf1e7ee435b7cc5f57a48b0911be89b586da"
+      },
+      "settings.json": {
+        "bytes": 268,
+        "sha256": "40ce2bafe793e9d04947108c2962fd6fe220ef302ba1edfddc5d175c4ff717f5"
+      }
+    },
+    "http-503-default": {
+      "http-request-01.raw.body": {
+        "bytes": 839,
+        "sha256": "4a4af34d8ba9128992d3807b0f715bdff6ad4589c41dc9520dec48ac4eb93ab4"
+      },
+      "http-request-02.raw.body": {
+        "bytes": 41404,
+        "sha256": "8bf1c6aaaae960747f49f7ace395a08663711037818e8e227aa27367230aba06"
+      },
+      "http-response-01.raw.body": {
+        "bytes": 68,
+        "sha256": "a02e39613bb91b316a0985282c52ff5b268a5f2afeb7ef0e55e8cbf38acbbcb3"
+      },
+      "http-response-02.raw.body": {
+        "bytes": 813,
+        "sha256": "60ed5f483e9765d6ea83a71ab553ebae35c48b81e1df24e75e2dcd24ac7afb3e"
+      },
+      "native.stderr.raw": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "native.stdout.raw": {
+        "bytes": 1607,
+        "sha256": "eb142c47214ec8e0bd06db53d554d1b1b9f1106f41ed6a1a2da2246ac9d56992"
+      },
+      "receipt.json": {
+        "bytes": 6189,
+        "sha256": "35b9846a8a64fc830aa1e1f70e2ae8053bfea0396a231a2e5da27b81953b746d"
+      },
+      "settings.json": {
+        "bytes": 234,
+        "sha256": "cd7df0c5723fbcff7fdfba0cba1dbf8dcb3994cfbbf1255d143b51c9ea96c905"
+      }
+    }
+  }
+}

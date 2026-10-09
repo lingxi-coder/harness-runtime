@@ -7,6 +7,7 @@
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-14-release-v0.6.0.md` Task 4.
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
     mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
@@ -59,6 +60,15 @@ struct SequenceEntry {
 
 fn load() -> Fixture {
     serde_json::from_str(FIXTURE).expect("fixture parse")
+}
+
+fn source_test_view(source: &Utf16JsonProjection) -> Value {
+    serde_json::from_str(
+        &source
+            .to_json_string()
+            .expect("valid source projection serializes as JSON"),
+    )
+    .expect("these scalar parity fixtures decode as JSON test views")
 }
 
 // ============================================================================
@@ -149,26 +159,28 @@ async fn assert_native_single_turn_rows(
     assert_eq!(calls.len(), 1, "single turn makes exactly one API call");
     let systems = api.captured_systems().await;
     assert_eq!(systems.len(), 1);
-    let system = systems[0].as_deref().expect("static system prompt");
-    assert!(!system.is_empty());
+    let system = systems[0].as_ref().expect("static system prompt");
+    let system_text = system.as_str();
+    assert!(!system_text.is_empty());
     // Native persists the source string vector before dynamic context. The
     // default mock route has no provider profile, so its source vector carries
     // no global-cache marker.
-    let snapshot_system = lines[4].extra["attachment"]["systemPrompt"].clone();
+    let extra = source_test_view(&lines[4].extra);
+    let snapshot_system = extra["attachment"]["systemPrompt"].clone();
     let snapshot_blocks = snapshot_system
         .as_array()
         .expect("Native source block array");
     assert!(!snapshot_blocks.is_empty());
     assert!(snapshot_blocks.iter().all(Value::is_string));
-    assert!(lines[4].extra["attachment"].get("sharedBoundary").is_none());
+    assert!(extra["attachment"].get("sharedBoundary").is_none());
     let snapshot_text = snapshot_blocks
         .iter()
         .map(Value::as_str)
         .collect::<Option<Vec<_>>>()
         .expect("source blocks are strings")
         .join("\n\n");
-    assert!(system.starts_with(&snapshot_text));
-    assert_eq!(api.captured_tools().await, vec![Vec::<Value>::new()]);
+    assert!(system_text.starts_with(&snapshot_text));
+    assert!(api.captured_tools().await[0].is_empty());
 
     let date = orchestrator::prompt::env_meta::current_date_string();
     let mut seen = HashSet::new();
@@ -198,10 +210,11 @@ async fn assert_native_single_turn_rows(
                 _ => {}
             }
             assert_eq!(payload["type"], kind);
-            assert_eq!(line.extra.get("attachment"), Some(&payload), "row {index}");
+            let line_extra = source_test_view(&line.extra);
+            assert_eq!(line_extra.get("attachment"), Some(&payload), "row {index}");
             assert_eq!(raw_rows[index]["attachment"], payload, "disk row {index}");
             assert_eq!(
-                line.message,
+                source_test_view(&line.message),
                 Value::Null,
                 "no decoded projection at row {index}"
             );
@@ -218,15 +231,16 @@ async fn assert_native_single_turn_rows(
     lingxi_core::types::SessionId::parse_prefixed(&lines[0].session_id)
         .expect("valid core session ID");
     assert_eq!(
-        lines[0].message,
+        source_test_view(&lines[0].message),
         serde_json::json!({"role":"user","content":[{"type":"text","text":"say hi"}]})
     );
-    assert_eq!(lines[5].message["role"], "assistant");
+    let assistant_message = source_test_view(&lines[5].message);
+    assert_eq!(assistant_message["role"], "assistant");
     assert_eq!(
-        lines[5].message["content"],
+        assistant_message["content"],
         serde_json::json!([{"type":"text","text":"hello"}])
     );
-    assert_eq!(lines[5].message["stop_reason"], "end_turn");
+    assert_eq!(assistant_message["stop_reason"], "end_turn");
 
     // Announcements and total_tokens preserve their prepared-request IDs.
     // The empty native session_context has no model-visible user projection.
@@ -245,7 +259,8 @@ async fn assert_native_single_turn_rows(
     );
     assert!(
         matches!(&sent[1], ConversationMessage::System { content, subtype, compact_metadata: None, refusal_fallback: None, .. }
-        if content.is_empty() && subtype.as_deref() == Some("model_reminder_attachment"))
+        if content.string_at("").is_some_and(str::is_empty)
+            && subtype.as_deref() == Some("model_reminder_attachment"))
     );
     let date_body = native["expected"][1]["rendered"][0]
         .as_str()

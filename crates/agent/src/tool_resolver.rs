@@ -678,15 +678,15 @@ mod tests {
         ) -> String {
             self.name.into()
         }
-        async fn prompt(&self, opts: &PromptOptions) -> String {
-            if self.name == "Bash" {
+        async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
+            Utf16JsonProjection::from(if self.name == "Bash" {
                 format!(
                     "Bash {:?} generation={}",
                     opts.bash_precommit_skills, opts.bash_precommit_session_generation
                 )
             } else {
-                self.name.into()
-            }
+                self.name.to_string()
+            })
         }
         async fn call(
             &self,

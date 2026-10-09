@@ -1,0 +1,7 @@
+# Native 2.1.295 modern MCP listener error baseline
+
+This bounded public CLI run used the pinned executable SHA-256 `0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70`, strict isolated `--mcp-config`, a local stdio MCP server, and a loopback-only Anthropic Messages stub with a dummy key. No upstream service was contacted. Fixed fixture inputs and runner are copied here; the raw request/response/log files are byte-preserved and hashed in `manifest.json`.
+
+The modern `server/discover` response advertised `tools.listChanged=true`. Native sent one `subscriptions/listen` request (`id: "listen:0"`, `notifications.toolsListChanged: true`); the fixture returned `{"jsonrpc":"2.0","id":"listen:0","error":{"code":-32000,"message":"ECONNRESET"}}`. The model stub waited until that response had been sent. Native then advertised `mcp__fixture__listener_probe`, called it once, received the fixed result, and completed successfully. The captured server method sequence is `server/discover`, `subscriptions/listen`, `prompts/list`, `resources/list`, `tools/list`, `tools/call`; there was no subsequent discovery, listener reopen, or tool-list request.
+
+This is evidence that this typed remote JSON-RPC error did not make Native 2.1.295 retire the usable tool/stdio session in this case. It does not establish behavior after an actual transport disconnect or a general retry rule. `capture-receipt.raw.json` is the original run receipt; `receipt.json` records the scoped observation. The isolated Native-generated config/user identifiers are not included.

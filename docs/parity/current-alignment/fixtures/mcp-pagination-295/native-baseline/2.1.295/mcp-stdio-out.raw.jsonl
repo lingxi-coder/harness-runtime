@@ -1,0 +1,9 @@
+{"jsonrpc":"2.0","id":"server-discover-probe-1","error":{"code":-32601,"message":"fixture method not found"}}
+{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false},"prompts":{"listChanged":false},"resources":{"listChanged":false,"subscribe":false}},"serverInfo":{"name":"pagination-fixture","version":"1.0.0"}}}
+{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"page_tool_00","description":"Fixed pagination marker tool from page 0.","inputSchema":{"type":"object","properties":{"page":{"type":"integer"}},"required":["page"],"additionalProperties":false}}],"nextCursor":"same-cursor"}}
+{"jsonrpc":"2.0","id":2,"result":{"prompts":[{"name":"prompt_page_00","description":"Prompt marker from page 0.","arguments":[]}],"nextCursor":"same-cursor"}}
+{"jsonrpc":"2.0","id":3,"result":{"resources":[{"uri":"fixture://pagination/resource/00","name":"resource_page_00","description":"Resource marker from page 0.","mimeType":"text/plain"}],"nextCursor":"same-cursor"}}
+{"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"page_tool_01","description":"Fixed pagination marker tool from page 1.","inputSchema":{"type":"object","properties":{"page":{"type":"integer"}},"required":["page"],"additionalProperties":false}}],"nextCursor":"same-cursor"}}
+{"jsonrpc":"2.0","id":5,"result":{"prompts":[{"name":"prompt_page_01","description":"Prompt marker from page 1.","arguments":[]}],"nextCursor":"same-cursor"}}
+{"jsonrpc":"2.0","id":6,"result":{"resources":[{"uri":"fixture://pagination/resource/01","name":"resource_page_01","description":"Resource marker from page 1.","mimeType":"text/plain"}],"nextCursor":"same-cursor"}}
+{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"CALLED:page_tool_01:1"}],"isError":false,"structuredContent":{"tool":"page_tool_01","page":1}}}

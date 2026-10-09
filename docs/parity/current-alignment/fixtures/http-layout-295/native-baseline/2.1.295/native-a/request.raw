@@ -1,0 +1,24 @@
+POST /v1/messages?beta=true HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+User-Agent: claude-cli/2.1.295 (external, sdk-cli)
+X-Claude-Code-Session-Id: 6b7ff52d-e492-4084-88e2-5ad153e3c053
+X-Stainless-Arch: arm64
+X-Stainless-Lang: js
+X-Stainless-OS: MacOS
+X-Stainless-Package-Version: 0.128.0
+X-Stainless-Retry-Count: 0
+X-Stainless-Runtime: node
+X-Stainless-Runtime-Version: v26.3.0
+X-Stainless-Timeout: 600
+anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,effort-2025-11-24
+anthropic-dangerous-direct-browser-access: true
+anthropic-version: 2023-06-01
+x-api-key: sk-ant-headless-local-fixture-only
+x-app: cli
+Connection: keep-alive
+Host: 127.0.0.1:58855
+Accept-Encoding: gzip, deflate, br, zstd
+Content-Length: 978
+
+{"model":"claude-sonnet-5-5","messages":[{"role":"user","content":[{"type":"text","text":"Return HEADLESS_LOCAL_RESPONSE.","cache_control":{"type":"ephemeral"}}]},{"role":"system","content":[],"output_config":{"effort":"medium"}}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.295.fa6; cc_entrypoint=sdk-cli;"},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"You are a local deterministic headless fixture.","cache_control":{"type":"ephemeral"}}],"tools":[],"metadata":{"user_id":"{\"device_id\":\"98a3afe4c3460facc17c8cef158165a4f97c87c4cfb82f4c1e55c512aea3e407\",\"account_uuid\":\"\",\"session_id\":\"6b7ff52d-e492-4084-88e2-5ad153e3c053\"}"},"max_tokens":128000,"thinking":{"type":"adaptive","display":"omitted"},"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"output_config":{"effort":"medium"},"stream":true}

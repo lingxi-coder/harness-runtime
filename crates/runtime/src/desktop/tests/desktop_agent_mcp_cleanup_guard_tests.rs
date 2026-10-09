@@ -68,7 +68,7 @@ impl McpTransport for HangingConnectTransport {
         &self,
         _conn: &McpRawConnection,
         _tool: &str,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         unreachable!("unused")
     }
@@ -76,7 +76,7 @@ impl McpTransport for HangingConnectTransport {
     async fn read_resource(
         &self,
         _conn: &McpRawConnection,
-        _uri: &str,
+        _uri: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         unreachable!("unused")
     }
@@ -98,7 +98,10 @@ impl McpTransport for HangingConnectTransport {
         _req: ElicitRequestDto,
     ) -> Result<ElicitResultDto, McpError> {
         Ok(ElicitResultDto {
-            data: serde_json::json!({ "action": "cancel" }),
+            data: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({ "action": "cancel" }),
+            )
+            .unwrap(),
         })
     }
 
@@ -137,12 +140,9 @@ async fn connect_loop_fixture() -> (
     // `opened` is already live, so `connect_agent_scoped` short-circuits
     // on it and the loop pushes its cleanup handle; `hangs` is not, so
     // its connect parks in the transport forever.
-    let config = mcp::build_server_from_json_entry(
-        "opened",
-        &serde_json::json!({ "command": "unused-in-test" }),
-        mcp::ConfigScope::Agent,
-    )
-    .expect("agent MCP config parses");
+    let config_json = serde_json::json!({ "command": "unused-in-test" });
+    let config = mcp::build_server_from_json_entry("opened", &config_json, mcp::ConfigScope::Agent)
+        .expect("agent MCP config parses");
     registry.connections.write().await.insert(
         opened_key.clone(),
         mcp::McpConnectionState::Connected {
@@ -154,8 +154,10 @@ async fn connect_loop_fixture() -> (
                 prompts: false,
                 logging: false,
                 directory_read: false,
-                experimental: std::collections::HashMap::new(),
-                extensions: std::collections::HashMap::new(),
+                experimental: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                    .expect("empty capabilities"),
+                extensions: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                    .expect("empty capabilities"),
             },
             negotiated: lingxi_core::host::McpNegotiatedProtocol {
                 era: lingxi_core::host::McpProtocolEra::Legacy,
@@ -232,10 +234,16 @@ async fn restored_identity_stays_reserved_until_cancelled_connect_loop_cleanup_f
         async fn invoke(
             &self,
             _: &str,
-            _: serde_json::Value,
+            _: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
-            Ok(serde_json::Value::Null)
+        ) -> Result<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+            lingxi_core::host::tool_invoker::ToolInvokerError,
+        > {
+            Ok(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
+                    .expect("null source"),
+            )
         }
     }
     #[async_trait::async_trait]

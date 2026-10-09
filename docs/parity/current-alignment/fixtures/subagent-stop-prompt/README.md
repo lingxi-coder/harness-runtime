@@ -11,10 +11,12 @@ Run once per explicitly selected Native executable:
 ```sh
 CLAUDE_NATIVE_BINARY=/path/to/claude-2.1.293 python3 docs/parity/current-alignment/fixtures/subagent-stop-prompt/run-native.py
 CLAUDE_NATIVE_BINARY=/path/to/claude-2.1.294 python3 docs/parity/current-alignment/fixtures/subagent-stop-prompt/run-native.py
+CLAUDE_NATIVE_BINARY=/path/to/claude-2.1.295 python3 docs/parity/current-alignment/fixtures/subagent-stop-prompt/run-native.py
 python3 docs/parity/current-alignment/fixtures/subagent-stop-prompt/compare-versions.py
+python3 docs/parity/current-alignment/fixtures/subagent-stop-prompt/compare-295.py
 ```
 
-The runner pins and checks both observed binary hashes. It classifies requests
+The runner pins and checks the 2.1.293, 2.1.294, and 2.1.295 binary hashes. It classifies requests
 from fixed content markers, the advertised `Agent` tool, a matching Agent
 tool-use/tool-result ID, the hook prompt marker, and the serialized
 `hook_event_name`. Request sequence is stored for chronology only. A usable
@@ -31,13 +33,19 @@ ignored `run-output/` so they can be inspected locally without placing the
 large injected project/system context into the portable fixture. The settings
 file and cases are fixed checked-in inputs.
 
-Both versions produced a real SubagentStop hook request from the general-
+All three versions produced a real SubagentStop hook request from the general-
 purpose child context (`cc_is_subagent=true` in the original system field),
 then completed the parent with the fixed result. The raw hook `system` field is
-not equal: 2.1.294 adds the allow/block decision rule and instruction to treat
-event JSON as evidence rather than authority, in addition to the `cc_version`
-change. The hook `messages` field is also byte-unequal because its embedded
-`prompt_id` is a different UUIDv4. Original bytes are compared as-is; the
-dynamic ID is recorded as a reference constraint, not normalized. A fixed
-`{"ok":true}` hook response verifies the public request/lifecycle boundary,
+1,810 bytes for 2.1.293 and 2,283 bytes for both 2.1.294 and 2.1.295. The
+allow/block decision rule and untrusted-event-JSON instruction appear in 2.1.294
+and remain text-identical in the 2.1.295 captured system field. The raw billing
+header is retained, but its suffix varies across captures of the same binary
+and is not attributed solely to the release.
+
+The hook `messages` field is 7,154 bytes for 2.1.293/2.1.294 and 7,156 bytes
+for 2.1.295. It contains generated `prompt_id` and `agent_id` values plus an
+agent transcript path containing that generated agent id. The field also has
+runtime git-status and date context that changed between captures. Raw bytes
+remain unequal; these dynamic references are recorded, not normalized. The
+fixed `{"ok":true}` response verifies the public request/lifecycle boundary,
 not model judgment quality. Candidate Harness comparison remains pending.

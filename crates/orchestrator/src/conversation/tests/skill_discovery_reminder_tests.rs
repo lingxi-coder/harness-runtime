@@ -73,7 +73,7 @@ async fn push_write_pivot(orch: &ConversationOrchestrator) {
         content: vec![ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::new(),
             name: "Edit".into(),
-            input: serde_json::json!({}),
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
             provider_id: None,
         }],
         stop_reason: None,

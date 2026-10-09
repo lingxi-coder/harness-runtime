@@ -182,6 +182,16 @@ pub fn extension_for_mime_type(mime_type: Option<&str>) -> &'static str {
         "image/gif" => "gif",
         "image/webp" => "webp",
         "image/svg+xml" => "svg",
+        "image/x-icon" | "image/vnd.microsoft.icon" => "ico",
+        "text/css" => "css",
+        "text/javascript" | "application/javascript" => "js",
+        "application/xml" | "text/xml" => "xml",
+        "application/manifest+json" => "webmanifest",
+        "font/woff2" | "application/font-woff2" => "woff2",
+        "font/woff" | "application/font-woff" => "woff",
+        "font/ttf" => "ttf",
+        "font/otf" => "otf",
+        "application/wasm" => "wasm",
         _ => "bin",
     }
 }
@@ -434,6 +444,31 @@ mod tests {
             "bin"
         );
         assert_eq!(extension_for_mime_type(None), "bin");
+    }
+
+    #[test]
+    fn native_295_mime_matrix_extensions() {
+        let cases = [
+            ("image/x-icon", "ico"),
+            ("image/vnd.microsoft.icon", "ico"),
+            ("text/css", "css"),
+            ("text/javascript", "js"),
+            ("application/javascript", "js"),
+            ("application/xml", "xml"),
+            ("text/xml", "xml"),
+            ("application/manifest+json", "webmanifest"),
+            ("font/woff2", "woff2"),
+            ("application/font-woff2", "woff2"),
+            ("font/woff", "woff"),
+            ("application/font-woff", "woff"),
+            ("font/ttf", "ttf"),
+            ("font/otf", "otf"),
+            ("application/wasm", "wasm"),
+            ("application/x-native-fixture", "bin"),
+        ];
+        for (mime, extension) in cases {
+            assert_eq!(extension_for_mime_type(Some(mime)), extension, "{mime}");
+        }
     }
 
     #[test]

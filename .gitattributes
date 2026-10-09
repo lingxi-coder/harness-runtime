@@ -1,0 +1,3 @@
+# Captured protocol fixtures are byte-level evidence; preserve their line endings.
+*.raw -text -diff
+*.raw.* -text -diff

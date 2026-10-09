@@ -1,6 +1,11 @@
 use std::sync::{Arc, Mutex as StdMutex};
 
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+fn empty_input() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("{}").expect("empty JSON object")
+}
 
 /// Terminal invoker that records the lease token it was dispatched with.
 struct RecordingInvoker {
@@ -16,7 +21,7 @@ impl ToolInvoker for RecordingInvoker {
     async fn invoke_supplied_detailed(
         &self,
         name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
         supplied: Arc<dyn std::any::Any + Send + Sync>,
@@ -37,7 +42,7 @@ impl ToolInvoker for RecordingInvoker {
     async fn invoke_detailed(
         &self,
         _name: &str,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         _ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
@@ -45,14 +50,15 @@ impl ToolInvoker for RecordingInvoker {
         Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
             turn_end: None,
             is_error: false,
-            data: serde_json::json!({"awaitingLeaderApproval": true}),
+            data: Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"awaitingLeaderApproval": true}),
+            )
+            .expect("generated tool result"),
             model_content: Some("Wait for the team lead to review your plan".into()),
             new_messages: Vec::new(),
             context_modifier: None,
             mcp_meta: None,
-            context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
-                serde_json::Value::Array(Vec::new()),
-            ),
+            context: Utf16JsonProjection::parse("[]").expect("empty context array"),
             context_state: None,
         })
     }
@@ -60,22 +66,22 @@ impl ToolInvoker for RecordingInvoker {
     async fn invoke(
         &self,
         _name: &str,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         _ctx: SubagentInvocationContext,
-    ) -> Result<serde_json::Value, ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
         *self.seen.lock().unwrap() = Some(None);
-        Ok(serde_json::json!({}))
+        Ok(empty_input())
     }
 
     async fn invoke_with_workspace_lease(
         &self,
         _name: &str,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         _ctx: SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
         *self.seen.lock().unwrap() = Some(workspace_lease_token);
-        Ok(serde_json::json!({}))
+        Ok(empty_input())
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -125,7 +131,7 @@ async fn deferred_invoker_forwards_the_workspace_lease_token() {
     deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
 
     deferred
-        .invoke_with_workspace_lease("Read", serde_json::json!({}), bare_ctx(), Some(77))
+        .invoke_with_workspace_lease("Read", empty_input(), bare_ctx(), Some(77))
         .await
         .expect("dispatch");
 
@@ -142,15 +148,18 @@ async fn deferred_invoker_preserves_model_content_and_workspace_lease() {
     let deferred = super::DeferredToolInvoker::new();
     deferred.set(Arc::new(RecordingInvoker { seen: seen.clone() }));
     let result = deferred
-        .invoke_detailed("ExitPlanMode", serde_json::json!({}), bare_ctx(), Some(77))
+        .invoke_detailed("ExitPlanMode", empty_input(), bare_ctx(), Some(77))
         .await
         .unwrap();
     assert_eq!(
-        result.data,
-        serde_json::json!({"awaitingLeaderApproval": true})
+        result.data.to_json_string().unwrap(),
+        r#"{"awaitingLeaderApproval":true}"#
     );
     assert_eq!(
-        result.model_content.as_deref(),
+        result
+            .model_content
+            .as_ref()
+            .and_then(|content| content.string_at("")),
         Some("Wait for the team lead to review your plan")
     );
     assert_eq!(*seen.lock().unwrap(), Some(Some(77)));
@@ -165,7 +174,7 @@ async fn deferred_invoker_preserves_private_child_tool_and_live_mode() {
     let result = deferred
         .invoke_supplied_detailed(
             "SubagentHandback",
-            serde_json::json!({}),
+            empty_input(),
             bare_ctx(),
             Some(91),
             Arc::new("private child tool".to_string()),

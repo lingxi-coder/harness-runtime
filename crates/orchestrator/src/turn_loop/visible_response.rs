@@ -19,6 +19,12 @@ pub(super) fn process_visible_response<'a>(
     query_depth: u32,
 ) -> futures::future::BoxFuture<'a, Result<TurnStepOutcome, OrchestratorError>> {
     Box::pin(async move {
+        let timing_capture = orch.active_turn_timing_capture();
+        if let Some(capture) = &timing_capture {
+            // A batched response has no MessageStart event; do not let its
+            // dispatch candidate leak into a later streamed request.
+            capture.discard_unobserved_request_dispatch();
+        }
         // 2. Translate `HistoryResponse.content` -> `ContentBlock` history entry.
         let mut assistant_blocks = crate::native_computer::bind_response(
             orch,
@@ -61,6 +67,13 @@ pub(super) fn process_visible_response<'a>(
                 allow_budget_continuation: false,
                 tool_requested_end: false,
             });
+        }
+        if !assistant_blocks.is_empty() {
+            if let Some(capture) = &timing_capture {
+                // A batched response has no SSE block completion event, so
+                // TTFT is first observable after the assistant row is accepted.
+                capture.observe_first_accepted_assistant_row();
+            }
         }
         // M5-07 T13: mirror the in-memory append to the optional JSONL writer.
         // Best-effort — write failures never fail the turn.

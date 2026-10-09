@@ -258,6 +258,10 @@ impl BuiltinCommandHandler for SecurityReviewHandler {
         core_description("security-review")
     }
 
+    fn is_prompt_command(&self) -> bool {
+        true
+    }
+
     fn allowed_tools(&self) -> &'static [&'static str] {
         ALLOWED_TOOLS
     }
@@ -281,7 +285,7 @@ mod tests {
         let h = SecurityReviewHandler::new();
         match h.handle(&args()).await {
             CommandResult::InjectMessage { content } => {
-                assert_eq!(content, SECURITY_REVIEW_PROMPT);
+                assert_eq!(content, SECURITY_REVIEW_PROMPT.into());
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }
@@ -304,7 +308,8 @@ mod tests {
                     "MINIMIZE FALSE POSITIVES: Only flag issues where you're >80% confident"
                 ));
                 // Closing line — verbatim from the TS markdown body.
-                assert!(content.trim_end().ends_with(
+                let text = content.string_at("").expect("generated prompt text");
+                assert!(text.trim_end().ends_with(
                     "Your final reply must contain the markdown report and nothing else."
                 ));
             }

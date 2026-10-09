@@ -1,0 +1,271 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "35c7ea71c9ed3803fc6863ff4098564a9f5f7a73755c7c0249309e38e107ada2",
+  "fixture_sha256": "a8813416ca31646e749bae695d4ccf13d2166d5606b7de1191ae73545edd6de9",
+  "native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "public_entrypoint": "Native 2.1.295 --bare --print --output-format json; one loopback Anthropic Messages SSE response",
+  "fixed_inputs": {
+    "session_id": "00000000-0000-4000-8000-000000002297",
+    "model": "claude-sonnet-4-5",
+    "system_prompt": "Fixed isolated streaming-timing fixture.",
+    "prompt": "Return the fixed timing probe result.",
+    "events": [
+      {
+        "event": "message_start",
+        "delay_before_ms": 400
+      },
+      {
+        "event": "thinking_block_start",
+        "delay_before_ms": 300
+      },
+      {
+        "event": "thinking_delta",
+        "delay_before_ms": 300
+      },
+      {
+        "event": "signature_delta",
+        "delay_before_ms": 100
+      },
+      {
+        "event": "thinking_block_stop",
+        "delay_before_ms": 300
+      },
+      {
+        "event": "text_block_start",
+        "delay_before_ms": 300
+      },
+      {
+        "event": "text_delta",
+        "delay_before_ms": 300
+      },
+      {
+        "event": "text_block_stop",
+        "delay_before_ms": 300
+      },
+      {
+        "event": "message_delta",
+        "delay_before_ms": 300
+      },
+      {
+        "event": "message_stop",
+        "delay_before_ms": 100
+      }
+    ]
+  },
+  "network_boundary": {
+    "model_endpoint": "127.0.0.1 loopback only",
+    "dummy_api_key_only": true,
+    "isolated_home_config": true,
+    "upstream_requests": 0
+  },
+  "timeout_seconds": 45,
+  "elapsed_seconds": 3.363,
+  "native_exit_code": 0,
+  "timed_out": false,
+  "native_stdout": {
+    "path": "native.stdout.raw.json",
+    "bytes": 1596,
+    "sha256": "bcd4bf897c0cbb3749e1649b01bbb0086d4475f2e201b2bcb9e6bce48d83a058"
+  },
+  "native_stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "native_result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "NATIVE_TIMED_SSE_RESULT",
+    "num_turns": 1,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-4000-8000-000000002297"
+  },
+  "native_timing_fields_ms": {
+    "time_to_request_ms": 19,
+    "ttft_stream_ms": 428,
+    "first_content_frame_ms": 734,
+    "ttft_ms": 1453,
+    "duration_api_ms": 2750,
+    "duration_ms": 2770
+  },
+  "request_trace": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 894,
+      "request_sha256": "245fc73e485bd5984abdac8b70035773138d0ce591697e625331aecf2a80d295",
+      "request_received_since_native_spawn_ms": 491.395,
+      "response_headers_since_request_ms": 1.103,
+      "response_finished_since_request_ms": 2742.546
+    }
+  ],
+  "sse_schedule": [
+    {
+      "event": "message_start",
+      "delay_before_ms": 400
+    },
+    {
+      "event": "thinking_block_start",
+      "delay_before_ms": 300
+    },
+    {
+      "event": "thinking_delta",
+      "delay_before_ms": 300
+    },
+    {
+      "event": "signature_delta",
+      "delay_before_ms": 100
+    },
+    {
+      "event": "thinking_block_stop",
+      "delay_before_ms": 300
+    },
+    {
+      "event": "text_block_start",
+      "delay_before_ms": 300
+    },
+    {
+      "event": "text_delta",
+      "delay_before_ms": 300
+    },
+    {
+      "event": "text_block_stop",
+      "delay_before_ms": 300
+    },
+    {
+      "event": "message_delta",
+      "delay_before_ms": 300
+    },
+    {
+      "event": "message_stop",
+      "delay_before_ms": 100
+    }
+  ],
+  "sse_actual_write_trace": [
+    {
+      "index": 1,
+      "fixture_event": "message_start",
+      "sse_event": "message_start",
+      "delay_before_ms": 400,
+      "write_since_response_headers_ms": 405.083,
+      "write_since_request_received_ms": 406.186,
+      "write_since_native_spawn_ms": 897.58,
+      "chunk_bytes": 329,
+      "chunk_sha256": "7989ca37f7a91cf06fb3d39966059eeb519af2cdbc1f9f6fe670ce79e28380df"
+    },
+    {
+      "index": 2,
+      "fixture_event": "content_block_start",
+      "sse_event": "content_block_start",
+      "delay_before_ms": 300,
+      "write_since_response_headers_ms": 711.097,
+      "write_since_request_received_ms": 712.2,
+      "write_since_native_spawn_ms": 1203.594,
+      "chunk_bytes": 125,
+      "chunk_sha256": "d558b59c2971c136ea60155a354f0f848e4734d5557619041dfc629118f8d60d"
+    },
+    {
+      "index": 3,
+      "fixture_event": "content_block_delta",
+      "sse_event": "content_block_delta",
+      "delay_before_ms": 300,
+      "write_since_response_headers_ms": 1016.024,
+      "write_since_request_received_ms": 1017.127,
+      "write_since_native_spawn_ms": 1508.522,
+      "chunk_bytes": 147,
+      "chunk_sha256": "b03db674931bb24415483d16eb97b06c1a60ed9f2abe6439004fb5c03d8f0dfb"
+    },
+    {
+      "index": 4,
+      "fixture_event": "content_block_delta",
+      "sse_event": "content_block_delta",
+      "delay_before_ms": 100,
+      "write_since_response_headers_ms": 1117.069,
+      "write_since_request_received_ms": 1118.172,
+      "write_since_native_spawn_ms": 1609.566,
+      "chunk_bytes": 154,
+      "chunk_sha256": "5d319a559c2b43ba527a6a856da844b80c0f12e0441fd72e8ec024df0633b14c"
+    },
+    {
+      "index": 5,
+      "fixture_event": "content_block_stop",
+      "sse_event": "content_block_stop",
+      "delay_before_ms": 300,
+      "write_since_response_headers_ms": 1422.478,
+      "write_since_request_received_ms": 1423.581,
+      "write_since_native_spawn_ms": 1914.975,
+      "chunk_bytes": 73,
+      "chunk_sha256": "c3ff233ce8a140450e2b9e3556bcfb3b8fffe2eebb33aeb8fb3919e2ef14ed16"
+    },
+    {
+      "index": 6,
+      "fixture_event": "content_block_start",
+      "sse_event": "content_block_start",
+      "delay_before_ms": 300,
+      "write_since_response_headers_ms": 1726.975,
+      "write_since_request_received_ms": 1728.078,
+      "write_since_native_spawn_ms": 2219.472,
+      "chunk_bytes": 117,
+      "chunk_sha256": "b51bb4bd6ae460a38c3f1340b3b8461ae3eaa45b7decd8f5960d706b3920169f"
+    },
+    {
+      "index": 7,
+      "fixture_event": "content_block_delta",
+      "sse_event": "content_block_delta",
+      "delay_before_ms": 300,
+      "write_since_response_headers_ms": 2032.089,
+      "write_since_request_received_ms": 2033.191,
+      "write_since_native_spawn_ms": 2524.586,
+      "chunk_bytes": 138,
+      "chunk_sha256": "c296095ffcdfb41e4c544efc54dfe0e3bc64efa05ab4ac4d1eb7bc2a843f6d50"
+    },
+    {
+      "index": 8,
+      "fixture_event": "content_block_stop",
+      "sse_event": "content_block_stop",
+      "delay_before_ms": 300,
+      "write_since_response_headers_ms": 2336.461,
+      "write_since_request_received_ms": 2337.563,
+      "write_since_native_spawn_ms": 2828.958,
+      "chunk_bytes": 73,
+      "chunk_sha256": "3e66d8c7072016c4ab5a9d3e3dacdb7283b221dbc8b66c4641fe393720d4c020"
+    },
+    {
+      "index": 9,
+      "fixture_event": "message_delta",
+      "sse_event": "message_delta",
+      "delay_before_ms": 300,
+      "write_since_response_headers_ms": 2638.16,
+      "write_since_request_received_ms": 2639.262,
+      "write_since_native_spawn_ms": 3130.657,
+      "chunk_bytes": 197,
+      "chunk_sha256": "e2bed7b5084833a6c605568aa200343ff3817e0ae76764e1c44f6066c042f27e"
+    },
+    {
+      "index": 10,
+      "fixture_event": "message_stop",
+      "sse_event": "message_stop",
+      "delay_before_ms": 100,
+      "write_since_response_headers_ms": 2741.361,
+      "write_since_request_received_ms": 2742.464,
+      "write_since_native_spawn_ms": 3233.858,
+      "chunk_bytes": 51,
+      "chunk_sha256": "62c3d6333853510aa1157554d8267d72d946554aed79472ad59570143b8c52eb"
+    }
+  ],
+  "raw_sse": {
+    "path": "scheduled-events.raw.sse",
+    "bytes": 1404,
+    "sha256": "7b3980c8363a1c83061a2bd238b235892880fc1f8aba5a524fef6db6d412f97e"
+  },
+  "raw_request": {
+    "path": "model-request.raw.json",
+    "bytes": 894,
+    "sha256": "245fc73e485bd5984abdac8b70035773138d0ce591697e625331aecf2a80d295"
+  },
+  "raw_outputs_relative_path": "run-output/native-timed-sse-295-01v81rsw"
+}

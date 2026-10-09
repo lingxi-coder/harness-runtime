@@ -1,0 +1,20 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "test_module_sha256": "b4d90dae507d0c56db6fa825dc40add55431524ae96e7af9bcf81e7f925fe1c8",
+  "hook_module_sha256": "b231a606b46601d4bbe580bd3d4c6b9281ff0051e5d03e7bd5a6ed1e9ce4b447",
+  "isolated_home_and_config": true,
+  "native_exit_code": 0,
+  "stdout_bytes": 385,
+  "stdout_sha256": "88ab8d1e517a1eb9c228efa2455bb509d5fd86127d5b9ed805e2889b60434426",
+  "stderr_bytes": 647,
+  "stderr_sha256": "dc7c9723c69401e216b6421875a9615a96afdf1172dbee5f17ccaef784b83ccb",
+  "ui_records": [
+    "NATIVE_MOD_UI_BUTTON={\"type\":\"Button\",\"props\":{\"key\":\"button-children\",\"label\":\"ABC\"},\"press\":{\"plugin\":\"mod-ui-render-295\",\"handle\":585254746},\"children\":[\"A\",{\"type\":\"Text\",\"props\":{\"bold\":true},\"children\":[\"B\",\"C\"]}]}",
+    "NATIVE_MOD_UI_BUTTON={\"type\":\"Button\",\"props\":{\"key\":\"button-explicit-label\",\"label\":\"Explicit\"},\"press\":{\"plugin\":\"mod-ui-render-295\",\"handle\":585254747},\"children\":[{\"type\":\"Text\",\"children\":[\"Child\"]}]}",
+    "NATIVE_MOD_UI_BUTTON={\"type\":\"Button\",\"props\":{\"key\":\"button-string-child\",\"label\":\"String child\"},\"press\":{\"plugin\":\"mod-ui-render-295\",\"handle\":585254748}}",
+    "NATIVE_MOD_UI_NOTIFY=rejected:no implementation for ui.notify"
+  ],
+  "notify_test_host_result": "no implementation for ui.notify",
+  "scope": "Native 2.1.295 public plugin-test ui.render child tree and ui.notify string call boundary; no desktop notification delivery claim"
+}

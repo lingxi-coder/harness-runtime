@@ -30,18 +30,26 @@ struct ProvenanceDenyGate {
 
 #[async_trait]
 impl PermissionGate for ProvenanceDenyGate {
-    async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+    async fn check(
+        &self,
+        _t: &str,
+        _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: "denied-for-test".into(),
         }
     }
-    async fn resolve_detailed(&self, _t: &str, _i: &serde_json::Value) -> PermissionResolution {
+    async fn resolve_detailed(
+        &self,
+        _t: &str,
+        _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionResolution {
         PermissionResolution::Deny {
             reason: "denied-for-test".into(),
             source: PermissionDecisionSource::Rule,
             rule_source: None,
             decision_reason_type: self.decision_reason_type.clone(),
-            decision_reason: self.decision_reason.clone(),
+            decision_reason: self.decision_reason.clone().map(Into::into),
             behavior_ask: self.behavior_ask,
             content_blocks: Vec::new(),
         }
@@ -54,33 +62,45 @@ impl Tool for DeniedTool {
     fn name(&self) -> &str {
         "Denied"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &json!({ "type": "object", "properties": {} }),
+                )
+            });
         &SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _: &serde_json::Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _: &serde_json::Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -92,7 +112,11 @@ impl Tool for DeniedTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &DescriptionOptions,
+    ) -> String {
         "denied".into()
     }
     async fn prompt(
@@ -103,7 +127,7 @@ impl Tool for DeniedTool {
     }
     async fn call(
         &self,
-        _: serde_json::Value,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -127,7 +151,12 @@ async fn denial_kinds_for(gate: ProvenanceDenyGate) -> Vec<(ToolUseId, String)> 
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
     );
-    let uses = vec![(ToolUseId::new(), "Denied".to_string(), json!({}), None)];
+    let uses = vec![(
+        ToolUseId::new(),
+        "Denied".to_string(),
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+        None,
+    )];
     dispatch_tool_uses_tracked(&orch, &uses, None)
         .await
         .expect("dispatch must succeed on a denied tool");
@@ -164,7 +193,8 @@ async fn a_denied_tool_is_recorded_in_the_sessions_permission_denials() {
     );
 
     let id = ToolUseId::new();
-    let input = json!({"file_path": "/repo/secret/.env"});
+    let input =
+        tool_api::tool_trait::generated_builtin_result(&json!({"file_path": "/repo/secret/.env"}));
     let uses = vec![(id.clone(), "Denied".to_string(), input.clone(), None)];
     dispatch_tool_uses_tracked(&orch, &uses, None)
         .await
@@ -187,7 +217,11 @@ async fn an_allowed_tool_is_not_recorded_as_a_denial() {
     struct AllowGate;
     #[async_trait]
     impl PermissionGate for AllowGate {
-        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+        async fn check(
+            &self,
+            _t: &str,
+            _i: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> PermissionDecision {
             PermissionDecision::Allow
         }
     }
@@ -197,33 +231,50 @@ async fn an_allowed_tool_is_not_recorded_as_a_denial() {
         fn name(&self) -> &str {
             "Ok"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-                once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &json!({ "type": "object", "properties": {} }),
+                )
+            });
             &SCHEMA
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
         }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -235,7 +286,11 @@ async fn an_allowed_tool_is_not_recorded_as_a_denial() {
                 metadata: permission::result::PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _: &DescriptionOptions,
+        ) -> String {
             "ok".into()
         }
         async fn prompt(
@@ -246,17 +301,18 @@ async fn an_allowed_tool_is_not_recorded_as_a_denial() {
         }
         async fn call(
             &self,
-            _: serde_json::Value,
+            _: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!("fine"),
+                data: tool_api::tool_trait::generated_builtin_result(&json!("fine")),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -272,7 +328,12 @@ async fn an_allowed_tool_is_not_recorded_as_a_denial() {
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
     );
-    let uses = vec![(ToolUseId::new(), "Ok".to_string(), json!({}), None)];
+    let uses = vec![(
+        ToolUseId::new(),
+        "Ok".to_string(),
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+        None,
+    )];
     dispatch_tool_uses_tracked(&orch, &uses, None).await.ok();
     assert!(
         orch.permission_denials().await.is_empty(),
@@ -342,7 +403,12 @@ async fn pre_cancelled_tool_is_emitted_as_cancelled() {
     );
     let cancel = tokio_util::sync::CancellationToken::new();
     cancel.cancel(); // fire BEFORE dispatch
-    let uses = vec![(ToolUseId::new(), "Denied".to_string(), json!({}), None)];
+    let uses = vec![(
+        ToolUseId::new(),
+        "Denied".to_string(),
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+        None,
+    )];
     dispatch_tool_uses_tracked(&orch, &uses, Some(cancel))
         .await
         .expect("dispatch must succeed on a pre-cancelled tool");

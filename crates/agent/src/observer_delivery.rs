@@ -511,6 +511,7 @@ mod projection_tests {
                 },
             ],
             stop_reason: None,
+            resumable: None,
         };
         let got = activity_from_message(&msg);
         assert_eq!(got.len(), 2);
@@ -534,6 +535,7 @@ mod projection_tests {
                 .expect("test provider content is valid JSON"),
             }],
             stop_reason: None,
+            resumable: None,
         };
 
         assert_eq!(
@@ -566,6 +568,10 @@ mod projection_tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let got = activity_from_message(&msg);
         assert_eq!(got.len(), 2);
@@ -585,6 +591,7 @@ mod projection_tests {
                 citations: None,
             }],
             stop_reason: None,
+            resumable: None,
         };
         assert!(activity_from_message(&msg).is_empty());
     }

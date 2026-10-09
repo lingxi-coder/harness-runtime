@@ -83,7 +83,7 @@ async fn agent_audit_without_contextual_classifier_requires_user_confirmation() 
             "prompt": "Inspect bypassPermissions and no-sandbox handling; do not execute commands.",
         })).await;
         assert!(
-            matches!(decision, PermissionDecision::Deny { reason } if reason == "user declined confirmation")
+            matches!(decision, PermissionDecision::Deny { reason } if reason == "user declined confirmation".into())
         );
     }
 }

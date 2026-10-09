@@ -224,6 +224,7 @@ fn format_tokens(count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -381,9 +382,10 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert!(s.contains("Managed skills\norg \u{00B7} ~"));
                 assert!(s.contains("Additional skills\nextra \u{00B7} ~"));
+                let text = s.string_at("").unwrap();
                 assert!(
-                    s.find("Managed skills") < s.find("Additional skills"),
-                    "managed should render before additional: {s}"
+                    text.find("Managed skills").unwrap() < text.find("Additional skills").unwrap(),
+                    "managed should render before additional: {text}"
                 );
             }
             other => panic!("expected Done display, got {other:?}"),

@@ -196,8 +196,8 @@ mod tests {
             }
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: None,
             }
@@ -233,6 +233,7 @@ mod tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
 
         let reg = Arc::new(tokio::sync::RwLock::new(registry));

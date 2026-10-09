@@ -29,7 +29,8 @@ fn fallback_api_error_projects_once_and_tombstone_is_not_spooled_or_terminal() {
         &refusal_text,
         "2026-10-04T00:00:00.000Z".into(),
     );
-    let query_message = serde_json::to_value(row.query_message()).unwrap();
+    let query_message =
+        Utf16JsonProjection::parse(&serde_json::to_string(&row.query_message()).unwrap()).unwrap();
     let api_error_event = SubagentEvent::ServerFallbackApiErrorRow {
         agent_id: agent_id.clone(),
         row: row.clone(),
@@ -65,7 +66,12 @@ fn fallback_api_error_projects_once_and_tombstone_is_not_spooled_or_terminal() {
             model: Some("test-model".into()),
             stop_reason: Some("refusal".into()),
             stop_details: row.message.stop_details.clone(),
-            usage: Some(row.message.usage.clone()),
+            usage: Some(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &row.message.usage,
+                )
+                .expect("fixture usage is valid source JSON"),
+            ),
             content: row.message.content.clone(),
             is_api_error_message: Some(true),
             supersedes_uuids: None,

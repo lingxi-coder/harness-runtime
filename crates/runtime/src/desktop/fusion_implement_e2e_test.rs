@@ -29,8 +29,8 @@ use lingxi_core::host::{
     PanelEvidence, PanelReport, PanelVerification, VerificationOutcome, VerificationRun,
     WorktreeManager, DEFAULT_IMPLEMENT_FUSION_DIMENSIONS,
 };
-use lingxi_core::types::AgentId;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::AgentId;
 use platform_posix::worktree::PosixWorktreeManager;
 use serde_json::{json, Value};
 use sidequery::{
@@ -94,10 +94,10 @@ impl ToolInvoker for InertInvoker {
     async fn invoke(
         &self,
         _: &str,
-        _: Value,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError> {
-        Ok(Value::Null)
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
+        Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap())
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self

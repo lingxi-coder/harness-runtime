@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "gate": "M2-HTTP-1",
+  "artifact": "crates/llm-runtime/tests/fixtures/http-layout-293/native-request-body-template.raw.json",
+  "sourceArtifact": "fixtures/http-layout/run-output/native-2.1.293-print-text-20261008-rerun1/print-text/native-a/provider/000.request-body.bin",
+  "sourceNativeBinarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "sourceBytes": 978,
+  "sourceSha256": "8751c228e6c5d3e2d7e1b9a0199a53b396156c792b1309170c667dc55a1f5510",
+  "templateBytes": 978,
+  "templateSha256": "94ee6a85a72ac351a9ff8bb33b548d984b6d6ec709dd75790d195eec901fb49e",
+  "singleSubstitution": {
+    "existingRule": "scripts/tests/headless-fixtures/normalization.json: print-text provider/000.request-body.bin metadata-json-string at outerPath /metadata/user_id, innerPath /device_id",
+    "path": "/metadata/user_id/device_id",
+    "replacement": "64 ASCII zeroes",
+    "sourceScalarLength": 64,
+    "sourceScalarValueRecorded": false
+  },
+  "claim": "The template preserves the captured body byte-for-byte except the one explicitly permitted per-run device identity scalar. Candidate requests must come from the public ApiService and built-in HttpTransport path. This template alone is not a candidate parity result."
+}

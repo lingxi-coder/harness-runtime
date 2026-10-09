@@ -485,10 +485,10 @@ mod tests {
         )
         .await;
         let block = reg.take_new_diagnostics_block().await.expect("a block");
-        let block_text = block_text(&block);
-        assert!(block_text.contains("<new-diagnostics>"));
-        assert!(block_text.contains("a.ts:"));
-        assert!(block_text.contains("[Line 1:1] e1"));
+        let rendered = block_text(&block);
+        assert!(rendered.contains("<new-diagnostics>"));
+        assert!(rendered.contains("a.ts:"));
+        assert!(rendered.contains("[Line 1:1] e1"));
 
         assert!(reg.take_new_diagnostics_block().await.is_none());
 
@@ -501,12 +501,9 @@ mod tests {
         )
         .await;
         let block = reg.take_new_diagnostics_block().await.expect("e2 block");
-        let block_text = block_text(&block);
-        assert!(block_text.contains("e2"), "got: {block_text}");
-        assert!(
-            !block_text.contains("e1"),
-            "e1 already surfaced: {block_text}"
-        );
+        let rendered = block_text(&block);
+        assert!(rendered.contains("e2"), "got: {rendered}");
+        assert!(!rendered.contains("e1"), "e1 already surfaced: {rendered}");
         assert!(reg.take_new_diagnostics_block().await.is_none());
     }
 

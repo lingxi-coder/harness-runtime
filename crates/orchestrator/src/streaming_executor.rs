@@ -10,16 +10,16 @@ use crate::autonomous_tool_scheduler::{
 use crate::conversation::ConversationOrchestrator;
 use lingxi_core::host::tool_invoker::ToolInvocationContextModifier;
 use lingxi_core::host::tool_use_lifecycle::{
-    ToolUseLifecycleTracker, ToolUseRemoval, ToolUseRemovalReason, max_tool_use_concurrency,
+    max_tool_use_concurrency, ToolUseLifecycleTracker, ToolUseRemoval, ToolUseRemovalReason,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tool_api::ContextModifier;
+use std::sync::Arc;
 use tool_api::context::ToolUseContext;
 use tool_api::tool_trait::ToolStaticContext;
+use tool_api::ContextModifier;
 
 /// claude-code `REJECT_MESSAGE` (utils/messages.ts:212). The user-interrupted
 /// synthetic result is this BARE text (NOT `<tool_use_error>`-wrapped, unlike
@@ -1501,18 +1501,18 @@ mod streaming_executor_test;
 #[cfg(test)]
 mod synthetic_denial_kind_tests {
     use super::*;
-    use crate::OrchestratorConfig;
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-        noop_hook_executor,
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
     };
+    use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use lingxi_core::types::MessageId;
     use serde_json::json;
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use tool_api::context::ToolUseContext;
     use tool_api::progress::ToolProgressSender;
     use tool_api::registry::ToolRegistry;
@@ -1601,11 +1601,14 @@ mod synthetic_denial_kind_tests {
             tokio::select! {
                 () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                     Ok(ToolCallResult {
-                        data: json!({ "content": "ran-to-end" }),
+                        data: tool_api::tool_trait::generated_builtin_result(
+                            &json!({ "content": "ran-to-end" }),
+                        ),
                         model_content: None,
                         new_messages: vec![],
                         context_modifier: None,
                         is_error: false,
+                        subagent_hooks_fired: false,
                         mcp_meta: None,
                     })
                 }

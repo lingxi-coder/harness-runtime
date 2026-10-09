@@ -71,7 +71,7 @@ impl RuntimeSpawner for UnusedRuntime {
 /// A `UserPromptSubmit` hook that blocks with `reason` and optionally sets
 /// `suppressOriginalPrompt`.
 struct BlockingPromptHook {
-    reason: Option<String>,
+    reason: Option<hooks::response::ExactHookText>,
     suppress: bool,
 }
 #[async_trait]
@@ -82,8 +82,8 @@ impl BuiltinHookHandler for BlockingPromptHook {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: Some(HookResponse {
                 decision: Some(HookDecision::Block),
@@ -113,6 +113,7 @@ fn builtin_hook(handler_id: &str) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -127,7 +128,7 @@ async fn orch_with_blocking_hook(
         .register(builtin_hook("block-prompt"));
     let mut exec = HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
     exec.register_builtin(Arc::new(BlockingPromptHook {
-        reason: reason.map(str::to_string),
+        reason: reason.map(Into::into),
         suppress,
     }));
 
@@ -135,7 +136,8 @@ async fn orch_with_blocking_hook(
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![llm_runtime::ContentBlock::Text {
             text: "unreached".into(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));

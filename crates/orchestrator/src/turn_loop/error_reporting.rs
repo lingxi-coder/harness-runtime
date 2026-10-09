@@ -688,7 +688,9 @@ pub(crate) async fn surface_terminal_api_error(
     orch.persist_api_error_message_to_jsonl(&assistant_msg, env)
         .await;
     if stop_reason == "refusal" {
-        orch.output.emit_terminal_api_error(None, "api_error").await;
+        orch.output
+            .emit_terminal_api_error(None, "api_error", "refusal")
+            .await;
     }
     orch.output.emit_text(&text).await;
     Some(assistant_id)
@@ -807,7 +809,9 @@ pub(crate) async fn surface_model_error(
     let status = env.api_error_status;
     let reason = env.terminal_reason.unwrap_or("api_error");
     let id = surface_api_error_notice(orch, error_text, env).await;
-    orch.output.emit_terminal_api_error(status, reason).await;
+    orch.output
+        .emit_terminal_api_error(status, reason, "stop_sequence")
+        .await;
     id
 }
 
@@ -821,6 +825,7 @@ pub(crate) async fn surface_api_error_notice(
     error_text: Utf16JsonProjection,
     env: ApiErrorEnvelope,
 ) -> MessageId {
+    orch.note_turn_api_error_status(env.api_error_status);
     // `createAssistantAPIErrorMessage({ content })` renders `content` verbatim,
     // falling back to the `NO_CONTENT_MESSAGE` placeholder when empty.
     let error_text = if error_text.string_at("") == Some("") {

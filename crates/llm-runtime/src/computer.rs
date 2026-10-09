@@ -556,15 +556,13 @@ mod tests {
         )
         .unwrap();
         request.input.native_options = native.native_options;
-        assert!(
-            client
-                .prepare(&request)
-                .await
-                .unwrap()
-                .provider_request
-                .url
-                .ends_with("/interactions")
-        );
+        assert!(client
+            .prepare(&request)
+            .await
+            .unwrap()
+            .provider_request
+            .url
+            .ends_with("/interactions"));
     }
 
     #[tokio::test]
@@ -587,14 +585,12 @@ mod tests {
             },
         )
         .await;
-        assert!(
-            client
-                .prepare(&request)
-                .await
-                .unwrap()
-                .computer_binding
-                .is_none()
-        );
+        assert!(client
+            .prepare(&request)
+            .await
+            .unwrap()
+            .computer_binding
+            .is_none());
         request.execution.computer_native = true;
         assert!(client.prepare(&request).await.is_err());
     }
@@ -646,16 +642,14 @@ mod tests {
             if stream {
                 assert!(service.stream_request(request.clone()).await.is_err());
             } else {
-                assert!(
-                    service
-                        .execute_non_stream_request(
-                            request.clone(),
-                            crate::NonStreamingRequestClass::Main,
-                            Default::default()
-                        )
-                        .await
-                        .is_err()
-                );
+                assert!(service
+                    .execute_non_stream_request(
+                        request.clone(),
+                        crate::NonStreamingRequestClass::Main,
+                        Default::default()
+                    )
+                    .await
+                    .is_err());
             }
             assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 0);
             assert!(
@@ -784,18 +778,14 @@ mod tests {
         assert!(!binding.account.contains("account-key"));
         request.execution.expected_computer_binding = Some(binding);
         first.prepare(&request).await.unwrap();
-        assert!(
-            client("https://api.anthropic.com", "different-account-key")
-                .prepare(&request)
-                .await
-                .is_err()
-        );
-        assert!(
-            client("https://different.example", "account-key")
-                .prepare(&request)
-                .await
-                .is_err()
-        );
+        assert!(client("https://api.anthropic.com", "different-account-key")
+            .prepare(&request)
+            .await
+            .is_err());
+        assert!(client("https://different.example", "account-key")
+            .prepare(&request)
+            .await
+            .is_err());
     }
 
     fn request() -> crate::LlmRequest {

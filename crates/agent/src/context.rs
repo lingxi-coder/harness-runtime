@@ -247,6 +247,9 @@ pub struct SubagentContext {
     /// runner skips SubagentStart firing + frontmatter-hook registration, keeping
     /// the child's history byte-identical to legacy.
     pub hook_executor: Option<Arc<hooks::HookExecutorImpl>>,
+    /// Admission token for an Agent-tool request. Only the execution owner
+    /// reports start and terminal receipts; non-Agent launches leave this empty.
+    pub agent_spawn_token: Option<lingxi_core::host::agent_statistics::AgentSpawnToken>,
     /// Managed `strictPluginOnlyCustomization:["hooks"]` decision captured by
     /// the composition root. When true, user/project definitions may not
     /// register command-capable frontmatter hooks.

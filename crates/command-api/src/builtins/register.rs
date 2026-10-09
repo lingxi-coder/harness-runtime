@@ -524,7 +524,7 @@ mod registry_tests {
         assert_eq!(BUILTIN_COMMAND_NAMES.len(), 87);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
-                reg.resolve(&name.into()).is_some(),
+                reg.resolve(&(*name).into()).is_some(),
                 "expected command /{name} registered"
             );
         }
@@ -602,7 +602,7 @@ mod registry_tests {
 
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
-                reg.get_handler(&name.into()).is_some(),
+                reg.get_handler(&(*name).into()).is_some(),
                 "expected handler for /{name}"
             );
         }
@@ -651,7 +651,7 @@ mod registry_tests {
         };
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)");
+                assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -663,7 +663,7 @@ mod registry_tests {
         register_all_builtin_commands(&mut reg);
         register_all_builtin_commands(&mut reg); // call twice
         for name in BUILTIN_COMMAND_NAMES {
-            assert!(reg.resolve(&name.into()).is_some());
+            assert!(reg.resolve(&(*name).into()).is_some());
         }
     }
 }
@@ -693,7 +693,7 @@ mod batch_1_tests {
         };
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Conversation cleared.");
+                assert_eq!(s, "Conversation cleared.".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -713,16 +713,16 @@ mod batch_1_tests {
         // survives future name churn while still asserting the stub mechanism.
         let mut found_stub = false;
         for name in crate::builtin_support::BUILTIN_COMMAND_NAMES {
-            let Some(h) = reg.get_handler(&name.into()) else {
+            let Some(h) = reg.get_handler(&(*name).into()) else {
                 continue;
             };
             let args = ParsedSlashCommand {
-                name: (*name).to_string(),
+                name: (*name).to_string().into(),
                 raw_args: String::new().into(),
                 positional_args: vec![],
             };
             if let CommandResult::Done { display: Some(s) } = h.handle(&args).await {
-                if s == format!("{name}: not implemented in v0.6.0 (M5)") {
+                if s == format!("{name}: not implemented in v0.6.0 (M5)").into() {
                     found_stub = true;
                     break;
                 }
@@ -787,10 +787,13 @@ mod batch_3_tests {
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
             match h.handle(&args(name)).await {
                 CommandResult::InjectMessage { content } => {
-                    assert!(!content.is_empty(), "/{name} injected empty content");
+                    assert!(
+                        !content.string_units("").unwrap_or_default().is_empty(),
+                        "/{name} injected empty content"
+                    );
                     assert_ne!(
                         content,
-                        format!("{name}: not implemented in v0.6.0 (M5)"),
+                        format!("{name}: not implemented in v0.6.0 (M5)").into(),
                         "/{name} still returns the locked stub literal"
                     );
                 }
@@ -812,7 +815,8 @@ mod batch_3_tests {
         match h.handle(&args("stickers")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_ne!(
-                    s, "stickers: not implemented in v0.6.0 (M5)",
+                    s.string_at(""),
+                    Some("stickers: not implemented in v0.6.0 (M5)"),
                     "/stickers still returns the locked stub literal"
                 );
             }
@@ -832,7 +836,7 @@ mod batch_3_tests {
             .expect("teleport handler missing");
         match h.handle(&args("teleport")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)");
+                assert_eq!(s, "teleport: not implemented in v0.6.0 (M5)".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -874,8 +878,8 @@ mod batch_3_tests {
             match h.handle(&args(name)).await {
                 CommandResult::Done { display: Some(s) } => {
                     assert_ne!(
-                        s,
-                        format!("{name}: not implemented in v0.6.0 (M5)"),
+                        s.string_at(""),
+                        Some(format!("{name}: not implemented in v0.6.0 (M5)").as_str()),
                         "/{name} still returns the locked stub literal"
                     );
                 }
@@ -935,7 +939,8 @@ mod batch_5_tests {
         match h.handle(&args("effort")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_ne!(
-                    s, "effort: not implemented in v0.6.0 (M5)",
+                    s.string_at(""),
+                    Some("effort: not implemented in v0.6.0 (M5)"),
                     "/effort still returns the locked stub literal"
                 );
             }
@@ -959,7 +964,7 @@ mod batch_5_tests {
             CommandResult::Done { display: Some(s) } => {
                 assert!(s.starts_with("Total cost:            $"));
                 assert!(!s.contains("interactive TUI mode"));
-                assert_ne!(s, "usage: not implemented in v0.6.0 (M5)");
+                assert_ne!(s, "usage: not implemented in v0.6.0 (M5)".into());
             }
             other => panic!("/usage expected Done with display, got {other:?}"),
         }
@@ -1009,12 +1014,13 @@ mod batch_6_tests {
         match h.handle(&args("keybindings")).await {
             CommandResult::Done { display: Some(s) } => {
                 assert_ne!(
-                    s, "keybindings: not implemented in v0.6.0 (M5)",
+                    s,
+                    "keybindings: not implemented in v0.6.0 (M5)".into(),
                     "/keybindings still returns the locked stub literal"
                 );
                 assert_eq!(
                     s,
-                    crate::builtins::keybindings::KEYBINDINGS_PREVIEW_DISABLED
+                    crate::builtins::keybindings::KEYBINDINGS_PREVIEW_DISABLED.into()
                 );
             }
             other => panic!("/keybindings expected Done with display, got {other:?}"),
@@ -1086,8 +1092,8 @@ mod batch_4_tests {
             match h.handle(&args(name)).await {
                 CommandResult::Done { display: Some(s) } => {
                     assert_ne!(
-                        s,
-                        format!("{name}: not implemented in v0.6.0 (M5)"),
+                        s.string_at(""),
+                        Some(format!("{name}: not implemented in v0.6.0 (M5)").as_str()),
                         "/{name} still returns the locked stub literal"
                     );
                 }
@@ -1110,7 +1116,7 @@ mod batch_4_tests {
             .expect("resume handler missing");
         match h.handle(&args("resume")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "No resumable sessions found.");
+                assert_eq!(s, "No resumable sessions found.".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -1148,7 +1154,7 @@ mod batch_4_tests {
             .expect("continue alias should map to the resume handler");
         match h.handle(&args("continue")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "No resumable sessions found.");
+                assert_eq!(s, "No resumable sessions found.".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -1169,7 +1175,9 @@ mod batch_8_tests {
     /// `subtask` is a `BUILTIN_COMMAND_NAMES` member, pass 1 of
     /// `register_all_builtin_commands` always registers a stub for it, so
     /// "not registered" can no longer be expressed as `get_handler` == None).
-    async fn subtask_display(reg: &CommandRegistry) -> String {
+    async fn subtask_display(
+        reg: &CommandRegistry,
+    ) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
         let h = reg
             .get_handler(&"subtask".into())
             .expect("/subtask always has at least its unimplemented stub");
@@ -1284,7 +1292,8 @@ mod batch_8_tests {
             "Spawn a background agent that inherits the full conversation"
         );
         assert_eq!(
-            subtask, "subtask: not implemented in v0.6.0 (M5)",
+            subtask,
+            "subtask: not implemented in v0.6.0 (M5)".into(),
             "/subtask must NOT get its real handler when agent view is disabled"
         );
     }
@@ -1305,11 +1314,11 @@ mod batch_8_tests {
             reg.resolve(&"fork".into())
                 .expect("/fork must resolve")
                 .description,
-            "Spawn a background agent that inherits the full conversation"
+            "Spawn a background agent that inherits the full conversation".into()
         );
         assert_eq!(
             subtask_display(&reg).await,
-            "subtask: not implemented in v0.6.0 (M5)",
+            "subtask: not implemented in v0.6.0 (M5)".into(),
             "/subtask must NOT get its real handler when the disableAgentView setting is true"
         );
     }
@@ -1334,7 +1343,7 @@ mod batch_8_tests {
         };
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Usage: /subtask \\<task\\>");
+                assert_eq!(s, "Usage: /subtask \\<task\\>".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -1438,8 +1447,8 @@ mod interactive_only_tests {
                 .unwrap_or_else(|| panic!("/{name} handler missing"));
             match h.handle(&args(name)).await {
                 CommandResult::Done { display: Some(s) } => {
-                    assert_ne!(s, format!("{name}: not implemented in v0.6.0 (M5)"));
-                    assert!(s.contains("interactive TUI mode"), "/{name}: {s}");
+                    assert_ne!(s, format!("{name}: not implemented in v0.6.0 (M5)").into());
+                    assert!(s.contains("interactive TUI mode"), "/{name}: {s:?}");
                 }
                 other => panic!("/{name} expected Done with display, got {other:?}"),
             }

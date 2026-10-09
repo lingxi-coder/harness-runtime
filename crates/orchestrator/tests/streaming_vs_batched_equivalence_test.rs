@@ -7,11 +7,11 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage};
 use llm_runtime::{ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-    StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
-    message_start, message_stop, text_delta,
+    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
+    text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
-use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, scripted};
+use orchestrator::{scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use std::future::Future;
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{DescriptionOptions, PromptOptions, Tool, ToolStaticContext};
-use tool_api::{ToolCallResult, ToolError, ValidationError, registry::ToolRegistry};
+use tool_api::{registry::ToolRegistry, ToolCallResult, ToolError, ValidationError};
 
 fn run_with_large_stack<F, Fut>(build: F)
 where
@@ -241,10 +241,20 @@ impl Tool for NamedStubTool {
     fn name(&self) -> &str {
         self.0
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| serde_json::json!({"type": "object"}));
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -252,22 +262,25 @@ impl Tool for NamedStubTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -279,7 +292,11 @@ impl Tool for NamedStubTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         String::new()
     }
     async fn prompt(
@@ -290,7 +307,7 @@ impl Tool for NamedStubTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {

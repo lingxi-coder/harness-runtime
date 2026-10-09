@@ -180,7 +180,10 @@ async fn model_fork_uses_captured_prefix_and_reports_cold_session() {
             lingxi_core::types::ContentBlock::ToolUse {
                 id: lingxi_core::types::ToolUseId::new(),
                 name: "Read".into(),
-                input: serde_json::json!({"file_path":"README.md"}),
+                input: lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"file_path":"README.md"}"#,
+                )
+                .unwrap(),
                 provider_id: Some("toolu_1".into()),
             },
         ],

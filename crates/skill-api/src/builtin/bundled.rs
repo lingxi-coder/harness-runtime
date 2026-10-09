@@ -19,18 +19,31 @@ pub(crate) struct BundledResource {
 }
 
 /// Desktop builtin skill templates.
-pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[BundledSkill {
-    name: "claude-api",
-    raw: include_str!("claude-api.md"),
-    triggers: &[
-        "claude-api",
-        "/claude-api",
-        "/claude-api upgrade python",
-        "claude api upgrade python",
-        "anthropic sdk migration",
-    ],
-    references: &[],
-}];
+pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[
+    BundledSkill {
+        name: "claude-api",
+        raw: include_str!("claude-api.md"),
+        triggers: &[
+            "claude-api",
+            "/claude-api",
+            "/claude-api upgrade python",
+            "claude api upgrade python",
+            "anthropic sdk migration",
+        ],
+        references: &[],
+    },
+    BundledSkill {
+        name: "plugin-authoring",
+        raw: include_str!("plugin-authoring.md"),
+        triggers: &[
+            "plugin-authoring",
+            "write a LingXi plugin",
+            "programmatic hooks",
+            "hooks module",
+        ],
+        references: &[],
+    },
+];
 
 /// Mobile has no bundled Local App skills. They are registered from the
 /// verified Plugin package by the mobile composition root.

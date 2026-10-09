@@ -21,6 +21,8 @@ async fn structured_patch_lines_accumulate_into_the_tracker() {
             { "lines": ["+a", "+b", "-c"] }
         ]
     });
+    let payload = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&payload)
+        .expect("test patch is valid JSON");
     accumulate_code_change(&payload, Some(&tracker)).await;
     let snap = tracker.snapshot().await;
     assert_eq!(snap.total_lines_added, 2);
@@ -34,6 +36,8 @@ async fn no_tracker_is_a_no_op() {
     let payload = json!({
         "structuredPatch": [ { "lines": ["+a"] } ]
     });
+    let payload = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&payload)
+        .expect("test patch is valid JSON");
     accumulate_code_change(&payload, None).await;
 }
 
@@ -41,7 +45,11 @@ async fn no_tracker_is_a_no_op() {
 async fn missing_structured_patch_is_a_no_op() {
     let tracker = make_tracker();
     // Every non-edit tool's result data lacks `structuredPatch` entirely.
-    accumulate_code_change(&json!({"stdout": "ok"}), Some(&tracker)).await;
+    let payload = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+        &json!({"stdout": "ok"}),
+    )
+    .expect("test result is valid JSON");
+    accumulate_code_change(&payload, Some(&tracker)).await;
     let snap = tracker.snapshot().await;
     assert_eq!(snap.total_lines_added, 0);
     assert_eq!(snap.total_lines_removed, 0);

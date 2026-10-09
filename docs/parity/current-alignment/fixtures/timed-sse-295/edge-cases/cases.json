@@ -1,0 +1,45 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "model": "claude-sonnet-4-5",
+  "system_prompt": "Fixed timing edge-case fixture.",
+  "timeout_seconds": 45,
+  "cases": [
+    {
+      "id": "http404-nonstream-fallback",
+      "mode": "http404-fallback",
+      "session_id": "00000000-0000-4000-8000-000000002361",
+      "prompt": "Return the fixed fallback timing result.",
+      "max_retries": 0,
+      "first_response_delay_ms": 200,
+      "fallback_response_delay_ms": 400,
+      "success_text": "NATIVE_404_NONSTREAM_FALLBACK_SUCCESS"
+    },
+    {
+      "id": "http500-retry-stream",
+      "mode": "http500-retry",
+      "session_id": "00000000-0000-4000-8000-000000002362",
+      "prompt": "Return the fixed retry timing result.",
+      "max_retries": 1,
+      "first_response_delay_ms": 200,
+      "retry_response_headers_delay_ms": 50,
+      "message_start_delay_ms": 400,
+      "content_block_start_delay_ms": 100,
+      "text_delta_delay_ms": 150,
+      "success_text": "NATIVE_500_RETRY_STREAM_SUCCESS"
+    },
+    {
+      "id": "http500-retry-stream-long-first-delay",
+      "mode": "http500-retry",
+      "session_id": "00000000-0000-4000-8000-000000002363",
+      "prompt": "Return the fixed retry timing result.",
+      "max_retries": 1,
+      "first_response_delay_ms": 400,
+      "retry_response_headers_delay_ms": 50,
+      "message_start_delay_ms": 400,
+      "content_block_start_delay_ms": 100,
+      "text_delta_delay_ms": 150,
+      "success_text": "NATIVE_500_RETRY_STREAM_LONG_FIRST_DELAY_SUCCESS"
+    }
+  ]
+}

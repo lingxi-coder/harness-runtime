@@ -1,16 +1,16 @@
 //! Root-provider ingress races against real owned clear/resume activation.
 
 use super::*;
-use crate::prompt::MemoryFile;
 use crate::prompt::memory_block::{MemoryHierarchyProvider, RootInstructionContextProvider};
+use crate::prompt::MemoryFile;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
 };
 use lingxi_core::host::instructions::{InstructionContextProvider, InstructionScope};
 use lingxi_core::host::{OrchestratorHandle, PromptSnapshot, ResumeRuntimeSnapshot};
 use std::path::PathBuf;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
 
 struct MutableMemory {
     file: RwLock<MemoryFile>,

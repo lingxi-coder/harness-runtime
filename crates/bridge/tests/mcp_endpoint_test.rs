@@ -132,7 +132,7 @@ struct EchoPump;
 impl FramePump for EchoPump {
     async fn on_frame(&self, _frame: Frame, out: FrameSink) {
         let reply = Frame::Event(ClientEvent::TextDelta {
-            text: "pong".to_string(),
+            text: "pong".to_string().into(),
         });
         let _ = out.send(reply);
     }
@@ -191,7 +191,7 @@ async fn frame_pump_invoked_on_inbound_frame() {
     assert_eq!(
         echoed,
         Frame::Event(ClientEvent::TextDelta {
-            text: "pong".to_string()
+            text: "pong".to_string().into()
         }),
         "the stub pump must have echoed its deterministic reply frame"
     );

@@ -41,8 +41,16 @@ fn tool_use_partial_json_reassembles() {
         },
     )
     .expect("start");
-    acc.append_json(1, "{\"file").expect("append1");
-    acc.append_json(1, "_path\":\"foo.rs\"}").expect("append2");
+    acc.append_json(
+        1,
+        &lingxi_llm_client::protocol::JsonPayloadFragment::from_text("{\"file"),
+    )
+    .expect("append1");
+    acc.append_json(
+        1,
+        &lingxi_llm_client::protocol::JsonPayloadFragment::from_text("_path\":\"foo.rs\"}"),
+    )
+    .expect("append2");
     let completed = acc.stop_block(1).expect("stop");
     match completed {
         CompletedBlock::ToolUse {
@@ -53,7 +61,10 @@ fn tool_use_partial_json_reassembles() {
         } => {
             assert_eq!(id, tu_id);
             assert_eq!(name, "Read");
-            assert_eq!(input, json!({"file_path": "foo.rs"}));
+            assert_eq!(
+                input.to_json_string().unwrap(),
+                json!({"file_path": "foo.rs"}).to_string()
+            );
             // P0: the verbatim provider id survives accumulation.
             assert_eq!(provider_id.as_deref(), Some("toolu_01ACC"));
         }
@@ -78,7 +89,7 @@ fn empty_tool_use_input_parses_as_empty_object() {
     .expect("start");
     let completed = acc.stop_block(0).expect("stop");
     match completed {
-        CompletedBlock::ToolUse { input, .. } => assert_eq!(input, json!({})),
+        CompletedBlock::ToolUse { input, .. } => assert_eq!(input.to_json_string().unwrap(), "{}"),
         other => panic!("expected ToolUse, got {other:?}"),
     }
 }
@@ -119,7 +130,12 @@ fn type_mismatch_errors() {
         },
     )
     .expect("start");
-    let err = acc.append_json(0, "{}").expect_err("mismatch");
+    let err = acc
+        .append_json(
+            0,
+            &lingxi_llm_client::protocol::JsonPayloadFragment::from_text("{}"),
+        )
+        .expect_err("mismatch");
     assert!(matches!(
         err,
         StreamingError::TypeMismatch {
@@ -142,7 +158,11 @@ fn malformed_tool_use_json_errors_at_stop() {
         },
     )
     .expect("start");
-    acc.append_json(0, "{not json").expect("append");
+    acc.append_json(
+        0,
+        &lingxi_llm_client::protocol::JsonPayloadFragment::from_text("{not json"),
+    )
+    .expect("append");
     let err = acc.stop_block(0).expect_err("parse fail");
     assert!(matches!(
         err,

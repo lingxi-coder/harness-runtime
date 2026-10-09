@@ -27,12 +27,41 @@ use std::path::{Path, PathBuf};
 
 use lingxi_core::host::subagent_spawn::SubagentSpawnRequest;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 /// Maximum on-disk size of a row. A row is a few KB; anything approaching this
 /// is not a row we wrote, so it is rejected unread.
 pub const ROW_MAX_BYTES: u64 = 1_048_576;
+
+type JsonSource = lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+fn serialize_description<S>(description: &JsonSource, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if description.string_units("").is_none() {
+        return Err(serde::ser::Error::custom(
+            "parked agent description must be a JSON string",
+        ));
+    }
+    lingxi_core::types::utf16_json::raw_json_serde::serialize(description, serializer)
+}
+
+fn deserialize_description<'de, D>(deserializer: D) -> Result<JsonSource, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    let description = JsonSource::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    if description.string_units("").is_none() {
+        return Err(serde::de::Error::custom(
+            "parked agent description must be a JSON string",
+        ));
+    }
+    Ok(description)
+}
 
 /// A parked background agent's launch configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,8 +70,9 @@ pub struct ParkedAgentRow {
     pub task_id: String,
     /// The agent id its transcript and sidecars are keyed on.
     pub agent_id: lingxi_core::types::AgentId,
-    /// Human-readable description (the task's).
-    pub description: String,
+    /// Source-backed description carried across cold restore as the exact
+    /// JavaScript string value.
+    pub description: lingxi_core::types::utf16_json::Utf16JsonProjection,
     /// The full spawn request, so the rebuilt runner is configured exactly as
     /// the original was — model, cwd, isolation, depth, tool overrides. This is
     /// the field that makes a restore faithful rather than approximate.
@@ -63,7 +93,11 @@ struct StoredParkedAgentRow {
     task_id: String,
     #[serde(rename = "agentId")]
     agent_id: lingxi_core::types::AgentId,
-    description: String,
+    #[serde(
+        serialize_with = "serialize_description",
+        deserialize_with = "deserialize_description"
+    )]
+    description: JsonSource,
     handback_opt_in: bool,
     handback_payload: ParkedPayloadRef,
 }
@@ -152,6 +186,12 @@ pub fn row_path(subagents_dir: &Path, agent_id: &str) -> PathBuf {
 /// # Errors
 /// Any filesystem error from the directory create or the write.
 pub async fn write_row(subagents_dir: &Path, row: &ParkedAgentRow) -> std::io::Result<()> {
+    if row.description.string_units("").is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "parked agent description must be a JSON string",
+        ));
+    }
     tokio::fs::create_dir_all(subagents_dir).await?;
     let path = row_path(subagents_dir, &row.agent_id.to_string());
     let previous = stored_row_at(&path)
@@ -373,6 +413,9 @@ mod tests {
 
     fn request(subagent_type: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            // Cold restore resumes an existing agent row; it does not create
+            // a new Agent-tool admission or a persisted statistics token.
+            agent_spawn_token: None,
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
             subagent_type: subagent_type.into(),
@@ -478,6 +521,67 @@ mod tests {
         assert_eq!(got.request.cwd.as_deref(), Some("/repo"));
         assert_eq!(got.request.depth, 1);
         assert_eq!(got.request.name.as_deref(), Some("rev"));
+    }
+
+    #[tokio::test]
+    async fn parked_description_preserves_lone_utf16_units_in_the_raw_row() {
+        let dir = tempdir().unwrap();
+        let id = lingxi_core::types::AgentId::new();
+        let mut source = row(id);
+        let units = vec![u16::from(b'b'), 0xd800, u16::from(b'k')];
+        source.description = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&units),
+            units.clone(),
+        )
+        .unwrap();
+
+        write_row(dir.path(), &source).await.unwrap();
+        let path = row_path(dir.path(), &id.to_string());
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(raw.contains(r#""description":"b\ud800k""#), "{raw}");
+
+        let restored = read_row(dir.path(), &id.to_string()).await.unwrap();
+        assert_eq!(restored.description.string_units(""), Some(units));
+    }
+
+    #[tokio::test]
+    async fn parked_description_rejects_non_string_json_on_write_and_restore() {
+        let dir = tempdir().unwrap();
+        let subagents_dir = dir.path().join("subagents");
+        let id = lingxi_core::types::AgentId::new();
+        let mut invalid_write = row(id);
+        invalid_write.description =
+            JsonSource::parse(r#"{"text":"not a description string"}"#).unwrap();
+        let error = write_row(&subagents_dir, &invalid_write).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            !subagents_dir.exists(),
+            "invalid DTOs do not create row storage"
+        );
+
+        let invalid_disk = serde_json::json!({
+            "taskId": "a00000001",
+            "agentId": id,
+            "description": {"text":"not a description string"},
+            "handback_opt_in": false,
+            "handback_payload": {
+                "version": 1,
+                "file": "unused.json",
+                "sha256": "0".repeat(64),
+                "origin_session_id": null
+            }
+        });
+        tokio::fs::create_dir_all(&subagents_dir).await.unwrap();
+        tokio::fs::write(
+            row_path(&subagents_dir, &id.to_string()),
+            serde_json::to_vec(&invalid_disk).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            read_row(&subagents_dir, &id.to_string()).await.is_none(),
+            "a non-string description is not a restorable parked-agent row"
+        );
     }
 
     /// The ABSENCE of a row is the "do not restore" signal — a terminal agent
@@ -679,7 +783,7 @@ mod tests {
         let inline = serde_json::json!({
             "taskId": source.task_id,
             "agentId": source.agent_id,
-            "description": source.description,
+            "description": "research",
             "request": source.request,
             "handback_opt_in": source.handback_opt_in,
             "handback_state": null,

@@ -13,7 +13,8 @@ async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {
     let response = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "hello world".into(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -45,7 +46,9 @@ async fn single_turn_no_tools_returns_end_turn_and_emits_text_and_end_turn() {
 
     let events = output.snapshot().await;
     assert_eq!(events.len(), 2, "expected Text + EndTurn; got {events:?}");
-    assert!(matches!(events[0], OutputEvent::Text { ref text } if text == "hello world"));
+    assert!(
+        matches!(events[0], OutputEvent::Text { ref text } if text.string_at("") == Some("hello world"))
+    );
     assert!(
         matches!(events[1], OutputEvent::EndTurn { ref stop_reason, .. } if stop_reason == "end_turn")
     );

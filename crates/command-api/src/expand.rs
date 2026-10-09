@@ -423,7 +423,7 @@ mod tests {
     async fn non_markdown_command_errors() {
         let cmd = SlashCommand {
             name: "help".into(),
-            description: String::new(),
+            description: String::new().into(),
             source: CommandSource::Builtin,
             kind: SlashCommandKind::Builtin {
                 handler_id: "help".to_string(),

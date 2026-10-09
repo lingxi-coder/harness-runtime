@@ -1,9 +1,9 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-    mock_message_response, noop_hook_executor,
+    mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use std::sync::Arc;
 
 struct MeasureSession;
@@ -149,9 +149,14 @@ async fn session_measure_runs_after_turn_complete_and_only_on_changed_units() {
     // change below covers the native statusChanged/`limits` path.
     orchestrator.emit_rate_limit_if_changed().await;
     orchestrator.emit_raw_utilization_if_changed().await;
-    host.load("measure-mod", root.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "measure-mod",
+        root.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
+    )
+    .await
+    .unwrap();
 
     orchestrator.run_turn("first").await.unwrap();
     wait_for_log_count(&output, "complete:", 1).await;

@@ -1,0 +1,32 @@
+{
+  "target": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "primary_runner_commit": "1d7e55259a16c476eba652a7252f152009862d30",
+  "primary_runner": "scripts/tests/headless_native_differential.mjs",
+  "fixture_id": "print-text",
+  "native_repetitions": 2,
+  "model": "claude-sonnet-5-5",
+  "argv": [
+    "--bare",
+    "--print",
+    "--output-format",
+    "text",
+    "--model",
+    "claude-sonnet-5-5",
+    "--system-prompt",
+    "You are a local deterministic headless fixture.",
+    "--tools",
+    "",
+    "--permission-mode",
+    "dontAsk",
+    "--permission-prompts",
+    "none",
+    "--session-id",
+    "6b7ff52d-e492-4084-88e2-5ad153e3c053",
+    "Return HEADLESS_LOCAL_RESPONSE."
+  ],
+  "dummy_api_key": "sk-ant-headless-local-fixture-only",
+  "fixed_response_text": "HEADLESS_LOCAL_RESPONSE",
+  "expected_messages_requests_per_run": 1,
+  "timeout_ms": 15000
+}

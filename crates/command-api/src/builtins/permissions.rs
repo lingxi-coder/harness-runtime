@@ -75,7 +75,7 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = PermissionsHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Edited /tmp/mock/permissions.json (exit 0).");
+            assert_eq!(s, "Edited /tmp/mock/permissions.json (exit 0).".into());
         } else {
             panic!();
         }
@@ -89,7 +89,7 @@ mod tests {
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
             assert_eq!(
                 s,
-                "Could not edit permissions: handle action failed: permission denied"
+                "Could not edit permissions: handle action failed: permission denied".into()
             );
         } else {
             panic!();

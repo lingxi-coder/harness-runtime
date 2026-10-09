@@ -104,8 +104,7 @@ fn report() -> PreparedHandbackReport {
             text: "entire sanitized report".into(),
             warning: None,
         },
-        body: handback_frame("persisted report pointer"),
-        body_utf16: None,
+        body: handback_frame("persisted report pointer").into(),
         sender_name: "worker".into(),
         sender_id: "worker".into(),
         sender_task_id: "model-forged-task".into(),
@@ -166,8 +165,9 @@ async fn handback_rejection_retry_duplicate_and_new_run_reset() {
             .unwrap()
             .report
             .unwrap()
-            .text,
-        "entire sanitized report"
+            .text
+            .string_at(""),
+        Some("entire sanitized report")
     );
     let next = begin(&registry, actor, scope, None).await;
     assert_ne!(token, next);

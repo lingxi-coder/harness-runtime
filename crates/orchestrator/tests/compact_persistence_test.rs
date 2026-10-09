@@ -26,6 +26,11 @@ use session::jsonl::JsonlMessage;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+fn source_value(source: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> Value {
+    serde_json::from_str(&source.to_json_string().expect("valid source projection"))
+        .expect("test fixture uses ordinary JSON")
+}
+
 struct SummaryClient;
 
 #[async_trait::async_trait]
@@ -65,7 +70,8 @@ fn shape(history: &[ConversationMessage]) -> Vec<(&'static str, String)> {
 /// Inner `message.content` text of a JSONL line — accepts both the plain
 /// string form and the content-block array the persist path writes.
 fn inner_text(line: &JsonlMessage) -> String {
-    match line.message.get("content") {
+    let message = source_value(&line.message);
+    match message.get("content") {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(blocks)) => blocks
             .iter()
@@ -126,11 +132,11 @@ fn assert_empty_context_and_budget_announcements<'a>(
         }
         assert_eq!(row.message_type, "attachment");
         assert_eq!(
-            row.message,
+            source_value(&row.message),
             Value::Null,
             "native attachment has no inner message"
         );
-        assert_eq!(row.extra.get("attachment"), Some(&payload));
+        assert_eq!(source_value(&row.extra).get("attachment"), Some(&payload));
         assert!(!row.is_sidechain);
         assert_eq!(row.logical_parent_uuid, None);
         assert_eq!(row.parent_uuid.as_deref(), Some(parent.as_str()));
@@ -142,7 +148,7 @@ fn assert_empty_context_and_budget_announcements<'a>(
         if rendered.is_empty() {
             assert!(matches!(projection, ConversationMessage::System {
                 content, subtype: Some(subtype), ..
-            } if content.is_empty() && subtype == "model_reminder_attachment"));
+            } if content.string_at("").is_some_and(str::is_empty) && subtype == "model_reminder_attachment"));
         } else {
             assert_eq!(rendered.len(), 1);
             assert!(projection.is_meta());
@@ -293,7 +299,10 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         .iter()
         .position(|l| {
             l.message_type == "system"
-                && l.extra.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+                && source_value(&l.extra)
+                    .get("subtype")
+                    .and_then(Value::as_str)
+                    == Some("compact_boundary")
         })
         .expect("a compact_boundary system line must be persisted");
     let boundary = &lines[boundary_idx];
@@ -307,15 +316,19 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         "logicalParentUuid = the last pre-compact line's uuid"
     );
     assert_eq!(
-        boundary.extra.get("content").and_then(Value::as_str),
+        source_value(&boundary.extra)
+            .get("content")
+            .and_then(Value::as_str),
         Some("Conversation compacted")
     );
     assert_eq!(
-        boundary.extra.get("level").and_then(Value::as_str),
+        source_value(&boundary.extra)
+            .get("level")
+            .and_then(Value::as_str),
         Some("info")
     );
-    let cm = boundary
-        .extra
+    let boundary_extra = source_value(&boundary.extra);
+    let cm = boundary_extra
         .get("compactMetadata")
         .expect("compactMetadata persisted");
     let mut expected_cm =
@@ -356,11 +369,11 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         "summary chains off the boundary"
     );
     assert_eq!(
-        summary.extra.get("isCompactSummary"),
+        source_value(&summary.extra).get("isCompactSummary"),
         Some(&Value::Bool(true))
     );
     assert_eq!(
-        summary.extra.get("isVisibleInTranscriptOnly"),
+        source_value(&summary.extra).get("isVisibleInTranscriptOnly"),
         Some(&Value::Bool(true))
     );
 
@@ -504,8 +517,8 @@ async fn cold_resume_reconstructs_post_compact_state_inner(manual: bool) {
         assert_eq!(cold.uuid, persisted.uuid);
         assert_eq!(cold.parent_uuid, persisted.parent_uuid);
         assert_eq!(
-            serde_json::to_vec(&cold.extra["attachment"]).unwrap(),
-            serde_json::to_vec(&persisted.extra["attachment"]).unwrap(),
+            serde_json::to_vec(&source_value(&cold.extra)["attachment"]).unwrap(),
+            serde_json::to_vec(&source_value(&persisted.extra)["attachment"]).unwrap(),
             "cold replay retains every typed attachment payload byte"
         );
     }
@@ -628,11 +641,14 @@ async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized
         .iter()
         .find(|l| {
             l.message_type == "system"
-                && l.extra.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+                && source_value(&l.extra)
+                    .get("subtype")
+                    .and_then(Value::as_str)
+                    == Some("compact_boundary")
         })
         .expect("a compact_boundary system line must be persisted");
-    let cm = boundary
-        .extra
+    let boundary_extra = source_value(&boundary.extra);
+    let cm = boundary_extra
         .get("compactMetadata")
         .expect("compactMetadata persisted");
 
@@ -670,9 +686,12 @@ async fn compact_boundary_carries_discovered_tools_and_omits_messages_summarized
 /// independent JSONL visibility flags in the session side tables.
 #[test]
 fn compact_summary_line_replays_as_user_history() {
-    let mut extra = serde_json::Map::new();
-    extra.insert("isVisibleInTranscriptOnly".to_string(), Value::Bool(true));
-    extra.insert("isCompactSummary".to_string(), Value::Bool(true));
+    let extra =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "isVisibleInTranscriptOnly": true,
+            "isCompactSummary": true,
+        }))
+        .unwrap();
     let summary = JsonlMessage {
         message_type: "user".to_string(),
         uuid: "9a1b2c3d-4e5f-6789-abcd-ef0123456789".to_string(),
@@ -681,7 +700,10 @@ fn compact_summary_line_replays_as_user_history() {
         timestamp: "2026-07-13T10:00:00.000Z".to_string(),
         cwd: "/tmp".to_string(),
         version: "0.6.0".to_string(),
-        message: serde_json::json!({"role":"user","content":"Summary:\nS"}),
+        message: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"role":"user","content":"Summary:\nS"}),
+        )
+        .unwrap(),
         is_sidechain: false,
         user_type: Some("external".to_string()),
         git_branch: None,

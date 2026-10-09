@@ -495,6 +495,9 @@ impl ConversationOrchestrator {
         let mut instruction_context = self.prompt_runtime.instruction_context.lock().await;
         let mut last_jsonl_uuid = self.transcript.last_jsonl_uuid.lock().await;
         let old_session_id = s.session_id;
+        if let Some(registry) = &self.task_registry {
+            registry.reset_agent_session_statistics(new_session_id_value, Some(old_session_id));
+        }
         // All fallible and awaiting work is complete. Publish the captured
         // transcript authority, cost scope, and conversation state in one
         // synchronous critical section so caller cancellation cannot split it.
@@ -599,6 +602,9 @@ impl ConversationOrchestrator {
         let mut reports = self.main_reports.state.lock().await;
         let mut s = self.session.lock().await;
         let mut instruction_context = self.prompt_runtime.instruction_context.lock().await;
+        if let Some(registry) = &self.task_registry {
+            registry.reset_agent_session_statistics(session_id, None);
+        }
         prepared_transcript.activate();
         self.model_runtime.activate_cost_session(prepared_cost);
         self.install_output_session(prepared_output);
@@ -1071,6 +1077,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
         let codename = format!("fork-{}", &uuid::Uuid::new_v4().simple().to_string()[..4]);
 
         let request = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
+            // Slash-command forks bypass AgentTool's statistics admission.
+            agent_spawn_token: None,
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
             subagent_type: lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE.to_string(),
@@ -3212,10 +3220,16 @@ mod tests {
         });
         let message = crate::ConversationOrchestrator::nested_memory_attachment_projection(
             lingxi_core::types::MessageId::new(),
-            &attachment,
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&attachment)
+                .expect("generated attachment is representable"),
         )
         .unwrap();
-        orch.persist_model_reminder(message, attachment).await;
+        orch.persist_model_reminder(
+            message,
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&attachment)
+                .expect("generated attachment is representable"),
+        )
+        .await;
         {
             let mut session = orch.session.lock().await;
             session.compacted_user_turns = 4;
@@ -3580,7 +3594,7 @@ mod tests {
             .sent_skill_names
             .lock()
             .await
-            .insert("stale-skill".to_string());
+            .insert("stale-skill".encode_utf16().collect());
         orch.compaction_runtime
             .last_response_input_tokens
             .store(99, std::sync::atomic::Ordering::Relaxed);
@@ -3851,6 +3865,7 @@ mod tests {
                 async_rewake: false,
                 async_timeout: None,
                 rewake_message: None,
+                on_failure: None,
             }],
             icon: None,
             allowed_tools: Vec::new(),
@@ -3889,7 +3904,13 @@ mod tests {
             let restored = orch.lifecycle_runtime.main_thread_agent.read().await;
             let restored = restored.as_ref().expect("resumed main-thread agent");
             assert_eq!(restored.agent_type, "reviewer");
-            assert_eq!(restored.system_prompt.as_deref(), Some("review carefully"));
+            assert_eq!(
+                restored
+                    .system_prompt
+                    .as_ref()
+                    .and_then(|source| source.string_at("")),
+                Some("review carefully")
+            );
         }
         assert!(orch
             .lifecycle_runtime

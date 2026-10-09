@@ -627,6 +627,16 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
+    async fn emit_mod_notify(&self, plugin: &str, text: &Utf16JsonProjection) {
+        self.sink
+            .emit(ClientEvent::UiNotify {
+                plugin: plugin.to_string(),
+                text: ClientTextDto::from_projection(text)
+                    .expect("Mod notify text is a root-string source projection"),
+            })
+            .await;
+    }
+
     async fn emit_mod_status(&self, plugin: &str, text: Option<&Utf16JsonProjection>) {
         self.sink
             .emit(ClientEvent::UiStatus {
@@ -949,11 +959,17 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_terminal_api_error(&self, api_error_status: Option<u16>, terminal_reason: &str) {
+    async fn emit_terminal_api_error(
+        &self,
+        api_error_status: Option<u16>,
+        terminal_reason: &str,
+        stop_reason: &str,
+    ) {
         self.sink
             .emit(ClientEvent::TerminalApiError {
                 api_error_status,
                 terminal_reason: terminal_reason.to_owned(),
+                stop_reason: stop_reason.to_owned(),
             })
             .await;
     }
@@ -994,12 +1010,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_api_error_forwards_status_and_reason_without_text_inference() {
+    async fn terminal_api_error_forwards_all_terminal_facts_without_text_inference() {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
-        stream.emit_terminal_api_error(None, "api_error").await;
         stream
-            .emit_terminal_api_error(Some(413), "image_error")
+            .emit_terminal_api_error(None, "api_error", "stop_sequence")
+            .await;
+        stream
+            .emit_terminal_api_error(Some(413), "image_error", "stop_sequence")
+            .await;
+        stream
+            .emit_terminal_api_error(None, "api_error", "refusal")
             .await;
 
         assert_eq!(
@@ -1008,10 +1029,17 @@ mod tests {
                 ClientEvent::TerminalApiError {
                     api_error_status: None,
                     terminal_reason: "api_error".into(),
+                    stop_reason: "stop_sequence".into(),
                 },
                 ClientEvent::TerminalApiError {
                     api_error_status: Some(413),
                     terminal_reason: "image_error".into(),
+                    stop_reason: "stop_sequence".into(),
+                },
+                ClientEvent::TerminalApiError {
+                    api_error_status: None,
+                    terminal_reason: "api_error".into(),
+                    stop_reason: "refusal".into(),
                 },
             ]
         );
@@ -1185,12 +1213,14 @@ mod tests {
                     message_type: "assistant".into(),
                     timestamp: "2026-10-03T12:00:00.000Z".into(),
                     request_id: Some("request-1".into()),
-                    request_ref: Some(serde_json::json!({"lane": "main"})),
+                    request_ref: Some(json_projection(&serde_json::json!({"lane": "main"}))),
                     provider_message_id: Some("provider-message-1".into()),
                     model: Some("claude-opus-4".into()),
                     stop_reason: Some("tool_use".into()),
-                    stop_details: Some(serde_json::json!({"category": "cyber"})),
-                    usage: Some(serde_json::json!({"input_tokens": 11, "output_tokens": 3})),
+                    stop_details: Some(json_projection(&serde_json::json!({"category": "cyber"}))),
+                    usage: Some(json_projection(
+                        &serde_json::json!({"input_tokens": 11, "output_tokens": 3}),
+                    )),
                     content: vec![
                         lingxi_core::types::ContentBlock::Text {
                             text: "old assistant output".into(),
@@ -1483,6 +1513,29 @@ mod tests {
                 text: "Done".into(),
                 timeout_ms: 4000,
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_mod_notify_preserves_lone_surrogate_on_client_wire() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let source = Utf16JsonProjection::parse(r#""notice-\ud800""#).unwrap();
+
+        stream.emit_mod_notify("review", &source).await;
+
+        let events = sink.events().await;
+        let ClientEvent::UiNotify { plugin, text } = &events[0] else {
+            panic!("expected UI notify event")
+        };
+        assert_eq!(plugin, "review");
+        assert_eq!(
+            text.code_units,
+            vec![110, 111, 116, 105, 99, 101, 45, 0xD800]
+        );
+        assert_eq!(
+            serde_json::to_string(&events[0]).unwrap(),
+            r#"{"type":"ui_notify","plugin":"review","text":"notice-\ud800"}"#
         );
     }
 
@@ -2101,12 +2154,13 @@ mod tests {
                     provider_id: None,
                 }],
                 stop_reason: Some("tool_use".to_string()),
+                resumable: None,
             },
             ConversationMessage::User {
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
-                    content: content.to_string(),
+                    content: content.to_string().into(),
                     is_error: Some(false),
                     provider_tool_use_id: None,
                     content_blocks: None,
@@ -2114,6 +2168,10 @@ mod tests {
                 is_meta: false,
                 is_compact_summary: false,
                 is_visible_in_transcript_only: false,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
             },
         ];
         let resumed = crate::adapter::lowering::lower_transcript(&history)

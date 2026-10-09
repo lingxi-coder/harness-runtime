@@ -18,22 +18,37 @@ fn compact_focus_and_hook_instructions_are_separate_paragraphs() {
 
 #[test]
 fn sdk_compact_metadata_keys_are_camelized_recursively() {
-    let metadata = camelize_json_keys(serde_json::json!({
-        "trigger": "manual",
-        "pre_tokens": 42,
-        "preserved_segment": {
-            "head_uuid": "head",
-            "anchor_uuid": "anchor",
-            "tail_uuid": "tail"
-        },
-        "pre_compact_discovered_tools": ["Read"]
-    }));
-    assert_eq!(metadata["trigger"], "manual");
-    assert_eq!(metadata["preTokens"], 42);
-    assert_eq!(metadata["preservedSegment"]["headUuid"], "head");
-    assert_eq!(metadata["preservedSegment"]["anchorUuid"], "anchor");
-    assert_eq!(metadata["preservedSegment"]["tailUuid"], "tail");
-    assert_eq!(metadata["preCompactDiscoveredTools"][0], "Read");
+    let input =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "trigger": "manual",
+            "pre_tokens": 42,
+            "preserved_segment": {
+                "head_uuid": "head",
+                "anchor_uuid": "anchor",
+                "tail_uuid": "tail"
+            },
+            "pre_compact_discovered_tools": ["Read"]
+        }))
+        .expect("generated compact fixture is representable");
+    let metadata = camelize_json_keys(&input);
+    assert_eq!(metadata.string_at("/trigger"), Some("manual"));
+    assert_eq!(metadata.number_at("/preTokens"), Some(42.0));
+    assert_eq!(
+        metadata.string_at("/preservedSegment/headUuid"),
+        Some("head")
+    );
+    assert_eq!(
+        metadata.string_at("/preservedSegment/anchorUuid"),
+        Some("anchor")
+    );
+    assert_eq!(
+        metadata.string_at("/preservedSegment/tailUuid"),
+        Some("tail")
+    );
+    assert_eq!(
+        metadata.string_at("/preCompactDiscoveredTools/0"),
+        Some("Read")
+    );
 }
 use crate::OrchestratorConfig;
 
@@ -576,8 +591,8 @@ impl BuiltinHookHandler for RecordingLifecycleHandler {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -601,8 +616,8 @@ impl BuiltinHookHandler for BlockingPreCompactHandler {
         });
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response,
         }
@@ -620,7 +635,7 @@ impl BuiltinHookHandler for InstructingPreCompactHandler {
         HookResult {
             outcome: HookOutcome::Success,
             stdout: "preserve the test evidence".into(),
-            stderr: String::new(),
+            stderr: String::new().into(),
             exit_code: Some(0),
             response: None,
         }
@@ -644,8 +659,8 @@ impl BuiltinHookHandler for SessionStartCtxHandler {
         });
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response,
         }
@@ -681,6 +696,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -744,7 +760,10 @@ async fn pre_compact_block_returns_detail_else_none() {
         .fire_pre_compact("manual", None)
         .await;
     assert_eq!(
-        blocked.blocked_by.as_deref(),
+        blocked
+            .blocked_by
+            .as_ref()
+            .and_then(|source| source.string_at("")),
         Some("[guard] compaction not allowed"),
         "a blocking PreCompact hook must surface its blockedBy detail"
     );
@@ -758,12 +777,16 @@ async fn pre_compact_block_returns_detail_else_none() {
 
 #[tokio::test]
 async fn pre_compact_success_stdout_becomes_summary_instructions() {
+    let focus = lingxi_core::types::utf16_json::Utf16JsonProjection::from("focus on Rust");
     let outcome = compact_orch(exec_instructing_pre_compact().await)
-        .fire_pre_compact("manual", Some("focus on Rust"))
+        .fire_pre_compact("manual", Some(&focus))
         .await;
     assert_eq!(outcome.blocked_by, None);
     assert_eq!(
-        outcome.additional_instructions.as_deref(),
+        outcome
+            .additional_instructions
+            .as_ref()
+            .and_then(|source| source.string_at("")),
         Some("preserve the test evidence")
     );
 }
@@ -792,8 +815,8 @@ impl BuiltinHookHandler for BlockOnceStopHandler {
         });
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response,
         }
@@ -826,13 +849,16 @@ impl BuiltinHookHandler for PreventStopHandler {
     async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
         let response = matches!(event, HookEvent::Stop { .. }).then(|| HookResponse {
             prevent_continuation: true,
-            reason: self.reason.clone(),
+            reason: self
+                .reason
+                .clone()
+                .map(hooks::response::ExactHookText::from_text),
             ..Default::default()
         });
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response,
         }
@@ -1068,11 +1094,14 @@ async fn async_hook_rewake_runs_without_persisting_a_synthetic_user_prompt() {
     let date = crate::prompt::env_meta::current_date_string();
     let native_context = orch.context_attachment_history(&history);
     assert_eq!(
-        native_context,
+        native_context
+            .iter()
+            .map(|attachment| attachment.to_json_string().unwrap())
+            .collect::<Vec<_>>(),
         vec![
-            serde_json::json!({"type":"session_context","context":{}}),
-            serde_json::json!({"type":"date","date":date}),
-            serde_json::json!({"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}),
+            r#"{"type":"session_context","context":{}}"#.to_string(),
+            format!(r#"{{"type":"date","date":"{date}"}}"#),
+            r#"{"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}"#.to_string(),
         ]
     );
     assert_eq!(
@@ -1094,10 +1123,10 @@ async fn async_hook_rewake_runs_without_persisting_a_synthetic_user_prompt() {
             "only typed native announcements may accompany the assistant"
         );
         let attachment = &attachments[0];
-        match attachment["type"].as_str() {
+        match attachment.string_at("/type") {
             Some("session_context") => assert!(matches!(message,
                 ConversationMessage::System { content, subtype, .. }
-                    if content.is_empty() && subtype.as_deref() == Some("model_reminder_attachment")
+                    if content.string_at("") == Some("") && subtype.as_deref() == Some("model_reminder_attachment")
             )),
             Some("date") => assert_eq!(
                 message.text_content(),
@@ -1810,14 +1839,14 @@ async fn git_status_stays_frozen_after_session_cwd_swap() {
     let before_context = orch
         .context_attachment_history(&before)
         .into_iter()
-        .find(|attachment| attachment["type"] == "session_context")
+        .find(|attachment| attachment.string_at("/type") == Some("session_context"))
         .unwrap();
     assert!(
-        before_context["context"]["gitStatus"]
-            .as_str()
+        before_context
+            .string_at("/context/gitStatus")
             .unwrap()
             .contains("boot-only.txt"),
-        "before: {before_context}"
+        "before: {before_context:?}"
     );
 
     session_cwd.swap(worktree.path().to_path_buf(), Vec::new());
@@ -1828,8 +1857,8 @@ async fn git_status_stays_frozen_after_session_cwd_swap() {
     );
     let after = orch.instruction_context_snapshot().await;
     assert_eq!(
-        after.user_context["gitStatus"],
-        before_context["context"]["gitStatus"].as_str().unwrap()
+        after.user_context.get("gitStatus").map(String::as_str),
+        before_context.string_at("/context/gitStatus")
     );
     assert!(!after.user_context["gitStatus"].contains("worktree-only.txt"));
 }
@@ -2084,7 +2113,10 @@ async fn mod_can_omit_session_start_attachment_without_erasing_history() {
         "session-start-attachment",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+            {}
+        ))
+        .expect("generated Mod options are representable"),
     )
     .await
     .unwrap();

@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use std::sync::Arc;
 
@@ -28,9 +28,14 @@ async fn uds_receive_gate_queues_rewrite_once_and_skips_consumed_delivery() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("uds-receive", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "uds-receive",
+        dir.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
+    )
+    .await
+    .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let orch = ConversationOrchestrator::new(
@@ -107,7 +112,7 @@ async fn mid_turn_peer_arrivals_are_screened_before_joining_with_human_input() {
         "receive-mid-turn",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
     )
     .await
     .unwrap();
@@ -172,9 +177,14 @@ async fn session_receive_only_persists_the_first_core_delivery() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("receive", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "receive",
+        dir.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
+    )
+    .await
+    .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let orch = ConversationOrchestrator::new(
@@ -256,8 +266,8 @@ async fn session_receive_only_persists_the_first_core_delivery() {
 #[tokio::test]
 async fn external_prompts_are_received_before_prompt_submit_and_model_request() {
     use crate::test_support_stream::{
-        MockStreamingApiClient, content_block_start_text, content_block_stop, message_delta_stop,
-        message_start, message_stop, text_delta,
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
     };
 
     let dir = tempfile::tempdir().unwrap();
@@ -279,7 +289,7 @@ async fn external_prompts_are_received_before_prompt_submit_and_model_request() 
         "external-receive",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
     )
     .await
     .unwrap();
@@ -346,22 +356,16 @@ async fn external_prompts_are_received_before_prompt_submit_and_model_request() 
 
     let calls = streaming.captured_calls().await;
     assert_eq!(calls.len(), 2);
-    assert!(
-        calls[0]
-            .messages
-            .iter()
-            .any(|message| message.text_content() == "scheduled received submitted")
-    );
-    assert!(
-        !calls[0]
-            .messages
-            .iter()
-            .any(|message| message.text_content().contains("drop"))
-    );
-    assert!(
-        calls[1]
-            .messages
-            .iter()
-            .any(|message| message.text_content() == "bridge received submitted")
-    );
+    assert!(calls[0]
+        .messages
+        .iter()
+        .any(|message| message.text_content() == "scheduled received submitted"));
+    assert!(!calls[0]
+        .messages
+        .iter()
+        .any(|message| message.text_content().contains("drop")));
+    assert!(calls[1]
+        .messages
+        .iter()
+        .any(|message| message.text_content() == "bridge received submitted"));
 }

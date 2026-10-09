@@ -87,8 +87,8 @@ impl BuiltinHookHandler for ContextHook {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: Some(0),
             response: Some(HookResponse {
                 additional_context: Some("STREAM-CTX".into()),
@@ -121,6 +121,7 @@ fn context_pre_hook_executor() -> Arc<HookExecutorImpl> {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     };
     let mut registry = HookRegistry::new();
     registry.register(hook);
@@ -140,10 +141,20 @@ impl Tool for InjectingTool {
     fn name(&self) -> &str {
         "Inject"
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -151,22 +162,25 @@ impl Tool for InjectingTool {
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -178,7 +192,11 @@ impl Tool for InjectingTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "inject".into()
     }
     async fn prompt(
@@ -189,15 +207,15 @@ impl Tool for InjectingTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: json!({
+            data: tool_api::tool_trait::generated_builtin_result(&json!({
                 "content": "TOOL-RESULT",
                 "model_content": "Launching skill: demo",
-            }),
+            })),
             model_content: None,
             new_messages: vec![ConversationMessage::user(
                 MessageId::new(),
@@ -205,6 +223,7 @@ impl Tool for InjectingTool {
             )],
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
@@ -220,10 +239,20 @@ impl Tool for PlainTool {
     fn name(&self) -> &str {
         "Plain"
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -231,22 +260,25 @@ impl Tool for PlainTool {
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -258,7 +290,11 @@ impl Tool for PlainTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "plain".into()
     }
     async fn prompt(
@@ -269,16 +305,19 @@ impl Tool for PlainTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: json!({ "content": "TOOL-RESULT", "model_content": "ok" }),
+            data: tool_api::tool_trait::generated_builtin_result(
+                &json!({ "content": "TOOL-RESULT", "model_content": "ok" }),
+            ),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
@@ -493,7 +532,7 @@ async fn streaming_pre_tool_additional_context_is_a_separate_message_after_tool_
             for b in content {
                 if let ContentBlock::ToolResult { content, .. } = b {
                     assert!(
-                        !content.contains("STREAM-CTX"),
+                        !content.string_at("").is_some_and(|text| text.contains("STREAM-CTX")),
                         "additionalContext must NOT be folded into the streaming tool_result: {content:?}"
                     );
                 }

@@ -1614,6 +1614,7 @@ mod tests {
                 tool_use_id: None,
                 assistant_message_id: None,
                 depth: 0,
+                native_query_depth: None,
                 observer: None,
                 parent_model: None,
                 parent_model_profile: None,
@@ -1695,7 +1696,8 @@ mod tests {
                     format!(
                         "<tool_use_error>InputValidationError: {}</tool_use_error>",
                         case["display"].as_str().unwrap()
-                    ),
+                    )
+                    .into(),
                     "nested case {index}"
                 );
             } else if let Some(message) = case["callError"].as_str() {
@@ -1709,7 +1711,7 @@ mod tests {
                     .unwrap_err();
                 assert_eq!(
                     error.model_tool_result_content(),
-                    format!("Error: {message}"),
+                    format!("Error: {message}").into(),
                     "call case {index}"
                 );
             }
@@ -1724,7 +1726,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.model_tool_result_content(),
-            "<tool_use_error>No scheduled job with id 'missing'</tool_use_error>"
+            "<tool_use_error>No scheduled job with id 'missing'</tool_use_error>".into()
         );
         let error = invoker
             .invoke(
@@ -1734,7 +1736,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(error.model_tool_result_content(), "<tool_use_error>Invalid cron expression 'invalid'. Expected 5 fields: M H DoM Mon DoW.</tool_use_error>");
+        assert_eq!(error.model_tool_result_content(), "<tool_use_error>Invalid cron expression 'invalid'. Expected 5 fields: M H DoM Mon DoW.</tool_use_error>".into());
     }
 
     #[test]
@@ -1918,13 +1920,12 @@ mod tests {
         );
         assert_eq!(
             tool.search_hint(),
-            Some("self-pace the dynamic /loop: pick a delay before the next tick, or stop/end/cancel the dynamic loop with stop:true (a fixed-interval /loop is a recurring cron — cancel it with CronDelete)")
+            Some("self-pace the dynamic /loop: pick a delay before the next tick, or stop/end/cancel the dynamic loop with stop:true (a fixed-interval /loop is a recurring cron — cancel it with CronDelete)".into())
         );
         assert_eq!(tool.max_result_size_chars(), 1000);
         assert!(tool.should_defer());
-        let prompt = tool
-            .prompt(&PromptOptions::default())
-            .await
+        let prompt_source = tool.prompt(&PromptOptions::default()).await;
+        let prompt = prompt_source
             .string_at("")
             .expect("generated prompt is a root string");
         // Structure of `iZn`: intro, noop, delay guidance, reason — blank-line

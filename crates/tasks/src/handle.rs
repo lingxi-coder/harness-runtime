@@ -21,6 +21,7 @@ use lingxi_core::host::task_registry::{
 };
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
     Ok(match s {
@@ -745,6 +746,36 @@ impl TaskRegistryHandle for TaskRegistry {
                 .to_string_lossy()
                 .into_owned(),
         )
+    }
+
+    fn agent_session_statistics(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+    ) -> Option<Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>> {
+        Some(TaskRegistry::agent_session_statistics(self, session_id))
+    }
+
+    async fn agent_statistics_for_parent(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Option<Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>> {
+        TaskRegistry::agent_statistics_for_parent(self, agent_id).await
+    }
+
+    fn reset_agent_session_statistics(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        clear_previous: Option<lingxi_core::types::SessionId>,
+    ) {
+        TaskRegistry::reset_agent_session_statistics(self, session_id, clear_previous);
+    }
+
+    fn bind_agent_spawn_token(
+        &self,
+        task_id: &str,
+        token: lingxi_core::host::agent_statistics::AgentSpawnToken,
+    ) {
+        TaskRegistry::bind_agent_spawn_token(self, task_id, token);
     }
 
     // Per-session subagent-spawn counter (claude 2.1.212 `getTotalAgentSpawns` /
@@ -2766,8 +2797,11 @@ mod tests {
             .unwrap();
 
         let record = handle.get(&created.task_id).await.unwrap().unwrap();
-        let expected_units = description.string_units("").unwrap();
-        assert_eq!(record.description.string_units(""), Some(expected_units));
+        let expected_units = description.string_units("").unwrap().to_vec();
+        assert_eq!(
+            record.description.string_units(""),
+            Some(expected_units.clone())
+        );
         let facts = record.agent_facts.expect("agent row facts are present");
         assert!(matches!(
             facts.row_description,

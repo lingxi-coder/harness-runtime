@@ -65,6 +65,7 @@ fn authenticate(
         headers,
         body: br#"{"model":"claude"}"#.to_vec().into(),
         timeout: None,
+        http1_header_layout: None,
     };
     apply_credential(
         &mut request,

@@ -9,7 +9,10 @@ mod tests {
         arc_mock_budget, arc_mock_mailbox, arc_mock_spawner, arc_mock_task_registry,
         MockBudgetEnforcerHandle, MockSubagentSpawner,
     };
-    use lingxi_core::host::task_registry::TaskRegistryHandle;
+    use lingxi_core::host::task_registry::{
+        TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
+        TaskRegistryHandle, TaskUpdatePatch,
+    };
     use std::sync::Mutex as StdMutex;
     use tokio::sync::oneshot;
 
@@ -317,6 +320,82 @@ mod tests {
         }
     }
 
+    /// Add a real per-session statistics owner to the existing task mock while
+    /// preserving its foreground-task behavior for AgentTool integration tests.
+    struct AgentStatisticsTaskRegistry {
+        inner: Arc<crate::agent_test_support::MockTaskRegistryHandle>,
+        session_id: lingxi_core::types::SessionId,
+        statistics: Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>,
+    }
+
+    #[async_trait::async_trait]
+    impl TaskRegistryHandle for AgentStatisticsTaskRegistry {
+        async fn create(&self, input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
+            self.inner.create(input).await
+        }
+
+        async fn get(&self, id: &str) -> Result<Option<TaskRecord>, TaskRegistryError> {
+            self.inner.get(id).await
+        }
+
+        async fn list(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, TaskRegistryError> {
+            self.inner.list(filter).await
+        }
+
+        async fn update(
+            &self,
+            id: &str,
+            patch: TaskUpdatePatch,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            self.inner.update(id, patch).await
+        }
+
+        async fn set_status(
+            &self,
+            id: &str,
+            status: &str,
+        ) -> Result<TaskRecord, TaskRegistryError> {
+            self.inner.set_status(id, status).await
+        }
+
+        async fn kill(&self, id: &str) -> Result<TaskRecord, TaskRegistryError> {
+            self.inner.kill(id).await
+        }
+
+        async fn output(
+            &self,
+            id: &str,
+            offset: Option<u64>,
+        ) -> Result<TaskOutputChunk, TaskRegistryError> {
+            self.inner.output(id, offset).await
+        }
+
+        fn agent_session_statistics(
+            &self,
+            session_id: lingxi_core::types::SessionId,
+        ) -> Option<Arc<lingxi_core::host::agent_statistics::AgentSessionStatistics>> {
+            (session_id == self.session_id).then(|| self.statistics.clone())
+        }
+    }
+
+    fn statistics_wired_ctx(
+        spawner: Arc<MockSubagentSpawner>,
+        registry: Arc<dyn TaskRegistryHandle>,
+        budget: Arc<MockBudgetEnforcerHandle>,
+    ) -> BuiltinToolContext {
+        let mut bctx = ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![PathBuf::from("/tmp")],
+        );
+        bctx.subagent_spawner = Some(spawner as Arc<dyn SubagentSpawner>);
+        bctx.task_registry = Some(registry);
+        bctx.mailbox_router =
+            Some(arc_mock_mailbox() as Arc<dyn lingxi_core::host::mailbox::MailboxRouterHandle>);
+        bctx.budget_enforcer = Some(budget as Arc<dyn BudgetEnforcerHandle>);
+        bctx
+    }
+
     // =====================================================================
     // CRITICAL TEST 1 — recursion-lock: AgentTool passes parent's
     // Arc<ToolRegistry> verbatim into the child via SubagentInheritance.
@@ -411,6 +490,187 @@ mod tests {
             Arc::ptr_eq(&parent_budget, captured),
             "budget inheritance: child must inherit parent's Arc<dyn BudgetEnforcerHandle> verbatim"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn agent_tool_producer_attaches_the_session_owner_to_both_spawn_modes() {
+        let _guard = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+
+        for run_in_background in [false, true] {
+            let session_id = lingxi_core::types::SessionId::nil();
+            let statistics =
+                Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+            let registry: Arc<dyn TaskRegistryHandle> = Arc::new(AgentStatisticsTaskRegistry {
+                inner: arc_mock_task_registry(),
+                session_id,
+                statistics: statistics.clone(),
+            });
+            let spawner = arc_mock_spawner();
+            let tool = AgentTool::new(statistics_wired_ctx(
+                spawner.clone(),
+                registry,
+                arc_mock_budget(u64::MAX),
+            ));
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.origin_session_id = Some(session_id);
+
+            tool.call(
+                serde_json::json!({
+                    "description": "inspect",
+                    "subagent_type": "general-purpose",
+                    "prompt": "inspect the repository",
+                    "run_in_background": run_in_background,
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect("the recording spawner accepts both launch modes");
+
+            let invocations = spawner.invocations();
+            assert_eq!(invocations.len(), 1);
+            let request = &invocations[0].request;
+            assert_eq!(request.run_in_background, run_in_background);
+            let token = request
+                .agent_spawn_token
+                .as_ref()
+                .expect("AgentTool attaches its session statistics token");
+            assert!(
+                Arc::ptr_eq(&statistics, &token.statistics()),
+                "the request token must retain this session's statistics owner"
+            );
+            assert_eq!(
+                statistics.snapshot(),
+                Default::default(),
+                "preparing a token must not count an unstarted request"
+            );
+
+            // The mock spawner records the request but does not own a worker
+            // startup gate. Exercise the exact token it received; B's real
+            // spawner tests cover the gate and terminal callbacks.
+            token.started();
+            token.completed();
+            let snapshot = statistics.snapshot();
+            assert_eq!(snapshot.spawned, 1);
+            assert_eq!(
+                snapshot.requested.foreground,
+                if run_in_background { 0 } else { 1 }
+            );
+            assert_eq!(
+                snapshot.requested.background,
+                if run_in_background { 1 } else { 0 }
+            );
+            assert_eq!(
+                snapshot.started_in_background,
+                if run_in_background { 1 } else { 0 }
+            );
+            assert_eq!(snapshot.max_depth, 1);
+            assert_eq!(snapshot.completed, 1);
+            assert_eq!(snapshot.by_type, vec![("general-purpose".into(), 1)]);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn agent_tool_pool_full_refusal_does_not_count_as_a_spawn() {
+        let _guard = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+
+        let session_id = lingxi_core::types::SessionId::nil();
+        let statistics =
+            Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+        let registry: Arc<dyn TaskRegistryHandle> = Arc::new(AgentStatisticsTaskRegistry {
+            inner: arc_mock_task_registry(),
+            session_id,
+            statistics: statistics.clone(),
+        });
+        let spawner = arc_mock_spawner();
+        spawner.script_pool_full();
+        let tool = AgentTool::new(statistics_wired_ctx(
+            spawner.clone(),
+            registry,
+            arc_mock_budget(u64::MAX),
+        ));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.origin_session_id = Some(session_id);
+
+        let result = tool
+            .call(
+                serde_json::json!({
+                    "description": "inspect",
+                    "subagent_type": "general-purpose",
+                    "prompt": "inspect the repository",
+                    "run_in_background": false,
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await;
+        assert!(matches!(result, Err(ToolError::InvalidInput(_))));
+
+        let invocations = spawner.invocations();
+        assert_eq!(invocations.len(), 1, "the race occurs after admission");
+        let token = invocations[0]
+            .request
+            .agent_spawn_token
+            .as_ref()
+            .expect("the admitted request carries its statistics token");
+        assert!(Arc::ptr_eq(&statistics, &token.statistics()));
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.spawned, 0);
+        assert_eq!(snapshot.requested, Default::default());
+        assert_eq!(snapshot.refused.concurrency_limit, 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn agent_tool_budget_refusal_records_without_preparing_a_spawn() {
+        let _guard = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
+        std::env::remove_var("LINGXI_FORK_SUBAGENT");
+
+        let session_id = lingxi_core::types::SessionId::nil();
+        let statistics =
+            Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+        let registry: Arc<dyn TaskRegistryHandle> = Arc::new(AgentStatisticsTaskRegistry {
+            inner: arc_mock_task_registry(),
+            session_id,
+            statistics: statistics.clone(),
+        });
+        let spawner = arc_mock_spawner();
+        let budget = arc_mock_budget(1);
+        budget.set_total(2);
+        let tool = AgentTool::new(statistics_wired_ctx(spawner.clone(), registry, budget));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.origin_session_id = Some(session_id);
+
+        let result = tool
+            .call(
+                serde_json::json!({
+                    "description": "inspect",
+                    "subagent_type": "general-purpose",
+                    "prompt": "inspect the repository",
+                    "run_in_background": false,
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await;
+        assert!(matches!(result, Err(ToolError::InvalidInput(_))));
+        assert!(spawner.invocations().is_empty());
+        let snapshot = statistics.snapshot();
+        assert_eq!(snapshot.spawned, 0);
+        assert_eq!(snapshot.refused.budget, 1);
     }
 
     // =====================================================================
@@ -1498,7 +1758,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .unwrap();
         let result = tool
             .call(
-                input,
+                projection_value(&input),
                 fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
@@ -1524,7 +1784,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let tool = implement_tool(fusion.clone());
         for mode in ["implement", "rewrite"] {
             let err = tool
-                .call(fusion_input(Some(mode)), ctx(), fresh_tx())
+                .call(
+                    projection_value(&fusion_input(Some(mode))),
+                    ctx(),
+                    fresh_tx(),
+                )
                 .await
                 .unwrap_err();
             assert!(matches!(err, ToolError::InvalidInput(_)), "{mode}: {err:?}");
@@ -7732,9 +7996,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let parsed = super::super::agent_output::parse(&output, false)
             .expect("Zod-compatible output parses");
         assert_eq!(parsed.string_units("/content/0/text"), Some(vec![0xd800]));
-        assert_eq!(parsed.at_pointer("/ignored"), None);
-        assert_eq!(parsed.at_pointer("/content/0/ignored"), None);
-        assert_eq!(parsed.at_pointer("/usage/ignored"), None);
+        assert!(parsed.at_pointer("/ignored").is_none());
+        assert!(parsed.at_pointer("/content/0/ignored").is_none());
+        assert!(parsed.at_pointer("/usage/ignored").is_none());
     }
 
     #[test]
@@ -7757,7 +8021,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let parsed =
             super::super::agent_output::parse(&output, false).expect("async branch parses");
         assert_eq!(parsed.string_at("/status"), Some("async_launched"));
-        assert_eq!(parsed.at_pointer("/ignored"), None);
+        assert!(parsed.at_pointer("/ignored").is_none());
         assert_eq!(
             parsed
                 .at_pointer("/canReadOutputFile")

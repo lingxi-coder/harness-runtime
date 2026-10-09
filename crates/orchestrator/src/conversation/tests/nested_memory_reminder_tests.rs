@@ -1,8 +1,8 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
@@ -113,13 +113,12 @@ async fn eviction_from_read_state_does_not_resurrect_a_sent_file() {
     touch(&mem, "pkg guidance");
     let orch = orch(&f);
     push_touched(&orch, &f.trigger);
-    assert!(
-        orch.nested_memory_reminder_messages()
-            .await
-            .into_iter()
-            .next()
-            .is_some()
-    );
+    assert!(orch
+        .nested_memory_reminder_messages()
+        .await
+        .into_iter()
+        .next()
+        .is_some());
 
     // Simulate the LRU dropping the seeded entry.
     let canon = std::fs::canonicalize(&mem).unwrap();
@@ -160,13 +159,12 @@ async fn surfacing_seeds_read_state_so_a_later_read_dedups() {
     touch(&mem, "pkg guidance");
     let orch = orch(&f);
     push_touched(&orch, &f.trigger);
-    assert!(
-        orch.nested_memory_reminder_messages()
-            .await
-            .into_iter()
-            .next()
-            .is_some()
-    );
+    assert!(orch
+        .nested_memory_reminder_messages()
+        .await
+        .into_iter()
+        .next()
+        .is_some());
 
     let entry = tool_api::read_file_state::get(
         &orch.prompt_runtime.read_state_map,

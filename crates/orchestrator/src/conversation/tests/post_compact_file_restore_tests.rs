@@ -1,18 +1,33 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex as StdMutex};
-use tool_api::read_file_state::{ReadFileEntry, set};
+use tool_api::read_file_state::{set, ReadFileEntry};
 use tool_api::registry::ToolRegistry;
+use tracing::field::Field;
 use tracing::Event;
 use tracing::Subscriber;
-use tracing::field::Field;
-use tracing_subscriber::Registry;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::Registry;
+
+type SourceJson = lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+fn source_json(value: &serde_json::Value) -> SourceJson {
+    SourceJson::from_serde_value(value).expect("test JSON is valid source")
+}
+
+fn assert_source_at_eq(source: &SourceJson, pointer: &str, expected: &serde_json::Value) {
+    assert_eq!(
+        source
+            .subprojection(pointer)
+            .expect("expected source field"),
+        source_json(expected)
+    );
+}
 
 fn stale_entry(content: &str) -> ReadFileEntry {
     ReadFileEntry {
@@ -291,7 +306,7 @@ async fn preserved_read_tool_use_prevents_file_restore() {
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::new(),
             name: "Read".to_string(),
-            input: serde_json::json!({"file_path": path}),
+            input: source_json(&serde_json::json!({"file_path": path})),
             provider_id: None,
         }],
         stop_reason: None,
@@ -356,7 +371,7 @@ async fn preserved_unchanged_read_stub_does_not_hide_the_missing_file_content() 
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: id.clone(),
             name: "Read".into(),
-            input: serde_json::json!({"file_path": path}),
+            input: source_json(&serde_json::json!({"file_path": path})),
             provider_id: Some("toolu-native-id".into()),
         }],
 
@@ -409,11 +424,11 @@ async fn file_restore_uses_utf16_rounding_and_dense_json_token_limits() {
         assert_eq!(restored.len(), 1, "{name}");
         let attachments = orch.transcript.model_reminder_attachments.lock().unwrap();
         assert_eq!(
-            attachments[&restored[0].id()]["type"],
+            attachments[&restored[0].id()].string_at("/type"),
             if reference {
-                "compact_file_reference"
+                Some("compact_file_reference")
             } else {
-                "file"
+                Some("file")
             }
         );
         drop(attachments);
@@ -517,7 +532,7 @@ async fn only_meta_text_bodies_suppress_skill_registry_truncation() {
             compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None),
         );
         assert_eq!(
-            rows[0].content == body,
+            rows[0].content.string_at("") == Some(body.as_str()),
             is_meta,
             "only meta-user text joined with a blank line matches the native Lle body"
         );
@@ -583,11 +598,9 @@ async fn memory_entrypoints_are_excluded_but_nested_memory_files_can_restore() {
     let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
     let restored = orch.restore_post_compact_attachments().await;
     assert_eq!(restored.len(), 1);
-    assert!(
-        restored[0]
-            .text_content()
-            .contains(&format!("nested/{}", branding::MEMORY_FILE))
-    );
+    assert!(restored[0]
+        .text_content()
+        .contains(&format!("nested/{}", branding::MEMORY_FILE)));
     assert_eq!(restore_names(&sink.events().await).len(), 1);
 }
 
@@ -742,10 +755,10 @@ async fn current_native_nested_seeds_restore_one_durable_file_for_kept_and_disca
         expected["content"]["file"]["filePath"] = serde_json::json!(path);
         let raw =
             orch.transcript.model_reminder_attachments.lock().unwrap()[&restored[0].id()].clone();
-        assert_eq!(raw, expected);
+        assert_eq!(raw, source_json(&expected));
         assert_eq!(
-            serde_json::to_vec(&raw).unwrap(),
-            serde_json::to_vec(&expected).unwrap()
+            raw.to_json_string().unwrap(),
+            serde_json::to_string(&expected).unwrap()
         );
         orch.persist_message_to_jsonl(&restored[0]).await;
         let bytes = tokio::fs::read_to_string(&jsonl).await.unwrap();
@@ -756,8 +769,11 @@ async fn current_native_nested_seeds_restore_one_durable_file_for_kept_and_disca
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].message_type, "attachment");
         assert_eq!(rows[1].uuid, restored[0].id().as_uuid().to_string());
-        assert!(rows[1].message.is_null());
-        assert_eq!(rows[1].extra["attachment"], expected);
+        assert!(rows[1]
+            .message
+            .at_pointer("")
+            .is_some_and(|value| value.is_null()));
+        assert_source_at_eq(&rows[1].extra, "/attachment", &expected);
         let fresh = tool_api::read_file_state::get(&map, &path).unwrap();
         assert_eq!(fresh.content, body);
         assert!(fresh.from_read);
@@ -788,14 +804,15 @@ async fn current_native_nested_seeds_restore_one_durable_file_for_kept_and_disca
         ctx.read_file_state = map;
         let reread = tool_file::FileReadTool::new(ctx)
             .call(
-                serde_json::json!({"file_path": path}),
+                source_json(&serde_json::json!({"file_path": path})),
                 tool_api::test_support::fresh_ctx(),
                 tool_api::test_support::fresh_tx(),
             )
             .await
             .unwrap();
         assert_eq!(
-            reread.data["type"], "file_unchanged",
+            reread.data.string_at("/type"),
+            Some("file_unchanged"),
             "the internal full-Read offset mapping must still dedup a real subsequent Read"
         );
     }
@@ -847,8 +864,8 @@ async fn current_restore_excludes_five_eager_entrypoints_and_only_direct_artifac
     let filenames = restored
         .iter()
         .map(|message| {
-            sidecars[&message.id()]["filename"]
-                .as_str()
+            sidecars[&message.id()]
+                .string_at("/filename")
                 .unwrap()
                 .to_owned()
         })
@@ -888,10 +905,16 @@ async fn current_full_text_restore_normalizes_body_and_counts_the_final_fragment
         assert_eq!(restored.len(), 1);
         let payload =
             orch.transcript.model_reminder_attachments.lock().unwrap()[&restored[0].id()].clone();
-        assert_eq!(payload["content"]["file"]["content"], body);
-        assert_eq!(payload["content"]["file"]["numLines"], lines);
-        assert_eq!(payload["content"]["file"]["totalLines"], lines);
-        assert_eq!(payload["content"]["file"]["startLine"], 1);
+        assert_eq!(payload.string_at("/content/file/content"), Some(body));
+        assert_eq!(
+            payload.number_at("/content/file/numLines"),
+            Some(f64::from(lines))
+        );
+        assert_eq!(
+            payload.number_at("/content/file/totalLines"),
+            Some(f64::from(lines))
+        );
+        assert_eq!(payload.number_at("/content/file/startLine"), Some(1.0));
         assert_eq!(
             tool_api::read_file_state::get(&map, &path).unwrap().content,
             body
@@ -916,8 +939,8 @@ async fn equal_timestamp_restore_limit_keeps_native_cache_mru_order() {
     let paths = restored
         .iter()
         .map(|message| {
-            sidecars[&message.id()]["filename"]
-                .as_str()
+            sidecars[&message.id()]
+                .string_at("/filename")
                 .unwrap()
                 .to_owned()
         })
@@ -966,7 +989,7 @@ async fn cancelled_compact_keeps_model_visible_read_state_untouched() {
         media_analysis_to_preserve: Vec::new(),
         compaction_usage: None,
         compaction_model: None,
-        raw_summary_text: "test summary".to_string(),
+        raw_summary_text: "test summary".into(),
     };
 
     let applied = orch
@@ -1020,7 +1043,7 @@ async fn apply_post_compact_clears_cached_git_status() {
         media_analysis_to_preserve: Vec::new(),
         compaction_usage: None,
         compaction_model: None,
-        raw_summary_text: "test summary".to_string(),
+        raw_summary_text: "test summary".into(),
     };
 
     let applied = orch

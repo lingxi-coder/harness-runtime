@@ -1,0 +1,46 @@
+{
+  "capture-receipt.raw.json": {
+    "bytes": 6107,
+    "sha256": "397e8a2913343efd8ff8e36b9d26a67baf54512660e6362f9ceaf04c8f8823e2"
+  },
+  "cases.json": {
+    "bytes": 591,
+    "sha256": "023916d1222154ba351c9bcfbcf4dc5a010e305cf281d295d3de12d2f43ee2ad"
+  },
+  "model-request-01.raw.json": {
+    "bytes": 112427,
+    "sha256": "326eb1c49af6bd088e73a22587786e5665abf695de90b7bc4225ec679af44729"
+  },
+  "model-request-02.raw.json": {
+    "bytes": 112911,
+    "sha256": "0b9361f6d8bdca45aca39209c94f3c1a575c67697fe5dd03e1c1fa00b0d73d98"
+  },
+  "model-response-01.raw.sse": {
+    "bytes": 959,
+    "sha256": "e65531e51add117e0f5b6cdca84470c971bbaf08273a1fcd5bd0124223f1b8aa"
+  },
+  "model-response-02.raw.sse": {
+    "bytes": 815,
+    "sha256": "550d7f2a791d0fbe89d279a1b1c0c34178443387539046ff394b3f1e66636796"
+  },
+  "model-tool-result-bash.raw.json": {
+    "bytes": 269,
+    "sha256": "efd0c0c180f54c3de56cbb05b4188a8651c1ca198cc930da0b07178deeb04b95"
+  },
+  "native-session.raw.jsonl": {
+    "bytes": 213724,
+    "sha256": "6a12ca5b6114d52c0faccbd0984a976432168a8c4d39fba445142abe1419dfde"
+  },
+  "native.stderr.raw": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "native.stdout.raw.json": {
+    "bytes": 1603,
+    "sha256": "90656df18dd6fda5b6c49d1b7f80fd2a1b2eba935727f498b52af8b9251f6fc1"
+  },
+  "run-native.py": {
+    "bytes": 15773,
+    "sha256": "9ac74dcbba1bab3f043e0d8201133942d6a3de69bcc5c2e5ffda8b60239e78ba"
+  }
+}

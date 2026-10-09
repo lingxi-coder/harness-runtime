@@ -1,0 +1,177 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "native_entrypoint": "Native 2.1.295 --print --output-format json, strict isolated --mcp-config, local stdio MCP modern discovery with tools.listChanged=true, loopback Messages stub",
+  "native_exit_code": 0,
+  "timed_out": false,
+  "elapsed_seconds": 1.116,
+  "native_result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "NATIVE_MCP_LISTENER_PROBE_FINISHED",
+    "num_turns": 2,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-4000-8000-000000002298"
+  },
+  "mcp_observation": {
+    "incoming": {
+      "path": "mcp-trace/mcp-stdio-in.raw.jsonl",
+      "bytes": 2813,
+      "sha256": "b8be326e7b21eaa7b4b515cafd96722ee3cdf9a8ec6b8c0c107b15f2a050ea93"
+    },
+    "outgoing": {
+      "path": "mcp-trace/mcp-stdio-out.raw.jsonl",
+      "bytes": 1269,
+      "sha256": "6489b78dea8bc12c3c1fd099312718e66b9fbc7d929c8e72910874713aedb9a4"
+    },
+    "methods": [
+      "server/discover",
+      "subscriptions/listen",
+      "prompts/list",
+      "resources/list",
+      "tools/list",
+      "tools/call"
+    ],
+    "subscriptions_listen_requests": 1,
+    "subscriptions_listen_request_paths": [
+      "mcp-trace/subscriptions-listen-request.raw.jsonrpc"
+    ],
+    "listener_error_signal_seen": true,
+    "tools_list_request_count": 1,
+    "tools_call_requests": 1,
+    "tools_call_names": [
+      "listener_probe"
+    ]
+  },
+  "anthropic_messages_requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 114977,
+      "request_sha256": "41295539938659dbc9332f26a608b9d96f8a66fd917e202fa8f1a7f4ccd99270",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "mcp_tool_names": [
+        "mcp__fixture__listener_probe"
+      ],
+      "subscriptions_listen_error_seen_before_model_response": true
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 115374,
+      "request_sha256": "46df316c51e3fea7d59fa6b1c21829559475a4a3bfb8d35741fa6ed99d132683",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "mcp_tool_names": [
+        "mcp__fixture__listener_probe"
+      ],
+      "fixture_tool_result_present": true
+    }
+  ],
+  "network_boundary": {
+    "model_endpoint": "127.0.0.1 loopback only",
+    "mcp_transport": "local stdio subprocess only",
+    "dummy_api_key_only": true,
+    "isolated_home_config": true,
+    "no_upstream_relay": true
+  },
+  "conclusion": {
+    "listener_response": "Native issued one subscriptions/listen request with toolsListChanged=true. The local server returned JSON-RPC error code -32000, message ECONNRESET.",
+    "post_error_behavior": "After the error response, Native retained the catalog tool in its model-visible tool list and invoked it once on the same stdio process. The server trace contains no second server/discover, subscriptions/listen, or tools/list request.",
+    "model_turn": "The model stub was held until the listener error response had been written; the first model request confirmed the tool was advertised, then Native executed tools/call and completed successfully.",
+    "scope": "One fixed public Native 2.1.295 stdio MCP case. This does not characterize actual socket loss, retry policy, or other server failures."
+  },
+  "artifacts": {
+    "capture-receipt.raw.json": {
+      "bytes": 5990,
+      "sha256": "95d3b91d9133e768c06303959270be5c73985f21fb71665efe0bf1927078428c"
+    },
+    "cases.json": {
+      "bytes": 645,
+      "sha256": "8514075597d190a93cd15110d145658548cc4052a2fad296217ea2e8fff6d549"
+    },
+    "mcp-config.raw.json": {
+      "bytes": 757,
+      "sha256": "b7e273679e7bad74ba7f3337f0f4eef9464c701db0b8741c72da0cdb3c964bf1"
+    },
+    "mcp-stdio-in.raw.jsonl": {
+      "bytes": 2813,
+      "sha256": "b8be326e7b21eaa7b4b515cafd96722ee3cdf9a8ec6b8c0c107b15f2a050ea93"
+    },
+    "mcp-stdio-out.raw.jsonl": {
+      "bytes": 1269,
+      "sha256": "6489b78dea8bc12c3c1fd099312718e66b9fbc7d929c8e72910874713aedb9a4"
+    },
+    "model-request-01.raw.json": {
+      "bytes": 114977,
+      "sha256": "41295539938659dbc9332f26a608b9d96f8a66fd917e202fa8f1a7f4ccd99270"
+    },
+    "model-request-02.raw.json": {
+      "bytes": 115374,
+      "sha256": "46df316c51e3fea7d59fa6b1c21829559475a4a3bfb8d35741fa6ed99d132683"
+    },
+    "model-response-01.raw.sse": {
+      "bytes": 891,
+      "sha256": "9acae4ee91c31660a44cd535763303c95e037f4df58af65bd09f2d74cf58fc01"
+    },
+    "model-response-02.raw.sse": {
+      "bytes": 801,
+      "sha256": "1cbc45812e1f2db6bc9601b80dd9a40e1021fb745ac686f45a753b0fab839467"
+    },
+    "native-mcp-debug.raw.jsonl": {
+      "bytes": 2428,
+      "sha256": "b6b3151e8faae47fd8e6975a4acdbc9c6533049a668e9b97ddf3be9de030fb14"
+    },
+    "native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native.stdout.raw.json": {
+      "bytes": 1599,
+      "sha256": "f89ddea068bb3974e600cf3765f9760a40e3abd28475320830c69324a97451cf"
+    },
+    "prompts-list-response.raw.jsonrpc": {
+      "bytes": 105,
+      "sha256": "16442dfff189fdbf79f7bbab3f9b15d3e581e96a92b0867ca6f86eedb8ac813f"
+    },
+    "resources-list-response.raw.jsonrpc": {
+      "bytes": 107,
+      "sha256": "54caee3bd030c4b00eee7c9e783e3a0a3d5533b23e6245cbfe1e4667d44b5c2a"
+    },
+    "run-native.py": {
+      "bytes": 13200,
+      "sha256": "b5848d3d7f295a569f140001dd1e0b52e60679a6c747c9a7543449219be3d48b"
+    },
+    "server-discover-response.raw.jsonrpc": {
+      "bytes": 399,
+      "sha256": "a7d63bb56de4fc234c229ea44a8b11b8b60ad3ad56c772b5dc528e7d4d74833a"
+    },
+    "stdio_server.py": {
+      "bytes": 4220,
+      "sha256": "e479374e7fac0f9c1a2352219a0d1ee69eec7407eec0a6faf8bb28e437a15a08"
+    },
+    "subscriptions-listen-error-response.raw.jsonrpc": {
+      "bytes": 80,
+      "sha256": "529a512e48c6b544bfccb4979d25349983b46c900f12a6f23c11a0dc1e6dd263"
+    },
+    "subscriptions-listen-request.raw.jsonrpc": {
+      "bytes": 490,
+      "sha256": "efdcd23231a1e2482f6c1770796bc34f1b94c9d0a9bd5bcff278d6f63ff8d5af"
+    },
+    "tools-call-response.raw.jsonrpc": {
+      "bytes": 226,
+      "sha256": "4558c63a2d979dfbf897421f6684382b9a4514889d39c03bbb238063f696b9ff"
+    },
+    "tools-list-response.raw.jsonrpc": {
+      "bytes": 346,
+      "sha256": "90ce1be9281ba5e8c2a6a630424f09cf002b3d09cbafc4aed69353cec50d1a57"
+    }
+  },
+  "raw_run_output": "run-output/native-mcp-listen-error-295-389y0_uh (ignored local capture; config/.claude.json intentionally not copied)"
+}

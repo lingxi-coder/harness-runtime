@@ -33,17 +33,17 @@ fn version_is_semver() {
     }
 }
 
-/// Major 18 adds the current Mod UI request/result and targeted invalidation
-/// protocol. This is a deliberate second lock beyond the structural guard
-/// because generated native bindings change and the host requires protocol
-/// version lockstep.
+/// Major 21 includes the Major 20 required provider stop_reason and retypes
+/// existing UI/app-agent text fields to `ClientTextDto`. The protocol bindings
+/// and host must advance together; this is a deliberate second lock beyond the
+/// structural guard.
 ///
 /// This test is the deliberate second lock on the version: the structural guard
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_eighteen_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "19.0.0");
+fn version_is_twenty_one_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "21.0.0");
 }
 
 fn repository_root() -> PathBuf {

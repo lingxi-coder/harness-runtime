@@ -1,0 +1,33 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "8868447db69e653af7132658715f546c5be76afa16c3e13a5a967c247eac45c2",
+  "fixed_input": {
+    "skill_name": "native-width-probe",
+    "description_mode": "ascii",
+    "description_utf16_units": 1200,
+    "description_utf8_sha256": "4d21dde662555b99cb697061c3b5041108dedb8825a4bc5858737afbf640e492",
+    "description_ascii_a_count": 1200,
+    "cwd_isolated": true,
+    "home_config_isolated": true,
+    "model": "claude-sonnet-4-5",
+    "prompt": "Return the fixed skill-width probe response."
+  },
+  "request": {
+    "json_pointer": "$.messages[0].content[3].text",
+    "bytes": 125947,
+    "sha256": "0779db02c6d58d3eee320e9ace9638bf549ef430a2fc7247e822c84e28032ca3",
+    "path_from_harness_repo_root": "docs/parity/current-alignment/fixtures/commands/skill-description-width/run-output/ascii-1200-current/request.full.raw.json"
+  },
+  "line_slice": {
+    "file": "skill-listing-line.raw.txt",
+    "marker": "- native-width-probe: ",
+    "byte_offset_zero_based": 3928,
+    "bytes": 1222,
+    "sha256": "ee55bd3eac0921c8fdf355e4d1bceffb4214a92e222d07f3518d2ee9e5757e74",
+    "trailing_newline": false,
+    "description_ascii_a_count": 1200,
+    "ellipsis_present": false,
+    "extraction": "Raw byte slice from the first marker through the byte before the next JSON newline escape; no decode or reserialization."
+  }
+}

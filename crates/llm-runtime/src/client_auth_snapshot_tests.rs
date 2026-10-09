@@ -3,7 +3,7 @@ use super::*;
 use crate::{Capabilities, ModelProfile, PricingConfig, ProviderProfile, SigningConfig};
 use futures::StreamExt;
 use lingxi_llm_client::{self as sdk, protocol as wire};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 const WAIT: Duration = Duration::from_secs(3);
@@ -992,11 +992,9 @@ async fn assert_public_prepare_prewarm_account_snapshot(explicit_clock: bool) {
         assert_eq!(send.authorization, format!("Bearer {token}"));
         assert_eq!(send.body["model"], "snapshot-model");
         assert_eq!(send.body["generate"], false);
-        assert!(
-            send.body["input"]
-                .to_string()
-                .contains("public prepared input")
-        );
+        assert!(send.body["input"]
+            .to_string()
+            .contains("public prepared input"));
         assert!(send.body.get("query_source").is_none());
         assert!(send.body.get("account_scope").is_none());
         assert!(send.body.get("previous_response_id").is_none());
@@ -1288,16 +1286,14 @@ async fn chatgpt_host_seal_keeps_exact_text_and_applies_final_body_policy() {
         sealed_auth(&prepared),
         "Bearer synthetic-chatgpt-access-token"
     );
-    assert!(
-        prepared
-            .provider_request
-            .headers
-            .iter()
-            .any(
-                |(name, value)| name.eq_ignore_ascii_case("chatgpt-account-id")
-                    && value == "synthetic-chatgpt-account"
-            )
-    );
+    assert!(prepared
+        .provider_request
+        .headers
+        .iter()
+        .any(
+            |(name, value)| name.eq_ignore_ascii_case("chatgpt-account-id")
+                && value == "synthetic-chatgpt-account"
+        ));
     let call = prepared.wire_call.as_ref().unwrap();
     let wire = std::str::from_utf8(&call.request().body).unwrap();
     assert!(wire.contains("\\ud800"), "{wire}");

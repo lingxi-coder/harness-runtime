@@ -1768,9 +1768,8 @@ mod tests {
                 },
             )
             .await;
-        let prompt = tool
-            .prompt(&PromptOptions::default())
-            .await
+        let prompt_source = tool.prompt(&PromptOptions::default()).await;
+        let prompt = prompt_source
             .string_at("")
             .expect("generated prompt is a root string");
         assert_eq!(desc, prompt);

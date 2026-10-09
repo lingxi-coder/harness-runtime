@@ -25,18 +25,28 @@ impl Tool for Probe {
     fn name(&self) -> &str {
         "Probe"
     }
-    fn input_schema(&self) -> &Value {
-        static SCHEMA: once_cell::sync::Lazy<Value> =
-            once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(&json!({"type":"object"}))
+            });
         &SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
@@ -44,7 +54,7 @@ impl Tool for Probe {
     }
     async fn check_permissions(
         &self,
-        _: &Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -56,7 +66,11 @@ impl Tool for Probe {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &DescriptionOptions,
+    ) -> String {
         String::new()
     }
     async fn prompt(
@@ -67,12 +81,14 @@ impl Tool for Probe {
     }
     async fn call(
         &self,
-        _: Value,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         ctx: ToolUseContext,
         _: tool_api::progress::ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         *self.0.lock().unwrap() = Some(ctx.observer_pairings.clone());
-        Ok(ToolCallResult::from_data(json!({"ok": true})))
+        Ok(ToolCallResult::from_data(
+            tool_api::tool_trait::generated_builtin_result(&json!({"ok": true})),
+        ))
     }
 }
 
@@ -93,7 +109,12 @@ async fn dispatch_with(table: Option<Arc<ObserverPairings>>) -> Option<Arc<Obser
     if let Some(table) = table {
         orch = orch.with_observer_pairings(table);
     }
-    let uses = vec![(ToolUseId::new(), "Probe".to_string(), json!({}), None)];
+    let uses = vec![(
+        ToolUseId::new(),
+        "Probe".to_string(),
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+        None,
+    )];
     let (blocks, ..) = dispatch_tool_uses_tracked(&orch, &uses, None)
         .await
         .expect("dispatch must succeed");

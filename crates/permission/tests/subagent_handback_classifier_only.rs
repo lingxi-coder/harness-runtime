@@ -75,8 +75,8 @@ impl LoopPermissionClassifier for ScriptedQueries {
                 self,
                 "SubagentHandback",
                 vec![
-                    serde_json::to_string(&request.transcript).unwrap(),
-                    request.action.clone(),
+                    serde_json::to_string(&request.transcript).unwrap().into(),
+                    request.action.clone().into(),
                 ],
             )
             .await,

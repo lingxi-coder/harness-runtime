@@ -43,7 +43,7 @@ impl PermissionGate for LiveModeGate {
     async fn check(
         &self,
         _tool_name: &str,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> lingxi_core::host::PermissionDecision {
         lingxi_core::host::PermissionDecision::Allow
     }
@@ -68,32 +68,48 @@ impl Tool for NamedTool {
     fn name(&self) -> &str {
         self.0
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-        SCHEMA.get_or_init(|| json!({ "type": "object", "properties": {} }))
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: std::sync::OnceLock<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            tool_api::tool_trait::generated_builtin_result(
+                &json!({ "type": "object", "properties": {} }),
+            )
+        })
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -105,7 +121,11 @@ impl Tool for NamedTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         self.0.into()
     }
     async fn prompt(
@@ -116,17 +136,18 @@ impl Tool for NamedTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: json!({ "content": "ok" }),
+            data: tool_api::tool_trait::generated_builtin_result(&json!({ "content": "ok" })),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -155,11 +176,7 @@ async fn wire_tool_names(orch: &ConversationOrchestrator) -> Vec<String> {
         .await
         .0
         .into_iter()
-        .filter_map(|t| {
-            t.get("name")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
+        .map(|tool| tool.name)
         .collect()
 }
 

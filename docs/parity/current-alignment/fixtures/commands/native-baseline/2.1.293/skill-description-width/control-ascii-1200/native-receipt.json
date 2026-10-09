@@ -1,0 +1,92 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "8868447db69e653af7132658715f546c5be76afa16c3e13a5a967c247eac45c2",
+  "skill_source_sha256": "4577d58a997cc586f3ad085fdf71c44b5cd82d04d70fda15885173eefaa4291b",
+  "skill_source_bytes": 1288,
+  "fixed_input": {
+    "skill_name": "native-width-probe",
+    "description_mode": "ascii",
+    "description_utf16_units": 1200,
+    "description_utf8_sha256": "4d21dde662555b99cb697061c3b5041108dedb8825a4bc5858737afbf640e492",
+    "description_ascii_a_count": 1200,
+    "cwd_isolated": true,
+    "home_config_isolated": true,
+    "model": "claude-sonnet-4-5",
+    "prompt": "Return the fixed skill-width probe response."
+  },
+  "argv": [
+    "$CLAUDE_NATIVE_BINARY",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--print",
+    "--no-session-persistence",
+    "--tools",
+    "default",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000003091",
+    "Return the fixed skill-width probe response."
+  ],
+  "loopback_only_dummy_key": true,
+  "timed_out": false,
+  "exit_code": 0,
+  "requests": [
+    {
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "bytes": 125947,
+      "sha256": "0779db02c6d58d3eee320e9ace9638bf549ef430a2fc7247e822c84e28032ca3"
+    }
+  ],
+  "response": {
+    "path": "response.raw.sse",
+    "bytes": 829,
+    "sha256": "153a3176b95267ee0c0a0731d6802e2989355221097d19ea6b1df0173280545e"
+  },
+  "system_field_raw": {
+    "path": "system-field.raw.json",
+    "bytes": 27920,
+    "sha256": "69c02d23330df4c26970b12306c30095a0bc5056d09261286ca1e0af979b325c"
+  },
+  "listing_observation": {
+    "skill_name_found_in_system": false,
+    "system_occurrences": 0,
+    "request_occurrences": 1,
+    "string_matches": [
+      {
+        "json_path": "$.messages[0].content[3].text",
+        "decoded_excerpt": "- native-width-probe: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "excerpt_code_points": 1222,
+        "ascii_a_count": 1201,
+        "max_ascii_a_run": 1200,
+        "replacement_character_count": 0,
+        "ellipsis_present": false
+      }
+    ],
+    "source_description_literal_present_in_request": true,
+    "ascii_tail_present_in_request": true,
+    "system_blocks": 3
+  },
+  "source_description_literal_present_in_request": true,
+  "ascii_tail_present_in_request": true,
+  "skill_bearing_request_excerpt": {
+    "path": "skill-bearing-request.raw-excerpt.bin",
+    "bytes": 1152,
+    "sha256": "814928eaa0018586a75dbed3e079573d39ae76fd814f3fa441dc9bb2a0bd3b8a"
+  },
+  "full_request_remains_in_ignored_run_output": true,
+  "stdout": {
+    "path": "native.stdout.raw",
+    "bytes": 33,
+    "sha256": "4918dcb422869014fe127ead3d9abbc5726405f14880af3f24dc3c98c805f8c3"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

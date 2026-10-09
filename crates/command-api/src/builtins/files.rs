@@ -155,7 +155,7 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = FilesHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "No files in context");
+            assert_eq!(s.string_at(""), Some("No files in context"));
         } else {
             panic!();
         }
@@ -180,7 +180,10 @@ mod tests {
         });
         let h = FilesHandler::new(Arc::new(mock));
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Files in context:\nsrc/a.rs\nCargo.toml");
+            assert_eq!(
+                s.string_at(""),
+                Some("Files in context:\nsrc/a.rs\nCargo.toml")
+            );
         } else {
             panic!();
         }

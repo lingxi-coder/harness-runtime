@@ -248,8 +248,8 @@ def main() -> int:
     version_result = subprocess.run([str(BINARY), "--version"], capture_output=True, timeout=15, check=False)
     version_text = (version_result.stdout + version_result.stderr).decode("utf-8", errors="backslashreplace").strip()
     version = version_text.split(" ", 1)[0]
-    if version_result.returncode != 0 or version not in ("2.1.293", "2.1.294"):
-        raise SystemExit(f"Expected Native 2.1.293 or 2.1.294, got {version_text!r}")
+    if version_result.returncode != 0 or version not in ("2.1.293", "2.1.294", "2.1.295"):
+        raise SystemExit(f"Expected Native 2.1.293, 2.1.294, or 2.1.295, got {version_text!r}")
     binary_hash = sha256(BINARY.read_bytes())
     expected_hash = FIXTURE["native_binary_hashes"][version]
     if binary_hash != expected_hash:

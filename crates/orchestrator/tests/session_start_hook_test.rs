@@ -77,15 +77,20 @@ struct TestModSettingsReader;
 impl hooks::mods::ModSettingsReader for TestModSettingsReader {
     async fn read(
         &self,
-        input: serde_json::Value,
-    ) -> Result<serde_json::Value, hooks::mods::ModError> {
-        assert_eq!(input, serde_json::json!({"source":"policy"}));
-        Ok(serde_json::json!({"custom":"managed"}))
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, hooks::mods::ModError> {
+        assert_eq!(input.to_json_string().unwrap(), r#"{"source":"policy"}"#);
+        Ok(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"custom":"managed"}),
+            )
+            .expect("generated settings are representable"),
+        )
     }
 }
 
 struct ListedTool {
-    schema: serde_json::Value,
+    schema: lingxi_core::types::utf16_json::Utf16JsonProjection,
 }
 
 #[async_trait]
@@ -94,8 +99,18 @@ impl Tool for ListedTool {
         "Inspector"
     }
 
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         &self.schema
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -106,17 +121,20 @@ impl Tool for ListedTool {
         1024
     }
 
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
 
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
 
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -129,7 +147,11 @@ impl Tool for ListedTool {
         }
     }
 
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "Inspect the current repository.".into()
     }
 
@@ -142,16 +164,17 @@ impl Tool for ListedTool {
 
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: tool_api::progress::ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: serde_json::json!({}),
+            data: tool_api::tool_trait::generated_builtin_result(&serde_json::json!({})),
             model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
@@ -173,8 +196,8 @@ impl BuiltinHookHandler for RecordingHandler {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -193,7 +216,7 @@ impl BuiltinHookHandler for FailingHandler {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Error,
-            stdout: String::new(),
+            stdout: String::new().into(),
             stderr: "the session-start hook itself blew up".into(),
             exit_code: Some(1),
             response: None,
@@ -219,6 +242,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -255,9 +279,17 @@ async fn mod_session_start_runs_at_the_host_startup_seam() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("start-mod", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "start-mod",
+        dir.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+            {}
+        ))
+        .expect("generated Mod options are representable"),
+    )
+    .await
+    .unwrap();
     let mut registry = HookRegistry::new();
     registry.set_mod_host(host);
     let registry = Arc::new(RwLock::new(registry));
@@ -305,9 +337,17 @@ async fn mod_settings_and_tool_list_reach_the_host_during_startup() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("settings-mod", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "settings-mod",
+        dir.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+            {}
+        ))
+        .expect("generated Mod options are representable"),
+    )
+    .await
+    .unwrap();
     let mut registry = HookRegistry::new();
     registry.set_mod_host(host);
     let registry = Arc::new(RwLock::new(registry));
@@ -319,7 +359,9 @@ async fn mod_settings_and_tool_list_reach_the_host_during_startup() {
     let output = Arc::new(MockOutputStream::new());
     let mut tools = ToolRegistry::new();
     tools.register_builtin(Arc::new(ListedTool {
-        schema: serde_json::json!({"type":"object"}),
+        schema: tool_api::tool_trait::generated_builtin_schema(
+            &serde_json::json!({"type":"object"}),
+        ),
     }));
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),

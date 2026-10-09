@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use std::sync::Arc;
 
@@ -35,11 +35,9 @@ fn dropping_orchestrator_clears_its_invoked_skills() {
 
     drop(orch);
 
-    assert!(
-        compaction::invoked_skills::filter_for_scope(
-            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None)
-        )
-        .is_empty()
-    );
+    assert!(compaction::invoked_skills::filter_for_scope(
+        compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None)
+    )
+    .is_empty());
     compaction::invoked_skills::reset_for_test();
 }

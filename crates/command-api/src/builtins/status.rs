@@ -132,8 +132,8 @@ Status:
   Started:     2026-05-26T10:00:00Z
   Working dir: /repo
 ";
-            assert_eq!(s, expected);
-            assert_eq!(s.matches('\n').count(), 11);
+            assert_eq!(s, expected.into());
+            assert_eq!(s.string_at("").unwrap().matches('\n').count(), 11);
         } else {
             panic!();
         }

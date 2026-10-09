@@ -309,6 +309,10 @@ pub struct DesktopConfig {
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
+    /// Explicit Native Anthropic wire metadata. Only admitted first-party
+    /// Messages routes use this; other providers retain their own wire policy.
+    pub anthropic_client_metadata:
+        Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata>,
     /// Anthropic API key. Empty string is valid — the orchestrator builds
     /// successfully and only fails at `run_turn` with a 401, so slash-command
     /// dispatch still works with no key configured.
@@ -1049,6 +1053,7 @@ impl Default for DesktopConfig {
             host_workspace_trusted: None,
             mod_render_surface: None,
             api_base: "https://api.anthropic.com".to_string(),
+            anthropic_client_metadata: None,
             api_key: String::new(),
             // Production reads the real keychain; only isolated hosts opt out.
             isolated_credential_storage: false,

@@ -100,6 +100,7 @@ mod tests {
                     s,
                     "See the full changelog at: \
                      https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md"
+                        .into()
                 );
             }
             other => panic!("expected Done with display, got {other:?}"),

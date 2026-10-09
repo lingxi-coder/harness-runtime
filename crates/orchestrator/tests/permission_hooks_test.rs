@@ -95,7 +95,11 @@ struct DenyGate {
 }
 #[async_trait]
 impl PermissionGate for DenyGate {
-    async fn check(&self, _name: &str, _input: &serde_json::Value) -> PermissionDecision {
+    async fn check(
+        &self,
+        _name: &str,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: self.reason.into(),
         }
@@ -109,7 +113,11 @@ struct ClassifierDenyGate {
 }
 #[async_trait]
 impl PermissionGate for ClassifierDenyGate {
-    async fn check(&self, _name: &str, _input: &serde_json::Value) -> PermissionDecision {
+    async fn check(
+        &self,
+        _name: &str,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: self.reason.into(),
         }
@@ -117,7 +125,7 @@ impl PermissionGate for ClassifierDenyGate {
     async fn resolve_detailed(
         &self,
         _name: &str,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> PermissionResolution {
         PermissionResolution::Deny {
             reason: self.reason.into(),
@@ -139,7 +147,11 @@ struct AskRejectGate {
 }
 #[async_trait]
 impl PermissionGate for AskRejectGate {
-    async fn check(&self, _name: &str, _input: &serde_json::Value) -> PermissionDecision {
+    async fn check(
+        &self,
+        _name: &str,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> PermissionDecision {
         PermissionDecision::Deny {
             reason: self.reason.into(),
         }
@@ -147,7 +159,7 @@ impl PermissionGate for AskRejectGate {
     async fn resolve_detailed(
         &self,
         _name: &str,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> PermissionResolution {
         PermissionResolution::Deny {
             reason: self.reason.into(),
@@ -176,8 +188,8 @@ impl BuiltinHookHandler for PermDeniedRetryHook {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: Some(0),
             response: Some(HookResponse {
                 retry: Some(true),
@@ -194,10 +206,20 @@ impl Tool for EchoTool {
     fn name(&self) -> &str {
         "Echo"
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| json!({"type": "object"}));
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -205,22 +227,25 @@ impl Tool for EchoTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -232,7 +257,11 @@ impl Tool for EchoTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "echo".into()
     }
     async fn prompt(
@@ -243,16 +272,22 @@ impl Tool for EchoTool {
     }
     async fn call(
         &self,
-        input: serde_json::Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: json!({ "content": format!("ran with {input}") }),
+            data: tool_api::tool_trait::generated_builtin_result(&json!({
+                "content": format!(
+                    "ran with {}",
+                    input.to_json_string().expect("generated tool input is valid JSON")
+                )
+            })),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
@@ -263,13 +298,13 @@ impl Tool for EchoTool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SeenRequest {
     tool_name: String,
-    tool_input: serde_json::Value,
+    tool_input: Utf16JsonProjection,
     reason: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SeenDenied {
     tool_name: String,
-    tool_input: serde_json::Value,
+    tool_input: Utf16JsonProjection,
     reason: Utf16JsonProjection,
 }
 
@@ -314,8 +349,8 @@ impl BuiltinHookHandler for PermRecorder {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -336,8 +371,8 @@ impl BuiltinHookHandler for PreContextHook {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: Some(0),
             response: Some(HookResponse {
                 additional_context: Some("DENY-CTX".into()),
@@ -357,8 +392,8 @@ impl BuiltinHookHandler for PreAllowHook {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: Some(HookResponse {
                 decision: Some(HookDecision::Approve),
@@ -379,8 +414,8 @@ impl BuiltinHookHandler for PreAskHook {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: Some(HookResponse {
                 decision: Some(HookDecision::Ask),
@@ -408,6 +443,7 @@ fn builtin_hook(name: &str, handler_id: &str, event_type: HookEventType) -> Hook
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -480,7 +516,8 @@ fn two_turn_api(
             vec![LlmContentBlock::ToolCall {
                 id: tool_use_id.to_string(),
                 name: tool_name.into(),
-                input,
+                input: lingxi_llm_client::protocol::JsonPayload::from_generated_value(&input)
+                    .expect("generated tool input is valid JSON"),
             }],
             Some("tool_use"),
         ),
@@ -557,7 +594,10 @@ async fn classifier_deny_fires_permission_denied_not_request() {
         log.denials
     );
     assert_eq!(log.denials[0].tool_name, "Echo");
-    assert_eq!(log.denials[0].tool_input, json!({ "cmd": "rm -rf /" }));
+    assert_eq!(
+        log.denials[0].tool_input.to_json_string().unwrap(),
+        r#"{"cmd":"rm -rf /"}"#
+    );
     assert_eq!(
         log.denials[0].reason.string_at(""),
         Some("classifier blocked it")
@@ -771,11 +811,13 @@ async fn pre_tool_additional_context_surfaces_even_when_denied() {
                         // claude-code sends the deny reason VERBATIM as the
                         // tool_result content (no "Permission denied: " wrapper).
                         assert!(
-                            content.contains("policy forbids it"),
+                            content
+                                .string_at("")
+                                .is_some_and(|text| text.contains("policy forbids it")),
                             "deny tool_result carries the deny reason verbatim: {content:?}"
                         );
                         assert!(
-                            !content.contains("DENY-CTX"),
+                            !content.string_at("").is_some_and(|text| text.contains("DENY-CTX")),
                             "additionalContext must NOT be folded into the deny tool_result: {content:?}"
                         );
                     }
@@ -920,7 +962,8 @@ async fn ask_behavior_deny_appends_image_blocks_at_top_level() {
             assert_eq!(tu, &tool_use_id);
             // Deny reason reaches the model VERBATIM (no "Permission denied: " wrapper).
             assert!(
-                c.contains("declined at prompt"),
+                c.string_at("")
+                    .is_some_and(|text| text.contains("declined at prompt")),
                 "tool_result carries the deny reason verbatim: {c:?}"
             );
         }

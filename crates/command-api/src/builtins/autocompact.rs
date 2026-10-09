@@ -240,6 +240,7 @@ impl BuiltinCommandHandler for AutocompactHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     /// Serializes the env-mutating tests in this module so parallel test threads
     /// can't race the shared `LINGXI_AUTO_COMPACT_WINDOW` process env.
@@ -358,7 +359,7 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert_eq!(
                     s,
-                    "LINGXI_AUTO_COMPACT_WINDOW is set and takes precedence. Unset it to change this setting."
+                    "LINGXI_AUTO_COMPACT_WINDOW is set and takes precedence. Unset it to change this setting.".into()
                 );
             }
             other => panic!("expected Done, got {other:?}"),
@@ -389,7 +390,7 @@ mod tests {
                 CommandResult::Done { display: Some(s) } => {
                     assert!(
                         s.starts_with("Auto-compact window: auto\n"),
-                        "bad={bad}: {s}"
+                        "bad={bad}: {s:?}"
                     );
                 }
                 other => panic!("expected Done, got {other:?}"),

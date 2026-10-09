@@ -1683,6 +1683,8 @@ mod tests {
             .expect_err("unsatisfiable");
         assert!(err
             .0
+            .string_at("")
+            .unwrap_or_default()
             .contains("does not match any calendar date in the next year"));
         // NOTE: DOM 31 (which the old crude 30-day decompose wrongly rejected) is
         // now correctly satisfiable on the real calendar — proven directly against
@@ -1737,11 +1739,11 @@ mod tests {
             );
             assert_eq!(
                 delete.prompt(&PromptOptions::default()).await,
-                case["delete"].as_str().unwrap()
+                case["delete"].as_str().unwrap().into()
             );
             assert_eq!(
                 list.prompt(&PromptOptions::default()).await,
-                case["list"].as_str().unwrap()
+                case["list"].as_str().unwrap().into()
             );
         }
         telemetry::test_clear_flag(AMBER_SENTINEL_FLAG);

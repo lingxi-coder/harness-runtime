@@ -26,10 +26,10 @@ fn fresh() -> (RegistrySlashDispatcher, Arc<MockOrchestratorHandle>) {
 #[tokio::test]
 async fn clear_dispatch() {
     let (d, mock) = fresh();
-    let r = d.dispatch("/clear").await;
+    let r = d.dispatch("/clear".into()).await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "Conversation cleared.");
+            assert_eq!(display, "Conversation cleared.".into());
         }
         other => panic!("{other:?}"),
     }
@@ -43,12 +43,12 @@ async fn compact_dispatch() {
         messages_before: 100,
         messages_after: 5,
         bytes_saved: 4_096,
-        summary: "kept context".to_string(),
+        summary: "kept context".into(),
     });
-    let r = d.dispatch("/compact").await;
+    let r = d.dispatch("/compact".into()).await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "Compacted (ctrl+o to see full summary)");
+            assert_eq!(display, "Compacted (ctrl+o to see full summary)".into());
         }
         other => panic!("{other:?}"),
     }
@@ -57,12 +57,13 @@ async fn compact_dispatch() {
 #[tokio::test]
 async fn help_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/help").await;
+    let r = d.dispatch("/help".into()).await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert!(display.starts_with("Commands:\n"));
+            let text = display.string_at("").unwrap();
+            assert!(text.starts_with("Commands:\n"));
             // (M4 cc2.1.198) /agents carries the removed-wizard description.
-            assert!(display.contains(
+            assert!(text.contains(
                 "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/"
             ));
             // 80 newlines (header + 79 visible command lines); hidden and
@@ -72,7 +73,7 @@ async fn help_dispatch() {
             // objects @2.1.238 296268759 are `isEnabled:()=>!1` — SLASH-13
             // added the ungated `/powerup` object, and cc2.1.269 brought
             // `/output-style` back.
-            assert_eq!(display.matches('\n').count(), 80);
+            assert_eq!(text.matches('\n').count(), 80);
         }
         other => panic!("{other:?}"),
     }
@@ -81,10 +82,10 @@ async fn help_dispatch() {
 #[tokio::test]
 async fn exit_dispatch() {
     let (d, mock) = fresh();
-    let r = d.dispatch("/exit").await;
+    let r = d.dispatch("/exit".into()).await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "Exiting.");
+            assert_eq!(display, "Exiting.".into());
         }
         other => panic!("{other:?}"),
     }
@@ -96,10 +97,10 @@ async fn memory_dispatch() {
     let (d, mock) = fresh();
     mock.set_memory_path(std::path::PathBuf::from("/tmp/LINGXI.md"));
     mock.set_editor_exit_code(0);
-    let r = d.dispatch("/memory").await;
+    let r = d.dispatch("/memory".into()).await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "Edited /tmp/LINGXI.md (exit 0).");
+            assert_eq!(display, "Edited /tmp/LINGXI.md (exit 0).".into());
         }
         other => panic!("{other:?}"),
     }
@@ -110,10 +111,13 @@ async fn init_dispatch_returns_handled_with_template_text() {
     // /init returns InjectMessage; the dispatcher maps InjectMessage to
     // Handled { display: content } per M5-09 Task 5 step 4.
     let (d, _) = fresh();
-    let r = d.dispatch("/init").await;
+    let r = d.dispatch("/init".into()).await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert!(display.starts_with("Please analyze this codebase"));
+            assert!(display
+                .string_at("")
+                .unwrap()
+                .starts_with("Please analyze this codebase"));
         }
         other => panic!("{other:?}"),
     }
@@ -124,10 +128,10 @@ async fn non_batch_1_command_still_returns_stub() {
     let (d, _) = fresh();
     // `x402` left the 105-name surface, so it is no longer a registered stub;
     // `teleport` remains a faithful compiled stub.
-    let r = d.dispatch("/teleport").await;
+    let r = d.dispatch("/teleport".into()).await;
     match r {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "teleport: not implemented in v0.6.0 (M5)");
+            assert_eq!(display, "teleport: not implemented in v0.6.0 (M5)".into());
         }
         other => panic!("{other:?}"),
     }

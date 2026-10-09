@@ -19,6 +19,11 @@ mod tests {
         assert_source_text(source, "", expected);
     }
 
+    fn root_text(source: &crate::source::Source) -> String {
+        String::from_utf16(&source.string_units("").expect("root string"))
+            .expect("fixture prompt contains only Unicode scalar values")
+    }
+
     fn assert_source_number(source: &crate::source::Source, pointer: &str, expected: f64) {
         assert_eq!(source.number_at(pointer), Some(expected), "at {pointer}");
     }
@@ -498,16 +503,16 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         };
 
         // Gate OFF (default): no exception in either variant.
-        let long_off = tool.prompt(&long_opts).await;
-        let short_off = tool.prompt(&short_opts).await;
+        let long_off = root_text(&tool.prompt(&long_opts).await);
+        let short_off = root_text(&tool.prompt(&short_opts).await);
         assert!(!long_off.contains("claude.ai/code/artifact/{uuid}"));
         assert!(!short_off.contains("claude.ai/code/artifact/{uuid}"));
 
         // Gate ON: both variants carry the byte-exact exception.
         telemetry::test_set_flag("tengu_cobalt_plinth", true);
         telemetry::test_set_flag("allow_cobalt_plinth", true);
-        let long_on = tool.prompt(&long_opts).await;
-        let short_on = tool.prompt(&short_opts).await;
+        let long_on = root_text(&tool.prompt(&long_opts).await);
+        let short_on = root_text(&tool.prompt(&short_opts).await);
         assert!(long_on.contains("authenticated access.\n- Exception: claude.ai/code/artifact/{uuid} URLs (including preview.claude.ai) ARE fetchable \u{2014} WebFetch uses your claude.ai login. Use WebFetch for these, not curl or a headless browser (those return the SPA shell or a Cloudflare 403, not the content).\n\n- Fetches content from a specified URL"));
         assert!(short_on.contains("use an authenticated MCP tool or `gh` for those instead. Exception: claude.ai/code/artifact/{uuid} URLs ARE fetchable via your claude.ai login \u{2014} use WebFetch, not curl (curl gets the SPA shell or a Cloudflare 403).\n- HTTP is upgraded to HTTPS."));
 
@@ -531,7 +536,7 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // Default (model=None) ⇒ LONG: auth-prefix, then the DESCRIPTION body. The
         // `access.\n${GSd}` template (DESCRIPTION starts with `\n`) yields a blank
         // line between the prefix and the first bullet.
-        let long = tool.prompt(&PromptOptions::default()).await;
+        let long = root_text(&tool.prompt(&PromptOptions::default()).await);
         assert!(
             long.starts_with("IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs."),
             "LONG must lead with the auth-warning prefix; got {long:?}"
@@ -541,14 +546,16 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         assert!(long.contains("authenticated GitHub tool"));
 
         // Current-gen model ⇒ SHORT (no auth-prefix).
-        let short = tool
-            .prompt(&PromptOptions {
-                include_examples: false,
-                model: Some("claude-opus-4-8".into()),
-                model_profile: None,
-                ..Default::default()
-            })
-            .await;
+        let short = root_text(
+            &tool
+                .prompt(&PromptOptions {
+                    include_examples: false,
+                    model: Some("claude-opus-4-8".into()),
+                    model_profile: None,
+                    ..Default::default()
+                })
+                .await,
+        );
         assert!(
             short.starts_with("Fetches a URL, converts the page to markdown"),
             "SHORT variant expected; got {short:?}"
@@ -798,7 +805,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
         let err = tool
-            .validate_input(&json!({ "url": "not a url" }), &fresh_ctx())
+            .validate_input(
+                &crate::source::generated(json!({ "url": "not a url" })),
+                &fresh_ctx(),
+            )
             .await
             .expect_err("unparseable URL must be rejected");
         // `ValidationError`'s Display prepends `invalid tool input: `; the message
@@ -819,7 +829,10 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
         let err = tool
-            .validate_input(&json!({ "url": "example.com/path" }), &fresh_ctx())
+            .validate_input(
+                &crate::source::generated(json!({ "url": "example.com/path" })),
+                &fresh_ctx(),
+            )
             .await
             .expect_err("schemeless URL must be rejected");
         assert!(err.to_string().contains(
@@ -832,9 +845,12 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let _cache_guard = crate::testsupport::web_globals_lock().await;
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
-        tool.validate_input(&json!({ "url": "https://example.com/page" }), &fresh_ctx())
-            .await
-            .expect("a parseable https URL is valid input");
+        tool.validate_input(
+            &crate::source::generated(json!({ "url": "https://example.com/page" })),
+            &fresh_ctx(),
+        )
+        .await
+        .expect("a parseable https URL is valid input");
     }
 
     #[tokio::test]
@@ -844,9 +860,12 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         // passes this gate — the scheme is rejected later in `call()`.
         let (ctx, _http, _sink) = make_web_ctx();
         let tool = WebFetchTool::new(ctx);
-        tool.validate_input(&json!({ "url": "file:///etc/passwd" }), &fresh_ctx())
-            .await
-            .expect("file:// parses, so validateInput accepts it");
+        tool.validate_input(
+            &crate::source::generated(json!({ "url": "file:///etc/passwd" })),
+            &fresh_ctx(),
+        )
+        .await
+        .expect("file:// parses, so validateInput accepts it");
     }
 
     // ---- http→https upgrade + 15-min cache integration ---------------------

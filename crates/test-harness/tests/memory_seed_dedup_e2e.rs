@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use hooks::registry::HookRegistry;
 use hooks::HookExecutorImpl;
 use lingxi_core::host::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
-use lingxi_core::types::{HttpRequest, HttpResponse};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, HttpRequest, HttpResponse};
 use orchestrator::prompt::{MemoryHierarchyProvider, RealMemoryHierarchyProvider};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
@@ -34,6 +34,10 @@ use tokio::sync::RwLock;
 use tool_api::registry::ToolRegistry;
 use tool_api::test_support::{fresh_ctx, fresh_tx};
 use tool_api::tool_trait::Tool;
+
+fn generated_input(value: serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).expect("generated tool input is valid")
+}
 
 struct UnusedHttp;
 #[async_trait]
@@ -138,14 +142,15 @@ async fn seeded_memory_file_dedups_on_a_real_read_tool_call() {
     // Nothing seeded yet: a Read returns full content.
     let pre = read_tool
         .call(
-            json!({ "file_path": plain.to_str().unwrap() }),
+            generated_input(json!({ "file_path": plain.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
         .await
         .unwrap();
     assert_eq!(
-        pre.data["file"]["content"], "# repo rules\nbe careful\n",
+        pre.data.string_at("/file/content"),
+        Some("# repo rules\nbe careful\n"),
         "before seeding, Read must return the body"
     );
     // Drop that Read's own entry so the seeding guard (`!has(path)`) does not
@@ -167,37 +172,44 @@ async fn seeded_memory_file_dedups_on_a_real_read_tool_call() {
     // Rendered file -> seeded stub, byte-exact.
     let after = read_tool
         .call(
-            json!({ "file_path": plain.to_str().unwrap() }),
+            generated_input(json!({ "file_path": plain.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
         .await
         .unwrap();
     assert_eq!(
-        after.data["type"], "file_unchanged",
+        after.data.string_at("/type"),
+        Some("file_unchanged"),
         "the seeded memory file must dedup"
     );
-    assert_eq!(after.data["source"], "seeded");
+    assert_eq!(after.data.string_at("/source"), Some("seeded"));
+    let seeded_model_content = tool_file::read::format_file_unchanged_seeded(&plain);
     assert_eq!(
-        after.model_content.as_deref(),
-        Some(tool_file::read::format_file_unchanged_seeded(&plain).as_str())
+        after
+            .model_content
+            .as_ref()
+            .and_then(|content| content.string_at("")),
+        Some(seeded_model_content.as_str())
     );
 
     // Conditional rule -> `seededFromContext: false` -> FULL content.
     let scoped = read_tool
         .call(
-            json!({ "file_path": cond.to_str().unwrap() }),
+            generated_input(json!({ "file_path": cond.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
         .await
         .unwrap();
     assert_ne!(
-        scoped.data["type"], "file_unchanged",
+        scoped.data.string_at("/type"),
+        Some("file_unchanged"),
         "a paths:-gated rule is NOT in model context and must NOT dedup"
     );
     assert_eq!(
-        scoped.data["file"]["content"], "---\npaths: src/**\n---\nscoped body\n",
+        scoped.data.string_at("/file/content"),
+        Some("---\npaths: src/**\n---\nscoped body\n"),
         "the conditional rule must come back in full"
     );
 }

@@ -124,6 +124,13 @@ pub struct CostSnapshot {
     /// `context_window.current_usage` payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_usage: Option<CurrentUsageSnapshot>,
+    /// Additional observations from the same most recent settled response.
+    /// Kept separate from the persisted four-counter resume projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_usage_details: Option<ResponseUsageDetailsSnapshot>,
+    /// Session-owned ephemeral model safety events, independent of API calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_stops: Option<u64>,
     /// The `/cost` prompt-cache line, pre-rendered (CLI-4).
     ///
     /// Rendered by the orchestrator rather than carried as structured data: the
@@ -178,6 +185,16 @@ pub struct CurrentUsageSnapshot {
     /// Input tokens written to cache.
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
+}
+
+/// Provider-neutral usage details retained by the canonical cost ledger.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseUsageDetailsSnapshot {
+    pub reasoning_tokens: u64,
+    pub web_search_requests: u64,
+    pub cache_creation_1h_input_tokens: u64,
+    pub cache_creation_5m_input_tokens: u64,
+    pub fast_mode: bool,
 }
 
 /// Live context-window usage paired with the cumulative billing snapshot.
@@ -3393,13 +3410,15 @@ pub enum OutputEvent {
         is_error: bool,
     },
     /// Preserve terminal API failure metadata as a structured event. The CLI
-    /// uses these values to render its error envelope without inferring status
-    /// or reason from the formatted error text.
+    /// uses these values to render its error envelope without inferring status,
+    /// terminal reason, or provider stop reason from formatted error text.
     TerminalApiError {
         /// HTTP status from the provider's API error envelope, when present.
         api_error_status: Option<u16>,
         /// Native terminal reason (for example `api_error` or `image_error`).
         terminal_reason: String,
+        /// Provider stop reason associated with the terminal result.
+        stop_reason: String,
     },
     /// One Mod `$.ui.log` line, separate from assistant and system messages.
     ModLog {
@@ -3421,6 +3440,15 @@ pub enum OutputEvent {
         )]
         text: crate::types::utf16_json::Utf16JsonProjection,
         timeout_ms: u64,
+    },
+    /// A transient Mod notification without a duration field.
+    ModNotify {
+        plugin: String,
+        #[serde(
+            serialize_with = "crate::types::utf16_json::raw_json_serde::serialize",
+            deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize"
+        )]
+        text: crate::types::utf16_json::Utf16JsonProjection,
     },
     /// A pinned Mod status line; `None` clears its plugin's line.
     ModStatus {
@@ -3819,12 +3847,13 @@ pub trait OutputStream: Send + Sync {
     /// transcript/status surface remain source-compatible.
     async fn emit_system_notice(&self, _body: &Utf16JsonProjection, _is_error: bool) {}
 
-    /// Emit provider status and native terminal reason without asking the sink
-    /// to infer either value from rendered error text.
+    /// Emit provider status, native terminal reason, and provider stop reason
+    /// without asking the sink to infer any value from rendered error text.
     async fn emit_terminal_api_error(
         &self,
         _api_error_status: Option<u16>,
         _terminal_reason: &str,
+        _stop_reason: &str,
     ) {
     }
 
@@ -3845,6 +3874,9 @@ pub trait OutputStream: Send + Sync {
 
     /// Show a transient Mod notification without persisting transcript content.
     async fn emit_mod_toast(&self, _plugin: &str, _text: &Utf16JsonProjection, _timeout_ms: u64) {}
+
+    /// Show a Mod notification without a timeout or transcript persistence.
+    async fn emit_mod_notify(&self, _plugin: &str, _text: &Utf16JsonProjection) {}
 
     /// Set or clear this plugin's pinned status below the prompt.
     async fn emit_mod_status(&self, _plugin: &str, _text: Option<&Utf16JsonProjection>) {}

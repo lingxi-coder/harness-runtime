@@ -1,0 +1,10 @@
+{
+  "signal": "SIGINT",
+  "requested": false,
+  "pending_observed": false,
+  "native_exit_code": 0,
+  "elapsed_since_launch_ms": 662.343,
+  "elapsed_since_launch_epoch_ms": 662.349,
+  "stdout_bytes": 1604,
+  "stderr_bytes": 0
+}

@@ -43,7 +43,7 @@ async fn route_to_unknown_worker_errors() {
             TeammateMessage {
                 from: MessageSender::Coordinator,
                 from_name: "team-lead".into(),
-                content: String::new(),
+                content: String::new().into(),
                 summary: None,
                 message_id: String::new(),
                 timestamp: std::time::SystemTime::now(),

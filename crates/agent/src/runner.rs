@@ -3565,6 +3565,9 @@ async fn run_subagent_loop(
                 if let Err(lingxi_core::host::budget::BudgetError::Exceeded { current_nano_usd }) =
                     b.check_and_charge(0).await
                 {
+                    if let Some(token) = &ctx.agent_spawn_token {
+                        token.killed(lingxi_core::host::agent_statistics::AgentKillReason::System);
+                    }
                     // Stop with the 2.1.217 background-agent budget string.
                     #[allow(clippy::cast_precision_loss)]
                     let dollars = current_nano_usd as f64 / 1_000_000_000.0;
@@ -4007,20 +4010,30 @@ async fn run_subagent_loop(
                                         .await;
                                         return;
                                     }
-                                    // A launcher message is task direction, not
-                                    // cancellation of an already-running tool or
-                                    // its pending permission decision. Keep this
-                                    // exact query future alive and append direction
-                                    // after its completed ToolResult is journaled.
+                                    // A launcher message is task direction. If no
+                                    // tool effect has started, restart this request
+                                    // with the new direction immediately. Once an
+                                    // effect starts, keep its future alive and append
+                                    // direction after its ToolResult is journaled.
                                     Some(lingxi_core::Event::UserMessage { content, .. })
                                         if ctx.persistent || ctx.task_registry.is_some() =>
                                     {
                                         wake_message = Some(ExactHookText::from_text(content));
+                                        if !tool_effects_started
+                                            .load(std::sync::atomic::Ordering::Relaxed)
+                                        {
+                                            continue 'response_attempts;
+                                        }
                                     }
                                     Some(lingxi_core::Event::UserMessageJsUtf16 { content, utf16_code_units, .. })
                                         if ctx.persistent || ctx.task_registry.is_some() =>
                                     {
                                         wake_message = Some(ExactHookText { display: content, utf16_code_units });
+                                        if !tool_effects_started
+                                            .load(std::sync::atomic::Ordering::Relaxed)
+                                        {
+                                            continue 'response_attempts;
+                                        }
                                     }
                                     Some(_) => {}
                                     None => event_channel_open = false,

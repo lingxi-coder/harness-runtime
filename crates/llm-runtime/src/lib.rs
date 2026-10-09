@@ -44,7 +44,7 @@ pub mod client;
 pub mod cloud_provider_env;
 pub mod computer;
 pub mod config;
-pub use computer::{ComputerNativeDeclaration, ComputerRequestProjection, scope_computer_request};
+pub use computer::{scope_computer_request, ComputerNativeDeclaration, ComputerRequestProjection};
 pub mod convert;
 pub mod cost;
 mod dispatch_header;
@@ -54,7 +54,7 @@ mod execution_context;
 mod structured_output;
 pub use execution_context::{
     ExecutionContext, PendingPromptCacheObservation, PromptCacheRequestContext,
-    RequestDispatchAdmission,
+    RequestDispatchAdmission, RequestDispatchObserver,
 };
 pub mod auth;
 pub mod fusion_hints;
@@ -73,6 +73,7 @@ pub mod registry;
 pub mod retry;
 #[allow(missing_docs)]
 pub mod route;
+mod safety_observation;
 #[allow(missing_docs)]
 pub mod service;
 pub mod services;
@@ -86,9 +87,8 @@ pub mod unicode_repair;
 mod upstream;
 
 pub use crate::protocol::{
-    LlmRequest, ProviderRequest, ProviderResponse, ProviderStreamTransport, ReasoningConfig,
-    RequestMetadata, stream_content_order, stream_provider_metadata_from_headers,
-    validate_capabilities,
+    stream_content_order, stream_provider_metadata_from_headers, validate_capabilities, LlmRequest,
+    ProviderRequest, ProviderResponse, ProviderStreamTransport, ReasoningConfig, RequestMetadata,
 };
 pub use auth::external_aws::{
     AwsAuthProcess, AwsAuthRefresh, AwsAuthRefresher, AwsAuthSettings, ShellAwsAuthProcess,
@@ -97,18 +97,18 @@ pub use auth::provider::{
     AnthropicAuthSnapshot, CopilotExchangeCredentialProvider, Credential, CredentialProvider,
     CredentialScope, EnvCredentialProvider, StaticCredentialProvider,
 };
-pub use catalog::{BuiltinCatalog, builtin_presets};
+pub use catalog::{builtin_presets, BuiltinCatalog};
 pub use client::{
     FileActivationPoll, ModelRuntime, PreparedLlmCall, ResponsesSession,
     ResponsesWebSocketRequestSnapshot,
 };
 pub use cloud_provider_env::{
-    FoundryCredential, bedrock_base_url_override, foundry_base_host, foundry_base_host_from_env,
+    bedrock_base_url_override, foundry_base_host, foundry_base_host_from_env,
     foundry_credential_from_env, foundry_messages_base_url, foundry_messages_base_url_from_env,
     select_foundry_credential, skip_bedrock_auth, skip_foundry_auth, skip_vertex_auth,
     small_fast_model_aws_region, vertex_base_host, vertex_base_host_url, vertex_codec_base_url,
     vertex_codec_base_url_from_env, vertex_default_region, vertex_region_env_var_for_model,
-    vertex_region_for_model, vertex_region_for_model_from_env,
+    vertex_region_for_model, vertex_region_for_model_from_env, FoundryCredential,
 };
 pub use config::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, ConnectionSpec, CredentialConfig,
@@ -116,13 +116,12 @@ pub use config::{
 };
 pub use cost::{CostEstimator, PricingCatalog, PricingOverride, PricingPolicy};
 pub use error::{
-    LlmError, MediaDelegationAccounting, api_error_detail, api_error_status, error_display_source,
-    error_display_text,
+    api_error_detail, api_error_status, error_display_source, error_display_text, LlmError,
+    MediaDelegationAccounting,
 };
 pub use fusion_hints::hints_for;
 pub use lingxi_core::host::ModelBillingMode;
-pub use lingxi_llm_client::SseFrameSplitter;
-pub use lingxi_llm_client::framing::eventstream::{EventStreamMessage, EventStreamSplitter, crc32};
+pub use lingxi_llm_client::framing::eventstream::{crc32, EventStreamMessage, EventStreamSplitter};
 pub use lingxi_llm_client::protocol::TokenPricing;
 pub use lingxi_llm_client::protocol::{
     ContinuationRef, HostedTool, NativeExtension, NativeType, OutputFormat, PromptCachePolicy,
@@ -130,26 +129,27 @@ pub use lingxi_llm_client::protocol::{
 };
 pub use lingxi_llm_client::protocol::{ServerToolUsage, Usage, UsageReport, UsageState};
 pub use lingxi_llm_client::providers::google::files_wire::GeminiFile;
+pub use lingxi_llm_client::SseFrameSplitter;
 pub use model_attempt::{
     ModelAttemptHooks, ModelAttemptLease, ModelAttemptSettlement, ModelAttemptUsageCompleteness,
 };
 pub use provider_settings::{
-    ParsedUserProvider, ProviderCredentialMode, ProviderKind, ProviderParseOptions,
     anthropic_model_profiles, anthropic_provider_profile, parse_provider_profiles_lenient,
     parse_provider_profiles_strict, pricing_provider_id_for_profile, split_profile_model,
+    ParsedUserProvider, ProviderCredentialMode, ProviderKind, ProviderParseOptions,
 };
 pub use reasoning_controls::{
-    ReasoningControlSpec, ReasoningSelection, ReasoningTarget, TokenBudgetRange,
-    apply_reasoning_selection, reasoning_control_spec,
+    apply_reasoning_selection, reasoning_control_spec, ReasoningControlSpec, ReasoningSelection,
+    ReasoningTarget, TokenBudgetRange,
 };
 pub use redaction::Redactor;
 pub use registry::{ConnectionHop, MediaRoute, ModelListing, ModelRegistry, ResolvedRoute};
 pub use retry::{ResponseMetadata, RetryDecision, RetryPolicy};
 pub use route::Route;
 pub use service::{
-    ApiService, FallbackPolicy, MessagesCreateOptions, MessagesCreateRequest,
-    NonStreamingRequestClass, NonStreamingRetryOptions, RetryInfo, RetryReporter, SubscriberState,
-    with_mod_request_effort,
+    with_mod_request_effort, ApiService, FallbackPolicy, MessagesCreateOptions,
+    MessagesCreateRequest, NonStreamingRequestClass, NonStreamingRetryOptions,
+    RequestSessionIdSource, RetryInfo, RetryReporter, SubscriberState,
 };
 pub use services::{ProviderServiceSnapshot, ProviderServices};
 pub use ssl::{detect_ssl_code, is_ssl_code, ssl_hint};

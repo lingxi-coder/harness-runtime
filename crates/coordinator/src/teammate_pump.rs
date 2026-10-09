@@ -380,7 +380,7 @@ mod tests {
             _agent_id: AgentId,
             _name: String,
             _team_name: String,
-            _description: String,
+            _description: Utf16JsonProjection,
         ) -> Result<String, TeamSpawnError> {
             Ok(String::new())
         }
@@ -409,7 +409,7 @@ mod tests {
             _agent_id: AgentId,
             _name: String,
             _team_name: String,
-            _description: String,
+            _description: Utf16JsonProjection,
         ) -> Result<String, TeamSpawnError> {
             Ok(String::new())
         }

@@ -653,8 +653,10 @@ mod tests {
                 prompts: false,
                 logging: false,
                 directory_read: false,
-                experimental: StdHashMap::new(),
-                extensions: StdHashMap::new(),
+                experimental: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                    .expect("empty experimental source object"),
+                extensions: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                    .expect("empty extension source object"),
             })
         }
 
@@ -680,7 +682,7 @@ mod tests {
             &self,
             _conn: &McpRawConnection,
             _tool: &str,
-            _input: serde_json::Value,
+            _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> Result<McpToolResultDto, McpError> {
             Ok(McpToolResultDto::default())
         }
@@ -688,7 +690,7 @@ mod tests {
         async fn read_resource(
             &self,
             _conn: &McpRawConnection,
-            _uri: &str,
+            _uri: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) -> Result<McpResourceContentDto, McpError> {
             Err(McpError::Internal("test transport does not read".into()))
         }
@@ -805,8 +807,10 @@ mod tests {
                     prompts: false,
                     logging: false,
                     directory_read: false,
-                    experimental: StdHashMap::new(),
-                    extensions: StdHashMap::new(),
+                    experimental: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                        .expect("empty experimental source object"),
+                    extensions: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                        .expect("empty extension source object"),
                 },
                 negotiated: lingxi_core::host::McpNegotiatedProtocol {
                     era: lingxi_core::host::McpProtocolEra::Legacy,

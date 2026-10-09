@@ -73,6 +73,12 @@ pub type BudgetCommitReceipt = Box<dyn BudgetSettlementReceipt>;
 /// Budget consultation seam used by `AgentTool` before spawning a subagent.
 #[async_trait]
 pub trait BudgetEnforcerHandle: Send + Sync {
+    /// Capture the originating cost authority for model calls made by a child.
+    /// Scoped budget handles retain this authority through session switches.
+    fn model_safety_observer(&self) -> Option<crate::host::model_safety::ModelSafetyObserver> {
+        None
+    }
+
     /// Charge `nano_usd` against the budget. Returns
     /// [`BudgetError::Exceeded`] (carrying the current cumulative total) if
     /// the post-charge state would exceed the configured limit.

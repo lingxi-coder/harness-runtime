@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, StaticMemoryProvider,
 };
 
 struct LivePermissionGate(std::sync::RwLock<String>);
@@ -10,7 +10,7 @@ impl lingxi_core::host::PermissionGate for LivePermissionGate {
     async fn check(
         &self,
         _tool_name: &str,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> lingxi_core::host::PermissionDecision {
         lingxi_core::host::PermissionDecision::Allow
     }

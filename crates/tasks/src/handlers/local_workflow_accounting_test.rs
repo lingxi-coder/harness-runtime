@@ -44,7 +44,8 @@ impl SubagentSpawner for BatchProbe {
         Ok(SubagentResult::Completed {
             handback: None,
             agent_id: lingxi_core::types::AgentId::new(),
-            content: Value::String("answer".into()),
+            content: Utf16JsonProjection::from_serde_value(&Value::String("answer".into()))
+                .unwrap(),
             usage: lingxi_core::host::SubagentUsage {
                 output_tokens: 1,
                 ..Default::default()

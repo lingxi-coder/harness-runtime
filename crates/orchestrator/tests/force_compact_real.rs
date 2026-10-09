@@ -15,7 +15,7 @@ use compaction::CompactionOrchestrator;
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::{ConversationMessage, MessageId};
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use std::sync::Arc;
@@ -201,7 +201,7 @@ async fn manual_compact_seeds_empty_resume_slot_and_forwards_focus() {
     seed_history(&orch, 4).await;
 
     orch.force_compact_with_instructions_and_cancel(
-        Some("focus on the Rust fixes"),
+        Some(&"focus on the Rust fixes".into()),
         tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -225,11 +225,9 @@ async fn manual_compact_seeds_empty_resume_slot_and_forwards_focus() {
         !texts.iter().any(|text| text.contains("reply-3")),
         "the preserved tail (newest reply) never reaches the summarizer"
     );
-    assert!(
-        texts
-            .last()
-            .is_some_and(|text| text.contains("Additional Instructions:\nfocus on the Rust fixes"))
-    );
+    assert!(texts
+        .last()
+        .is_some_and(|text| text.contains("Additional Instructions:\nfocus on the Rust fixes")));
 
     let summary_text = {
         let session = orch.session();
@@ -283,8 +281,9 @@ async fn post_compact_summary_is_visible_to_next_turn() {
         panic!("expected System message; got {first:?}");
     };
     assert_eq!(
-        content, "Conversation compacted",
-        "CSM.4 boundary sentinel missing; got: {content}"
+        content.string_at(""),
+        Some("Conversation compacted"),
+        "CSM.4 boundary sentinel missing; got: {content:?}"
     );
 
     // The summary message produced by the compactor sits AFTER the
@@ -554,8 +553,9 @@ async fn compaction_safety_gate() {
                 // no longer inline in the marker. COMPACT.1: the marker now
                 // LEADS the post-compact history.
                 assert_eq!(
-                    content, "Conversation compacted",
-                    "GATE#2 FAIL: boundary sentinel missing; got: {content}"
+                    content.string_at(""),
+                    Some("Conversation compacted"),
+                    "GATE#2 FAIL: boundary sentinel missing; got: {content:?}"
                 );
             }
             other => panic!("GATE#2 FAIL: expected System marker head; got {other:?}"),
@@ -964,7 +964,7 @@ async fn the_boundary_records_the_user_context_and_the_count() {
 
     orch.summarize_at(
         &chosen,
-        Some("  keep the parser notes  "),
+        Some(&"  keep the parser notes  ".into()),
         lingxi_core::host::SummarizeDirection::UpTo,
         tokio_util::sync::CancellationToken::new(),
     )
@@ -985,7 +985,10 @@ async fn the_boundary_records_the_user_context_and_the_count() {
         })
         .expect("a compact boundary");
     assert_eq!(
-        metadata.user_context.as_deref(),
+        metadata
+            .user_context
+            .as_ref()
+            .and_then(|context| context.string_at("")),
         Some("keep the parser notes"),
         "the picker text is recorded on the boundary, trimmed"
     );

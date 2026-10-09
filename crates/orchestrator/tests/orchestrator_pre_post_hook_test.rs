@@ -79,12 +79,12 @@ impl BuiltinHookHandler for BlockBashHandler {
             if tool_name == "Bash" {
                 return HookResult {
                     outcome: HookOutcome::Success,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: String::new().into(),
+                    stderr: String::new().into(),
                     exit_code: None,
                     response: Some(HookResponse {
                         decision: Some(HookDecision::Block),
-                        reason: Some("Bash is gated".to_string()),
+                        reason: Some("Bash is gated".into()),
                         ..Default::default()
                     }),
                 };
@@ -92,8 +92,8 @@ impl BuiltinHookHandler for BlockBashHandler {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -113,8 +113,8 @@ impl BuiltinHookHandler for AppendNoteOnReadHandler {
             if tool_name == "Read" {
                 return HookResult {
                     outcome: HookOutcome::Success,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: String::new().into(),
+                    stderr: String::new().into(),
                     exit_code: None,
                     response: Some(HookResponse {
                         system_message: Some("[hook: file accessed]".into()),
@@ -125,8 +125,8 @@ impl BuiltinHookHandler for AppendNoteOnReadHandler {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -145,7 +145,7 @@ impl tool_api::tool_trait::Tool for BashStubTool {
     fn name(&self) -> &str {
         "Bash"
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| {
                 json!({
@@ -153,7 +153,17 @@ impl tool_api::tool_trait::Tool for BashStubTool {
                     "properties": { "command": { "type": "string" } },
                 })
             });
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &tool_api::tool_trait::ToolStaticContext) -> bool {
         true
@@ -161,15 +171,18 @@ impl tool_api::tool_trait::Tool for BashStubTool {
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -183,7 +196,7 @@ impl tool_api::tool_trait::Tool for BashStubTool {
     }
     async fn description(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _opts: &tool_api::tool_trait::DescriptionOptions,
     ) -> String {
         "bash stub".into()
@@ -196,16 +209,17 @@ impl tool_api::tool_trait::Tool for BashStubTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: tool_api::progress::ToolProgressSender,
     ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
         Ok(tool_api::tool_trait::ToolCallResult {
-            data: json!({ "content": "ok" }),
+            data: tool_api::tool_trait::generated_builtin_result(&json!({ "content": "ok" })),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
@@ -229,6 +243,7 @@ fn make_builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinit
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -255,7 +270,10 @@ async fn pre_hook_blocks_bash_tool() {
             vec![LlmContentBlock::ToolCall {
                 id: tool_use_id.to_string(),
                 name: "Bash".into(),
-                input: json!({"command": "rm -rf /"}),
+                input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                    &json!({"command": "rm -rf /"}),
+                )
+                .expect("generated tool input fixture"),
             }],
             Some("tool_use"),
         ),
@@ -263,7 +281,8 @@ async fn pre_hook_blocks_bash_tool() {
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "stopped".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),

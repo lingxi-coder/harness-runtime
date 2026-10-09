@@ -77,6 +77,25 @@ mod tests {
         assert_eq!(text.string_units(""), Some(vec![0xd800]));
     }
 
+    #[test]
+    fn mod_notify_output_event_round_trips_unpaired_utf16_text() {
+        let text =
+            crate::types::utf16_json::Utf16JsonProjection::root_string("�".into(), vec![0xd800])
+                .unwrap();
+        let event = OutputEvent::ModNotify {
+            plugin: "example".into(),
+            text,
+        };
+
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(encoded.contains(r#""text":"\ud800""#), "{encoded}");
+        let decoded: OutputEvent = serde_json::from_str(&encoded).unwrap();
+        let OutputEvent::ModNotify { text, .. } = decoded else {
+            panic!("expected ModNotify event");
+        };
+        assert_eq!(text.string_units(""), Some(vec![0xd800]));
+    }
+
     /// Coordinator-activation T08: the additive `emit_coordinator_status`
     /// PUSH hook ships as a default no-op so every pre-existing `OutputStream`
     /// impl (TUI / CLI / `MockOutputStream`) keeps compiling without an

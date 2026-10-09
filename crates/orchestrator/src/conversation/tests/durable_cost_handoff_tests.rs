@@ -47,32 +47,45 @@ impl tool_api::Tool for DurablePatchTool {
     fn name(&self) -> &str {
         "DurablePatch"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-        SCHEMA.get_or_init(|| serde_json::json!({"type": "object", "properties": {}}))
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: std::sync::OnceLock<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| {
+            tool_api::tool_trait::generated_builtin_result(
+                &serde_json::json!({"type": "object", "properties": {}}),
+            )
+        })
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
     async fn validate_input(
         &self,
-        _: &serde_json::Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &tool_api::ToolUseContext,
     ) -> Result<(), tool_api::ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _: &serde_json::Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -84,7 +97,11 @@ impl tool_api::Tool for DurablePatchTool {
             metadata: Default::default(),
         }
     }
-    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &tool_api::DescriptionOptions,
+    ) -> String {
         "return an edit result".into()
     }
     async fn prompt(
@@ -95,17 +112,20 @@ impl tool_api::Tool for DurablePatchTool {
     }
     async fn call(
         &self,
-        _: serde_json::Value,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
         Ok(tool_api::ToolCallResult {
-            data: serde_json::json!({"structuredPatch": [{"lines": ["-old", "+new"]}]}),
+            data: tool_api::tool_trait::generated_builtin_result(
+                &serde_json::json!({"structuredPatch": [{"lines": ["-old", "+new"]}]}),
+            ),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }

@@ -12,6 +12,9 @@ use serde_json::{json, Value};
 /// Owns all known slash commands and built-in handler implementations.
 pub struct CommandRegistry {
     commands: HashMap<Vec<u16>, SlashCommand>,
+    /// Registration order is the headless command source order. UI consumers
+    /// can continue to sort their own projection without changing it.
+    registration_order: Vec<Vec<u16>>,
     aliases: HashMap<Vec<u16>, Vec<u16>>,
     builtin_handlers: HashMap<Vec<u16>, Arc<dyn BuiltinCommandHandler>>,
     plugin_commands: HashMap<PluginId, Vec<Vec<u16>>>,
@@ -28,6 +31,7 @@ impl CommandRegistry {
     pub fn new() -> Self {
         Self {
             commands: HashMap::new(),
+            registration_order: Vec::new(),
             aliases: HashMap::new(),
             builtin_handlers: HashMap::new(),
             plugin_commands: HashMap::new(),
@@ -45,7 +49,7 @@ impl CommandRegistry {
     /// Answers: may a later load replace an already-registered command.
     ///
     /// One of several orderings over these rungs; `lingxi_core::types::scope`'s module docs index them all and say which question each answers.
-    pub fn register_command(&mut self, cmd: SlashCommand) {
+    pub fn register_command(&mut self, mut cmd: SlashCommand) {
         let Some(name_units) = cmd.name.string_units("") else {
             return;
         };
@@ -63,8 +67,29 @@ impl CommandRegistry {
         }) {
             return;
         }
+        if matches!(
+            cmd.kind,
+            SlashCommandKind::Markdown { .. }
+                | SlashCommandKind::Plugin { .. }
+                | SlashCommandKind::Mcp { .. }
+        ) {
+            cmd.is_prompt = true;
+        }
         self.index_aliases(&name_units, &cmd.aliases);
-        self.commands.insert(name_units, cmd);
+        self.insert_command(name_units, cmd);
+    }
+
+    fn insert_command(&mut self, name_units: Vec<u16>, command: SlashCommand) {
+        if !self.commands.contains_key(&name_units) {
+            self.registration_order.push(name_units.clone());
+        }
+        self.commands.insert(name_units, command);
+    }
+
+    fn remove_command(&mut self, name_units: &[u16]) {
+        self.commands.remove(name_units);
+        self.registration_order
+            .retain(|registered| registered.as_slice() != name_units);
     }
 
     /// Point each alias at `target` in the alias map (used by
@@ -99,9 +124,13 @@ impl CommandRegistry {
             kind: SlashCommandKind::Builtin {
                 handler_id: name.clone(),
             },
+            is_hidden: h.is_hidden(),
+            is_enabled: h.is_enabled(),
+            is_prompt: h.is_prompt_command(),
+            disable_model_invocation: h.disable_model_invocation(),
             ..SlashCommand::default()
         };
-        self.commands.insert(name_units.clone(), cmd);
+        self.insert_command(name_units.clone(), cmd);
         self.builtin_handlers.insert(name_units, h);
     }
 
@@ -177,7 +206,7 @@ impl CommandRegistry {
             })
             .filter(|name| !self.mod_commands.contains_key(name))
             .collect();
-        for command in cmds {
+        for mut command in cmds {
             let Some(name_units) = command.name.string_units("") else {
                 continue;
             };
@@ -187,8 +216,16 @@ impl CommandRegistry {
             if self.mod_commands.contains_key(&name_units) {
                 continue;
             }
+            if matches!(
+                command.kind,
+                SlashCommandKind::Markdown { .. }
+                    | SlashCommandKind::Plugin { .. }
+                    | SlashCommandKind::Mcp { .. }
+            ) {
+                command.is_prompt = true;
+            }
             self.index_aliases(&name_units, &command.aliases);
-            self.commands.insert(name_units, command);
+            self.insert_command(name_units, command);
         }
         self.plugin_commands.insert(plugin_id, names);
     }
@@ -319,7 +356,7 @@ impl CommandRegistry {
         self.mod_commands
             .insert(name_units.clone(), (owner.to_owned(), immediate));
         self.builtin_handlers.insert(name_units.clone(), handler);
-        self.commands.insert(name_units, command);
+        self.insert_command(name_units, command);
     }
 
     /// Remove the commands served by one unloaded Mod.
@@ -343,7 +380,7 @@ impl CommandRegistry {
             .collect::<Vec<_>>();
         for name in names {
             self.mod_commands.remove(&name);
-            self.commands.remove(&name);
+            self.remove_command(&name);
             self.builtin_handlers.remove(&name);
             self.aliases.retain(|_, target| target != &name);
         }
@@ -354,6 +391,67 @@ impl CommandRegistry {
     #[must_use]
     pub fn list_all(&self) -> Vec<&SlashCommand> {
         self.commands.values().collect()
+    }
+
+    /// Registered commands in their source/assembly order.
+    #[must_use]
+    pub fn registration_ordered_commands(&self) -> Vec<&SlashCommand> {
+        self.registration_order
+            .iter()
+            .filter_map(|name| self.commands.get(name))
+            .collect()
+    }
+
+    /// Build the Native headless unknown-command catalog. The availability
+    /// count is measured after Native visibility/enabled gates but before the
+    /// prompt-type and `disableModelInvocation` gates used for the names list.
+    #[must_use]
+    pub fn headless_command_catalog(&self) -> crate::model::HeadlessCommandCatalog {
+        let available = self
+            .registration_ordered_commands()
+            .into_iter()
+            .filter(|command| self.native_headless_command_available(command))
+            .collect::<Vec<_>>();
+        // Native assembles prompt skills before handler-backed prompt
+        // commands. Keep each group's registry order while placing prompt
+        // builtins after the skill/plugin producers that register later in
+        // LingXi's startup sequence.
+        let prompt_command_names = available
+            .iter()
+            .filter(|command| {
+                native_prompt_model_invocable(command)
+                    && !matches!(command.kind, SlashCommandKind::Builtin { .. })
+            })
+            .chain(available.iter().filter(|command| {
+                native_prompt_model_invocable(command)
+                    && matches!(command.kind, SlashCommandKind::Builtin { .. })
+            }))
+            .map(|command| command.name.clone())
+            .collect();
+        crate::model::HeadlessCommandCatalog {
+            prompt_command_names,
+            available_command_count: available.len(),
+        }
+    }
+
+    fn native_headless_command_available(&self, command: &SlashCommand) -> bool {
+        if command.is_hidden
+            || !command.is_enabled
+            || command.user_invocable == Some(false)
+            || !self.session_skill_allowed(command)
+        {
+            return false;
+        }
+        if matches!(command.kind, SlashCommandKind::Builtin { .. }) {
+            if let Some(name) = projection_text(&command.name) {
+                if crate::builtin_support::names::is_palette_hidden(name)
+                    || crate::builtin_support::names::is_command_env_disabled(name)
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Commands the model is allowed to invoke — every entry whose
@@ -468,7 +566,7 @@ impl CommandRegistry {
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
         if let Some(names) = self.plugin_commands.remove(plugin_id) {
             for n in &names {
-                self.commands.remove(n);
+                self.remove_command(n);
             }
             self.aliases.retain(|_, target| !names.contains(target));
         }
@@ -497,7 +595,7 @@ impl CommandRegistry {
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
         for name in &names {
-            self.commands.remove(name);
+            self.remove_command(name);
         }
         self.aliases.retain(|_, target| !names.contains(target));
         if let Some(server_units) = server.string_units("") {
@@ -516,7 +614,7 @@ impl CommandRegistry {
             .map(|(name, _)| name.clone())
             .collect::<Vec<_>>();
         for name in &old_names {
-            self.commands.remove(name);
+            self.remove_command(name);
         }
         self.aliases.retain(|_, target| !old_names.contains(target));
         self.managed_mcp_servers.clear();
@@ -553,7 +651,7 @@ impl CommandRegistry {
             .map(|(name, _)| name.clone())
             .collect();
         for name in &names {
-            self.commands.remove(name);
+            self.remove_command(name);
         }
         self.aliases.retain(|_, target| !names.contains(target));
         names.len()
@@ -573,11 +671,15 @@ impl CommandRegistry {
             .map(|(name, _)| name.clone())
             .collect();
         for name in &names {
-            self.commands.remove(name);
+            self.remove_command(name);
         }
         self.aliases.retain(|_, target| !names.contains(target));
         names.len()
     }
+}
+
+fn native_prompt_model_invocable(command: &&SlashCommand) -> bool {
+    command.is_prompt && !command.disable_model_invocation
 }
 
 fn string_units(value: &Utf16JsonProjection) -> Vec<u16> {
@@ -713,6 +815,123 @@ mod tests {
             },
             ..SlashCommand::default()
         }
+    }
+
+    #[test]
+    fn headless_catalog_preserves_registration_order_and_native_gates() {
+        let mut registry = CommandRegistry::new();
+        let prompt = |name: &str| SlashCommand {
+            name: name.into(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            ..SlashCommand::default()
+        };
+
+        let mut first = prompt("first-prompt");
+        first.is_prompt = true;
+        registry.register_command(first);
+        registry.register_command(SlashCommand {
+            name: "local-command".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "local-command".into(),
+            },
+            ..SlashCommand::default()
+        });
+        let mut manual = prompt("manual-prompt");
+        manual.is_prompt = true;
+        manual.disable_model_invocation = true;
+        registry.register_command(manual);
+        let mut hidden = prompt("hidden-prompt");
+        hidden.is_prompt = true;
+        hidden.is_hidden = true;
+        registry.register_command(hidden);
+        let mut unavailable = prompt("unavailable-prompt");
+        unavailable.is_prompt = true;
+        unavailable.is_enabled = false;
+        registry.register_command(unavailable);
+        let mut non_user_invocable = prompt("non-user-prompt");
+        non_user_invocable.is_prompt = true;
+        non_user_invocable.user_invocable = Some(false);
+        registry.register_command(non_user_invocable);
+
+        // Replacing metadata does not move or duplicate the original entry.
+        let mut replacement = prompt("first-prompt");
+        replacement.is_prompt = true;
+        replacement.description = "replacement".into();
+        registry.register_command(replacement);
+
+        let ordered_names = registry
+            .registration_ordered_commands()
+            .iter()
+            .map(|command| command.name.string_at("").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_names,
+            [
+                "first-prompt",
+                "local-command",
+                "manual-prompt",
+                "hidden-prompt",
+                "unavailable-prompt",
+                "non-user-prompt",
+            ]
+        );
+
+        let catalog = registry.headless_command_catalog();
+        assert_eq!(catalog.available_command_count, 3);
+        assert_eq!(
+            catalog
+                .prompt_command_names
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            ["first-prompt"]
+        );
+    }
+
+    #[test]
+    fn unknown_reminder_keeps_source_units_and_native_remainder_count() {
+        let unknown = Utf16JsonProjection::root_string(
+            "unknown�".into(),
+            ["unknown".encode_utf16().collect::<Vec<_>>(), vec![0xd800]].concat(),
+        )
+        .unwrap();
+        let catalog = crate::model::HeadlessCommandCatalog {
+            prompt_command_names: vec!["first".into(), "second".into()],
+            available_command_count: 5,
+        };
+        let rendered = crate::model::render_unknown_command_reminder(&unknown, &catalog);
+        let expected_prefix =
+            "<system-reminder>\nThe user's message starts with the slash command /unknown"
+                .encode_utf16()
+                .collect::<Vec<_>>();
+        let rendered_units = rendered.string_units("").unwrap();
+        assert!(rendered_units.starts_with(&expected_prefix));
+        assert_eq!(
+            rendered_units[expected_prefix.len()],
+            0xd800,
+            "the unknown name's source unit is preserved"
+        );
+        assert!(rendered.string_at("").unwrap().contains("and 3 more."));
+    }
+
+    #[test]
+    fn unknown_reminder_lists_at_most_forty_names_in_source_order() {
+        let catalog = crate::model::HeadlessCommandCatalog {
+            prompt_command_names: (0..41)
+                .map(|index| format!("prompt-{index}").into())
+                .collect(),
+            available_command_count: 42,
+        };
+        let rendered = crate::model::render_unknown_command_reminder(&"missing".into(), &catalog);
+        let text = rendered.string_at("").unwrap();
+        assert!(text.contains("/prompt-0, /prompt-1"));
+        assert!(text.contains("/prompt-39, and 2 more."));
+        assert!(!text.contains("/prompt-40"));
     }
 
     #[test]

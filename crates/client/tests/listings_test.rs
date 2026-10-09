@@ -346,7 +346,7 @@ fn hooks_round_trips() {
             HookDto {
                 name: "format-on-save".to_string(),
                 event: "PostToolUse".to_string(),
-                matcher: Some("Edit|Write".to_string()),
+                matcher: Some("Edit|Write".into()),
                 timeout_ms: 60_000,
                 hook_type: None,
                 source: None,

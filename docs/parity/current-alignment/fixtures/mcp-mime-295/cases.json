@@ -1,0 +1,37 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "session_id": "00000000-0000-4000-8000-000000002296",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Call the fixture blob tool once. Then use Read on the CSS, JavaScript, XML, webmanifest, and unknown-control files whose paths the tool result gives you. Finish with the fixed response.",
+  "server_name": "fixture",
+  "tool_name": "return_blob_matrix",
+  "tool_use_id": "toolu_native_mcp_mime_295_blob_matrix",
+  "read_targets": [
+    "text/css",
+    "text/javascript",
+    "application/xml",
+    "application/manifest+json"
+  ],
+  "read_tool_use_prefix": "toolu_native_mcp_mime_295_read_",
+  "final_text": "MCP MIME fixture completed.",
+  "timeout_seconds": 45,
+  "resources": [
+    {"id":"image-x-icon","mime":"image/x-icon","uri":"fixture://mime/icon-a.not-the-extension","bytes_hex":"000001000100101000000100200068040000160000002800000010000000100000000100200000000000000400000000000000000000000000000000000000ffffff00"},
+    {"id":"image-vnd-microsoft-icon","mime":"image/vnd.microsoft.icon","uri":"fixture://mime/icon-b.not-the-extension","bytes_hex":"000001000100101000000100200068040000160000002800000010000000100000000100200000000000000400000000000000000000000000000000000000ffffff00"},
+    {"id":"text-css","mime":"text/css","uri":"fixture://mime/css.not-the-extension","bytes_hex":"2f2a204e41544956455f4d494d455f435353202a2f0a2e6d696d652d637373207b20636f6c6f723a207265643b207d0a","read_marker":"NATIVE_MIME_CSS"},
+    {"id":"text-javascript","mime":"text/javascript","uri":"fixture://mime/js.not-the-extension","bytes_hex":"2f2f204e41544956455f4d494d455f4a4156415343524950540a636f6e7374206d696d6546697874757265203d20226a73223b0a","read_marker":"NATIVE_MIME_JAVASCRIPT"},
+    {"id":"application-javascript","mime":"application/javascript","uri":"fixture://mime/js-app.not-the-extension","bytes_hex":"2f2f204e41544956455f4d494d455f4150504c49434154494f4e5f4a530a"},
+    {"id":"application-xml","mime":"application/xml","uri":"fixture://mime/xml-a.not-the-extension","bytes_hex":"3c66697874757265206d61726b65723d226e61746976652d6d696d652d786d6c222f3e0a","read_marker":"native-mime-xml"},
+    {"id":"text-xml","mime":"text/xml","uri":"fixture://mime/xml-b.not-the-extension","bytes_hex":"3c66697874757265206d61726b65723d226e61746976652d746578742d786d6c222f3e0a"},
+    {"id":"application-manifest-json","mime":"application/manifest+json","uri":"fixture://mime/manifest.not-the-extension","bytes_hex":"7b226e616d65223a224e41544956455f4d494d455f5745424d414e4946455354222c2273746172745f75726c223a222f227d0a","read_marker":"NATIVE_MIME_WEBMANIFEST"},
+    {"id":"font-woff2","mime":"font/woff2","uri":"fixture://mime/font-woff2.not-the-extension","bytes_hex":"774f4632000100000000000800000000"},
+    {"id":"application-font-woff2","mime":"application/font-woff2","uri":"fixture://mime/font-woff2-app.not-the-extension","bytes_hex":"774f4632000100000000000800000001"},
+    {"id":"font-woff","mime":"font/woff","uri":"fixture://mime/font-woff.not-the-extension","bytes_hex":"774f4646000100000000000800000000"},
+    {"id":"application-font-woff","mime":"application/font-woff","uri":"fixture://mime/font-woff-app.not-the-extension","bytes_hex":"774f4646000100000000000800000001"},
+    {"id":"font-ttf","mime":"font/ttf","uri":"fixture://mime/font-ttf.not-the-extension","bytes_hex":"00010000000000000000000000000000"},
+    {"id":"font-otf","mime":"font/otf","uri":"fixture://mime/font-otf.not-the-extension","bytes_hex":"4f54544f000000000000000000000000"},
+    {"id":"application-wasm","mime":"application/wasm","uri":"fixture://mime/module.not-the-extension","bytes_hex":"0061736d01000000"},
+    {"id":"unknown-control","mime":"application/x-native-fixture","uri":"fixture://mime/unknown.not-the-extension","bytes_hex":"004e41544956455f4d494d455f554e4b4e4f574eff"}
+  ]
+}

@@ -69,14 +69,14 @@ mod tests {
             handler.handle(&args()).await,
             CommandResult::Done {
                 display: Some(ref display)
-            } if display == "Brief-only mode enabled"
+            } if display.string_at("") == Some("Brief-only mode enabled")
         ));
         assert!(lingxi_core::host::session_flags::brief_mode_enabled());
         assert!(matches!(
             handler.handle(&args()).await,
             CommandResult::Done {
                 display: Some(ref display)
-            } if display == "Brief-only mode disabled"
+            } if display.string_at("") == Some("Brief-only mode disabled")
         ));
         assert!(!lingxi_core::host::session_flags::brief_mode_enabled());
 

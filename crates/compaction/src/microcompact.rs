@@ -948,8 +948,8 @@ mod tests {
         let got = keep_recent_persist_candidates(&msgs, 2);
         let ids: Vec<&str> = got.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, vec!["t0", "t1", "t2", "t3"]);
-        assert_eq!(got[0].1, "body-0");
-        assert_eq!(got[3].1, "body-3");
+        assert_eq!(got[0].1, "body-0".into());
+        assert_eq!(got[3].1, "body-3".into());
     }
 
     #[test]

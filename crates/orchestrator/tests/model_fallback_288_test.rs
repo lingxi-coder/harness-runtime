@@ -882,28 +882,42 @@ async fn current_configured_fallback_budget_route_notice_and_resume_lifecycle() 
             .collect();
         let persisted: Vec<_> = rows
             .iter()
-            .filter(|row| row.extra.get("subtype") == Some(&json!("model_fallback")))
+            .filter(|row| row.extra.string_at("/subtype") == Some("model_fallback"))
             .collect();
         assert_eq!(persisted.len(), notices, "{name}");
         for ((row, frame), message) in persisted.iter().zip(&frames).zip(&hot) {
-            assert_eq!(row.uuid, frame["uuid"].as_str().unwrap());
-            assert_eq!(row.extra["content"], frame["content"]);
-            assert_eq!(row.extra["originalModel"], frame["original_model"]);
-            assert_eq!(row.extra["fallbackModel"], frame["fallback_model"]);
-            assert_eq!(row.extra["level"], "warning");
-            assert_eq!(row.extra["isMeta"], false);
+            assert_eq!(row.uuid.as_str(), frame.string_at("/uuid").unwrap());
+            assert_eq!(row.extra.string_at("/content"), frame.string_at("/content"));
             assert_eq!(
-                row.extra["trigger"],
+                row.extra.string_at("/originalModel"),
+                frame.string_at("/original_model")
+            );
+            assert_eq!(
+                row.extra.string_at("/fallbackModel"),
+                frame.string_at("/fallback_model")
+            );
+            assert_eq!(row.extra.string_at("/level"), Some("warning"));
+            assert_eq!(
+                row.extra
+                    .at_pointer("/isMeta")
+                    .and_then(|value| value.as_bool()),
+                Some(false)
+            );
+            assert_eq!(
+                row.extra.string_at("/trigger"),
                 if name.contains("529")
                     || name.contains("payload-overload")
                     || name == "http-shared-body-overload-count"
                 {
-                    "overloaded"
+                    Some("overloaded")
                 } else {
-                    "server_error"
+                    Some("server_error")
                 }
             );
-            assert!(row.message.is_null());
+            assert!(row
+                .message
+                .at_pointer("")
+                .is_some_and(|value| value.is_null()));
             assert_eq!(message.id().as_uuid().to_string(), row.uuid);
             let raw = data.lines().find(|l| l.contains(&row.uuid)).unwrap();
             let keys = [

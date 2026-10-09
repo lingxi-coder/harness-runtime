@@ -477,7 +477,11 @@ mod tests {
         let token = "local-token";
         let value =
             serde_json::json!([{ "type": "text", "text": format!("editor refused: {token}") }]);
-        let rendered = tool_result_text(value, token);
+        let rendered = tool_result_text(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&value)
+                .expect("generated IDE result is valid JSON"),
+            token,
+        );
         assert_eq!(rendered, "editor refused: <redacted>");
         assert!(!rendered.contains(token));
     }

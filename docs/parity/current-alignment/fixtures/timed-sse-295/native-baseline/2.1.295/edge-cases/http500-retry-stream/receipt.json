@@ -1,0 +1,476 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "7a2ac335807ee1b72b7a7657d4d83b768ad6607d7722ddc307d1c269ecfb2a9b",
+  "fixture_sha256": "be65bab0f469418a9b8cd05baa772f0995b4091b9f3b8117b6bd668036a33f8a",
+  "native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "case": {
+    "id": "http500-retry-stream",
+    "mode": "http500-retry",
+    "session_id": "00000000-0000-4000-8000-000000002362",
+    "prompt": "Return the fixed retry timing result.",
+    "max_retries": 1,
+    "first_response_delay_ms": 200,
+    "retry_response_headers_delay_ms": 50,
+    "message_start_delay_ms": 400,
+    "content_block_start_delay_ms": 100,
+    "text_delta_delay_ms": 150,
+    "success_text": "NATIVE_500_RETRY_STREAM_SUCCESS"
+  },
+  "argv": [
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "--bare",
+    "--print",
+    "--output-format",
+    "json",
+    "--tools",
+    "",
+    "--permission-mode",
+    "dontAsk",
+    "--permission-prompts",
+    "none",
+    "--max-turns",
+    "1",
+    "--max-budget-usd",
+    "1",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002362",
+    "--system-prompt",
+    "Fixed timing edge-case fixture.",
+    "Return the fixed retry timing result."
+  ],
+  "public_entrypoint": "Native 2.1.295 --bare --print --output-format json against loopback Anthropic stub",
+  "network_boundary": {
+    "model_endpoint": "127.0.0.1 loopback only",
+    "dummy_key_only": true,
+    "isolated_home_config": true,
+    "upstream_requests": 0
+  },
+  "retry_budget": 1,
+  "timeout_seconds": 45,
+  "elapsed_seconds": 2.361,
+  "native_exit_code": 0,
+  "timed_out": false,
+  "native_stdout": {
+    "path": "native.stdout.raw.json",
+    "bytes": 1606,
+    "sha256": "57201ffb09308e6257d08413381951afb3675130302e9fddc47bab36792bc3db"
+  },
+  "native_stdout_top_level_key_order": [
+    "duration_api_ms",
+    "stop_reason",
+    "session_id",
+    "total_cost_usd",
+    "usage",
+    "modelUsage",
+    "permission_denials",
+    "terminal_reason",
+    "fast_mode_state",
+    "fast_mode_disabled_reason",
+    "subagent_stats",
+    "safety_stops",
+    "is_error",
+    "num_turns",
+    "subtype",
+    "api_error_status",
+    "result",
+    "ttft_ms",
+    "type",
+    "duration_ms",
+    "uuid",
+    "ttft_stream_ms",
+    "time_to_request_ms",
+    "first_content_frame_ms",
+    "queued_turn_count",
+    "result_index"
+  ],
+  "native_result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "NATIVE_500_RETRY_STREAM_SUCCESS",
+    "num_turns": 1,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-4000-8000-000000002362"
+  },
+  "native_timing_fields_ms": {
+    "time_to_request_ms": 20,
+    "ttft_stream_ms": 1204,
+    "first_content_frame_ms": 1306,
+    "ttft_ms": 1459,
+    "duration_api_ms": 1444,
+    "duration_ms": 1463
+  },
+  "native_stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "requests": [
+    {
+      "sequence": 1,
+      "accepted_loopback_dummy_key": true,
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "stream": true,
+      "model": "claude-sonnet-4-5",
+      "request_bytes": 885,
+      "request_sha256": "0f902c3973bbc918d1ddaca39d905ec6ff8d898a03bf8f735470297ce3b2744c",
+      "request_path": "model-request-01.raw.json",
+      "headers_in_order": [
+        [
+          "Accept",
+          "application/json"
+        ],
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "User-Agent",
+          "claude-cli/2.1.295 (external, sdk-cli)"
+        ],
+        [
+          "X-Claude-Code-Session-Id",
+          "00000000-0000-4000-8000-000000002362"
+        ],
+        [
+          "X-Stainless-Arch",
+          "arm64"
+        ],
+        [
+          "X-Stainless-Lang",
+          "js"
+        ],
+        [
+          "X-Stainless-OS",
+          "MacOS"
+        ],
+        [
+          "X-Stainless-Package-Version",
+          "0.128.0"
+        ],
+        [
+          "X-Stainless-Retry-Count",
+          "0"
+        ],
+        [
+          "X-Stainless-Runtime",
+          "node"
+        ],
+        [
+          "X-Stainless-Runtime-Version",
+          "v26.3.0"
+        ],
+        [
+          "X-Stainless-Timeout",
+          "600"
+        ],
+        [
+          "anthropic-beta",
+          "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "native-timed-sse-edge-295-dummy-key"
+        ],
+        [
+          "x-app",
+          "cli"
+        ],
+        [
+          "Connection",
+          "keep-alive"
+        ],
+        [
+          "Host",
+          "127.0.0.1:63694"
+        ],
+        [
+          "Accept-Encoding",
+          "gzip, deflate, br, zstd"
+        ],
+        [
+          "Content-Length",
+          "885"
+        ]
+      ],
+      "request_received_since_native_spawn_ms": 264.923
+    },
+    {
+      "sequence": 2,
+      "accepted_loopback_dummy_key": true,
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "stream": true,
+      "model": "claude-sonnet-4-5",
+      "request_bytes": 885,
+      "request_sha256": "0f902c3973bbc918d1ddaca39d905ec6ff8d898a03bf8f735470297ce3b2744c",
+      "request_path": "model-request-02.raw.json",
+      "headers_in_order": [
+        [
+          "Accept",
+          "application/json"
+        ],
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "User-Agent",
+          "claude-cli/2.1.295 (external, sdk-cli)"
+        ],
+        [
+          "X-Claude-Code-Session-Id",
+          "00000000-0000-4000-8000-000000002362"
+        ],
+        [
+          "X-Stainless-Arch",
+          "arm64"
+        ],
+        [
+          "X-Stainless-Lang",
+          "js"
+        ],
+        [
+          "X-Stainless-OS",
+          "MacOS"
+        ],
+        [
+          "X-Stainless-Package-Version",
+          "0.128.0"
+        ],
+        [
+          "X-Stainless-Retry-Count",
+          "0"
+        ],
+        [
+          "X-Stainless-Runtime",
+          "node"
+        ],
+        [
+          "X-Stainless-Runtime-Version",
+          "v26.3.0"
+        ],
+        [
+          "X-Stainless-Timeout",
+          "600"
+        ],
+        [
+          "anthropic-beta",
+          "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "native-timed-sse-edge-295-dummy-key"
+        ],
+        [
+          "x-app",
+          "cli"
+        ],
+        [
+          "Connection",
+          "keep-alive"
+        ],
+        [
+          "Host",
+          "127.0.0.1:63694"
+        ],
+        [
+          "Accept-Encoding",
+          "gzip, deflate, br, zstd"
+        ],
+        [
+          "Content-Length",
+          "885"
+        ]
+      ],
+      "request_received_since_native_spawn_ms": 989.363
+    }
+  ],
+  "responses": [
+    {
+      "sequence": 1,
+      "status": 500,
+      "kind": "retryable_error",
+      "delay_before_response_ms": 200,
+      "path": "http-response-01.raw.json",
+      "bytes": 104,
+      "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510",
+      "headers": [
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "x-should-retry",
+          "true"
+        ],
+        [
+          "retry-after",
+          "0"
+        ]
+      ]
+    },
+    {
+      "sequence": 2,
+      "status": 200,
+      "kind": "streaming_anthropic_sse",
+      "delay_before_headers_ms": 50,
+      "path": "http-response-02.raw.sse",
+      "bytes": 920,
+      "sha256": "5913a280b2b131d37eca63e59392d0b1783d7fdd85aef6c20c77311f87cbe383",
+      "headers": [
+        [
+          "Content-Type",
+          "text/event-stream"
+        ],
+        [
+          "Transfer-Encoding",
+          "chunked"
+        ],
+        [
+          "Connection",
+          "keep-alive"
+        ]
+      ]
+    }
+  ],
+  "response_event_trace": [
+    {
+      "request_sequence": 2,
+      "index": 1,
+      "event": "message_start",
+      "delay_before_ms": 400,
+      "write_since_headers_ms": 403.142,
+      "write_since_request_received_ms": 457.283,
+      "write_since_native_spawn_ms": 1446.646,
+      "chunk_bytes": 336,
+      "chunk_sha256": "226d68e61a8b2ee91c19b6c7e28f9fe6a02f2e57c9aadd62b41a660059029e96"
+    },
+    {
+      "request_sequence": 2,
+      "index": 2,
+      "event": "content_block_start",
+      "delay_before_ms": 100,
+      "write_since_headers_ms": 505.397,
+      "write_since_request_received_ms": 559.538,
+      "write_since_native_spawn_ms": 1548.901,
+      "chunk_bytes": 117,
+      "chunk_sha256": "74e31758108a5c7064e58764384757cfbd379f52e8e91b136bda12a39d1c9930"
+    },
+    {
+      "request_sequence": 2,
+      "index": 3,
+      "event": "content_block_delta",
+      "delay_before_ms": 150,
+      "write_since_headers_ms": 658.272,
+      "write_since_request_received_ms": 712.414,
+      "write_since_native_spawn_ms": 1701.777,
+      "chunk_bytes": 146,
+      "chunk_sha256": "c4b02cd97eab54404705c0495ed95706c0624695aa6aefcf1426772b61b48270"
+    },
+    {
+      "request_sequence": 2,
+      "index": 4,
+      "event": "content_block_stop",
+      "delay_before_ms": 0,
+      "write_since_headers_ms": 658.305,
+      "write_since_request_received_ms": 712.446,
+      "write_since_native_spawn_ms": 1701.809,
+      "chunk_bytes": 73,
+      "chunk_sha256": "c3ff233ce8a140450e2b9e3556bcfb3b8fffe2eebb33aeb8fb3919e2ef14ed16"
+    },
+    {
+      "request_sequence": 2,
+      "index": 5,
+      "event": "message_delta",
+      "delay_before_ms": 0,
+      "write_since_headers_ms": 658.334,
+      "write_since_request_received_ms": 712.475,
+      "write_since_native_spawn_ms": 1701.838,
+      "chunk_bytes": 197,
+      "chunk_sha256": "e2bed7b5084833a6c605568aa200343ff3817e0ae76764e1c44f6066c042f27e"
+    },
+    {
+      "request_sequence": 2,
+      "index": 6,
+      "event": "message_stop",
+      "delay_before_ms": 0,
+      "write_since_headers_ms": 658.36,
+      "write_since_request_received_ms": 712.501,
+      "write_since_native_spawn_ms": 1701.864,
+      "chunk_bytes": 51,
+      "chunk_sha256": "62c3d6333853510aa1157554d8267d72d946554aed79472ad59570143b8c52eb"
+    }
+  ],
+  "success_nonstream_body": null,
+  "input_error_body": {
+    "path": "http-500-error.raw.json",
+    "bytes": 104,
+    "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+  },
+  "sse_schedule": [
+    {
+      "index": 1,
+      "event": "message_start",
+      "delay_before_ms": 400,
+      "chunk_bytes": 336,
+      "chunk_sha256": "226d68e61a8b2ee91c19b6c7e28f9fe6a02f2e57c9aadd62b41a660059029e96"
+    },
+    {
+      "index": 2,
+      "event": "content_block_start",
+      "delay_before_ms": 100,
+      "chunk_bytes": 117,
+      "chunk_sha256": "74e31758108a5c7064e58764384757cfbd379f52e8e91b136bda12a39d1c9930"
+    },
+    {
+      "index": 3,
+      "event": "content_block_delta",
+      "delay_before_ms": 150,
+      "chunk_bytes": 146,
+      "chunk_sha256": "c4b02cd97eab54404705c0495ed95706c0624695aa6aefcf1426772b61b48270"
+    },
+    {
+      "index": 4,
+      "event": "content_block_stop",
+      "delay_before_ms": 0,
+      "chunk_bytes": 73,
+      "chunk_sha256": "c3ff233ce8a140450e2b9e3556bcfb3b8fffe2eebb33aeb8fb3919e2ef14ed16"
+    },
+    {
+      "index": 5,
+      "event": "message_delta",
+      "delay_before_ms": 0,
+      "chunk_bytes": 197,
+      "chunk_sha256": "e2bed7b5084833a6c605568aa200343ff3817e0ae76764e1c44f6066c042f27e"
+    },
+    {
+      "index": 6,
+      "event": "message_stop",
+      "delay_before_ms": 0,
+      "chunk_bytes": 51,
+      "chunk_sha256": "62c3d6333853510aa1157554d8267d72d946554aed79472ad59570143b8c52eb"
+    }
+  ],
+  "scope": "This receipt records one bounded 404 nonstream-fallback case or one 500 retry-then-SSE case; it does not claim timing behavior for other status/error families."
+}

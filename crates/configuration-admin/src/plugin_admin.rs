@@ -182,7 +182,10 @@ pub async fn preview_operation(
         .filter_map(|key| source_member(&payload, key))
         .find(|value| value.string_at("").is_some())
         .unwrap_or(source_string("configuration")?);
-    let target = target_projection.string_at("").unwrap_or("configuration");
+    let target = target_projection
+        .string_at("")
+        .unwrap_or("configuration")
+        .to_owned();
     let requires_confirmation = matches!(
         action,
         "install"

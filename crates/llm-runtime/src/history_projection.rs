@@ -1338,7 +1338,7 @@ impl HistoryProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     fn source(value: &Value) -> wire::JsonPayload {
         wire::JsonPayload::from_generated_value(value).expect("test JSON is source-backed")
@@ -1402,13 +1402,11 @@ mod tests {
             "lingxi_computer_abandoned",
             "lingxi_native_content",
         ] {
-            assert!(
-                host_block(wire::ContentBlock::ProviderContent {
-                    protocol: wire::ProtocolFamily::AnthropicMessages,
-                    value: source(&json!({"type":kind}))
-                })
-                .is_err()
-            );
+            assert!(host_block(wire::ContentBlock::ProviderContent {
+                protocol: wire::ProtocolFamily::AnthropicMessages,
+                value: source(&json!({"type":kind}))
+            })
+            .is_err());
         }
     }
 
@@ -1601,11 +1599,9 @@ mod tests {
             response.response_id.as_ref().map(|id| id.as_str()),
             Some("resp-inner-two")
         );
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, HistoryEvent::ServerFallback { .. }))
-        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::ServerFallback { .. })));
     }
 
     #[test]
@@ -1889,13 +1885,11 @@ mod stop_delta_tests {
                 inference: Default::default(),
             })])
             .unwrap();
-        assert!(
-            !end.iter()
-                .any(|event| matches!(event, HistoryEvent::MessageDelta { .. }))
-        );
-        assert!(
-            end.iter()
-                .any(|event| matches!(event, HistoryEvent::MessageStop))
-        );
+        assert!(!end
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::MessageDelta { .. })));
+        assert!(end
+            .iter()
+            .any(|event| matches!(event, HistoryEvent::MessageStop)));
     }
 }

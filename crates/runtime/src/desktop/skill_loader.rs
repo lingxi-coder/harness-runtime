@@ -517,7 +517,13 @@ mod tests {
         reg.register_command(markdown_cmd("other", "body"));
         let loader = CommandRegistrySkillLoader::new(Arc::new(RwLock::new(reg)));
         let mut names = loader.list_names().await;
-        names.sort();
-        assert_eq!(names, vec!["other", "some-plugin:deploy"]);
+        names.sort_by_key(|name| name.string_units("").unwrap());
+        assert_eq!(
+            names
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            vec!["other", "some-plugin:deploy"]
+        );
     }
 }

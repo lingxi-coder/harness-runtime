@@ -1,0 +1,28 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "session_id": "00000000-0000-4000-8000-000000002351",
+  "model": "claude-sonnet-4-5",
+  "server_name": "fixture",
+  "prompt": "Call the fixture MCP tool once, then finish with the fixed response.",
+  "resume_prompt": "Restore the saved session and finish with the fixed response.",
+  "final_text": "NATIVE_MCP_COMPLEX_ERROR_PERSISTENCE_FINISHED",
+  "timeout_seconds": 45,
+  "tool_cases": [
+    {
+      "name": "error_complex",
+      "tool_use_id": "toolu_native_error_complex_295",
+      "marker": "MCP_COMPLEX_ERROR_MARKER",
+      "is_error": true,
+      "content": [
+        {"type": "text", "text": " \n\t "},
+        {"type": "text", "text": "  mcp-error-\ud800-tail \n"},
+        {
+          "type": "image",
+          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jH0sAAAAASUVORK5CYII=",
+          "mimeType": "image/png"
+        }
+      ]
+    }
+  ]
+}

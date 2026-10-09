@@ -4,6 +4,7 @@
 //! authority or carry account identity across sessions. This context is never
 //! forwarded to a provider; selected account scopes are passed as SDK options.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 type AdmissionCheck = Arc<dyn Fn() -> bool + Send + Sync>;
@@ -63,10 +64,7 @@ impl RequestDispatchAdmission {
             ),
         >,
     ) -> Self {
-        Self::with_global_and_message_sources(
-            std::iter::empty::<AdmissionCheck>(),
-            checks,
-        )
+        Self::with_global_and_message_sources(std::iter::empty::<AdmissionCheck>(), checks)
     }
 
     /// Retain row-scoped checks only while their source content contributes to
@@ -102,12 +100,14 @@ impl RequestDispatchAdmission {
     #[must_use]
     pub fn is_admitted(&self) -> bool {
         self.checks.global.iter().all(|check| check())
-            && self.checks.by_message.iter().all(|(id, check)| {
-                match &self.selected_messages {
+            && self
+                .checks
+                .by_message
+                .iter()
+                .all(|(id, check)| match &self.selected_messages {
                     None => check(),
                     Some(selected) => !selected.contains(id) || check(),
-                }
-            })
+                })
     }
 }
 
@@ -124,10 +124,62 @@ impl PartialEq for RequestDispatchAdmission {
     }
 }
 
+struct RequestDispatchObserverState {
+    marked: AtomicBool,
+    on_dispatch: Box<dyn Fn() + Send + Sync>,
+}
+
+/// One-shot host observer for the first physical provider dispatch of a
+/// request. It is separate from admission: admission decides whether a call
+/// may dispatch, while this records only after the SDK crosses that boundary.
+#[derive(Clone)]
+pub struct RequestDispatchObserver {
+    state: Arc<RequestDispatchObserverState>,
+}
+
+impl RequestDispatchObserver {
+    /// Observe the first physical dispatch that passes host admission.
+    #[must_use]
+    pub fn new(on_dispatch: impl Fn() + Send + Sync + 'static) -> Self {
+        Self {
+            state: Arc::new(RequestDispatchObserverState {
+                marked: AtomicBool::new(false),
+                on_dispatch: Box::new(on_dispatch),
+            }),
+        }
+    }
+
+    /// Mark the first successful crossing of the provider-dispatch boundary.
+    /// Repeated retries using this observer are deliberately ignored.
+    pub fn mark_dispatched(&self) {
+        if !self.state.marked.swap(true, Ordering::AcqRel) {
+            (self.state.on_dispatch)();
+        }
+    }
+}
+
+impl std::fmt::Debug for RequestDispatchObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RequestDispatchObserver(..)")
+    }
+}
+
+impl PartialEq for RequestDispatchObserver {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+}
+
+impl Eq for RequestDispatchObserver {}
+
 /// Host-owned execution state. Cloning preserves the logical attempt and its
 /// recovery scope; it does not authorize another physical dispatch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionContext {
+    /// Trusted main/origin session captured before provider preparation.
+    pub request_session_id: Option<String>,
+    /// Session authority captured before execution; never resolved from provider input.
+    pub model_safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
     /// Native prompt source and typed cache inputs, projected after the
     /// selected request credential is captured in `ModelRuntime`. The Host
     /// account generation comes from a separate live getter, not from the SDK
@@ -145,6 +197,11 @@ pub struct ExecutionContext {
     /// Native service feature resolution; raw ModelRuntime callers keep their
     /// provider-neutral SDK controls unless the host selects this policy.
     pub resolve_native_effort: bool,
+    /// Non-secret fingerprint of the explicitly selected Native Anthropic
+    /// endpoint. ModelRuntime rechecks it against each resolved route before
+    /// applying first-party request-only policies, so failover cannot inherit
+    /// the primary route's Native admission.
+    pub native_anthropic_base_url_fingerprint: Option<String>,
     /// Native inherited defaults are a boot snapshot, independently of live caps.
     pub inherited_effort_settings: Option<Vec<lingxi_core::host::effort::EffortSettingsLayer>>,
     pub effort_table_options: lingxi_core::host::effort_table::TableOptions,
@@ -165,6 +222,9 @@ pub struct ExecutionContext {
     pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
     /// Host-owned logical dispatch check, never serialized into provider input.
     pub request_dispatch_admission: Option<RequestDispatchAdmission>,
+    /// Host-owned observation of the first admitted physical dispatch, never
+    /// serialized into provider input.
+    pub request_dispatch_observer: Option<RequestDispatchObserver>,
     /// Host message sources whose content contributes to the canonical request.
     /// Used to project row-scoped admission only after all normalization passes.
     pub request_message_source_ids: std::collections::HashSet<lingxi_core::types::MessageId>,
@@ -211,7 +271,7 @@ impl ExecutionContext {
 
 #[cfg(test)]
 mod tests {
-    use super::RequestDispatchAdmission;
+    use super::{RequestDispatchAdmission, RequestDispatchObserver};
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -222,22 +282,32 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_observer_is_idempotent_across_request_retries() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&count);
+        let observer = RequestDispatchObserver::new(move || {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let retry = observer.clone();
+
+        observer.mark_dispatched();
+        retry.mark_dispatched();
+
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn unprojected_source_checks_fail_closed() {
         let stale_id = lingxi_core::types::MessageId::new();
-        let admission = RequestDispatchAdmission::for_message_sources([(
-            stale_id,
-            check(false),
-        )]);
+        let admission = RequestDispatchAdmission::for_message_sources([(stale_id, check(false))]);
         assert!(!admission.is_admitted());
     }
 
     #[test]
     fn projection_prunes_row_checks_but_keeps_global_checks() {
         let source_id = lingxi_core::types::MessageId::new();
-        let message_only = RequestDispatchAdmission::for_message_sources([(
-            source_id,
-            check(false),
-        )]);
+        let message_only =
+            RequestDispatchAdmission::for_message_sources([(source_id, check(false))]);
         assert!(message_only
             .retaining_message_sources(&HashSet::new())
             .is_none());

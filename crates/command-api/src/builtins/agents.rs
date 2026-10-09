@@ -94,7 +94,7 @@ mod tests {
         let h = AgentsHandler::new(Arc::new(MockOrchestratorHandle::new()));
         let locked = "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  \u{2022} .lingxi/agents/       (this project)\n  \u{2022} ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents";
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, locked);
+            assert_eq!(s, locked.into());
         } else {
             panic!("expected Done with display text");
         }

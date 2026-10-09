@@ -292,7 +292,7 @@ mod tests {
             .await;
         match result {
             CommandResult::Done { display } => assert_eq!(
-                display.as_deref(),
+                display.as_ref().and_then(|source| source.string_at("")),
                 Some("/workflows is unavailable (no engine handle wired)")
             ),
             other => panic!("unexpected result: {other:?}"),

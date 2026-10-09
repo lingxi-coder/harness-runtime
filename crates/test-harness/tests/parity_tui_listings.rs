@@ -16,7 +16,7 @@ const FIXTURE: &str = include_str!("../src/parity/fixtures/tui_listings.json");
 fn args(name: &str) -> ParsedSlashCommand {
     ParsedSlashCommand {
         name: name.into(),
-        raw_args: String::new(),
+        raw_args: String::new().into(),
         positional_args: vec![],
     }
 }
@@ -34,7 +34,7 @@ async fn empty_states_match_fixture() {
     let r = McpHandler::new(mock.clone()).handle(&args("mcp")).await;
     match r {
         CommandResult::Done { display: Some(s) } => {
-            assert_eq!(s, empty["mcp"].as_str().unwrap());
+            assert_eq!(s.string_at(""), empty["mcp"].as_str());
         }
         other => panic!("got {other:?}"),
     }
@@ -42,7 +42,7 @@ async fn empty_states_match_fixture() {
     let r = HooksHandler::new(mock.clone()).handle(&args("hooks")).await;
     match r {
         CommandResult::Done { display: Some(s) } => {
-            assert_eq!(s, empty["hooks"].as_str().unwrap());
+            assert_eq!(s.string_at(""), empty["hooks"].as_str());
         }
         other => panic!("got {other:?}"),
     }
@@ -50,7 +50,7 @@ async fn empty_states_match_fixture() {
     let r = AgentsHandler::new(mock).handle(&args("agents")).await;
     match r {
         CommandResult::Done { display: Some(s) } => {
-            assert_eq!(s, empty["agents"].as_str().unwrap());
+            assert_eq!(s.string_at(""), empty["agents"].as_str());
         }
         other => panic!("got {other:?}"),
     }
@@ -77,7 +77,7 @@ async fn non_empty_mcp_matches_fixture() {
         .as_str()
         .unwrap();
     match r {
-        CommandResult::Done { display: Some(s) } => assert_eq!(s, expected),
+        CommandResult::Done { display: Some(s) } => assert_eq!(s.string_at(""), Some(expected)),
         other => panic!("got {other:?}"),
     }
 }
@@ -98,7 +98,7 @@ async fn non_empty_hooks_matches_fixture() {
         .as_str()
         .unwrap();
     match r {
-        CommandResult::Done { display: Some(s) } => assert_eq!(s, expected),
+        CommandResult::Done { display: Some(s) } => assert_eq!(s.string_at(""), Some(expected)),
         other => panic!("got {other:?}"),
     }
 }
@@ -119,7 +119,7 @@ async fn non_empty_agents_matches_fixture() {
         .as_str()
         .unwrap();
     match r {
-        CommandResult::Done { display: Some(s) } => assert_eq!(s, expected),
+        CommandResult::Done { display: Some(s) } => assert_eq!(s.string_at(""), Some(expected)),
         other => panic!("got {other:?}"),
     }
 }

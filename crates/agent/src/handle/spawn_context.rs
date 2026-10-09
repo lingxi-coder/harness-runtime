@@ -869,6 +869,7 @@ impl PoolSubagentSpawner {
             // cells (None when unfilled — tests / minimal builds). `hook_session_id`
             // / `hook_cwd` carry the boot-set values.
             hook_executor: None,
+            agent_spawn_token: None,
             strict_plugin_only_hooks: false,
             skill_loader: None,
             hook_session_id: lingxi_core::types::SessionId::nil(),
@@ -1243,6 +1244,7 @@ impl PoolSubagentSpawner {
         );
         ctx.structured_output_validator = self.structured_output_validator.clone();
         ctx.agent_spawn_provenance = request.agent_spawn_provenance.clone();
+        ctx.agent_spawn_token = request.agent_spawn_token.clone();
         ctx.native_query_depth =
             Self::initial_native_query_depth(request.parent_native_query_depth);
         ctx.instruction_context = request.instruction_context.clone().unwrap_or_default();
@@ -1593,15 +1595,15 @@ impl PoolSubagentSpawner {
 
 #[cfg(test)]
 mod native_query_depth_tests {
-    use super::AgentSpawner;
+    use super::PoolSubagentSpawner;
 
     #[test]
     fn child_depth_is_separate_from_agent_spawn_depth() {
-        assert_eq!(AgentSpawner::initial_native_query_depth(None), 1);
-        assert_eq!(AgentSpawner::initial_native_query_depth(Some(0)), 2);
-        assert_eq!(AgentSpawner::initial_native_query_depth(Some(4)), 6);
+        assert_eq!(PoolSubagentSpawner::initial_native_query_depth(None), 1);
+        assert_eq!(PoolSubagentSpawner::initial_native_query_depth(Some(0)), 2);
+        assert_eq!(PoolSubagentSpawner::initial_native_query_depth(Some(4)), 6);
         assert_eq!(
-            AgentSpawner::initial_native_query_depth(Some(u32::MAX)),
+            PoolSubagentSpawner::initial_native_query_depth(Some(u32::MAX)),
             u32::MAX
         );
     }

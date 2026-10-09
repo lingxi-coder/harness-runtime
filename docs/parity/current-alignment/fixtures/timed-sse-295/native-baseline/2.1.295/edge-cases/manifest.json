@@ -1,0 +1,480 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "7a2ac335807ee1b72b7a7657d4d83b768ad6607d7722ddc307d1c269ecfb2a9b",
+  "cases_sha256": "8b56ac543ddbf808902bd7ad67903c4fcdd16b0f1517fb9b2e2d1d2a6985afe9",
+  "error_body_inputs": {
+    "http-404-error.raw.json": {
+      "bytes": 104,
+      "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+    },
+    "http-500-error.raw.json": {
+      "bytes": 104,
+      "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+    }
+  },
+  "cases": {
+    "http404-nonstream-fallback": {
+      "mode": "http404-fallback",
+      "native_exit_code": 0,
+      "timed_out": false,
+      "requests": [
+        {
+          "stream": true,
+          "offset_since_spawn_ms": 394.466,
+          "bytes": 888,
+          "sha256": "08efbc81915aac63428cb9ba4a15b897e8f74e662cde6c2f2e0c513048e9ab7b"
+        },
+        {
+          "stream": false,
+          "offset_since_spawn_ms": 603.254,
+          "bytes": 889,
+          "sha256": "de2aa8d688271714e10acce17f14256bdb9a1973da747dfd7006e0a7a9fe5d30"
+        }
+      ],
+      "responses": [
+        {
+          "status": 404,
+          "kind": "error",
+          "delay_ms": 200,
+          "bytes": 104,
+          "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+        },
+        {
+          "status": 200,
+          "kind": "nonstream_anthropic_message",
+          "delay_ms": 400,
+          "bytes": 356,
+          "sha256": "c1389e8bd21dc6f2c9c33a7ec5c61187633f44d15cd62cfd180ed97b8e895c5f"
+        }
+      ],
+      "timing_fields_ms": {
+        "ttft_ms": 638,
+        "duration_api_ms": 621,
+        "duration_ms": 642
+      },
+      "stdout_key_order": [
+        "duration_api_ms",
+        "stop_reason",
+        "session_id",
+        "total_cost_usd",
+        "usage",
+        "modelUsage",
+        "permission_denials",
+        "terminal_reason",
+        "fast_mode_state",
+        "fast_mode_disabled_reason",
+        "subagent_stats",
+        "safety_stops",
+        "is_error",
+        "num_turns",
+        "subtype",
+        "api_error_status",
+        "result",
+        "ttft_ms",
+        "type",
+        "duration_ms",
+        "uuid",
+        "queued_turn_count",
+        "result_index"
+      ],
+      "native_result": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "NATIVE_404_NONSTREAM_FALLBACK_SUCCESS",
+        "num_turns": 1,
+        "stop_reason": "end_turn",
+        "session_id": "00000000-0000-4000-8000-000000002361"
+      },
+      "response_event_trace": []
+    },
+    "http500-retry-stream": {
+      "mode": "http500-retry",
+      "native_exit_code": 0,
+      "timed_out": false,
+      "requests": [
+        {
+          "stream": true,
+          "offset_since_spawn_ms": 264.923,
+          "bytes": 885,
+          "sha256": "0f902c3973bbc918d1ddaca39d905ec6ff8d898a03bf8f735470297ce3b2744c"
+        },
+        {
+          "stream": true,
+          "offset_since_spawn_ms": 989.363,
+          "bytes": 885,
+          "sha256": "0f902c3973bbc918d1ddaca39d905ec6ff8d898a03bf8f735470297ce3b2744c"
+        }
+      ],
+      "responses": [
+        {
+          "status": 500,
+          "kind": "retryable_error",
+          "delay_ms": 200,
+          "bytes": 104,
+          "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+        },
+        {
+          "status": 200,
+          "kind": "streaming_anthropic_sse",
+          "delay_ms": 50,
+          "bytes": 920,
+          "sha256": "5913a280b2b131d37eca63e59392d0b1783d7fdd85aef6c20c77311f87cbe383"
+        }
+      ],
+      "timing_fields_ms": {
+        "time_to_request_ms": 20,
+        "ttft_stream_ms": 1204,
+        "first_content_frame_ms": 1306,
+        "ttft_ms": 1459,
+        "duration_api_ms": 1444,
+        "duration_ms": 1463
+      },
+      "stdout_key_order": [
+        "duration_api_ms",
+        "stop_reason",
+        "session_id",
+        "total_cost_usd",
+        "usage",
+        "modelUsage",
+        "permission_denials",
+        "terminal_reason",
+        "fast_mode_state",
+        "fast_mode_disabled_reason",
+        "subagent_stats",
+        "safety_stops",
+        "is_error",
+        "num_turns",
+        "subtype",
+        "api_error_status",
+        "result",
+        "ttft_ms",
+        "type",
+        "duration_ms",
+        "uuid",
+        "ttft_stream_ms",
+        "time_to_request_ms",
+        "first_content_frame_ms",
+        "queued_turn_count",
+        "result_index"
+      ],
+      "native_result": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "NATIVE_500_RETRY_STREAM_SUCCESS",
+        "num_turns": 1,
+        "stop_reason": "end_turn",
+        "session_id": "00000000-0000-4000-8000-000000002362"
+      },
+      "response_event_trace": [
+        {
+          "request_sequence": 2,
+          "index": 1,
+          "event": "message_start",
+          "delay_before_ms": 400,
+          "write_since_headers_ms": 403.142,
+          "write_since_request_received_ms": 457.283,
+          "write_since_native_spawn_ms": 1446.646,
+          "chunk_bytes": 336,
+          "chunk_sha256": "226d68e61a8b2ee91c19b6c7e28f9fe6a02f2e57c9aadd62b41a660059029e96"
+        },
+        {
+          "request_sequence": 2,
+          "index": 2,
+          "event": "content_block_start",
+          "delay_before_ms": 100,
+          "write_since_headers_ms": 505.397,
+          "write_since_request_received_ms": 559.538,
+          "write_since_native_spawn_ms": 1548.901,
+          "chunk_bytes": 117,
+          "chunk_sha256": "74e31758108a5c7064e58764384757cfbd379f52e8e91b136bda12a39d1c9930"
+        },
+        {
+          "request_sequence": 2,
+          "index": 3,
+          "event": "content_block_delta",
+          "delay_before_ms": 150,
+          "write_since_headers_ms": 658.272,
+          "write_since_request_received_ms": 712.414,
+          "write_since_native_spawn_ms": 1701.777,
+          "chunk_bytes": 146,
+          "chunk_sha256": "c4b02cd97eab54404705c0495ed95706c0624695aa6aefcf1426772b61b48270"
+        },
+        {
+          "request_sequence": 2,
+          "index": 4,
+          "event": "content_block_stop",
+          "delay_before_ms": 0,
+          "write_since_headers_ms": 658.305,
+          "write_since_request_received_ms": 712.446,
+          "write_since_native_spawn_ms": 1701.809,
+          "chunk_bytes": 73,
+          "chunk_sha256": "c3ff233ce8a140450e2b9e3556bcfb3b8fffe2eebb33aeb8fb3919e2ef14ed16"
+        },
+        {
+          "request_sequence": 2,
+          "index": 5,
+          "event": "message_delta",
+          "delay_before_ms": 0,
+          "write_since_headers_ms": 658.334,
+          "write_since_request_received_ms": 712.475,
+          "write_since_native_spawn_ms": 1701.838,
+          "chunk_bytes": 197,
+          "chunk_sha256": "e2bed7b5084833a6c605568aa200343ff3817e0ae76764e1c44f6066c042f27e"
+        },
+        {
+          "request_sequence": 2,
+          "index": 6,
+          "event": "message_stop",
+          "delay_before_ms": 0,
+          "write_since_headers_ms": 658.36,
+          "write_since_request_received_ms": 712.501,
+          "write_since_native_spawn_ms": 1701.864,
+          "chunk_bytes": 51,
+          "chunk_sha256": "62c3d6333853510aa1157554d8267d72d946554aed79472ad59570143b8c52eb"
+        }
+      ]
+    },
+    "http500-retry-stream-long-first-delay": {
+      "mode": "http500-retry",
+      "native_exit_code": 0,
+      "timed_out": false,
+      "requests": [
+        {
+          "stream": true,
+          "offset_since_spawn_ms": 268.81,
+          "bytes": 885,
+          "sha256": "fdc41f8700308f590a20c4d66fe1b23ce756253f1dc5e8202ea859dbb23b70ab"
+        },
+        {
+          "stream": true,
+          "offset_since_spawn_ms": 1235.374,
+          "bytes": 885,
+          "sha256": "fdc41f8700308f590a20c4d66fe1b23ce756253f1dc5e8202ea859dbb23b70ab"
+        }
+      ],
+      "responses": [
+        {
+          "status": 500,
+          "kind": "retryable_error",
+          "delay_ms": 400,
+          "bytes": 104,
+          "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+        },
+        {
+          "status": 200,
+          "kind": "streaming_anthropic_sse",
+          "delay_ms": 50,
+          "bytes": 954,
+          "sha256": "ab1bc49c5a12e99afd1a349cafaff005405c3fc7899c74cf0deeb56912bda86a"
+        }
+      ],
+      "timing_fields_ms": {
+        "time_to_request_ms": 18,
+        "ttft_stream_ms": 1449,
+        "first_content_frame_ms": 1549,
+        "ttft_ms": 1717,
+        "duration_api_ms": 1706,
+        "duration_ms": 1726
+      },
+      "stdout_key_order": [
+        "duration_api_ms",
+        "stop_reason",
+        "session_id",
+        "total_cost_usd",
+        "usage",
+        "modelUsage",
+        "permission_denials",
+        "terminal_reason",
+        "fast_mode_state",
+        "fast_mode_disabled_reason",
+        "subagent_stats",
+        "safety_stops",
+        "is_error",
+        "num_turns",
+        "subtype",
+        "api_error_status",
+        "result",
+        "ttft_ms",
+        "type",
+        "duration_ms",
+        "uuid",
+        "ttft_stream_ms",
+        "time_to_request_ms",
+        "first_content_frame_ms",
+        "queued_turn_count",
+        "result_index"
+      ],
+      "native_result": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "NATIVE_500_RETRY_STREAM_LONG_FIRST_DELAY_SUCCESS",
+        "num_turns": 1,
+        "stop_reason": "end_turn",
+        "session_id": "00000000-0000-4000-8000-000000002363"
+      },
+      "response_event_trace": [
+        {
+          "request_sequence": 2,
+          "index": 1,
+          "event": "message_start",
+          "delay_before_ms": 400,
+          "write_since_headers_ms": 405.14,
+          "write_since_request_received_ms": 460.995,
+          "write_since_native_spawn_ms": 1696.369,
+          "chunk_bytes": 353,
+          "chunk_sha256": "d45d639b9b03ba522ab98319dcc5d8aa2a278db5add3b7f2489cc714c3ec4637"
+        },
+        {
+          "request_sequence": 2,
+          "index": 2,
+          "event": "content_block_start",
+          "delay_before_ms": 100,
+          "write_since_headers_ms": 505.792,
+          "write_since_request_received_ms": 561.647,
+          "write_since_native_spawn_ms": 1797.021,
+          "chunk_bytes": 117,
+          "chunk_sha256": "74e31758108a5c7064e58764384757cfbd379f52e8e91b136bda12a39d1c9930"
+        },
+        {
+          "request_sequence": 2,
+          "index": 3,
+          "event": "content_block_delta",
+          "delay_before_ms": 150,
+          "write_since_headers_ms": 660.987,
+          "write_since_request_received_ms": 716.843,
+          "write_since_native_spawn_ms": 1952.217,
+          "chunk_bytes": 163,
+          "chunk_sha256": "3f9707e5c16371bfce447e48bde0fd88f4064ffcd124945536273a1871c2ca20"
+        },
+        {
+          "request_sequence": 2,
+          "index": 4,
+          "event": "content_block_stop",
+          "delay_before_ms": 0,
+          "write_since_headers_ms": 661.113,
+          "write_since_request_received_ms": 716.969,
+          "write_since_native_spawn_ms": 1952.343,
+          "chunk_bytes": 73,
+          "chunk_sha256": "c3ff233ce8a140450e2b9e3556bcfb3b8fffe2eebb33aeb8fb3919e2ef14ed16"
+        },
+        {
+          "request_sequence": 2,
+          "index": 5,
+          "event": "message_delta",
+          "delay_before_ms": 0,
+          "write_since_headers_ms": 661.168,
+          "write_since_request_received_ms": 717.023,
+          "write_since_native_spawn_ms": 1952.397,
+          "chunk_bytes": 197,
+          "chunk_sha256": "e2bed7b5084833a6c605568aa200343ff3817e0ae76764e1c44f6066c042f27e"
+        },
+        {
+          "request_sequence": 2,
+          "index": 6,
+          "event": "message_stop",
+          "delay_before_ms": 0,
+          "write_since_headers_ms": 661.194,
+          "write_since_request_received_ms": 717.049,
+          "write_since_native_spawn_ms": 1952.423,
+          "chunk_bytes": 51,
+          "chunk_sha256": "62c3d6333853510aa1157554d8267d72d946554aed79472ad59570143b8c52eb"
+        }
+      ]
+    }
+  },
+  "timing_inference": "Across retry runs, increasing the first 500 response delay by 200 ms moved the successful second request receipt by about 246 ms and moved ttft_stream_ms by about 245 ms, while time_to_request_ms stayed 20 ms vs 18 ms. This is consistent with time_to_request_ms being latched to the initial request timestamp rather than the retry request; the raw timing baseline origin is internal, so this remains a scoped inference.",
+  "artifacts": {
+    "http404-nonstream-fallback/http-response-01.raw.json": {
+      "bytes": 104,
+      "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+    },
+    "http404-nonstream-fallback/http-response-02.raw.json": {
+      "bytes": 356,
+      "sha256": "c1389e8bd21dc6f2c9c33a7ec5c61187633f44d15cd62cfd180ed97b8e895c5f"
+    },
+    "http404-nonstream-fallback/model-request-01.raw.json": {
+      "bytes": 888,
+      "sha256": "08efbc81915aac63428cb9ba4a15b897e8f74e662cde6c2f2e0c513048e9ab7b"
+    },
+    "http404-nonstream-fallback/model-request-02.raw.json": {
+      "bytes": 889,
+      "sha256": "de2aa8d688271714e10acce17f14256bdb9a1973da747dfd7006e0a7a9fe5d30"
+    },
+    "http404-nonstream-fallback/native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "http404-nonstream-fallback/native.stdout.raw.json": {
+      "bytes": 1533,
+      "sha256": "872f514a96c8dd26380e48467a0d6778c63a88255b2a939e83ab245917335cce"
+    },
+    "http404-nonstream-fallback/planned-nonstream-message.raw.json": {
+      "bytes": 356,
+      "sha256": "c1389e8bd21dc6f2c9c33a7ec5c61187633f44d15cd62cfd180ed97b8e895c5f"
+    },
+    "http404-nonstream-fallback/receipt.json": {
+      "bytes": 8622,
+      "sha256": "d42e726171578e204852effcc6ef6970d2cf21e102d2a7f19053327a6ebb49b8"
+    },
+    "http500-retry-stream/http-response-01.raw.json": {
+      "bytes": 104,
+      "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+    },
+    "http500-retry-stream/http-response-02.raw.sse": {
+      "bytes": 920,
+      "sha256": "5913a280b2b131d37eca63e59392d0b1783d7fdd85aef6c20c77311f87cbe383"
+    },
+    "http500-retry-stream/model-request-01.raw.json": {
+      "bytes": 885,
+      "sha256": "0f902c3973bbc918d1ddaca39d905ec6ff8d898a03bf8f735470297ce3b2744c"
+    },
+    "http500-retry-stream/model-request-02.raw.json": {
+      "bytes": 885,
+      "sha256": "0f902c3973bbc918d1ddaca39d905ec6ff8d898a03bf8f735470297ce3b2744c"
+    },
+    "http500-retry-stream/native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "http500-retry-stream/native.stdout.raw.json": {
+      "bytes": 1606,
+      "sha256": "57201ffb09308e6257d08413381951afb3675130302e9fddc47bab36792bc3db"
+    },
+    "http500-retry-stream/receipt.json": {
+      "bytes": 12518,
+      "sha256": "f0d91794bc3dc8655a8e3540589b02c04cf3970c7e5fd5f15db8df7cb466c5fa"
+    },
+    "http500-retry-stream-long-first-delay/http-response-01.raw.json": {
+      "bytes": 104,
+      "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+    },
+    "http500-retry-stream-long-first-delay/http-response-02.raw.sse": {
+      "bytes": 954,
+      "sha256": "ab1bc49c5a12e99afd1a349cafaff005405c3fc7899c74cf0deeb56912bda86a"
+    },
+    "http500-retry-stream-long-first-delay/model-request-01.raw.json": {
+      "bytes": 885,
+      "sha256": "fdc41f8700308f590a20c4d66fe1b23ce756253f1dc5e8202ea859dbb23b70ab"
+    },
+    "http500-retry-stream-long-first-delay/model-request-02.raw.json": {
+      "bytes": 885,
+      "sha256": "fdc41f8700308f590a20c4d66fe1b23ce756253f1dc5e8202ea859dbb23b70ab"
+    },
+    "http500-retry-stream-long-first-delay/native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "http500-retry-stream-long-first-delay/native.stdout.raw.json": {
+      "bytes": 1623,
+      "sha256": "9508645f89716e2a6edc6ad78cab253e14c18a7cf047b5612a7043c9b6263f1e"
+    },
+    "http500-retry-stream-long-first-delay/receipt.json": {
+      "bytes": 12569,
+      "sha256": "c4b5787abcaa34fb609d3801ea20e9ac4fdd033f16bc8507f3725fd61017494d"
+    }
+  }
+}

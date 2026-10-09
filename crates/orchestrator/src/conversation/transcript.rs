@@ -2890,7 +2890,7 @@ impl ConversationOrchestrator {
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             return;
         };
-        let session_id_str = self.session.lock().await.session_id.to_string();
+        let session_id_str = self.session.lock().await.session_id.as_uuid().to_string();
         let parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
         let git_branch = self.resolve_git_branch().await;
         let extra = source_object([("attachment", payload)]);
@@ -2966,7 +2966,7 @@ impl ConversationOrchestrator {
             return;
         }
         let mut parent = last_uuid.lock().await;
-        let session_id = expected_session.to_string();
+        let session_id = expected_session.as_uuid().to_string();
         let row = session::JsonlMessage {
             message_type: "attachment".into(),
             uuid: uuid::Uuid::new_v4().to_string(),
@@ -3224,6 +3224,21 @@ impl ConversationOrchestrator {
         };
         let msg = &rewritten;
         self.note_assistant_commit(msg).await;
+        if matches!(msg, ConversationMessage::Assistant { .. }) {
+            // The accepted assistant owns terminal API-error metadata even
+            // when the embedding host has no durable transcript writer.
+            let error_stop_reason = api_error
+                .as_ref()
+                .map(|env| env.inner_stop_reason.unwrap_or("stop_sequence"))
+                .or_else(|| {
+                    preappended
+                        .as_ref()
+                        .and_then(|metadata| metadata.api_error)
+                        .filter(|row| row.is_api_error_message)
+                        .map(|row| row.message.stop_reason.as_str())
+                });
+            self.note_turn_api_error_stop_reason(error_stop_reason);
+        }
         let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
             // These side tables live only until the corresponding tool-result
             // line is persisted. In in-memory/no-writer sessions there is no
@@ -3241,7 +3256,11 @@ impl ConversationOrchestrator {
                 Some(p) => Some(p),
                 None => self.transcript.last_jsonl_uuid.lock().await.clone(),
             };
-            (session.session_id.to_string(), session.plan_mode, parent)
+            (
+                session.session_id.as_uuid().to_string(),
+                session.plan_mode,
+                parent,
+            )
         };
         // Writer-field fidelity (§G gap 4):
         // - gitBranch: once-per-session `getBranch()` (cached).
@@ -3549,7 +3568,7 @@ impl ConversationOrchestrator {
         let persisted_session_id = if durable {
             target_bare.clone()
         } else {
-            target_session.to_string()
+            target_session.as_uuid().to_string()
         };
         let mut persisted = self.to_jsonl_message_with_inner_id(
             msg,
@@ -3724,7 +3743,7 @@ impl ConversationOrchestrator {
         let (session_id_str, mut model, mut model_profile) = {
             let s = self.session.lock().await;
             (
-                s.session_id.to_string(),
+                s.session_id.as_uuid().to_string(),
                 s.model.clone(),
                 s.model_profile.clone(),
             )
@@ -4001,7 +4020,7 @@ impl ConversationOrchestrator {
             stop_reason: row.stop_reason.clone(),
             resumable: row.resumable.clone(),
         };
-        let session_id = self.session.lock().await.session_id.to_string();
+        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
         let usage = row.usage.as_ref().map(persisted_assistant_usage);
         let mut jmsg = self.to_jsonl_message_with_inner_id(
             &single,
@@ -4210,7 +4229,7 @@ impl ConversationOrchestrator {
         let (session_id_str, mut model, mut model_profile) = {
             let s = self.session.lock().await;
             (
-                s.session_id.to_string(),
+                s.session_id.as_uuid().to_string(),
                 s.model.clone(),
                 s.model_profile.clone(),
             )
@@ -4385,7 +4404,7 @@ async fn mod_utf16_text_preserves_raw_jsonl_and_normalizes_public_cold_resume() 
     use hooks::mods::ModHost;
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId};
     use llm_runtime::services::sdk::{self, WireCodec};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::sync::Arc;
 
     let root = tempfile::tempdir().expect("temporary session root");
@@ -4582,11 +4601,9 @@ export function register(on) {
         sdk::protocol::ProtocolFamily::AnthropicMessages,
     )
     .expect("project exact live history");
-    assert!(
-        live_overrides
-            .values()
-            .any(|units| units == &accepted_units)
-    );
+    assert!(live_overrides
+        .values()
+        .any(|units| units == &accepted_units));
     let profile: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
         "provider_id":"anthropic", "profile_name":"test", "base_url":"https://api.anthropic.com",
         "protocol":"anthropic_messages", "auth":"none", "models":[]
@@ -4635,7 +4652,8 @@ export function register(on) {
     .expect("load durable UTF-16 transcript");
     let assistant_row = loaded.last().expect("loaded assistant row");
     assert_eq!(
-        session::jsonl::exact_json::message_utf16_overrides(assistant_row)["/message/content/0/text"],
+        session::jsonl::exact_json::message_utf16_overrides(assistant_row)
+            ["/message/content/0/text"],
         accepted_units
     );
     let resumed = crate::resume::state_from_messages(session_id.as_uuid(), &loaded);
@@ -4669,11 +4687,9 @@ export function register(on) {
         sdk::protocol::ProtocolFamily::AnthropicMessages,
     )
     .expect("project cold-resumed history");
-    assert!(
-        resumed_overrides
-            .values()
-            .any(|units| units == &accepted_units)
-    );
+    assert!(resumed_overrides
+        .values()
+        .any(|units| units == &accepted_units));
     let resumed_encoded = sdk::AnthropicMessagesCodec
         .encode_request(
             sdk::EncodeRequest::new(&resumed_request),
@@ -4718,11 +4734,9 @@ fn mod_append_content_block_preserves_optional_wire_presence() {
         provider_tool_use_id: None,
         content_blocks: None,
     };
-    assert!(
-        mod_append_content_block(&omitted)
-            .get_property("is_error")
-            .is_none()
-    );
+    assert!(mod_append_content_block(&omitted)
+        .get_property("is_error")
+        .is_none());
 
     let explicit_false = ContentBlock::ToolResult {
         tool_use_id: ToolUseId::from("toolu_1"),
@@ -4751,12 +4765,10 @@ fn mod_append_content_block_preserves_optional_wire_presence() {
     ));
     let projected_accepted_text = mod_append_content_block(&accepted_text[0]);
     assert!(projected_accepted_text.get_property("citations").is_some());
-    assert!(
-        projected_accepted_text
-            .get_property("citations")
-            .unwrap()
-            .is_null()
-    );
+    assert!(projected_accepted_text
+        .get_property("citations")
+        .unwrap()
+        .is_null());
 
     let old_error = ContentBlock::ToolResult {
         tool_use_id: ToolUseId::from("toolu_1"),
@@ -5053,14 +5065,12 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         Some("tool_use")
     );
     assert_eq!(accepted_assistant.array_len("/content"), Some(3));
-    assert!(
-        accepted_assistant
-            .subprojection("/content/0/citations")
-            .unwrap()
-            .at_pointer("")
-            .unwrap()
-            .is_null()
-    );
+    assert!(accepted_assistant
+        .subprojection("/content/0/citations")
+        .unwrap()
+        .at_pointer("")
+        .unwrap()
+        .is_null());
     assert_eq!(
         accepted_assistant.string_at("/content/1/type").as_deref(),
         Some("text")
@@ -5069,29 +5079,23 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
         accepted_assistant.string_at("/content/1/text").as_deref(),
         Some("accepted Mod cited text")
     );
-    assert!(
-        accepted_assistant
-            .subprojection("/content/1/citations")
-            .unwrap()
-            .at_pointer("")
-            .unwrap()
-            .is_null()
-    );
-    assert!(
-        accepted_assistant
-            .subprojection("/content/1/provider_metadata")
-            .is_err()
-    );
+    assert!(accepted_assistant
+        .subprojection("/content/1/citations")
+        .unwrap()
+        .at_pointer("")
+        .unwrap()
+        .is_null());
+    assert!(accepted_assistant
+        .subprojection("/content/1/provider_metadata")
+        .is_err());
     assert_eq!(
         accepted_assistant.string_at("/content/2/id").as_deref(),
         Some(tool_use_wire_id.as_str())
     );
-    assert!(
-        loaded[2]
-            .message
-            .subprojection("/content/0/is_error")
-            .is_err()
-    );
+    assert!(loaded[2]
+        .message
+        .subprojection("/content/0/is_error")
+        .is_err());
     assert_eq!(
         loaded[2]
             .message
@@ -5174,7 +5178,7 @@ async fn mod_utf16_text_is_exact_live_and_raw_but_native_cold_resume_projects_re
     use hooks::mods::ModHost;
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId};
     use llm_runtime::services::sdk::{self, WireCodec};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::sync::Arc;
 
     let root = tempfile::tempdir().expect("temporary session root");
@@ -5371,11 +5375,9 @@ export function register(on) {
         sdk::protocol::ProtocolFamily::AnthropicMessages,
     )
     .expect("project exact live history");
-    assert!(
-        live_overrides
-            .values()
-            .any(|units| units == &accepted_units)
-    );
+    assert!(live_overrides
+        .values()
+        .any(|units| units == &accepted_units));
     let profile: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
         "provider_id":"anthropic", "profile_name":"test", "base_url":"https://api.anthropic.com",
         "protocol":"anthropic_messages", "auth":"none", "models":[]
@@ -5424,7 +5426,8 @@ export function register(on) {
     .expect("load durable UTF-16 transcript");
     let assistant_row = loaded.last().expect("loaded assistant row");
     assert_eq!(
-        session::jsonl::exact_json::message_utf16_overrides(assistant_row)["/message/content/0/text"],
+        session::jsonl::exact_json::message_utf16_overrides(assistant_row)
+            ["/message/content/0/text"],
         accepted_units
     );
     let resumed = crate::resume::state_from_messages(session_id.as_uuid(), &loaded);

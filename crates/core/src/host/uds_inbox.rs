@@ -441,11 +441,7 @@ pub fn send_uds_raw(path: &Path, auth_token: Option<&str>, payload: &Value) -> i
 }
 
 #[cfg(unix)]
-fn send_uds_unix_json(
-    path: &Path,
-    auth_token: Option<&str>,
-    payload_json: &str,
-) -> io::Result<()> {
+fn send_uds_unix_json(path: &Path, auth_token: Option<&str>, payload_json: &str) -> io::Result<()> {
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(path)?;
     stream.set_write_timeout(Some(SEND_TIMEOUT))?;

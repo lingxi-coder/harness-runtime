@@ -81,6 +81,7 @@ impl ConversationOrchestrator {
             return GuardVerdict::OverBudget;
         }
         state.turn_count = state.turn_count.saturating_add(1);
+        self.note_turn_count(state.turn_count);
         GuardVerdict::Proceed
     }
 }

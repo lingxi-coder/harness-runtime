@@ -1,4 +1,4 @@
-use crate::definition::{HookDefinition, HookShell, HookSource};
+use crate::definition::{HookDefinition, HookFailureBehavior, HookShell, HookSource};
 use crate::events::HookEventType;
 use crate::loader::{
     build_condition, build_executor, event_type_name, parse_event_type, HookEntry, MatcherGroup,
@@ -144,6 +144,10 @@ fn compile_hook_layer(
                     ),
                     executor,
                     source,
+                    on_failure: entry
+                        .on_failure
+                        .as_deref()
+                        .and_then(HookFailureBehavior::from_wire),
                     blocking: !entry.r#async.unwrap_or(false),
                     timeout: entry.timeout.map(Duration::from_secs),
                     priority: entry.priority.unwrap_or(0),
@@ -220,6 +224,16 @@ fn validate_entry(
 
     if let Some(if_pattern) = entry.if_pattern.as_ref() {
         validate_if_pattern(if_pattern, &format!("{base}.if"), issues);
+    }
+    if entry
+        .on_failure
+        .as_deref()
+        .is_some_and(|value| HookFailureBehavior::from_wire(value).is_none())
+    {
+        issues.push(HookValidationIssue {
+            path: format!("{base}.onFailure"),
+            message: "onFailure must be \"continue\" or \"block\"".into(),
+        });
     }
 
     match kind {
@@ -695,5 +709,38 @@ mod tests {
             input.string_units("/path").as_deref(),
             Some([0xD800].as_slice())
         );
+    }
+
+    #[test]
+    fn on_failure_is_validated_and_preserved_in_parsed_definition() {
+        let raw = r#"{
+            "UserPromptSubmit": [{"hooks": [
+                {"type":"command","command":"fail.sh","onFailure":"block"}
+            ]}]
+        }"#;
+        let parsed = parse_hook_layer_strict(
+            raw,
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .expect("supported onFailure values parse");
+        assert_eq!(parsed.hooks.len(), 1);
+        assert_eq!(parsed.hooks[0].on_failure, Some(HookFailureBehavior::Block));
+        assert!(serialize_hook_layer(&parsed.document)
+            .unwrap()
+            .semantically_eq(&Utf16JsonProjection::parse(raw).unwrap()));
+
+        let invalid = r#"{"UserPromptSubmit":[{"hooks":[
+            {"type":"command","command":"fail.sh","onFailure":"ignore"}
+        ]}]}"#;
+        let error = parse_hook_layer_strict(
+            invalid,
+            HookSource::Settings(lingxi_core::types::SettingsScope::User),
+        )
+        .expect_err("unsupported onFailure values are rejected");
+        assert!(matches!(
+            error,
+            HookLayerError::Validation(ref issues)
+                if issues.iter().any(|issue| issue.path.ends_with(".onFailure"))
+        ));
     }
 }

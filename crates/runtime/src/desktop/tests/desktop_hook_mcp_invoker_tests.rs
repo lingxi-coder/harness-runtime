@@ -8,11 +8,16 @@ use lingxi_core::host::{
     McpResourceTemplateDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
     ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+fn empty_source_object() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("{}").expect("empty JSON object")
+}
 
 #[derive(Default)]
 struct NoopTransport {
@@ -53,8 +58,8 @@ impl McpTransport for NoopTransport {
             prompts: false,
             logging: false,
             directory_read: false,
-            experimental: HashMap::new(),
-            extensions: HashMap::new(),
+            experimental: empty_source_object(),
+            extensions: empty_source_object(),
         })
     }
 
@@ -90,7 +95,7 @@ impl McpTransport for NoopTransport {
         &self,
         _conn: &McpRawConnection,
         _tool: &str,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         unreachable!("adapter no-lazy-dial test never calls transport tools")
     }
@@ -98,7 +103,7 @@ impl McpTransport for NoopTransport {
     async fn read_resource(
         &self,
         _conn: &McpRawConnection,
-        _uri: &str,
+        _uri: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         unreachable!("unused")
     }
@@ -120,7 +125,8 @@ impl McpTransport for NoopTransport {
         _req: ElicitRequestDto,
     ) -> Result<ElicitResultDto, McpError> {
         Ok(ElicitResultDto {
-            data: serde_json::json!({ "action": "cancel" }),
+            data: Utf16JsonProjection::from_serde_value(&serde_json::json!({ "action": "cancel" }))
+                .unwrap(),
         })
     }
 
@@ -172,12 +178,13 @@ fn hook_full_name_normalizes_server_and_respects_existing_prefix() {
 #[test]
 fn hook_result_mapping_extracts_text_and_preserves_is_error() {
     let success = map_hook_mcp_tool_result(McpToolResultDto {
-        content: serde_json::json!([
+        content: Utf16JsonProjection::from_serde_value(&serde_json::json!([
             {"type":"text","text":"first"},
             "second",
             {"ignored": true},
             [{"type":"text","text":"third"}]
-        ]),
+        ]))
+        .unwrap(),
         is_error: false,
         meta: None,
         structured_content: None,
@@ -190,7 +197,7 @@ fn hook_result_mapping_extracts_text_and_preserves_is_error() {
     );
 
     let is_error = map_hook_mcp_tool_result(McpToolResultDto {
-        content: serde_json::json!("boom"),
+        content: Utf16JsonProjection::from_serde_value(&serde_json::json!("boom")).unwrap(),
         is_error: true,
         meta: None,
         structured_content: None,
@@ -242,7 +249,7 @@ async fn invoker_is_late_bound_and_shared_across_clones() {
         .invoke(hooks::HookMcpInvocation {
             server: "srv".into(),
             tool: "tool".into(),
-            input: HashMap::new(),
+            input: empty_source_object(),
             timeout: Duration::from_secs(1),
         })
         .await;
@@ -267,7 +274,7 @@ async fn invoker_is_late_bound_and_shared_across_clones() {
         .invoke(hooks::HookMcpInvocation {
             server: "srv".into(),
             tool: "tool".into(),
-            input: HashMap::new(),
+            input: empty_source_object(),
             timeout: Duration::from_secs(1),
         })
         .await;
@@ -297,8 +304,8 @@ async fn invoker_uses_get_client_and_does_not_lazy_connect_cached_servers() {
                 prompts: false,
                 logging: false,
                 directory_read: false,
-                experimental: HashMap::new(),
-                extensions: HashMap::new(),
+                experimental: empty_source_object(),
+                extensions: empty_source_object(),
             },
             negotiated: lingxi_core::host::McpNegotiatedProtocol {
                 era: McpProtocolEra::Legacy,
@@ -319,7 +326,7 @@ async fn invoker_uses_get_client_and_does_not_lazy_connect_cached_servers() {
         .invoke(hooks::HookMcpInvocation {
             server: "srv".into(),
             tool: "read".into(),
-            input: HashMap::new(),
+            input: empty_source_object(),
             timeout: Duration::from_secs(1),
         })
         .await;

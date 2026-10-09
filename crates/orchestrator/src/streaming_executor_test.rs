@@ -86,6 +86,13 @@ mod tests {
         value.into_test_tool_input()
     }
 
+    macro_rules! source_json {
+        ($($json:tt)*) => {
+            Utf16JsonProjection::from_serde_value(&json!($($json)*))
+                .expect("generated test JSON is valid")
+        };
+    }
+
     /// Build an orchestrator with an EMPTY tool registry. Used to exercise the
     /// unknown-tool short-circuit path.
     fn orch_empty() -> ConversationOrchestrator {
@@ -196,12 +203,13 @@ mod tests {
                 call_entries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             Ok(ToolCallResult {
-                data: json!({ "content": "ok" }),
+                data: source_json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -285,7 +293,7 @@ mod tests {
         }
 
         fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool {
-            input.bool_at("/safe") == Some(true)
+            input.at_pointer("/safe").and_then(|value| value.as_bool()) == Some(true)
         }
 
         fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
@@ -386,7 +394,7 @@ mod tests {
             }
             .to_owned();
             Ok(ToolCallResult {
-                data: json!({ "step": step }),
+                data: source_json!({ "step": step }),
                 model_content: None,
                 new_messages: Vec::new(),
                 context_modifier: Some(Box::new(move |mut context: ToolUseContext| {
@@ -396,11 +404,12 @@ mod tests {
                 })),
                 is_error: false,
                 mcp_meta: (step == "old").then(|| {
-                    json!({
+                    source_json!({
                         "fence_probe": "old-generation",
                         "_meta": { "claude/endTurn": true },
                     })
                 }),
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -432,7 +441,7 @@ mod tests {
             1024
         }
         fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool {
-            input.bool_at("/hold") != Some(true)
+            input.at_pointer("/hold").and_then(|value| value.as_bool()) != Some(true)
         }
         fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
             true
@@ -497,7 +506,7 @@ mod tests {
                 verbose: ctx.options.verbose,
             };
             self.captured.lock().unwrap().push(captured.clone());
-            let held = input.bool_at("/hold") == Some(true);
+            let held = input.at_pointer("/hold").and_then(|value| value.as_bool()) == Some(true);
             if held {
                 self.first_started.notify_one();
                 self.release_first.notified().await;
@@ -507,7 +516,9 @@ mod tests {
                 .unwrap_or("layered-model")
                 .to_owned();
             let layered_cwd = input.string_at("/layered_cwd").map(PathBuf::from);
-            let layered_permission_mode = input.string_at("/layered_permission_mode");
+            let layered_permission_mode = input
+                .string_at("/layered_permission_mode")
+                .map(str::to_owned);
             let context_modifier = self.return_context_layer.then(|| {
                 let expected = captured;
                 Box::new(move |mut context: ToolUseContext| {
@@ -557,12 +568,13 @@ mod tests {
                 }) as tool_api::ContextModifier
             });
             let result = ToolCallResult {
-                data: json!({ "content": "ok" }),
+                data: source_json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             };
             self.call_returned.notify_one();
             Ok(result)
@@ -659,7 +671,7 @@ mod tests {
             let tool_use_id = ctx.tool_use_id.expect("owned W1 supplies tool_use_id");
             let progress = || tool_api::progress::ToolProgress {
                 tool_use_id: tool_use_id.clone(),
-                data: json!({ "subagent_activity": "progress" }),
+                data: source_json!({ "subagent_activity": "progress" }),
             };
             self.started.notify_one();
             tx.send(progress())
@@ -683,7 +695,9 @@ mod tests {
                 .take()
                 .expect("test owns the progress tool release gate");
             let _ = release.await;
-            Ok(ToolCallResult::from_data(json!({ "completed": true })))
+            Ok(ToolCallResult::from_data(
+                source_json!({ "completed": true }),
+            ))
         }
     }
 
@@ -902,7 +916,7 @@ mod tests {
             if input.string_at("/step").as_deref() == Some("second") {
                 self.second_call_started.notify_one();
             }
-            Ok(ToolCallResult::from_data(json!({ "content": "ok" })))
+            Ok(ToolCallResult::from_data(source_json!({ "content": "ok" })))
         }
     }
 
@@ -942,7 +956,7 @@ mod tests {
         }
 
         fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool {
-            input.bool_at("/safe") == Some(true)
+            input.at_pointer("/safe").and_then(|value| value.as_bool()) == Some(true)
         }
 
         fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
@@ -996,7 +1010,7 @@ mod tests {
             self.started
                 .send(step.to_owned())
                 .expect("actor queue test is listening for W1 entry");
-            if input.bool_at("/hold") == Some(true) {
+            if input.at_pointer("/hold").and_then(|value| value.as_bool()) == Some(true) {
                 let release = self
                     .releases
                     .lock()
@@ -1014,7 +1028,7 @@ mod tests {
                     } => {},
                 }
             }
-            Ok(ToolCallResult::from_data(json!({ "step": step })))
+            Ok(ToolCallResult::from_data(source_json!({ "step": step })))
         }
     }
 
@@ -1148,12 +1162,13 @@ mod tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!({ "content": "ok" }),
+                data: source_json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -1185,8 +1200,8 @@ mod tests {
         ) -> hooks::HookResult {
             hooks::HookResult {
                 outcome: hooks::HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: Some(hooks::response::HookResponse {
                     additional_context: Some("POST-ERROR-CTX".into()),
@@ -1267,6 +1282,7 @@ mod tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
         let mut executor = hooks::executor::HookExecutorImpl::new(
             Arc::new(tokio::sync::RwLock::new(registry)),
@@ -1431,7 +1447,7 @@ mod tests {
             executor: hooks::definition::HookExecutor::McpTool {
                 server: "test".into(),
                 tool: "delayed".into(),
-                input: std::collections::HashMap::new(),
+                input: Utf16JsonProjection::parse("{}").unwrap(),
             },
             source: hooks::definition::HookSource::Session,
             blocking: false,
@@ -1442,6 +1458,7 @@ mod tests {
             async_rewake: true,
             async_timeout: Some(std::time::Duration::from_secs(5)),
             rewake_message: Some("continue after delayed validation".into()),
+            on_failure: None,
         });
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -1807,8 +1824,8 @@ mod tests {
         };
         assert!(is_error.unwrap_or(false));
         assert_eq!(
-            content,
-            "<tool_use_error>Error: No such tool available: Nope</tool_use_error>"
+            content.string_at(""),
+            Some("<tool_use_error>Error: No such tool available: Nope</tool_use_error>")
         );
     }
 
@@ -2082,8 +2099,12 @@ mod tests {
         else {
             panic!("expected error")
         };
-        assert!(content.contains("disabled for this session"));
-        assert!(!content.contains("run it from a worker"));
+        assert!(content
+            .string_at("")
+            .is_some_and(|text| text.contains("disabled for this session")));
+        assert!(!content
+            .string_at("")
+            .is_some_and(|text| text.contains("run it from a worker")));
     }
 
     #[tokio::test]
@@ -2113,8 +2134,8 @@ mod tests {
         };
         assert!(is_error.unwrap_or(false));
         assert_eq!(
-            content,
-            "<tool_use_error>Error: No such tool available: Read. Read is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead.</tool_use_error>"
+            content.string_at(""),
+            Some("<tool_use_error>Error: No such tool available: Read. Read is not available to you as the coordinator \u{2014} run it from a worker via the Agent tool instead.</tool_use_error>")
         );
     }
 
@@ -2401,12 +2422,13 @@ mod tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!({ "content": "ok" }),
+                data: source_json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -2543,12 +2565,13 @@ mod tests {
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
-                data: json!({ "content": "ok" }),
+                data: source_json!({ "content": "ok" }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -2640,18 +2663,19 @@ mod tests {
                     self.release_second.notified().await;
                 }
                 other => {
-                    return Err(ToolError::InvalidInput(format!(
-                        "unexpected step: {other:?}"
-                    )));
+                    return Err(ToolError::InvalidInput(
+                        format!("unexpected step: {other:?}").into(),
+                    ));
                 }
             }
             Ok(ToolCallResult {
-                data: json!({ "content": input.string_at("/step").unwrap_or_default() }),
+                data: source_json!({ "content": input.string_at("/step").unwrap_or_default() }),
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -3169,8 +3193,11 @@ mod tests {
         );
         assert_eq!(content.string_at("").as_deref(), Some(REJECT_MESSAGE));
         assert!(
-            !content.contains("<tool_use_error>"),
-            "REJECT_MESSAGE must be bare (not tool_use_error-wrapped): {content}"
+            !content
+                .string_at("")
+                .is_some_and(|text| text.contains("<tool_use_error>")),
+            "REJECT_MESSAGE must be bare (not tool_use_error-wrapped): {}",
+            content.string_at("").unwrap_or_default()
         );
     }
 
@@ -3434,8 +3461,8 @@ mod tests {
         assert_eq!(results[0].post_tool_batch_calls.len(), 1);
         assert_eq!(
             results[0].post_tool_batch_calls[0].tool_response,
-            Some(json!(
-                "<tool_use_error>Error: No such tool available: NoSuchTool</tool_use_error>"
+            Some(Utf16JsonProjection::from(
+                "<tool_use_error>Error: No such tool available: NoSuchTool</tool_use_error>",
             )),
             "PostToolBatch covers every assistant tool_use and reads the yielded result content"
         );
@@ -3667,12 +3694,13 @@ mod tests {
             tokio::select! {
                 () = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
                     Ok(ToolCallResult {
-                        data: json!({ "content": "cancel-tool-ran-to-end" }),
+                        data: source_json!({ "content": "cancel-tool-ran-to-end" }),
                         model_content: None,
                         new_messages: vec![],
                         context_modifier: None,
                         is_error: false,
                         mcp_meta: None,
+                        subagent_hooks_fired: false,
                     })
                 }
                 () = async { match token { Some(t) => t.cancelled().await, None => std::future::pending().await } } => {
@@ -3839,8 +3867,8 @@ mod tests {
         };
         assert!(is_error.unwrap_or(false));
         assert_eq!(
-            content,
-            "Error: The tool call was interrupted before a result was received. It may or may not have completed on the server — verify before assuming it succeeded, and retry if needed."
+            content.string_at(""),
+            Some("Error: The tool call was interrupted before a result was received. It may or may not have completed on the server — verify before assuming it succeeded, and retry if needed.")
         );
     }
 
@@ -3890,10 +3918,13 @@ mod tests {
         };
         assert!(is_error.unwrap_or(false));
         assert_eq!(
-            content, REJECT_MESSAGE,
+            content.string_at(""),
+            Some(REJECT_MESSAGE),
             "in-flight Cancel tool must get the bare REJECT_MESSAGE on user interrupt"
         );
-        assert!(!content.contains("cancel-tool-ran-to-end"));
+        assert!(!content
+            .string_at("")
+            .is_some_and(|text| text.contains("cancel-tool-ran-to-end")));
         let drained = exec.take_newly_completed();
         assert_eq!(drained.len(), 1);
         let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
@@ -3919,7 +3950,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             result_events,
-            vec![json!({ "error": REJECT_MESSAGE })],
+            vec![source_json!({ "error": REJECT_MESSAGE })],
             "Tn emits exactly the accepted synthetic result, never the raw ToolError frame"
         );
         assert_eq!(
@@ -4389,9 +4420,14 @@ mod tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("append-order", dir.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "append-order",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::parse("{}").unwrap(),
+        )
+        .await
+        .unwrap();
         let mut hooks = hooks::HookRegistry::new();
         hooks.set_mod_host(host.clone());
         let orch = ConversationOrchestrator::into_shared(
@@ -4457,14 +4493,17 @@ mod tests {
         let observed = host
             .dispatch(
                 "tool.call",
-                json!({"tool":"Probe", "input":{}}),
+                source_json!({"tool":"Probe", "input":{}}),
                 |_| async { panic!("the probe is answered by the Mod") },
             )
             .await
             .unwrap();
-        assert_eq!(observed["result"]["stage"], "called");
-        assert_eq!(observed["result"]["appendCount"], 1);
-        assert_eq!(observed["result"]["uuid"], row.row_id.as_uuid().to_string());
+        assert_eq!(observed.string_at("/result/stage"), Some("called"));
+        assert_eq!(observed.number_at("/result/appendCount"), Some(1.0));
+        assert_eq!(
+            observed.string_at("/result/uuid"),
+            Some(row.row_id.as_uuid().to_string().as_str())
+        );
         let ContentBlock::ToolResult { is_error, .. } = executor.tools[0].result.as_ref().unwrap()
         else {
             panic!("expected the original tool result");
@@ -4676,12 +4715,18 @@ mod tests {
                 llm_runtime::ContentBlock::ToolCall {
                     id: first_id.into(),
                     name: "W1Capture".into(),
-                    input: project_test_tool_input(json!({ "hold": false })),
+                    input: lingxi_llm_client::protocol::JsonPayload::parse(
+                        &json!({ "hold": false }).to_string(),
+                    )
+                    .unwrap(),
                 },
                 llm_runtime::ContentBlock::ToolCall {
                     id: second_id.into(),
                     name: "W1Capture".into(),
-                    input: project_test_tool_input(json!({ "hold": false })),
+                    input: lingxi_llm_client::protocol::JsonPayload::parse(
+                        &json!({ "hold": false }).to_string(),
+                    )
+                    .unwrap(),
                 },
             ],
             Some("tool_use"),
@@ -5447,7 +5492,7 @@ mod tests {
                             content: vec![ContentBlock::ToolUse {
                                 id,
                                 name: "W1Capture".into(),
-                                input,
+                                input: project_test_tool_input(input),
                                 provider_id: None,
                             }],
                             stop_reason: None,
@@ -5863,9 +5908,14 @@ mod tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("clock-after-generation", dir.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "clock-after-generation",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::parse("{}").unwrap(),
+        )
+        .await
+        .unwrap();
         let mut hook_registry = hooks::HookRegistry::new();
         hook_registry.set_mod_host(host.clone());
         let hook_registry = Arc::new(tokio::sync::RwLock::new(hook_registry));
@@ -6158,14 +6208,19 @@ mod tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("clock-after-owner-drop", dir.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "clock-after-owner-drop",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::parse("{}").unwrap(),
+        )
+        .await
+        .unwrap();
         host.load(
             "clock-after-owner-drop-live",
             dir.path(),
             &live_module,
-            json!({}),
+            Utf16JsonProjection::parse("{}").unwrap(),
         )
         .await
         .unwrap();

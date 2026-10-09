@@ -16,7 +16,7 @@ use crate::async_registry::{
 use crate::attachment::{
     self, CancellationTimeout, HookAttachmentIdentity, HookAttachmentSink, HookPublicationGuard,
 };
-use crate::definition::{HookDefinition, HookExecutor};
+use crate::definition::{HookDefinition, HookExecutor, HookFailureBehavior};
 use crate::events::HookEvent;
 use crate::hook_payload::{
     parse_response_projection, ConfigChangePayload, CwdChangedPayload, DirectoryAddedPayload,
@@ -286,6 +286,7 @@ type AgentPromptTranscripts = HashMap<
 >;
 
 pub struct HookExecutorImpl {
+    model_safety_provider: std::sync::Mutex<Option<HookModelSafetyProvider>>,
     agent_prompt_transcripts: std::sync::Mutex<AgentPromptTranscripts>,
     registry: Arc<RwLock<HookRegistry>>,
     http: Arc<dyn HttpTransport>,
@@ -369,7 +370,48 @@ pub struct HookExecutorImpl {
     attachment_sink: Option<Arc<dyn HookAttachmentSink>>,
 }
 
+/// Admission-time authority lookup for context-light hook events. Existing
+/// task/session contexts retain the observer they already captured.
+pub type HookModelSafetyProvider = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
+                    > + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
 impl HookExecutorImpl {
+    /// Bind a weak host lookup after composition. It is consulted when a hook
+    /// is admitted, not after the hook's model work completes.
+    pub fn set_model_safety_provider(&self, provider: HookModelSafetyProvider) {
+        *self
+            .model_safety_provider
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provider);
+    }
+
+    async fn capture_model_safety(&self, ctx: &mut HookContext) {
+        if ctx.model_safety_observer.is_some() {
+            return;
+        }
+        ctx.model_safety_observer =
+            lingxi_core::host::model_safety::current_model_safety_observer();
+        if ctx.model_safety_observer.is_some() {
+            return;
+        }
+        let provider = self
+            .model_safety_provider
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(provider) = provider {
+            ctx.model_safety_observer = provider().await;
+        }
+    }
+
     /// The live Mod worker shared with the owning session, when loaded.
     pub async fn mod_host(&self) -> Option<Arc<crate::mods::ModHost>> {
         self.registry.read().await.mod_host()
@@ -387,6 +429,7 @@ impl HookExecutorImpl {
         runtime: Arc<dyn RuntimeSpawner>,
     ) -> Self {
         Self {
+            model_safety_provider: std::sync::Mutex::new(None),
             agent_prompt_transcripts: std::sync::Mutex::new(HashMap::new()),
             registry,
             http,
@@ -778,8 +821,9 @@ impl HookExecutorImpl {
     pub async fn execute_session_end(
         &self,
         event: HookEvent,
-        ctx: HookContext,
+        mut ctx: HookContext,
     ) -> AggregateHookResult {
+        self.capture_model_safety(&mut ctx).await;
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips the
         // SessionEnd batch entirely (the binary's `cH` head runs before the
         // SessionEnd deadline race too).
@@ -1023,9 +1067,10 @@ impl HookExecutorImpl {
     pub async fn execute_excluding_hook(
         &self,
         event: HookEvent,
-        ctx: HookContext,
+        mut ctx: HookContext,
         excluded: Option<lingxi_core::types::HookId>,
     ) -> AggregateHookResult {
+        self.capture_model_safety(&mut ctx).await;
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips
         // ALL hooks before any matching/dispatch.
         if let Some(skipped) = self.policy_disable_gate(&event) {
@@ -1198,9 +1243,10 @@ impl HookExecutorImpl {
     pub async fn execute_agent_scoped(
         &self,
         event: HookEvent,
-        ctx: HookContext,
+        mut ctx: HookContext,
         agent_id: lingxi_core::types::AgentId,
     ) -> AggregateHookResult {
+        self.capture_model_safety(&mut ctx).await;
         // #41 runner-head gate (`h$`).
         if let Some(skipped) = self.policy_disable_gate(&event) {
             return skipped;
@@ -1307,6 +1353,7 @@ impl HookExecutorImpl {
         mut ctx: HookContext,
         exclude_agent_id: lingxi_core::types::AgentId,
     ) -> AggregateHookResult {
+        self.capture_model_safety(&mut ctx).await;
         if matches!(&event, HookEvent::SubagentStop { agent_id, .. } if *agent_id == exclude_agent_id)
         {
             // Consume even if hooks are disabled or none match.
@@ -1713,11 +1760,31 @@ impl Dispatcher {
         }
     }
 
+    async fn dispatch(
+        &self,
+        hook: &HookDefinition,
+        event: &HookEvent,
+        ctx: &HookContext,
+        progress_id: Option<&str>,
+    ) -> HookResult {
+        let observer = ctx
+            .model_safety_observer
+            .clone()
+            .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
+        let work = Box::pin(self.dispatch_in_origin_scope(hook, event, ctx, progress_id));
+        let result = if let Some(observer) = observer {
+            lingxi_core::host::model_safety::scope_model_safety(observer, work).await
+        } else {
+            work.await
+        };
+        apply_on_failure_policy(hook, event, result)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "arm dispatch fan-out — splitting hurts readability"
     )]
-    async fn dispatch(
+    async fn dispatch_in_origin_scope(
         &self,
         hook: &HookDefinition,
         event: &HookEvent,
@@ -2399,6 +2466,48 @@ impl Dispatcher {
             }
         }
     }
+}
+
+/// Convert a failed settings hook into its configured blocking response before
+/// attachment publication and aggregate folding. Native 2.1.295 applies this
+/// to `UserPromptSubmit` and `PreToolUse`; the former suppresses the explicit-
+/// Block `Original prompt:` suffix, while the latter enters the ordinary tool
+/// permission block path.
+fn apply_on_failure_policy(
+    hook: &HookDefinition,
+    event: &HookEvent,
+    mut result: HookResult,
+) -> HookResult {
+    let suppress_original_prompt = matches!(event, &HookEvent::UserPromptSubmit { .. });
+    let pre_tool_use = matches!(event, &HookEvent::PreToolUse { .. });
+    if hook.on_failure != Some(HookFailureBehavior::Block)
+        || !(suppress_original_prompt || pre_tool_use)
+        || !matches!(result.outcome, HookOutcome::Error | HookOutcome::Timeout)
+        || result
+            .response
+            .as_ref()
+            .and_then(|response| response.decision)
+            == Some(HookDecision::Block)
+    {
+        return result;
+    }
+
+    let mut reason = ExactHookText::from_text("[");
+    reason.push(&attachment::attachment_command(hook));
+    reason.push_text("]: failed; blocking because onFailure is \"block\"");
+    if !result.stderr.is_empty() {
+        reason.push_text("\n");
+        reason.push(&result.stderr);
+    }
+
+    let mut response = result.response.take().unwrap_or_default();
+    response.decision = Some(HookDecision::Block);
+    response.reason = Some(reason);
+    if suppress_original_prompt {
+        response.suppress_original_prompt = true;
+    }
+    result.response = Some(response);
+    result
 }
 
 impl HookExecutorImpl {
@@ -5074,6 +5183,7 @@ mod attachment_wiring_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 

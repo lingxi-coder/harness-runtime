@@ -1589,8 +1589,8 @@ impl Tool for GrepTool {
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
-            mcp_meta: None,
             subagent_hooks_fired: false,
+            mcp_meta: None,
         })
     }
 }
@@ -1769,28 +1769,26 @@ mod tests {
             .await;
         assert_eq!(d, grep_description(true));
         // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
-        let long = tool
+        let long_prompt = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
                 model_profile: None,
                 ..Default::default()
             })
-            .await
-            .string_at("")
-            .expect("prompt is a JSON string");
+            .await;
+        let long = long_prompt.string_at("").expect("prompt is a JSON string");
         assert_eq!(long, grep_description(true));
         // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
-        let short = tool
+        let short_prompt = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
                 ..Default::default()
             })
-            .await
-            .string_at("")
-            .expect("prompt is a JSON string");
+            .await;
+        let short = short_prompt.string_at("").expect("prompt is a JSON string");
         assert_eq!(short, GREP_PROMPT_SHORT);
         assert!(short.starts_with(
             "Content search built on ripgrep. Prefer this over `grep`/`rg` via a registered shell tool \u{2014} results integrate with the permission UI and file links."

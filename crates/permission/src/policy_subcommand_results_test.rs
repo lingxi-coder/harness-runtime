@@ -312,7 +312,7 @@ fn recovered_open_if_child_deny_is_not_downgraded_to_parent_ask() {
         ["true", "echo x"]
     );
     assert!(matches!(
-        Some(child_for_command(reasons, "echo x")),
+        Some(child_for_command(&reasons, "echo x")),
         Some(PermissionResult::Deny { .. })
     ));
 }
@@ -347,7 +347,7 @@ fn recovered_open_if_child_deny_outranks_a_parent_content_ask() {
         panic!("the AST denial retains ordered child outcomes: {reason:?}");
     };
     assert!(matches!(
-        Some(child_for_command(reasons, "echo x")),
+        Some(child_for_command(&reasons, "echo x")),
         Some(PermissionResult::Deny { .. })
     ));
 }
@@ -486,14 +486,14 @@ fn recovered_open_if_can_compose_a_rule_allow_with_a_read_only_child() {
     };
     assert_eq!(reason_keys(&reasons), ["true", "echo x"]);
     assert!(matches!(
-        Some(child_for_command(reasons, "true")),
+        Some(child_for_command(&reasons, "true")),
         Some(PermissionResult::Allow {
             reason: PermissionDecisionReason::MatchedRule { .. },
             ..
         })
     ));
     assert!(matches!(
-        Some(child_for_command(reasons, "echo x")),
+        Some(child_for_command(&reasons, "echo x")),
         Some(PermissionResult::Allow {
             reason: PermissionDecisionReason::Other { reason },
             ..

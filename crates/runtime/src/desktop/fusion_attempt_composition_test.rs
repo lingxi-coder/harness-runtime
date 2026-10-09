@@ -71,9 +71,9 @@ impl ToolInvoker for Offline {
     async fn invoke(
         &self,
         _: &str,
-        _: serde_json::Value,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: SubagentInvocationContext,
-    ) -> Result<serde_json::Value, ToolInvokerError> {
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
         panic!("composition tests must not invoke tools")
     }
     fn as_any(&self) -> &dyn std::any::Any {

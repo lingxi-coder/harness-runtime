@@ -357,7 +357,7 @@ mod tests {
     fn bundled_cmd(name: &str) -> SlashCommand {
         SlashCommand {
             name: name.into(),
-            description: format!("{name} bundled"),
+            description: format!("{name} bundled").into(),
             source: CommandSource::Bundled,
             kind: SlashCommandKind::Bundled {
                 frontmatter: CommandFrontmatter::default(),
@@ -370,7 +370,10 @@ mod tests {
 
     async fn run(h: &ReloadSkillsHandler) -> String {
         match h.handle(&args()).await {
-            CommandResult::Done { display: Some(s) } => s,
+            CommandResult::Done { display: Some(s) } => s
+                .string_at("")
+                .expect("generated reload display")
+                .to_owned(),
             other => panic!("expected Done with display, got {other:?}"),
         }
     }

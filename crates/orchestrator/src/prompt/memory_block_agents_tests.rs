@@ -346,39 +346,48 @@ impl tool_api::tool_trait::Tool for SuccessfulReadFixture {
     fn name(&self) -> &str {
         "Read"
     }
-    fn input_schema(&self) -> &Value {
-        static SCHEMA: once_cell::sync::Lazy<Value> = once_cell::sync::Lazy::new(|| {
-            json!({
-                "type":"object",
-                "properties": {
-                    "file_path":{"type":"string"},
-                    "offset":{"type":"integer"},
-                    "limit":{"type":"integer"},
-                    "pages":{"type":"string"},
-                    "test_error":{"type":"boolean"},
-                    "test_truncated":{"type":"boolean"},
-                    "test_unchanged":{"type":"boolean"}
-                },
-                "required":["file_path"]
-            })
-        });
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(&json!({
+                    "type":"object",
+                    "properties": {
+                        "file_path":{"type":"string"},
+                        "offset":{"type":"integer"},
+                        "limit":{"type":"integer"},
+                        "pages":{"type":"string"},
+                        "test_error":{"type":"boolean"},
+                        "test_truncated":{"type":"boolean"},
+                        "test_unchanged":{"type":"boolean"}
+                    },
+                    "required":["file_path"]
+                }))
+            });
         &SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _: &tool_api::tool_trait::ToolStaticContext) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn check_permissions(
         &self,
-        _: &Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -390,7 +399,11 @@ impl tool_api::tool_trait::Tool for SuccessfulReadFixture {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _: &Value, _: &tool_api::tool_trait::DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &tool_api::tool_trait::DescriptionOptions,
+    ) -> String {
         "Read outcome fixture".into()
     }
     async fn prompt(
@@ -401,22 +414,38 @@ impl tool_api::tool_trait::Tool for SuccessfulReadFixture {
     }
     async fn call(
         &self,
-        input: Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: tool_api::context::ToolUseContext,
         _: tool_api::progress::ToolProgressSender,
     ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
-        let path = input["file_path"].as_str().unwrap();
-        let data = if input["test_unchanged"] == true {
-            json!({"type":"file_unchanged", "filePath":path, "content":"unchanged"})
+        let path = input.string_at("/file_path").unwrap();
+        let test_unchanged = input
+            .at_pointer("/test_unchanged")
+            .is_some_and(|value| value.as_bool() == Some(true));
+        let data = if test_unchanged {
+            tool_api::tool_trait::generated_builtin_result(
+                &json!({"type":"file_unchanged", "filePath":path, "content":"unchanged"}),
+            )
         } else if path.ends_with(".png") {
-            json!({"type":"image", "file":{"base64":"aW1hZ2U=", "type":"image/png", "originalSize":5}})
+            tool_api::tool_trait::generated_builtin_result(
+                &json!({"type":"image", "file":{"base64":"aW1hZ2U=", "type":"image/png", "originalSize":5}}),
+            )
         } else if path.ends_with(".pdf") {
-            json!({"type":"pdf", "file":{"filePath":path,"base64":"JVBERi0=","originalSize":5}})
+            tool_api::tool_trait::generated_builtin_result(
+                &json!({"type":"pdf", "file":{"filePath":path,"base64":"JVBERi0=","originalSize":5}}),
+            )
         } else {
-            json!({"type":"text", "content":"read body", "file":{"truncatedByTokenCap":input["test_truncated"] == true}})
+            let truncated = input
+                .at_pointer("/test_truncated")
+                .is_some_and(|value| value.as_bool() == Some(true));
+            tool_api::tool_trait::generated_builtin_result(
+                &json!({"type":"text", "content":"read body", "file":{"truncatedByTokenCap":truncated}}),
+            )
         };
         let mut result = tool_api::tool_trait::ToolCallResult::from_data(data);
-        result.is_error = input["test_error"] == true;
+        result.is_error = input
+            .at_pointer("/test_error")
+            .is_some_and(|value| value.as_bool() == Some(true));
         Ok(result)
     }
 }
@@ -426,7 +455,8 @@ fn read_response(id: &str, input: Value) -> llm_runtime::HistoryResponse {
         vec![llm_runtime::ContentBlock::ToolCall {
             id: id.to_owned(),
             name: "Read".into(),
-            input,
+            input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(&input)
+                .expect("fixture tool input JSON"),
         }],
         Some("tool_use"),
     )
@@ -521,8 +551,8 @@ async fn successful_read_agents_context_survives_requests_and_cold_replay() {
             .collect();
         let attachments: Vec<_> = rows
             .iter()
-            .filter_map(|row| row.extra.get("attachment"))
-            .filter(|attachment| attachment["hookName"] == "tool.call")
+            .filter_map(|row| row.extra.subprojection("/attachment").ok())
+            .filter(|attachment| attachment.string_at("/hookName") == Some("tool.call"))
             .collect();
         let expected_attachment = hooks::additional_context_attachment(
             "tool.call",
@@ -533,7 +563,11 @@ async fn successful_read_agents_context_survives_requests_and_cold_replay() {
                 agents.display()
             ))],
         );
-        assert_eq!(attachments, vec![&expected_attachment.value], "{path}");
+        assert_eq!(attachments.len(), 1, "{path}");
+        assert!(
+            attachments[0].semantically_eq(&expected_attachment),
+            "{path}"
+        );
         let resumed_api = Arc::new(MockApiClient::new(vec![finished_response()]));
         let resumed = read_fixture_orchestrator(resumed_api.clone(), &root);
         let session_id = orch.session.lock().await.session_id;

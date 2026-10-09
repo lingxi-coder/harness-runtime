@@ -781,7 +781,7 @@ fn append_owner_warning(entries: &[SkillDoctorEntry], plugin: bool, lines: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CommandFrontmatter, SlashCommandKind};
+    use crate::model::{CommandFrontmatter, SlashCommandKind, SourceTextTestExt};
     use lingxi_core::types::{McpConnectionId, PluginId};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -817,7 +817,7 @@ mod tests {
     fn plugin_skill(name: &str, plugin_id: PluginId) -> SlashCommand {
         SlashCommand {
             name: name.into(),
-            description: format!("Run {name}"),
+            description: format!("Run {name}").into(),
             source: CommandSource::Plugin,
             kind: SlashCommandKind::Plugin {
                 plugin_id,
@@ -833,11 +833,11 @@ mod tests {
     fn mcp_skill(name: &str) -> SlashCommand {
         SlashCommand {
             name: name.into(),
-            description: format!("Run {name}"),
+            description: format!("Run {name}").into(),
             source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
             kind: SlashCommandKind::Mcp {
                 connection_id: McpConnectionId::new(),
-                prompt_name: name.split_once(':').unwrap().1.to_string(),
+                prompt_name: name.split_once(':').unwrap().1.to_string().into(),
                 arguments: Vec::new(),
             },
             loaded_from: Some("mcp".to_string()),
@@ -863,7 +863,10 @@ mod tests {
         let h = SkillDoctorHandler::new(cwd, lingxi_home, None, Vec::new());
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Skills loaded this session\n\n  (no skills loaded)");
+                assert_eq!(
+                    s,
+                    "Skills loaded this session\n\n  (no skills loaded)".into()
+                );
             }
             other => panic!("expected Done display, got {other:?}"),
         }
@@ -890,18 +893,18 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert!(
                     s.contains("demo"),
-                    "table should list the discovered skill: {s}"
+                    "table should list the discovered skill: {s:?}"
                 );
                 assert!(
                     s.contains("project"),
-                    "source column should read project: {s}"
+                    "source column should read project: {s:?}"
                 );
-                assert!(s.contains("never"), "unrecorded usage renders never: {s}");
+                assert!(s.contains("never"), "unrecorded usage renders never: {s:?}");
                 assert!(
                     s.contains(
                         "1 skill loaded but never invoked. Each one adds to the system prompt every turn. Disable in /skills, or remove from .lingxi/skills."
                     ),
-                    "unused-count line: {s}"
+                    "unused-count line: {s:?}"
                 );
             }
             other => panic!("expected Done display, got {other:?}"),
@@ -925,15 +928,16 @@ mod tests {
         let h = SkillDoctorHandler::new(cwd, lingxi_home, None, Vec::new());
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert!(s.contains("foo"), "table should list foo: {s}");
+                assert!(s.contains("foo"), "table should list foo: {s:?}");
                 assert!(
                     s.contains("today"),
-                    "just-recorded usage renders today: {s}"
+                    "just-recorded usage renders today: {s:?}"
                 );
+                let text = s.string_at("").unwrap();
                 assert_eq!(
-                    s.lines().last(),
+                    text.lines().last(),
                     Some(ALL_USED),
-                    "all-used line when every entry has usage: {s}"
+                    "all-used line when every entry has usage: {text}"
                 );
             }
             other => panic!("expected Done display, got {other:?}"),
@@ -971,6 +975,7 @@ mod tests {
             other => panic!("expected Done display, got {other:?}"),
         };
 
+        let display = display.string_at("").expect("display is a root string");
         assert!(display.contains("scan"));
         assert!(display.contains("verify"));
         assert!(display.contains("reviewer"));
@@ -1034,7 +1039,7 @@ mod tests {
             CommandResult::Done { display: Some(s) } => {
                 assert!(
                     s.starts_with("Couldn't compute skill usage. Run with --debug for details. ("),
-                    "fallback error string: {s}"
+                    "fallback error string: {s:?}"
                 );
             }
             other => panic!("expected Done display, got {other:?}"),

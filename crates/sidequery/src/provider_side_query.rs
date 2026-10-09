@@ -54,10 +54,6 @@ use std::sync::Arc;
 /// Default Anthropic API base URL used when the caller passes `None`.
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
-fn custom_side_query_prompt(text: Option<&str>) -> Option<Utf16JsonProjection> {
-    text.map(Utf16JsonProjection::from)
-}
-
 fn system_blocks_from_source(
     source: Option<&Utf16JsonProjection>,
     captured: Option<&SystemPromptInput>,
@@ -446,7 +442,10 @@ impl SideQueryClient for ProviderSideQueryClient {
                     &request.model,
                     request.temperature,
                 );
-                let system_prompt = custom_side_query_prompt(request.system_prompt.as_deref());
+                let system_prompt = request
+                    .system_prompt
+                    .as_deref()
+                    .map(Utf16JsonProjection::from);
                 let canonical = service.build_json_schema_request_with_thinking(
                     &request.model,
                     request.profile.as_deref(),
@@ -605,7 +604,10 @@ impl SideQueryClient for ProviderSideQueryClient {
         let resp = match &self.backend {
             ProviderSideQueryBackend::Session(service) => {
                 let query_source = request.query_source.as_str().to_string();
-                let system_prompt = custom_side_query_prompt(request.system_prompt.as_deref());
+                let system_prompt = request
+                    .system_prompt
+                    .as_deref()
+                    .map(Utf16JsonProjection::from);
                 // Round-3 review finding 4: an explicit `temperature`
                 // override (e.g. the fusion analyst's hard `Some(0.0)`) used
                 // to be silently dropped by the old 7-arg `stream_json_schema`
@@ -654,7 +656,10 @@ impl SideQueryClient for ProviderSideQueryClient {
                         message: "registered side query requires session accounting hooks".into(),
                     }));
                 }
-                let system_prompt = custom_side_query_prompt(request.system_prompt.as_deref());
+                let system_prompt = request
+                    .system_prompt
+                    .as_deref()
+                    .map(Utf16JsonProjection::from);
                 let system = system_blocks_from_source(system_prompt.as_ref(), None)
                     .map_err(map_structured_llm_error)?;
                 let messages = convert_messages(request.messages)?;
@@ -1133,7 +1138,9 @@ mod tests {
     }
 
     fn text_content(text: &Option<Utf16JsonProjection>) -> Option<String> {
-        text.as_ref().and_then(|text| text.string_at(""))
+        text.as_ref()
+            .and_then(|text| text.string_at(""))
+            .map(str::to_owned)
     }
 
     #[test]
@@ -1558,8 +1565,7 @@ mod tests {
         request.profile = Some("parent-profile".to_string());
         request.temperature = None;
         request.thinking = Some(llm_runtime::model::thinking::ThinkingConfig::Adaptive);
-        request.effort =
-            Some(Utf16JsonProjection::from_serde_value(&serde_json::json!("high")).unwrap());
+        request.effort = Some(serde_json::json!("high").into());
         let parent_tools = vec![tool_declaration(
             "Read",
             "Read a file from the parent session.",

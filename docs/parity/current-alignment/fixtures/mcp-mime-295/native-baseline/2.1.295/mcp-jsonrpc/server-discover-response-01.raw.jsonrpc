@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":"server-discover-probe-1","error":{"code":-32601,"message":"fixture does not implement server/discover"}}

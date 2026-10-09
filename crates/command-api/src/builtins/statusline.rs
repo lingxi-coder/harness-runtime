@@ -98,6 +98,7 @@ mod tests {
                     content,
                     "Create an Agent with subagent_type \"statusline-setup\" \
                      and the prompt \"Configure my statusLine from my shell PS1 configuration\""
+                        .into()
                 );
             }
             other => panic!("expected InjectMessage, got {other:?}"),
@@ -113,6 +114,7 @@ mod tests {
                     content,
                     "Create an Agent with subagent_type \"statusline-setup\" \
                      and the prompt \"use a minimal layout\""
+                        .into()
                 );
             }
             other => panic!("expected InjectMessage, got {other:?}"),

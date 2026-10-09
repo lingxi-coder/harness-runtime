@@ -1,11 +1,11 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-    StaticMemoryProvider, content_block_start_text, content_block_start_tool_use,
-    content_block_stop, input_json_delta, message_delta_stop, message_start, message_stop,
-    mock_message_response, noop_hook_executor, text_delta,
+    content_block_start_text, content_block_start_tool_use, content_block_stop, input_json_delta,
+    message_delta_stop, message_start, message_stop, mock_message_response, noop_hook_executor,
+    text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use lingxi_core::types::ToolUseId;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use std::sync::Arc;
@@ -30,34 +30,48 @@ impl Tool for ModelSwitchTool {
     fn name(&self) -> &str {
         "ModelSwitch"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(
-            || serde_json::json!({ "type": "object", "properties": {} }),
-        );
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &serde_json::json!({ "type": "object", "properties": {} }),
+                )
+            });
         &SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -69,7 +83,11 @@ impl Tool for ModelSwitchTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "model-switch".into()
     }
     async fn prompt(
@@ -80,7 +98,7 @@ impl Tool for ModelSwitchTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -89,15 +107,16 @@ impl Tool for ModelSwitchTool {
             ctx
         });
         Ok(ToolCallResult {
-            data: serde_json::json!({
+            data: tool_api::tool_trait::generated_builtin_result(&serde_json::json!({
                 "content": "TOOL-RESULT",
                 "model_content": "Launching skill: switcher",
-            }),
+            })),
             model_content: None,
             new_messages: vec![],
             context_modifier: Some(modifier),
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -110,34 +129,48 @@ impl Tool for PlainTool {
     fn name(&self) -> &str {
         "Plain"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(
-            || serde_json::json!({ "type": "object", "properties": {} }),
-        );
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &serde_json::json!({ "type": "object", "properties": {} }),
+                )
+            });
         &SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -149,7 +182,11 @@ impl Tool for PlainTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "plain".into()
     }
     async fn prompt(
@@ -160,17 +197,20 @@ impl Tool for PlainTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: serde_json::json!({ "content": "PLAIN-RESULT" }),
+            data: tool_api::tool_trait::generated_builtin_result(
+                &serde_json::json!({ "content": "PLAIN-RESULT" }),
+            ),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -190,7 +230,8 @@ async fn batched_skill_model_override_switches_session_model() {
         vec![LlmContentBlock::ToolCall {
             id: tu.to_string(),
             name: "ModelSwitch".into(),
-            input: serde_json::json!({}),
+            input: llm_runtime::services::sdk::protocol::JsonPayload::parse("{}")
+                .expect("empty tool input JSON"),
         }],
         Some("tool_use"),
     );
@@ -233,7 +274,8 @@ async fn batched_no_modifier_leaves_session_model_untouched() {
         vec![LlmContentBlock::ToolCall {
             id: tu.to_string(),
             name: "Plain".into(),
-            input: serde_json::json!({}),
+            input: llm_runtime::services::sdk::protocol::JsonPayload::parse("{}")
+                .expect("empty tool input JSON"),
         }],
         Some("tool_use"),
     );

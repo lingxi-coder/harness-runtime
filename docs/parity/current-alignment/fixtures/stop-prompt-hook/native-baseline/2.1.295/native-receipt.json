@@ -1,0 +1,119 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "public_entrypoint": "Native CLI --print --output-format json with isolated --settings Stop prompt hook",
+  "fixed_inputs": {
+    "native_binary_hashes": {
+      "2.1.293": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+      "2.1.294": "def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53",
+      "2.1.295": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+    },
+    "model": "claude-sonnet-4-5",
+    "session_id": "00000000-0000-4000-8000-000000002960",
+    "main_prompt": "Run the fixed Stop prompt-hook release fixture and finish.",
+    "main_response_text": "FIXED_MAIN_RESPONSE_STOP_HOOK_RELEASE_FIXTURE",
+    "hook_instruction": "FIXED_STOP_PROMPT_HOOK_INSTRUCTION: Evaluate the completed response for this fixture. Return only the JSON object {\"ok\":true}; do not ask for another turn.",
+    "hook_response_text": "{\"ok\":true}"
+  },
+  "hook_settings": {
+    "scope": "explicit --settings file plus project-only setting sources",
+    "file_sha256": "0c358105272575d02d0dd9f4739465b4814ac093aba05f3f562f82bac250d30e",
+    "file_artifact": "settings.json",
+    "prompt_marker": "FIXED_STOP_PROMPT_HOOK_INSTRUCTION"
+  },
+  "network_boundary": "127.0.0.1-only Messages stub; fixed dummy API key; no upstream relay",
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "sequence": 1,
+      "classification": "main",
+      "request_bytes": 41381,
+      "request_sha256": "3b8891d2c80977fd82f89a32577a25f96a33b671d832a9e694f3ec19ef8f8021",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "marker_in_original_request_bytes": false,
+      "stop_event_key_in_original_request_bytes": false,
+      "request_artifact": "request-01.raw.json",
+      "system_source_bytes": 27113,
+      "system_source_sha256": "90c5381bb8845955ee06841718033e6f4629aad794ddb13442711d473a991a9e",
+      "system_artifact": "request-01.system.raw.json",
+      "messages_source_bytes": 13832,
+      "messages_source_sha256": "5476716f552ddf50335e039a808a18f9dde1e471ba27016262438a1f3c324638",
+      "messages_artifact": "request-01.messages.raw.json",
+      "marker_strings": [],
+      "response_content_type": "text/event-stream",
+      "response_bytes": 805,
+      "response_sha256": "7705a94dabfc3905049a7134e94be7b91d7036932427a0893899043ed8fa864a",
+      "response_artifact": "response-01.sse.raw"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "sequence": 2,
+      "classification": "prompt_hook",
+      "request_bytes": 18031,
+      "request_sha256": "9d3983745ca408f5fd8536cf303ee4fd7c944604855479155718886b941bd5f8",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "marker_in_original_request_bytes": true,
+      "stop_event_key_in_original_request_bytes": true,
+      "request_artifact": "request-02.raw.json",
+      "system_source_bytes": 2262,
+      "system_source_sha256": "f75d733728207922dc6b95694cdcbcdc55129404cb8dccc884e0bbf9c15113db",
+      "system_artifact": "request-02.system.raw.json",
+      "messages_source_bytes": 15208,
+      "messages_source_sha256": "c275793e274756aebb4b2a8a0d1de81323b944343d07a86766fadc29bc6b1a72",
+      "messages_artifact": "request-02.messages.raw.json",
+      "marker_strings": [
+        {
+          "path": "$.messages[2].content[0].text",
+          "utf16_units_count": 1178,
+          "utf16_sha256": "f57a2f6a098ebdca4f29396d14fed7eba6cd827337acf4a8505e6f51af951e41",
+          "instruction_marker_offset_utf16": 151,
+          "contains_instruction_marker": true,
+          "contains_stop_event_name": true
+        }
+      ],
+      "response_content_type": "text/event-stream",
+      "response_bytes": 773,
+      "response_sha256": "0afd1fe3df37d384c2527bb10e5aeda6d4faff176eb6e851736fa1dd646a234d",
+      "response_artifact": "response-02.sse.raw"
+    }
+  ],
+  "hook_request_count": 1,
+  "hook_marker_observed_in_original_request_bytes": true,
+  "native_exit_code": 0,
+  "timed_out": false,
+  "stdout_bytes": 1609,
+  "stdout_sha256": "edf4970446d596dce623d387735da249d679fa93288f7823e4f7e7449dbb444d",
+  "stdout_json_parse_error": null,
+  "stdout_json_summary": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "session_id": "00000000-0000-4000-8000-000000002960",
+    "num_turns": 1
+  },
+  "stdout_result": "FIXED_MAIN_RESPONSE_STOP_HOOK_RELEASE_FIXTURE",
+  "stderr_bytes": 0,
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "artifacts": [
+    "settings.json",
+    "native.stdout.raw",
+    "native.stderr.raw",
+    "request-01.raw.json",
+    "request-01.system.raw.json",
+    "request-01.messages.raw.json",
+    "request-02.raw.json",
+    "request-02.system.raw.json",
+    "request-02.messages.raw.json",
+    "response-01.sse.raw",
+    "response-02.sse.raw"
+  ],
+  "scope": "Native public Stop prompt-hook request/evaluation only; fixed model responses do not test LLM judgment quality; SubagentStop remains separate"
+}

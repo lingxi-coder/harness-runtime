@@ -129,7 +129,8 @@ async fn wire_tools_contain_per_server_fqn_entries_with_server_schema() {
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "done".into(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -140,10 +141,7 @@ async fn wire_tools_contain_per_server_fqn_entries_with_server_schema() {
     let captured = api.captured_tools().await;
     let wire = &captured[0];
 
-    let names: Vec<&str> = wire
-        .iter()
-        .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
-        .collect();
+    let names: Vec<&str> = wire.iter().map(|tool| tool.name.as_str()).collect();
     assert!(
         names.contains(&"mcp__mock__a"),
         "wire tools must advertise mcp__mock__a; got {names:?}"
@@ -157,26 +155,25 @@ async fn wire_tools_contain_per_server_fqn_entries_with_server_schema() {
     // generic {full_name, arguments} envelope.
     let entry_a = wire
         .iter()
-        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("mcp__mock__a"))
+        .find(|tool| tool.name == "mcp__mock__a")
         .expect("mcp__mock__a entry present");
     assert_eq!(
-        entry_a.get("input_schema"),
-        Some(&serde_json::json!({"type": "object"})),
+        entry_a.input_schema.as_json_source(),
+        r#"{"type":"object"}"#,
         "per-tool entry must carry the server-provided inputSchema"
     );
     // It must NOT be the generic dispatcher envelope schema.
     assert!(
         entry_a
-            .get("input_schema")
-            .and_then(|s| s.get("properties"))
-            .and_then(|p| p.get("full_name"))
+            .input_schema
+            .raw_source_at("/properties/full_name")
             .is_none(),
         "per-tool entry must not expose the generic full_name/arguments envelope"
     );
     // The wire `description` is the server's tool description (client.ts:1786-1794).
     assert_eq!(
-        entry_a.get("description").and_then(|v| v.as_str()),
-        Some("a test tool"),
+        entry_a.description.string_at(""),
+        Some("a test tool".to_owned()),
         "per-tool entry description must be the server's tool description"
     );
 }
@@ -217,14 +214,18 @@ async fn dispatch_sends_raw_wire_name_for_normalized_special_char_fqn_inner() {
                 id: ToolUseId::new().to_string(),
                 // The model addresses the tool by its NORMALIZED model-facing FQN.
                 name: "mcp__mock__a_b".into(),
-                input: serde_json::json!({ "x": 1 }),
+                input: lingxi_llm_client::protocol::JsonPayload::parse(
+                    &serde_json::json!({ "x": 1 }).to_string(),
+                )
+                .unwrap(),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -273,14 +274,18 @@ async fn dispatch_routes_fqn_tool_use_to_server_call_tool_inner() {
             vec![LlmContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: "mcp__mock__a".into(),
-                input: serde_json::json!({ "x": 1 }),
+                input: lingxi_llm_client::protocol::JsonPayload::parse(
+                    &serde_json::json!({ "x": 1 }).to_string(),
+                )
+                .unwrap(),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "all done".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -312,12 +317,13 @@ async fn dispatch_routes_fqn_tool_use_to_server_call_tool_inner() {
         })
         .expect("a ToolResult for mcp__mock__a must be emitted");
     assert_eq!(
-        tool_result,
-        serde_json::json!("ok"),
+        tool_result.string_at(""),
+        Some("ok"),
         "result `data` is the server's content verbatim (unwrapped)"
     );
     assert!(
-        tool_result.get("server_name").is_none() && tool_result.get("tool_name").is_none(),
+        tool_result.get_property("server_name").is_none()
+            && tool_result.get_property("tool_name").is_none(),
         "the {{server_name, tool_name, is_error}} wrapper is gone"
     );
 
@@ -346,14 +352,18 @@ async fn dispatch_unknown_mcp_tool_hits_tool_not_found() {
             vec![LlmContentBlock::ToolCall {
                 id: ToolUseId::new().to_string(),
                 name: "mcp__unknown__x".into(),
-                input: serde_json::json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse(
+                    &serde_json::json!({}).to_string(),
+                )
+                .unwrap(),
             }],
             Some("tool_use"),
         ),
         mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "recovered".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ),
@@ -379,8 +389,7 @@ async fn dispatch_unknown_mcp_tool_hits_tool_not_found() {
         })
         .expect("a ToolResult for the unknown tool must be emitted");
     let err = result
-        .get("error")
-        .and_then(|v| v.as_str())
+        .string_at("/error")
         .expect("tool-not-found result carries an `error` string");
     assert_eq!(
         err, "tool not found: mcp__unknown__x",

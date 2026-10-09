@@ -498,7 +498,7 @@ fn null_projection() -> Utf16JsonProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonrpc::{Id, JsonPayload, Request};
+    use jsonrpc::{Id, InboundHandler as _, JsonPayload, Request};
     use tokio::io::duplex;
 
     #[tokio::test]

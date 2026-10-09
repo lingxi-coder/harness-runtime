@@ -10,6 +10,14 @@ use lingxi_core::types::ContentBlock;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
+fn source_projection(value: serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).expect("fixture JSON is source-representable")
+}
+
+fn empty_mod_options() -> Utf16JsonProjection {
+    Utf16JsonProjection::parse("{}").expect("empty Mod options JSON")
+}
+
 fn orch_with(memory: Arc<StaticMemoryProvider>, email: Option<&str>) -> ConversationOrchestrator {
     orch_with_rendering(
         memory,
@@ -55,7 +63,7 @@ async fn mod_ui_control_without_mods_preserves_the_canonical_empty_render() {
     let props = serde_json::json!({"label":"unchanged", "nested":{"count":3}});
     let outcome = lingxi_core::host::OrchestratorHandle::mod_ui_control(
         &orch,
-        Utf16JsonProjection::plain(serde_json::json!({
+        source_projection(serde_json::json!({
             "subtype":"ui_render", "surface":"desktop", "component":"AbovePrompt",
             "instance_id":"above-main", "props":props,
             "viewport":{"columns":80,"rows":24}, "unknown_protocol_field":"discarded"
@@ -65,7 +73,7 @@ async fn mod_ui_control_without_mods_preserves_the_canonical_empty_render() {
     .unwrap();
     assert_eq!(
         outcome.response,
-        Utf16JsonProjection::plain(
+        source_projection(
             serde_json::json!({"tree":null,"props":props,"rewritten":false,"hooked":false})
         )
     );
@@ -79,11 +87,11 @@ async fn mod_ui_control_without_mods_preserves_the_canonical_empty_render() {
 async fn mod_ui_control_validates_requests_even_without_a_mod_worker() {
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
     for request in [
-        Utf16JsonProjection::plain(serde_json::json!({
+        source_projection(serde_json::json!({
             "subtype":"ui_render", "surface":"desktop", "component":"AbovePrompt",
             "instance_id":"above-main", "props":[]
         })),
-        Utf16JsonProjection::plain(serde_json::json!({
+        source_projection(serde_json::json!({
             "subtype":"ui_client_press", "plugin":"caller", "component":"AbovePrompt",
             "instance_id":"above-main", "client":"counter", "module":"counter.tsx",
             "element":"increment", "event":{"type":"input","kind":"other","value":"x"}
@@ -115,14 +123,15 @@ async fn plugin_prompt_context_attachment_is_screened_with_plugin_origin() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("plugin-context", dir.path(), &module, serde_json::json!({}))
+    host.load("plugin-context", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-    orch.append_mod_prompt_context(&["ORIGINAL".into()]).await;
+    orch.append_mod_prompt_context(&source_projection(serde_json::json!(["ORIGINAL"])))
+        .await;
     let original = orch.session.lock().await.history.last().cloned().unwrap();
     assert!(text(&original).contains("prompt.submit hook additional context: ORIGINAL"));
     let prepared = orch
@@ -165,7 +174,7 @@ async fn mod_turn_start_fires_once_after_prompt_screening_in_all_main_drivers() 
     .unwrap();
     for driver in ["batched", "cancelable", "streaming"] {
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("turn-start", dir.path(), &module, serde_json::json!({}))
+        host.load("turn-start", dir.path(), &module, empty_mod_options())
             .await
             .unwrap();
         let mut registry = hooks::HookRegistry::new();
@@ -259,7 +268,7 @@ async fn mod_turn_complete_observes_raw_answer_and_shows_separate_notice() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("complete-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("complete-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -289,7 +298,9 @@ async fn mod_turn_complete_observes_raw_answer_and_shows_separate_notice() {
         .await
         .into_iter()
         .filter_map(|event| match event {
-            lingxi_core::host::OutputEvent::SystemNotice { body, .. } => Some(body),
+            lingxi_core::host::OutputEvent::SystemNotice { body, .. } => {
+                body.string_at("").map(str::to_owned)
+            }
             _ => None,
         })
         .collect();
@@ -319,7 +330,7 @@ async fn mod_turn_complete_reports_api_error_without_usage() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("error-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("error-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -377,7 +388,7 @@ async fn mod_turn_complete_runs_after_streamed_answer() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("stream-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("stream-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -416,7 +427,7 @@ async fn mod_turn_complete_runs_after_streamed_answer() {
     assert!(events.iter().any(|event| matches!(
         event,
         lingxi_core::host::OutputEvent::SystemNotice { body, .. }
-            if body == "stream-mod: stream summary"
+            if body.string_at("") == Some("stream-mod: stream summary")
     )));
 }
 
@@ -453,7 +464,7 @@ async fn mod_turn_step_rewrites_live_model_stream_and_persisted_text() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("step-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("step-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -507,13 +518,14 @@ async fn mod_turn_step_rewrites_live_model_stream_and_persisted_text() {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    source_projection(serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
             let result: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+                serde_json::from_str(result.string_at("/text").expect("prompt.submit JSON text"))
+                    .unwrap();
             if !result.is_null() {
                 break result;
             }
@@ -552,7 +564,7 @@ async fn mod_turn_step_stream_keeps_synthetic_and_physical_assistant_records() {
         "stream-two-records",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -636,14 +648,9 @@ async fn mod_turn_step_stream_handles_two_physical_next_calls_in_one_step() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load(
-        "stream-two-next",
-        dir.path(),
-        &module,
-        serde_json::json!({}),
-    )
-    .await
-    .unwrap();
+    host.load("stream-two-next", dir.path(), &module, empty_mod_options())
+        .await
+        .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let response = |id, text| {
@@ -732,7 +739,7 @@ async fn mod_turn_step_stream_finishes_earlier_tool_before_later_answer() {
         "stream-tool-then-answer",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -820,7 +827,7 @@ async fn mod_turn_step_stream_hook_throw_before_next_uses_core_request() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("step-error", dir.path(), &module, serde_json::json!({}))
+    host.load("step-error", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -887,7 +894,7 @@ async fn mod_turn_step_synthetic_response_skips_provider_request() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("synthetic-step", dir.path(), &module, serde_json::json!({}))
+    host.load("synthetic-step", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -948,7 +955,7 @@ async fn mod_turn_step_thinking_rewrite_changes_display_but_keeps_signed_history
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("thinking-step", dir.path(), &module, serde_json::json!({}))
+    host.load("thinking-step", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -1041,7 +1048,7 @@ async fn mod_turn_step_dropped_tool_chunk_never_dispatches_tool() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("drop-tool-step", dir.path(), &module, serde_json::json!({}))
+    host.load("drop-tool-step", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -1108,7 +1115,7 @@ async fn mod_turn_step_batched_keeps_synthetic_and_physical_assistant_records() 
         "batch-two-records",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -1169,38 +1176,56 @@ async fn mod_turn_step_batched_dispatches_an_earlier_tool_before_the_final_respo
         ValidationError,
     };
 
-    struct Probe(std::sync::Mutex<Vec<serde_json::Value>>);
+    struct Probe(std::sync::Mutex<Vec<Utf16JsonProjection>>);
     #[async_trait::async_trait]
     impl Tool for Probe {
         fn name(&self) -> &str {
             "Probe"
         }
-        fn input_schema(&self) -> &serde_json::Value {
-            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-            SCHEMA.get_or_init(|| serde_json::json!({"type":"object"}))
+        fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+            static SCHEMA: std::sync::OnceLock<
+                lingxi_core::types::utf16_json::Utf16JsonProjection,
+            > = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &serde_json::json!({"type":"object"}),
+                )
+            })
         }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
         }
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        fn is_concurrency_safe(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        ) -> bool {
             true
         }
-        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
             true
         }
         async fn validate_input(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
         }
         async fn check_permissions(
             &self,
-            _: &serde_json::Value,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -1212,7 +1237,11 @@ async fn mod_turn_step_batched_dispatches_an_earlier_tool_before_the_final_respo
                 metadata: permission::result::PermissionMetadata::default(),
             }
         }
-        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+        async fn description(
+            &self,
+            _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _: &DescriptionOptions,
+        ) -> String {
             "probe".into()
         }
         async fn prompt(
@@ -1223,18 +1252,21 @@ async fn mod_turn_step_batched_dispatches_an_earlier_tool_before_the_final_respo
         }
         async fn call(
             &self,
-            input: serde_json::Value,
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
             self.0.lock().unwrap().push(input);
             Ok(ToolCallResult {
-                data: serde_json::json!({"content":"probe done"}),
+                data: tool_api::tool_trait::generated_builtin_result(
+                    &serde_json::json!({"content":"probe done"}),
+                ),
                 model_content: None,
                 new_messages: Vec::new(),
                 context_modifier: None,
                 is_error: false,
                 mcp_meta: None,
+                subagent_hooks_fired: false,
             })
         }
     }
@@ -1260,7 +1292,7 @@ async fn mod_turn_step_batched_dispatches_an_earlier_tool_before_the_final_respo
         "batch-tool-then-answer",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -1298,7 +1330,7 @@ async fn mod_turn_step_batched_dispatches_an_earlier_tool_before_the_final_respo
     assert_eq!(api.captured_msgs().await.len(), 1);
     assert_eq!(
         *probe.0.lock().unwrap(),
-        vec![serde_json::json!({"path":"first"})]
+        vec![source_projection(serde_json::json!({"path":"first"}))]
     );
     let history = &orch.session.lock().await.history;
     let tool_position = history.iter().position(|message| matches!(message,
@@ -1335,7 +1367,7 @@ async fn mod_turn_step_batched_passes_opaque_response_and_rewrites_model() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("batch-step", dir.path(), &module, serde_json::json!({}))
+    host.load("batch-step", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -1386,14 +1418,9 @@ async fn mod_turn_step_batched_synthetic_answer_skips_provider() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load(
-        "batch-synthetic",
-        dir.path(),
-        &module,
-        serde_json::json!({}),
-    )
-    .await
-    .unwrap();
+    host.load("batch-synthetic", dir.path(), &module, empty_mod_options())
+        .await
+        .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let api = Arc::new(MockApiClient::new(vec![]));
@@ -1444,7 +1471,7 @@ async fn mod_turn_step_batched_replacement_keeps_physical_usage() {
         "batch-replacement",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -1524,7 +1551,7 @@ async fn mod_turn_step_batched_multiple_next_calls_count_every_provider_response
         "batch-multiple-next",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -1655,7 +1682,7 @@ async fn mod_turn_step_concurrent_next_results_keep_their_own_response() {
         "batch-concurrent-next",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -1707,7 +1734,7 @@ async fn mod_turn_step_batched_hook_failure_retains_completed_provider_cost() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("batch-failure", dir.path(), &module, serde_json::json!({}))
+    host.load("batch-failure", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -1824,7 +1851,7 @@ async fn mod_turn_step_cancel_after_first_next_keeps_physical_usage() {
         "batch-cancel-after-first",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -1930,7 +1957,7 @@ async fn mod_turn_complete_reports_cancellation_before_any_response() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("cancel-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("cancel-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2010,7 +2037,7 @@ async fn mod_turn_step_cancel_during_first_request_ends_worker_stream() {
         "first-request-cancel",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -2074,7 +2101,7 @@ async fn mod_turn_complete_sums_response_usage_and_keeps_last_model() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("usage-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("usage-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2104,7 +2131,8 @@ async fn mod_turn_complete_sums_response_usage_and_keeps_last_model() {
         ),
         ..Default::default()
     };
-    orch.fire_mod_turn_start("question", "turn-usage").await;
+    let question: Utf16JsonProjection = "question".into();
+    orch.fire_mod_turn_start(&question, "turn-usage").await;
     let first = ConversationMessage::Assistant {
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
@@ -2186,11 +2214,11 @@ async fn mod_session_version_reports_the_running_engine_build() {
         .await
         .unwrap();
     assert_eq!(
-        version,
-        serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "base": env!("CARGO_PKG_VERSION"),
-        })
+        (version.string_at("/version"), version.string_at("/base"),),
+        (
+            Some(env!("CARGO_PKG_VERSION")),
+            Some(env!("CARGO_PKG_VERSION")),
+        )
     );
 }
 
@@ -2212,7 +2240,7 @@ async fn prompt_submit_mod_rewrites_before_history_and_attaches_model_context() 
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("submit", dir.path(), &module, serde_json::json!({}))
+    host.load("submit", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2294,7 +2322,7 @@ async fn prompt_submit_mod_screens_direct_streaming_image_input() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("image-submit", dir.path(), &module, serde_json::json!({}))
+    host.load("image-submit", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2375,7 +2403,7 @@ async fn prompt_section_mod_rewrites_and_removes_named_system_sections() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("section-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("section-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2454,7 +2482,7 @@ async fn prompt_sections_resolve_concurrently_and_keep_slot_order() {
         "parallel-sections",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -2497,7 +2525,7 @@ async fn prompt_compose_mod_can_reorder_and_replace_system_sections() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("compose-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("compose-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2535,7 +2563,7 @@ async fn prompt_compose_scopes_reach_the_main_request_without_leaking_into_previ
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("scoped-compose", dir.path(), &module, serde_json::json!({}))
+    host.load("scoped-compose", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2590,7 +2618,7 @@ async fn prompt_compose_next_can_recompute_sdk_sections() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("compose-facts", dir.path(), &module, serde_json::json!({}))
+    host.load("compose-facts", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2633,7 +2661,7 @@ async fn prompt_compose_api_returns_detached_hooked_sections() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("compose-api", dir.path(), &module, serde_json::json!({}))
+    host.load("compose-api", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2706,7 +2734,7 @@ async fn mod_ui_selection_reads_live_fullscreen_text_and_clears() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("selection", dir.path(), &module, serde_json::json!({}))
+    host.load("selection", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     lingxi_core::host::OrchestratorHandle::set_mod_ui_selection(
@@ -2720,23 +2748,30 @@ async fn mod_ui_selection_reads_live_fullscreen_text_and_clears() {
         <ConversationOrchestrator as hooks::mods::ModSessionContext>::ui_selection(&orch)
             .await
             .unwrap(),
-        Some(serde_json::json!({"text":"selected text","requestId":"toolu_123"}))
+        Some(source_projection(serde_json::json!({
+            "text":"selected text","requestId":"toolu_123"
+        })))
     );
     let result = host
         .dispatch_with_log_at_session(
             "tool.call",
-            serde_json::json!({"tool":"Selection"}),
+            source_projection(serde_json::json!({"tool":"Selection"})),
             &orch,
             |_| async { panic!("Mod answers tool.call") },
             |_, _| async {},
         )
         .await
         .unwrap();
+    assert!(result
+        .subprojection("/result/selection")
+        .unwrap()
+        .semantically_eq(&source_projection(serde_json::json!({
+            "text":"selected text","requestId":"toolu_123"
+        }))));
     assert_eq!(
-        result["result"]["selection"],
-        serde_json::json!({"text":"selected text","requestId":"toolu_123"})
+        result.at_pointer("/result/absent").unwrap().as_bool(),
+        Some(false)
     );
-    assert_eq!(result["result"]["absent"], false);
     lingxi_core::host::OrchestratorHandle::set_mod_ui_selection(
         &orch,
         Some(lingxi_core::host::ModUiSelection {
@@ -2748,7 +2783,9 @@ async fn mod_ui_selection_reads_live_fullscreen_text_and_clears() {
         <ConversationOrchestrator as hooks::mods::ModSessionContext>::ui_selection(&orch)
             .await
             .unwrap(),
-        Some(serde_json::json!({"text":"unattributed"}))
+        Some(source_projection(
+            serde_json::json!({"text":"unattributed"})
+        ))
     );
     lingxi_core::host::OrchestratorHandle::set_mod_ui_selection(&orch, None);
     assert_eq!(
@@ -2760,15 +2797,24 @@ async fn mod_ui_selection_reads_live_fullscreen_text_and_clears() {
     let cleared = host
         .dispatch_with_log_at_session(
             "tool.call",
-            serde_json::json!({"tool":"Selection"}),
+            source_projection(serde_json::json!({"tool":"Selection"})),
             &orch,
             |_| async { panic!("Mod answers tool.call") },
             |_, _| async {},
         )
         .await
         .unwrap();
-    assert_eq!(cleared["result"]["absent"], true);
-    assert!(cleared["result"].get("selection").is_none());
+    assert_eq!(
+        cleared.at_pointer("/result/absent").unwrap().as_bool(),
+        Some(true)
+    );
+    assert!(!cleared
+        .at_pointer("/result")
+        .unwrap()
+        .object_entries()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.display_key == "selection"));
 }
 
 #[tokio::test]
@@ -2803,7 +2849,7 @@ async fn prompt_context_is_cached_until_mod_invalidate_or_gv_refresh() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("context-cache", dir.path(), &module, serde_json::json!({}))
+    host.load("context-cache", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2826,7 +2872,7 @@ async fn prompt_context_is_cached_until_mod_invalidate_or_gv_refresh() {
 
     host.dispatch_with_log_at_session(
         "tool.call",
-        serde_json::json!({"tool":"Bash"}),
+        source_projection(serde_json::json!({"tool":"Bash"})),
         &orch,
         |_| async { panic!("Mod handles tool.call") },
         |_, _| async {},
@@ -2868,7 +2914,7 @@ async fn prompt_context_mod_instruction_files_reach_the_model_reminder() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("context-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("context-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -2926,7 +2972,7 @@ async fn prompt_context_repeated_names_keep_first_position_and_last_value() {
         "context-duplicate",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        empty_mod_options(),
     )
     .await
     .unwrap();
@@ -2969,7 +3015,7 @@ async fn prompt_context_mod_sees_import_source_and_can_remove_all_blocks() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("context-mod", dir.path(), &module, serde_json::json!({}))
+    host.load("context-mod", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();
@@ -3567,7 +3613,7 @@ async fn prompt_mod_sections_and_context_keep_exact_utf16_until_provider_project
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("prompt-utf16", dir.path(), &module, serde_json::json!({}))
+    host.load("prompt-utf16", dir.path(), &module, empty_mod_options())
         .await
         .unwrap();
     let mut registry = hooks::HookRegistry::new();

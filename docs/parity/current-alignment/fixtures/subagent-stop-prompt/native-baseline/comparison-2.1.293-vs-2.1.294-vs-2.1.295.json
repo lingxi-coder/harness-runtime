@@ -1,0 +1,194 @@
+{
+  "scope": "Native public Agent -> SubagentStop prompt-hook captures only; no candidate parity claim.",
+  "versions": {
+    "2.1.293": {
+      "native_version": "2.1.293 (Claude Code)",
+      "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+      "classification_counts": {
+        "main_request": 1,
+        "child_request": 1,
+        "subagent_stop_hook": 1,
+        "hook_prompt_unconfirmed": 0,
+        "parent_continuation": 1,
+        "unclassified": 0
+      },
+      "hook_request_sequence": 3,
+      "event_name_observed": true,
+      "subagent_context_marker_observed": true,
+      "child_request_observed": true,
+      "parent_completed_with_fixed_response": true,
+      "native_exit_code": 0,
+      "stdout_result": "FIXED_SUBAGENT_PARENT_RESPONSE: parent completed after receiving the child result."
+    },
+    "2.1.294": {
+      "native_version": "2.1.294 (Claude Code)",
+      "native_sha256": "def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53",
+      "classification_counts": {
+        "main_request": 1,
+        "child_request": 1,
+        "subagent_stop_hook": 1,
+        "hook_prompt_unconfirmed": 0,
+        "parent_continuation": 1,
+        "unclassified": 0
+      },
+      "hook_request_sequence": 3,
+      "event_name_observed": true,
+      "subagent_context_marker_observed": true,
+      "child_request_observed": true,
+      "parent_completed_with_fixed_response": true,
+      "native_exit_code": 0,
+      "stdout_result": "FIXED_SUBAGENT_PARENT_RESPONSE: parent completed after receiving the child result."
+    },
+    "2.1.295": {
+      "native_version": "2.1.295 (Claude Code)",
+      "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+      "classification_counts": {
+        "main_request": 1,
+        "child_request": 1,
+        "subagent_stop_hook": 1,
+        "hook_prompt_unconfirmed": 0,
+        "parent_continuation": 1,
+        "unclassified": 0
+      },
+      "hook_request_sequence": 3,
+      "event_name_observed": true,
+      "subagent_context_marker_observed": true,
+      "child_request_observed": true,
+      "parent_completed_with_fixed_response": true,
+      "native_exit_code": 0,
+      "stdout_result": "FIXED_SUBAGENT_PARENT_RESPONSE: parent completed after receiving the child result."
+    }
+  },
+  "hook_request_fields": {
+    "system": {
+      "raw_bytes_equal_to_2.1.293": {
+        "2.1.293": true,
+        "2.1.294": false,
+        "2.1.295": false
+      },
+      "raw": {
+        "2.1.293": {
+          "path": "native-baseline/2.1.293/requests/request-03.system.raw.json",
+          "bytes": 1810,
+          "sha256": "a482b97600abbd314309e31d94155109b676daa947cdad0bddb7be0fd8245c1c"
+        },
+        "2.1.294": {
+          "path": "native-baseline/2.1.294/requests/request-03.system.raw.json",
+          "bytes": 2283,
+          "sha256": "b2e22c70b782cf8643102e76b0e1b2aa6330138a2e817f13595372cb789b7435"
+        },
+        "2.1.295": {
+          "path": "native-baseline/2.1.295/requests/request-03.system.raw.json",
+          "bytes": 2283,
+          "sha256": "be9b1c06c25b7725174ddbe361426c19c27df927bf9e87aeee39f104754afc21"
+        }
+      }
+    },
+    "messages": {
+      "raw_bytes_equal_to_2.1.293": {
+        "2.1.293": true,
+        "2.1.294": false,
+        "2.1.295": false
+      },
+      "raw": {
+        "2.1.293": {
+          "path": "native-baseline/2.1.293/requests/request-03.messages.raw.json",
+          "bytes": 7154,
+          "sha256": "948ee696e7d6cbb16c616c8b01afb0cf42f3336e11e1565e72b5bcd4f7fa2a43"
+        },
+        "2.1.294": {
+          "path": "native-baseline/2.1.294/requests/request-03.messages.raw.json",
+          "bytes": 7154,
+          "sha256": "dde1ccec3fb288b7847d8091b3fc7f4e89283d3314c4318a0e761fa63566dba6"
+        },
+        "2.1.295": {
+          "path": "native-baseline/2.1.295/requests/request-03.messages.raw.json",
+          "bytes": 7156,
+          "sha256": "4347fe8a658b045f93a645118b923d0ab68caf8959cb7aba7be2b5b4b19f2689"
+        }
+      }
+    }
+  },
+  "system_content_observations": {
+    "captured_billing_header_by_run": {
+      "2.1.293": "cc_version=2.1.293.fda; cc_entrypoint=sdk-cli; cc_is_subagent=true;",
+      "2.1.294": "cc_version=2.1.294.6f8; cc_entrypoint=sdk-cli; cc_is_subagent=true;",
+      "2.1.295": "cc_version=2.1.295.2f3; cc_entrypoint=sdk-cli; cc_is_subagent=true;"
+    },
+    "stop_evaluator_new_ok_policy_present": {
+      "2.1.293": false,
+      "2.1.294": true,
+      "2.1.295": true
+    },
+    "2.1.294_and_2.1.295_evaluator_prompt_text_equal": true,
+    "classification": "The allow/block and untrusted-event-JSON evaluator instructions are present in 2.1.294 and unchanged in the 2.1.295 captured system field. Billing text is recorded as captured; its suffix differs between fixtures even for the same binary, so it is not treated as a fixed version-only delta."
+  },
+  "messages_dynamic_and_runtime_constraints": {
+    "generated_references": {
+      "2.1.293": {
+        "prompt_ids": [
+          {
+            "value": "a70d462d-9900-4948-a076-665843918a26",
+            "uuid_v4_shape": true
+          }
+        ],
+        "agent_ids": [
+          "a2e2d5e04030a14d5"
+        ],
+        "agent_transcript_paths": [
+          "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/subagent-stop-prompt/run-output/shared/config/projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-harness-runtime-docs-parity-current-alignment-fixtures-subagent-stop-prompt-run-output-shared-cwd/00000000-0000-4000-8000-000000002961/subagents/agent-a2e2d5e04030a14d5.jsonl"
+        ]
+      },
+      "2.1.294": {
+        "prompt_ids": [
+          {
+            "value": "bb14baf5-0030-4d35-846c-14173d058bc2",
+            "uuid_v4_shape": true
+          }
+        ],
+        "agent_ids": [
+          "a3e6e6103f77fc156"
+        ],
+        "agent_transcript_paths": [
+          "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/subagent-stop-prompt/run-output/shared/config/projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-harness-runtime-docs-parity-current-alignment-fixtures-subagent-stop-prompt-run-output-shared-cwd/00000000-0000-4000-8000-000000002961/subagents/agent-a3e6e6103f77fc156.jsonl"
+        ]
+      },
+      "2.1.295": {
+        "prompt_ids": [
+          {
+            "value": "08d7a204-aba3-471c-8beb-2eb11c6b123e",
+            "uuid_v4_shape": true
+          }
+        ],
+        "agent_ids": [
+          "acac117674f94cb90"
+        ],
+        "agent_transcript_paths": [
+          "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/subagent-stop-prompt/run-output/shared/config/projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-harness-runtime-docs-parity-current-alignment-fixtures-subagent-stop-prompt-run-output-shared-cwd/00000000-0000-4000-8000-000000002961/subagents/agent-acac117674f94cb90.jsonl"
+        ]
+      }
+    },
+    "context_observations": {
+      "2.1.293": {
+        "git_status_snapshot_present": true,
+        "injected_session_dates": [
+          "2026-10-08"
+        ]
+      },
+      "2.1.294": {
+        "git_status_snapshot_present": true,
+        "injected_session_dates": [
+          "2026-10-08"
+        ]
+      },
+      "2.1.295": {
+        "git_status_snapshot_present": true,
+        "injected_session_dates": [
+          "2026-10-09"
+        ]
+      }
+    },
+    "raw_fields_compared_without_normalization": true,
+    "classification": "The hook request includes generated prompt_id and agent_id references plus an agent transcript path containing the generated agent id. The messages field also carries a git-status snapshot and injected date that changed between runs; whole messages bytes remain unequal and these values are not normalized or attributed to the binary version."
+  }
+}

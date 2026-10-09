@@ -118,7 +118,6 @@ impl SkillListingProvider for LazySkillListingProvider {
 const SKILL_BUDGET_CONTEXT_PERCENT: f64 = 0.01;
 const CHARS_PER_TOKEN: usize = 4;
 const DEFAULT_CHAR_BUDGET: usize = 8_000;
-const MAX_LISTING_DESC_CHARS: usize = 250;
 const MIN_DESC_LENGTH: usize = 20;
 
 /// prompt.ts:31-41. Honors the `SLASH_COMMAND_TOOL_CHAR_BUDGET` override 1:1.
@@ -141,13 +140,13 @@ fn char_budget(context_window_tokens: Option<usize>) -> usize {
     }
 }
 
-/// prompt.ts:43-50. `whenToUse ? "{desc} - {when}" : desc`, capped at 250 with `…`.
+/// Native 2.1.293 retains the full description when the listing fits its
+/// overall budget. Guidance remains part of the same source string.
 fn skill_description(e: &SkillListingEntry) -> Source {
-    let desc = match &e.when_to_use {
+    match &e.when_to_use {
         Some(w) if !units(w).is_empty() => concatenate(&[&e.description, &" - ".into(), w]),
         _ => e.description.clone(),
-    };
-    truncate_to_width_ellipsis(&desc, MAX_LISTING_DESC_CHARS)
+    }
 }
 
 fn full_line(e: &SkillListingEntry) -> Source {
@@ -223,22 +222,6 @@ fn truncate_to_width(source: &Source, max_width: usize) -> Source {
         end = next;
     }
     from_units(original[..end].to_vec())
-}
-
-fn truncate_to_width_ellipsis(source: &Source, max_width: usize) -> Source {
-    if string_width(source) <= max_width {
-        return source.clone();
-    }
-    if max_width == 0 {
-        return "".into();
-    }
-    if max_width == 1 {
-        return "\u{2026}".into();
-    }
-    concatenate(&[
-        &truncate_to_width(source, max_width - 1),
-        &"\u{2026}".into(),
-    ])
 }
 
 /// prompt.ts:70-171. Returns the listing body (no `<system-reminder>` wrapper);
@@ -437,59 +420,49 @@ mod tests {
     }
 
     #[test]
-    fn description_capped_at_250_chars_with_ellipsis() {
-        let long = "d".repeat(400);
-        let e = entry("x", &long, None, false);
-        let d = skill_description(&e);
-        assert_eq!(
-            d.string_at("").unwrap().chars().count(),
-            MAX_LISTING_DESC_CHARS
-        );
-        assert_eq!(string_width(&d), MAX_LISTING_DESC_CHARS);
-        assert!(d.string_at("").unwrap().ends_with('\u{2026}'));
+    fn in_budget_long_description_matches_native_293_raw_listing_line() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SLASH_COMMAND_TOOL_CHAR_BUDGET");
+        let entries = [entry("native-width-probe", &"a".repeat(1200), None, false)];
+        let actual = format_within_budget(&entries, None);
+        // This is a direct slice of the captured Native request, with no
+        // JSON decoding, reserialization, whitespace changes, or trailing LF.
+        let native = include_bytes!("../../../../docs/parity/current-alignment/fixtures/commands/native-baseline/2.1.293/skill-description-width/control-ascii-1200/skill-listing-line.raw.txt");
+        assert_eq!(actual.string_at("").unwrap().as_bytes(), native);
     }
 
     #[test]
-    fn description_cap_counts_cjk_by_display_width() {
+    fn in_budget_description_retains_all_cjk_text() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SLASH_COMMAND_TOOL_CHAR_BUDGET");
         let long = "中".repeat(200);
-        let e = entry("han", &long, None, false);
-        let d = skill_description(&e);
-        assert!(string_width(&d) <= MAX_LISTING_DESC_CHARS);
-        assert!(d.string_at("").unwrap().ends_with('\u{2026}'));
-        assert!(d
-            .string_at("")
-            .unwrap()
-            .chars()
-            .all(|c| c == '中' || c == '\u{2026}'));
-    }
-
-    #[test]
-    fn description_cap_preserves_emoji_graphemes() {
-        let family = "👨‍👩‍👧‍👦";
-        let long = family.repeat(200);
-        let e = entry("emoji", &long, None, false);
-        let d = skill_description(&e);
-        let scalar = d.string_at("").unwrap();
-        let without_ellipsis = scalar.strip_suffix('\u{2026}').expect("ellipsis");
-        assert!(string_width(&d) <= MAX_LISTING_DESC_CHARS);
-        assert!(without_ellipsis
-            .graphemes(true)
-            .all(|grapheme| grapheme == family));
-    }
-
-    #[test]
-    fn ellipsis_truncation_respects_zero_and_one_column_budgets() {
+        let actual = format_within_budget(&[entry("han", &long, None, false)], None);
         assert_eq!(
-            truncate_to_width_ellipsis(&"wide".into(), 0)
-                .string_at("")
-                .unwrap(),
-            ""
+            units(&actual),
+            format!("- han: {long}").encode_utf16().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn in_budget_description_retains_all_emoji_graphemes() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("SLASH_COMMAND_TOOL_CHAR_BUDGET");
+        let long = "👨‍👩‍👧‍👦".repeat(200);
+        let actual = format_within_budget(&[entry("emoji", &long, None, false)], None);
         assert_eq!(
-            truncate_to_width_ellipsis(&"wide".into(), 1)
-                .string_at("")
-                .unwrap(),
-            "\u{2026}"
+            units(&actual),
+            format!("- emoji: {long}")
+                .encode_utf16()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn width_truncation_respects_zero_and_one_column_budgets() {
+        assert_eq!(truncate_to_width(&"wide".into(), 0).string_at(""), Some(""));
+        assert_eq!(
+            truncate_to_width(&"wide".into(), 1).string_at(""),
+            Some("w")
         );
     }
 

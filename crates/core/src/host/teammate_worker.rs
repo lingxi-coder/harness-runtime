@@ -1,8 +1,8 @@
 //! Private host transport for a teammate running in a terminal pane.
 //! Prompt/context travel over a private manifest, never shell arguments.
+use crate::types::utf16_json::Utf16JsonProjection;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use crate::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -503,6 +503,14 @@ impl RegistrySlashDispatcher {
         commands
     }
 
+    /// Return the Native headless command catalog used by unknown-slash
+    /// fallback reminders. Unlike palette listings, this preserves registry
+    /// source order and separates the prompt-invocable names from the count of
+    /// all currently available commands.
+    pub async fn headless_command_catalog(&self) -> crate::model::HeadlessCommandCatalog {
+        self.registry.read().await.headless_command_catalog()
+    }
+
     /// Format the locked unknown-command literal.
     ///
     /// Public so callers can render the same string outside the dispatch loop
@@ -2004,10 +2012,10 @@ mod tests {
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct FiredExpansion {
         expansion_type: PromptExpansionType,
-        command_name: String,
-        command_args: String,
-        command_source: Option<String>,
-        prompt: String,
+        command_name: Utf16JsonProjection,
+        command_args: Utf16JsonProjection,
+        command_source: Option<Utf16JsonProjection>,
+        prompt: Utf16JsonProjection,
     }
 
     type ExpansionLog = std::sync::Mutex<Vec<FiredExpansion>>;
@@ -2039,8 +2047,8 @@ mod tests {
             }
             HookResult {
                 outcome: HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: None,
                 response: None,
             }
@@ -2065,6 +2073,7 @@ mod tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -2125,7 +2134,8 @@ mod tests {
             SlashDispatchResult::RunAsTurn { .. }
         ));
         let usage = crate::skill_usage::read_skill_usage(&root).unwrap();
-        assert_eq!(usage.get("demo").map(|entry| entry.count), Some(2));
+        let skill_key = "demo".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(usage.get(&skill_key).map(|entry| entry.count), Some(2));
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -2161,12 +2171,12 @@ mod tests {
             seen,
             vec![FiredExpansion {
                 expansion_type: PromptExpansionType::SlashCommand,
-                command_name: "demo".to_string(),
-                command_args: "this and that".to_string(),
-                command_source: Some("project".to_string()),
+                command_name: "demo".into(),
+                command_args: "this and that".into(),
+                command_source: Some("project".into()),
                 // claude-code `o = `/${e.name} ${t}`` — the command LINE, not
                 // the expanded body.
-                prompt: "/demo this and that".to_string(),
+                prompt: "/demo this and that".into(),
             }],
             "UserPromptExpansion must fire once with byte-faithful metadata: {seen:?}"
         );
@@ -2187,8 +2197,8 @@ mod tests {
         let seen = log.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "exactly one expansion: {seen:?}");
         assert_eq!(seen[0].expansion_type, PromptExpansionType::McpPrompt);
-        assert_eq!(seen[0].command_source, Some("mcp".to_string()));
-        assert_eq!(seen[0].prompt, "/demo arg");
+        assert_eq!(seen[0].command_source, Some("mcp".into()));
+        assert_eq!(seen[0].prompt, "/demo arg".into());
     }
 
     fn registry_with_mcp_prompt(connection_id: McpConnectionId) -> Arc<RwLock<CommandRegistry>> {
@@ -2226,12 +2236,13 @@ mod tests {
             let seen = resolver_seen.clone();
             Box::pin(async move {
                 *seen.lock().unwrap() = Some((id, name, arguments));
-                Ok(serde_json::json!({
+                Utf16JsonProjection::from_serde_value(&serde_json::json!({
                     "messages": [{
                         "role": "user",
                         "content": {"type": "text", "text": "Review src/lib.rs"}
                     }]
                 }))
+                .map_err(|error| error.to_string())
             })
         });
         let dispatcher = RegistrySlashDispatcher::new(registry_with_mcp_prompt(connection_id))
@@ -2248,10 +2259,14 @@ mod tests {
         }
         let call = seen.lock().unwrap().clone().expect("resolver call");
         assert_eq!(call.0, connection_id);
-        assert_eq!(call.1, "review");
+        assert_eq!(call.1, "review".into());
         assert_eq!(
             call.2,
-            serde_json::json!({"repository": "lingxi", "focus": "\"unsafe"})
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                "repository": "lingxi",
+                "focus": "\"unsafe"
+            }))
+            .unwrap()
         );
 
         assert!(matches!(
@@ -2263,7 +2278,11 @@ mod tests {
         let marker_call = seen.lock().unwrap().clone().expect("marker resolver call");
         assert_eq!(
             marker_call.2,
-            serde_json::json!({"repository": "lingxi", "focus": "focus"})
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                "repository": "lingxi",
+                "focus": "focus"
+            }))
+            .unwrap()
         );
     }
 
@@ -2304,9 +2323,15 @@ mod tests {
 
         let seen = log.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "exactly one expansion: {seen:?}");
-        assert_eq!(seen[0].command_args, "");
-        assert_eq!(seen[0].command_source, Some("user".to_string()));
-        assert_eq!(seen[0].prompt, "/demo");
+        assert_eq!(seen[0].command_args.string_at(""), Some(""));
+        assert_eq!(
+            seen[0]
+                .command_source
+                .as_ref()
+                .and_then(|source| source.string_at("")),
+            Some("user")
+        );
+        assert_eq!(seen[0].prompt.string_at(""), Some("/demo"));
     }
 
     /// Without `with_expansion_hooks` wired, expanding a markdown command is a
@@ -2400,7 +2425,7 @@ mod tests {
             _s: Option<crate::FrontmatterShell>,
         ) -> ShellPermissionDecision {
             ShellPermissionDecision::Deny {
-                message: Some("not allowed".to_string()),
+                message: Some("not allowed".into()),
             }
         }
     }
@@ -2439,7 +2464,7 @@ mod tests {
     impl crate::model::BuiltinCommandHandler for EmbeddedInjectHandler {
         async fn handle(&self, _args: &crate::parser::ParsedSlashCommand) -> CommandResult {
             CommandResult::InjectMessage {
-                content: "commit: !`git status` now".to_string(),
+                content: "commit: !`git status` now".into(),
             }
         }
         fn name(&self) -> &str {
@@ -2746,10 +2771,22 @@ mod tests {
         let _ = d.dispatch("/no-such-command".into()).await;
         let _ = d.dispatch("/".into()).await;
         let calls = gate.calls.lock().unwrap().clone();
+        let calls = calls
+            .iter()
+            .map(|(names, interactive)| {
+                (
+                    names
+                        .iter()
+                        .map(|name| name.string_at("").unwrap().to_owned())
+                        .collect::<Vec<_>>(),
+                    *interactive,
+                )
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             calls,
             vec![
-                (vec!["Bash".to_string(), "Write".to_string()], false),
+                (vec!["Bash".into(), "Write".into()], false),
                 (Vec::new(), false),
                 (Vec::new(), false),
                 (Vec::new(), false),

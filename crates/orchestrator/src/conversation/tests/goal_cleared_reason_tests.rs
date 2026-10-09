@@ -14,12 +14,12 @@
 //! user cleared by hand — and a goal replaced by a newer one emitted nothing at
 //! all.
 
+use crate::test_support::{
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+};
+use crate::turn_loop::{clear_goal_after_unrecoverable_error, GoalClearReason};
 use crate::ConversationOrchestrator;
 use crate::OrchestratorConfig;
-use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
-};
-use crate::turn_loop::{GoalClearReason, clear_goal_after_unrecoverable_error};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
@@ -47,7 +47,9 @@ fn orch_with_output(
     (orch, output)
 }
 
-async fn system_notices(output: &MockOutputStream) -> Vec<String> {
+async fn system_notices(
+    output: &MockOutputStream,
+) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
     output
         .snapshot()
         .await
@@ -169,14 +171,17 @@ async fn replacing_a_live_goal_reports_superseded() {
     let orch = orch(bus);
 
     // The first `/goal` has nothing to supersede.
-    orch.set_active_goal("ship the release").await;
+    let first_goal: lingxi_core::types::utf16_json::Utf16JsonProjection = "ship the release".into();
+    orch.set_active_goal(&first_goal).await;
     assert!(
         cleared_reasons(&sink).await.is_empty(),
         "setting the first goal tears nothing down"
     );
 
     // `let l = t.getAppState().activeGoal; if (l !== void 0) kB(l,"superseded")`
-    orch.set_active_goal("cut the branch instead").await;
+    let replacement_goal: lingxi_core::types::utf16_json::Utf16JsonProjection =
+        "cut the branch instead".into();
+    orch.set_active_goal(&replacement_goal).await;
 
     assert_eq!(
         cleared_reasons(&sink).await,
@@ -208,7 +213,7 @@ async fn a_rejected_request_pauses_the_goal_out_loud() {
         system_notices(&output).await,
         vec![
             "Goal paused · the API rejected the last request · send a message to continue, or run /goal clear"
-                .to_string()
+                .into()
         ]
     );
     // PAUSED, not cleared: the goal stays set so a message resumes it.
@@ -236,7 +241,7 @@ async fn a_rate_limit_pauses_with_its_own_sentence() {
 
     assert_eq!(
         system_notices(&output).await,
-        vec!["Goal paused · the request was rate limited · send a message to retry".to_string()]
+        vec!["Goal paused · the request was rate limited · send a message to retry".into()]
     );
     assert!(orch.session.lock().await.active_goal.is_some());
 }
@@ -261,8 +266,9 @@ async fn the_clear_tier_still_clears_and_says_so() {
     let notices = system_notices(&output).await;
     assert_eq!(notices.len(), 1);
     assert!(
-        notices[0]
-            .starts_with("Goal cleared after an unrecoverable error (credit balance too low)"),
+        notices[0].string_at("").is_some_and(|text| {
+            text.starts_with("Goal cleared after an unrecoverable error (credit balance too low)")
+        }),
         "got {:?}",
         notices[0]
     );

@@ -1231,7 +1231,13 @@ mod tests {
         assert_eq!(parsed.session_id, session_id.as_uuid().to_string());
         assert_eq!(parsed.uuid, uuid);
         assert_eq!(parsed.cwd, "/workspace");
-        assert_eq!(parsed.extra.get("isMeta"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            parsed
+                .extra
+                .at_pointer("/isMeta")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -1425,15 +1431,15 @@ mod tests {
         .expect("normal resume loader accepts durable Fusion row");
         assert_eq!(loaded.len(), 1);
         assert_eq!(
-            loaded[0]
-                .extra
-                .get("fusionRunId")
-                .and_then(serde_json::Value::as_str),
+            loaded[0].extra.string_at("/fusionRunId"),
             Some(run_id.as_str())
         );
         assert_eq!(
-            loaded[0].extra.get("isModelContextExcluded"),
-            Some(&serde_json::json!(true))
+            loaded[0]
+                .extra
+                .at_pointer("/isModelContextExcluded")
+                .and_then(|value| value.as_bool()),
+            Some(true)
         );
         coordinator.close_and_drain().await.unwrap();
     }

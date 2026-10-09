@@ -27,33 +27,48 @@ impl Tool for FailingTool {
     fn name(&self) -> &str {
         self.name
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &json!({ "type": "object", "properties": {} }),
+                )
+            });
         &SCHEMA
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -65,7 +80,11 @@ impl Tool for FailingTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "failing-tool".into()
     }
     async fn prompt(
@@ -76,7 +95,7 @@ impl Tool for FailingTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -118,7 +137,12 @@ async fn aborted_tool_is_stamped_interrupted() {
     let out = MockOutputStream::new();
     let orch = orch_with(out.clone());
     let id = ToolUseId::new();
-    let uses = vec![(id.clone(), "AbortTool".to_string(), json!({}), None)];
+    let uses = vec![(
+        id.clone(),
+        "AbortTool".to_string(),
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+        None,
+    )];
     let (blocks, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
         .await
         .expect("dispatch");
@@ -150,7 +174,12 @@ async fn ordinary_tool_error_is_not_stamped() {
     let out = MockOutputStream::new();
     let orch = orch_with(out.clone());
     let id = ToolUseId::new();
-    let uses = vec![(id.clone(), "BoomTool".to_string(), json!({}), None)];
+    let uses = vec![(
+        id.clone(),
+        "BoomTool".to_string(),
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+        None,
+    )];
     let _ = dispatch_tool_uses_tracked(&orch, &uses, None)
         .await
         .expect("dispatch");

@@ -1,0 +1,303 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "runner_sha256": "3ccf1e6943f400cf295e7df017abb2f3df32de19e43397b906aec808aaf8579f",
+  "hook_sha256": "b8f3c3a7bef99934342dd62deefd5e7943995a84f3f62700bc1af70c6f39a5d4",
+  "loopback_only": true,
+  "dummy_key_only": true,
+  "isolated_home_and_config": true,
+  "retry_limit": 0,
+  "timeout_seconds": 45,
+  "argv": [
+    "$CLAUDE_NATIVE_BINARY",
+    "--plugin-dir",
+    "<isolated-plugin>",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--print",
+    "--tools",
+    "default,Glob",
+    "--dangerously-skip-permissions",
+    "--debug",
+    "hooks",
+    "--max-turns",
+    "3",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002f11",
+    "Find the file matching *.fixture twice and report its path."
+  ],
+  "fixed_sse_usage": [
+    {
+      "request": 1,
+      "input_tokens": 5,
+      "output_tokens": 1,
+      "response": "tool_use"
+    },
+    {
+      "request": 2,
+      "input_tokens": 7,
+      "output_tokens": 2,
+      "response": "tool_use"
+    },
+    {
+      "request": 3,
+      "input_tokens": 11,
+      "output_tokens": 3,
+      "response": "end_turn"
+    }
+  ],
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 42278,
+      "request_sha256": "65459e191dd412d378ba5ef8eca544d7dbd5c34dea6640934e5e562351138a39",
+      "raw_request": "request-01.raw.json",
+      "advertised_glob": true,
+      "tool_names": [
+        "Glob"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 42645,
+      "request_sha256": "a1bcd163342c8013d4029b7ff2d9b9ab90d7dda4f146fe042ba1a31ab672e238",
+      "raw_request": "request-02.raw.json",
+      "advertised_glob": true,
+      "tool_names": [
+        "Glob"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 43012,
+      "request_sha256": "1a8279a03e11f335e404169d7b334d501f84f55bd1351473b138e514d23fa391",
+      "raw_request": "request-03.raw.json",
+      "advertised_glob": true,
+      "tool_names": [
+        "Glob"
+      ]
+    }
+  ],
+  "stub_responses": [
+    {
+      "path": "response-01.raw.sse",
+      "bytes": 871,
+      "sha256": "936d07667b20f774ca7d3a5df5b86990492901d0c108ffc25c6f75b4366f6b6a",
+      "request_index": 1,
+      "usage": {
+        "input_tokens": 5,
+        "output_tokens": 1
+      }
+    },
+    {
+      "path": "response-02.raw.sse",
+      "bytes": 871,
+      "sha256": "2c6561f24619ac59681eac4b7b36c46022dccf3f67b1d5d04372b7119a40a6f1",
+      "request_index": 2,
+      "usage": {
+        "input_tokens": 7,
+        "output_tokens": 2
+      }
+    },
+    {
+      "path": "response-03.raw.sse",
+      "bytes": 826,
+      "sha256": "be10b8ac47948032731e3935761502ef14cffe143f230d140ca84387241add14",
+      "request_index": 3,
+      "usage": {
+        "input_tokens": 11,
+        "output_tokens": 3
+      }
+    }
+  ],
+  "request03_tool_result_blocks": [
+    {
+      "message_index": 2,
+      "content_index": 0,
+      "tool_use_id": "toolu_native_glob_three_request_01",
+      "is_error": false,
+      "raw_path": "request-03-tool-result-01.raw.json",
+      "raw_byte_range": [
+        13922,
+        14119
+      ],
+      "raw_bytes": 197,
+      "raw_sha256": "02d478208a84d1f1c45dc83ef31785cf28010a7e5b83ea6182462cfb214016ef"
+    },
+    {
+      "message_index": 4,
+      "content_index": 0,
+      "tool_use_id": "toolu_native_glob_three_request_02",
+      "is_error": false,
+      "raw_path": "request-03-tool-result-02.raw.json",
+      "raw_byte_range": [
+        14289,
+        14523
+      ],
+      "raw_bytes": 234,
+      "raw_sha256": "0f25be86dc72134b6553141fd11da4ce384b7201cc0334166b1afdb281bbe8e8"
+    }
+  ],
+  "request03_total_tokens_occurrences": [
+    {
+      "message_index": 0,
+      "content_index": 2,
+      "block_type": "text",
+      "field": "text",
+      "value": "15000000",
+      "raw_byte_range": [
+        1919,
+        1968
+      ]
+    },
+    {
+      "message_index": 2,
+      "content_index": 0,
+      "block_type": "tool_result",
+      "field": "content",
+      "value": "14999994",
+      "raw_byte_range": [
+        14048,
+        14097
+      ]
+    },
+    {
+      "message_index": 4,
+      "content_index": 0,
+      "block_type": "tool_result",
+      "field": "content",
+      "value": "14999991",
+      "raw_byte_range": [
+        14415,
+        14464
+      ]
+    }
+  ],
+  "tool_result_jsonl_rows": [
+    {
+      "path": "tool-use-result-row-01.raw.jsonl",
+      "bytes": 1001,
+      "sha256": "a0532c52858cb74035feb8672cdaba637740d4ef7a64877332cb12cc2e39c79d",
+      "typed_attachment": [
+        {
+          "tool_use_id": "toolu_native_glob_three_request_01",
+          "type": "tool_result",
+          "content": "hook-return.fixture"
+        }
+      ],
+      "bare_toolUseResult": {
+        "durationMs": 1,
+        "numFiles": 1,
+        "filenames": [
+          "hook-return.fixture"
+        ],
+        "truncated": false,
+        "totalMatches": 1,
+        "countIsComplete": true
+      },
+      "bare_toolUseResult_has_tool_use_id": false
+    },
+    {
+      "path": "tool-use-result-row-02.raw.jsonl",
+      "bytes": 1001,
+      "sha256": "632cd4148d372b80568f7f0a19478d5234b0bf93b19acfb98cf84c70df926914",
+      "typed_attachment": [
+        {
+          "tool_use_id": "toolu_native_glob_three_request_02",
+          "type": "tool_result",
+          "content": "hook-return.fixture"
+        }
+      ],
+      "bare_toolUseResult": {
+        "durationMs": 1,
+        "numFiles": 1,
+        "filenames": [
+          "hook-return.fixture"
+        ],
+        "truncated": false,
+        "totalMatches": 1,
+        "countIsComplete": true
+      },
+      "bare_toolUseResult_has_tool_use_id": false
+    }
+  ],
+  "checks": {
+    "native_three_loopback_requests": true,
+    "two_native_glob_tool_results_persisted": true,
+    "third_request_has_two_typed_tool_result_blocks": true,
+    "third_request_has_at_least_prior_and_current_token_reminders": true
+  },
+  "timed_out": false,
+  "exit_code": 0,
+  "stdout": {
+    "path": "native.stdout.raw",
+    "bytes": 29,
+    "sha256": "6e113d2a8d595ebabb8f0707236cba54e002c3fe2d46415637b19674cfc19d5c"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "run_output_dir": "run-output/glob-three-requests",
+  "scope": "Native 2.1.293 public CLI two-Glob-call then final-answer loop; all requests served by fixed loopback SSE, no upstream API",
+  "session_token_reminder_attachment_rows": {
+    "source_transcript": "run-output/glob-three-requests/config/projects/-Users-luolingfeng-lingxi--worktrees-claude-alignment-integration-harness-runtime-docs-parity-current-alignment-fixtures-tool-output-parser-run-output-glob-three-requests-cwd/00000000-0000-4000-8000-000000002f11.jsonl",
+    "path": "token-reminder-attachments.raw.jsonl",
+    "raw_bytes": 2316,
+    "raw_sha256": "2316a5160c215ee248a69da93a6da9e633b29868855105ce52c25f0d07c1dc34",
+    "rows": [
+      {
+        "source_line_number": 6,
+        "row_type": "attachment",
+        "attachment_type": "total_tokens_reminder",
+        "attachment_keys": [
+          "type",
+          "text"
+        ],
+        "has_tool_use_id": false,
+        "text": "<total_tokens>15000000 tokens left</total_tokens>",
+        "raw_row_bytes": 772,
+        "raw_row_sha256": "4866d6f1019330c7d8ef3cbe25306e3fa3570e8ddef2441ee43f47596f2c0c64"
+      },
+      {
+        "source_line_number": 15,
+        "row_type": "attachment",
+        "attachment_type": "total_tokens_reminder",
+        "attachment_keys": [
+          "type",
+          "text"
+        ],
+        "has_tool_use_id": false,
+        "text": "<total_tokens>14999994 tokens left</total_tokens>",
+        "raw_row_bytes": 772,
+        "raw_row_sha256": "e64771752338d0f5138c76af70e0678c99d7a311f25768c3f631e94ddc6d5817"
+      },
+      {
+        "source_line_number": 18,
+        "row_type": "attachment",
+        "attachment_type": "total_tokens_reminder",
+        "attachment_keys": [
+          "type",
+          "text"
+        ],
+        "has_tool_use_id": false,
+        "text": "<total_tokens>14999991 tokens left</total_tokens>",
+        "raw_row_bytes": 772,
+        "raw_row_sha256": "df70ee6985d97619a99a6afac53aa7dafdd9ea75f7c8d84c16207e93b83b73de"
+      }
+    ]
+  }
+}

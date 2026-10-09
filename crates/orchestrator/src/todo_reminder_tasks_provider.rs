@@ -127,7 +127,10 @@ mod tests {
                 "ship fix".into(),
                 "wire reminder fallback".into(),
                 None,
-                serde_json::Map::new(),
+                Some(
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                        .expect("empty task metadata is valid source JSON"),
+                ),
             ))
             .await
             .expect("task created");

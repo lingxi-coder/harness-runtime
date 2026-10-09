@@ -81,7 +81,7 @@ mod tests {
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
             assert_eq!(
                 s,
-                "No MCP servers configured. Use `claude mcp add` to add a server.\n"
+                "No MCP servers configured. Use `claude mcp add` to add a server.\n".into()
             );
         } else {
             panic!();
@@ -107,7 +107,7 @@ mod tests {
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
             assert_eq!(
                 s,
-                "MCP servers (2):\n  memory  connected  stdio\n  filesystem  error: connection refused  stdio\n"
+                "MCP servers (2):\n  memory  connected  stdio\n  filesystem  error: connection refused  stdio\n".into()
             );
         } else {
             panic!();

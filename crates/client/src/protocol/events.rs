@@ -826,6 +826,13 @@ define_client_event! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         api_error_status: Option<u16>,
         terminal_reason: String,
+        stop_reason: String,
+    },
+    // A transient Mod notification without a duration/expiry field.
+    // Appended to preserve every existing UniFFI event ordinal.
+    UiNotify {
+        plugin: String,
+        text: ClientTextDto,
     },
 
 }
@@ -837,9 +844,11 @@ impl From<ClientEventWire> for ClientEvent {
             ClientEventWire::TerminalApiError {
                 api_error_status,
                 terminal_reason,
+                stop_reason,
             } => Self::TerminalApiError {
                 api_error_status,
                 terminal_reason,
+                stop_reason,
             },
             ClientEventWire::SystemNotice { message, is_error } => {
                 Self::SystemNotice { message, is_error }
@@ -1384,6 +1393,7 @@ impl From<ClientEventWire> for ClientEvent {
                 uuid,
                 session_id,
             },
+            ClientEventWire::UiNotify { plugin, text } => Self::UiNotify { plugin, text },
         }
     }
 }
@@ -1852,30 +1862,44 @@ mod session_agent_identity_contract_tests {
     }
 
     #[test]
-    fn terminal_api_error_keeps_reason_and_omits_unknown_status() {
+    fn terminal_api_error_keeps_terminal_and_stop_reasons_and_omits_unknown_status() {
         let event = ClientEvent::TerminalApiError {
             api_error_status: None,
             terminal_reason: "api_error".into(),
+            stop_reason: "stop_sequence".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"terminal_api_error","terminal_reason":"api_error"}"#
+            r#"{"type":"terminal_api_error","terminal_reason":"api_error","stop_reason":"stop_sequence"}"#
         );
         assert_eq!(serde_json::from_str::<ClientEvent>(&json).unwrap(), event);
 
         let image_error = ClientEvent::TerminalApiError {
             api_error_status: Some(413),
             terminal_reason: "image_error".into(),
+            stop_reason: "stop_sequence".into(),
         };
         let json = serde_json::to_string(&image_error).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"terminal_api_error","api_error_status":413,"terminal_reason":"image_error"}"#
+            r#"{"type":"terminal_api_error","api_error_status":413,"terminal_reason":"image_error","stop_reason":"stop_sequence"}"#
         );
         assert_eq!(
             serde_json::from_str::<ClientEvent>(&json).unwrap(),
             image_error
         );
+
+        let refusal = ClientEvent::TerminalApiError {
+            api_error_status: None,
+            terminal_reason: "api_error".into(),
+            stop_reason: "refusal".into(),
+        };
+        let json = serde_json::to_string(&refusal).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"terminal_api_error","terminal_reason":"api_error","stop_reason":"refusal"}"#
+        );
+        assert_eq!(serde_json::from_str::<ClientEvent>(&json).unwrap(), refusal);
     }
 }

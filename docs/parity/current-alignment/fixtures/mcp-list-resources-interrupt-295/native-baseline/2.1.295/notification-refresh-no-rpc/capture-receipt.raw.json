@@ -1,0 +1,145 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "0b3da9c5f46d646430d6ee027403b308e3e2498f7b0375d2af2518baf396cbe0",
+  "stdio_server_sha256": "232436a38f3bc53c720dc30e9f660df2dd6e27f30ac24cd0f2e45eaa3b98e2c2",
+  "fixture_sha256": "bab921d551a5cb9e2f000a4cab23c686f50ac2d0b1074cf37c64277b08189996",
+  "native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "public_entrypoint": "Native 2.1.295 --print --output-format json, isolated strict --mcp-config, local stdio MCP, loopback Anthropic Messages stub",
+  "discovery_mode": "legacy-notification-refresh",
+  "fixed_inputs": {
+    "native_version": "2.1.295",
+    "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "session_id": "00000000-0000-4000-8000-000000002299",
+    "model": "claude-sonnet-4-5",
+    "server_name": "fixture",
+    "prompt": "Use ListMcpResourcesTool for the fixture server once, then finish.",
+    "list_resources_tool_name": "ListMcpResourcesTool",
+    "tool_use_id": "toolu_native_mcp_resources_interrupt_295",
+    "resource_uri": "fixture://resources/initial.txt",
+    "tool_result_marker": "INITIAL_DISCOVERY_RESOURCE_LIST",
+    "final_text": "NATIVE_MCP_RESOURCES_INTERRUPT_FINISHED",
+    "pending_timeout_seconds": 20,
+    "interrupt_settle_seconds": 12,
+    "timeout_seconds": 45
+  },
+  "network_boundary": {
+    "model_endpoint": "127.0.0.1 loopback only",
+    "mcp_transport": "local stdio subprocess only",
+    "dummy_api_key_only": true,
+    "isolated_home_config": true,
+    "no_upstream_relay": true
+  },
+  "timeout_seconds": 45,
+  "timed_out": false,
+  "native_exit_code": 0,
+  "native_result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "NATIVE_MCP_RESOURCES_INTERRUPT_FINISHED",
+    "num_turns": 2,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-4000-8000-000000002299"
+  },
+  "interrupt": {
+    "signal": "SIGINT",
+    "requested": false,
+    "discovery_mode": "legacy-notification-refresh",
+    "pending_observed": false,
+    "native_exit_code": 0,
+    "elapsed_since_launch_ms": 20699.461,
+    "elapsed_since_launch_epoch_ms": 20699.49,
+    "stdout_bytes": 1610,
+    "stderr_bytes": 0
+  },
+  "mcp": {
+    "incoming": {
+      "path": "mcp-trace/mcp-stdio-in.raw.jsonl",
+      "bytes": 1003,
+      "sha256": "2306075302737777821aee21e6dfd15d1036ba1efe279cf3795aa76995a22fb6"
+    },
+    "outgoing": {
+      "path": "mcp-trace/mcp-stdio-out.raw.jsonl",
+      "bytes": 970,
+      "sha256": "5f49396ca721c5d0459751e64eec995471625bac4ac0e38fcad1a319370291c3"
+    },
+    "methods": [
+      "server/discover",
+      "initialize",
+      "notifications/initialized",
+      "tools/list",
+      "prompts/list",
+      "resources/list"
+    ],
+    "resource_list_calls": 1,
+    "cancellation_notifications": []
+  },
+  "anthropic_messages_requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 114521,
+      "request_sha256": "3ef84d51acddfe009793326f4f72b4f04a18dca9d6a89fc891651769d9964b1f",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "resource_list_tools": [
+        "ListMcpResourcesTool"
+      ],
+      "initial_resources_list_completed": true
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 115113,
+      "request_sha256": "5e35237780f2f9c5cec50a0e39fe9bf2ba07235063eac74aa953abc72e48c088",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "resource_list_tools": [
+        "ListMcpResourcesTool"
+      ],
+      "fixture_tool_result_present": true,
+      "notification_refresh_pending_before_followup_response": false
+    }
+  ],
+  "anthropic_messages_responses": [
+    {
+      "index": 1,
+      "kind": "list_resources_tool_use",
+      "name": "ListMcpResourcesTool",
+      "bytes": 903,
+      "sha256": "262924d476317bd67d930c5d34fab13f4c4f3d262ffc0bee05f26880d06e76e8"
+    },
+    {
+      "index": 2,
+      "kind": "final",
+      "bytes": 813,
+      "sha256": "bd69cb481d0d36c996fee0f75a50fb17e240420ee6fdd3767aa9859e040f7e2b"
+    }
+  ],
+  "session_jsonl": {
+    "path": "native-session.raw.jsonl",
+    "bytes": 217602,
+    "sha256": "45bffd52ce24ca2eb716e37e7e352fb8de2c9fb5d9ea5fb5c8874dd29522e37a"
+  },
+  "native_mcp_debug": {
+    "path": "native-mcp-debug.raw.jsonl",
+    "bytes": 1775,
+    "sha256": "f2936376433467eab350f3dee64843a67b5af2aee6d73eca0d4e250ff55cf026"
+  },
+  "native_stdout": {
+    "path": "native.stdout.raw.json",
+    "bytes": 1610,
+    "sha256": "7adca03bf37c4dbcab807955ef74aa33313145cf329d4676f16ee34ad895f312"
+  },
+  "native_stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "raw_outputs_relative_path": "run-output/native-mcp-list-resources-interrupt-295-tm6zd6kf"
+}

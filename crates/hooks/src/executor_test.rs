@@ -79,6 +79,7 @@ mod session_end_timeout_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -257,6 +258,7 @@ mod session_end_batch_deadline_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -563,6 +565,7 @@ mod command_arm_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -2934,6 +2937,7 @@ mod async_path_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -3313,6 +3317,88 @@ mod async_path_tests {
             1,
             "blocking hook IS in the aggregate"
         );
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_on_failure_block_synthesizes_suppressed_block() {
+        let runner = CountingRunner::new(out("", "FIXED_COMMAND_HOOK_STDERR", 1));
+        let mut hook = command_hook(true);
+        hook.events = vec![HookEventType::UserPromptSubmit];
+        hook.on_failure = Some(crate::definition::HookFailureBehavior::Block);
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox));
+
+        let aggregate = exec
+            .execute(
+                HookEvent::UserPromptSubmit {
+                    prompt: hook_json(r#""fixed prompt""#),
+                },
+                HookContext::default(),
+            )
+            .await;
+
+        assert_eq!(aggregate.decision, Some(HookDecision::Block));
+        assert_eq!(
+            aggregate.reason.as_ref().map(|reason| reason.display.as_str()),
+            Some(
+                "[hook.sh]: failed; blocking because onFailure is \"block\"\nFIXED_COMMAND_HOOK_STDERR"
+            )
+        );
+        assert!(aggregate.suppress_original_prompt);
+        assert!(aggregate.hook_attachments.is_empty());
+        assert!(matches!(
+            aggregate.all_results[0]
+                .1
+                .response
+                .as_ref()
+                .and_then(|response| response.decision),
+            Some(HookDecision::Block)
+        ));
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_on_failure_block_synthesizes_permission_block() {
+        let runner = CountingRunner::new(out(
+            "FIXED_PRETOOL_HOOK_STDOUT",
+            "FIXED_PRETOOL_HOOK_STDERR",
+            1,
+        ));
+        let mut hook = command_hook(true);
+        hook.on_failure = Some(crate::definition::HookFailureBehavior::Block);
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox));
+
+        let aggregate = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(aggregate.decision, Some(HookDecision::Block));
+        assert_eq!(
+            aggregate.reason.as_ref().map(|reason| reason.display.as_str()),
+            Some(
+                "[hook.sh]: failed; blocking because onFailure is \"block\"\nFIXED_PRETOOL_HOOK_STDERR"
+            )
+        );
+        assert!(!aggregate.suppress_original_prompt);
+        assert!(aggregate.hook_attachments.is_empty());
+        assert!(matches!(
+            aggregate.all_results[0]
+                .1
+                .response
+                .as_ref()
+                .and_then(|response| response.decision),
+            Some(HookDecision::Block)
+        ));
     }
 
     /// (5) Mixed: one async (`blocking == false`) + one blocking hook fire for
@@ -4015,6 +4101,7 @@ mod once_and_status_message_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -4193,6 +4280,7 @@ mod once_and_status_message_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let (exec, _reg) = executor_with(hook, Arc::new(RewriteBuiltin));
         let post = HookEvent::PostToolUse {
@@ -4260,6 +4348,7 @@ mod once_and_status_message_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let (exec, _reg) = executor_with(
             hook,
@@ -4346,6 +4435,7 @@ mod once_and_status_message_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let (exec, _reg) = executor_with(hook, Arc::new(RewriteAll));
         let post = HookEvent::PostToolUse {
@@ -4404,6 +4494,7 @@ mod once_and_status_message_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let (exec, _reg) = executor_with(hook, Arc::new(TermHook));
         let pre = HookEvent::PreToolUse {
@@ -4447,6 +4538,7 @@ mod once_and_status_message_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let (exec, _reg) = executor_with(hook, handler);
         let post = HookEvent::PostToolUse {
@@ -4646,6 +4738,7 @@ mod http_agent_dispatch_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -4782,6 +4875,7 @@ mod http_agent_dispatch_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -5009,6 +5103,7 @@ mod prompt_dispatch_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -5247,6 +5342,7 @@ mod prompt_dispatch_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -5430,6 +5526,7 @@ mod prompt_dispatch_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
         let exec = HookExecutorImpl::new(
             Arc::new(RwLock::new(registry)),
@@ -5481,6 +5578,7 @@ mod prompt_dispatch_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
         let exec = HookExecutorImpl::new(
             Arc::new(RwLock::new(registry)),
@@ -5540,6 +5638,7 @@ mod prompt_dispatch_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
 
         let mut registry = HookRegistry::new();

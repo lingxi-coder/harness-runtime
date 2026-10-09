@@ -432,11 +432,15 @@ pub trait StreamingApiClient: Send + Sync {
         messages: Vec<ConversationMessage>,
         tools: Vec<llm_runtime::ToolDeclaration>,
         effort: Option<&str>,
+        tool_result_reminder_suffixes: Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
         query_source: &str,
         skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
+        request_dispatch_observer: Option<llm_runtime::RequestDispatchObserver>,
     ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
         let _ = effort;
+        let _ = tool_result_reminder_suffixes;
+        let _ = request_dispatch_observer;
         self.stream(
             model,
             profile,
@@ -1659,6 +1663,7 @@ mod output_accounting_impl;
 mod runtime_impl;
 
 use drivers_impl::parse_generated_session_name;
+pub(crate) use runtime_impl::TurnTimingCapture;
 use runtime_impl::{
     camelize_json_keys, compact_file_reference_body, extend_session_memory_fork_context,
     find_unresolved_tool_use_in_history, CompactionRuntime, LifecycleRuntime, ModelRuntime,
@@ -1666,6 +1671,7 @@ use runtime_impl::{
 };
 pub use runtime_impl::{
     CostSessionSwitcher, PreparedSessionSwitch, SessionActivationObserver, SessionMemoryHandle,
+    TurnExecutionMetrics,
 };
 
 /// Internal no-op streaming client used by [`ConversationOrchestrator::new`]

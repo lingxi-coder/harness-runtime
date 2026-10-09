@@ -532,7 +532,12 @@ mod tests {
             name: &str,
             input: &Utf16JsonProjection,
         ) -> Option<bool> {
-            (name == "Read").then(|| !input.bool_at("/force_serial").unwrap_or(false))
+            (name == "Read").then(|| {
+                !input
+                    .at_pointer("/force_serial")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            })
         }
 
         fn map_result_text(
@@ -546,7 +551,9 @@ mod tests {
         }
 
         fn map_result_is_error(&self, _name: &str, result: &Utf16JsonProjection) -> Option<bool> {
-            result.bool_at("/mappedError")
+            result
+                .at_pointer("/mappedError")
+                .and_then(|value| value.as_bool())
         }
 
         async fn parse_output(
@@ -665,9 +672,14 @@ mod tests {
         let module = dir.path().join("nested.js");
         std::fs::write(&module, source_text).unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("nested", dir.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "nested",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::from_serde_value(&json!({})).unwrap(),
+        )
+        .await
+        .unwrap();
         let session = Arc::new(Session {
             cwd: PathBuf::from("/tmp/main-session"),
             ancestor_cwds: StdMutex::new(Vec::new()),
@@ -1090,7 +1102,13 @@ mod tests {
         assert_eq!(calls[1].string_at("/marker"), Some("two"));
         drop(calls);
         assert_eq!(result.data.string_at("/marker"), Some("one"));
-        assert_eq!(result.data.bool_at("/selectedRewrite"), Some(true));
+        assert_eq!(
+            result
+                .data
+                .at_pointer("/selectedRewrite")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
         let expected_model_content = result.data.to_json_string().unwrap();
         assert_eq!(
             result

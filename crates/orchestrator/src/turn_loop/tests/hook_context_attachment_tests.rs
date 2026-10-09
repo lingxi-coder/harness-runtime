@@ -34,45 +34,61 @@ impl Tool for EchoTool {
     fn name(&self) -> &str {
         "Echo"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(
+                    &json!({ "type": "object", "properties": {} }),
+                )
+            });
         &SCHEMA
     }
     /// Declared so a PostToolUse `updatedToolOutput` can FAIL validation
     /// and exercise the `hook_error_during_execution` arm.
-    fn output_schema(&self) -> Option<&serde_json::Value> {
-        static OUT: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(|| {
-            json!({
-                "type": "object",
-                "properties": { "out": { "type": "string" } },
-                "required": ["out"]
-            })
-        });
+    fn output_schema(&self) -> Option<&lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        static OUT: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_result(&json!({
+                    "type": "object",
+                    "properties": { "out": { "type": "string" } },
+                    "required": ["out"]
+                }))
+            });
         Some(&OUT)
     }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
+    }
+
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
     }
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -84,7 +100,11 @@ impl Tool for EchoTool {
             metadata: permission::result::PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "echo".into()
     }
     async fn prompt(
@@ -95,17 +115,20 @@ impl Tool for EchoTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: json!({ "out": "ECHOED-OUTPUT" }),
+            data: tool_api::tool_trait::generated_builtin_result(
+                &json!({ "out": "ECHOED-OUTPUT" }),
+            ),
             model_content: Some("ECHOED-OUTPUT".into()),
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
             mcp_meta: None,
+            subagent_hooks_fired: false,
         })
     }
 }
@@ -163,8 +186,8 @@ impl BuiltinHookHandler for FixedPostHook {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: hooks::ExactHookText::from_text(""),
+            stderr: hooks::ExactHookText::from_text(""),
             exit_code: Some(0),
             response: Some(self.response.clone()),
         }
@@ -192,6 +215,7 @@ fn post_hook_executor(response: HookResponse) -> Arc<HookExecutorImpl> {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     };
     let mut registry = HookRegistry::new();
     registry.register(hook);
@@ -219,8 +243,18 @@ fn orch_with_post_hook(response: HookResponse) -> ConversationOrchestrator {
     )
 }
 
-fn uses() -> Vec<(ToolUseId, String, serde_json::Value, Option<String>)> {
-    vec![(ToolUseId::new(), "Echo".into(), json!({}), None)]
+fn uses() -> Vec<(
+    ToolUseId,
+    String,
+    lingxi_core::types::utf16_json::Utf16JsonProjection,
+    Option<String>,
+)> {
+    vec![(
+        ToolUseId::new(),
+        "Echo".into(),
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+        None,
+    )]
 }
 
 /// Same as [`post_hook_executor`] but registered for `PostToolBatch`, the
@@ -245,6 +279,7 @@ fn batch_hook_executor(response: HookResponse) -> Arc<HookExecutorImpl> {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     };
     let mut registry = HookRegistry::new();
     registry.register(hook);
@@ -287,8 +322,8 @@ impl BuiltinHookHandler for CancellingBatchHook {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: hooks::ExactHookText::from_text(""),
+            stderr: hooks::ExactHookText::from_text(""),
             exit_code: Some(0),
             response: Some(HookResponse {
                 additional_context: Some("stale context".into()),
@@ -323,6 +358,7 @@ async fn post_tool_batch_executor_receives_and_honors_generation_guard() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     };
     let mut registry = HookRegistry::new();
     registry.register(hook);
@@ -356,9 +392,11 @@ async fn post_tool_batch_executor_receives_and_honors_generation_guard() {
         PostToolBatchDispatch {
             tool_calls: vec![hooks::events::PostToolBatchCall {
                 tool_name: "Echo".into(),
-                tool_input: json!({}),
+                tool_input: tool_api::tool_trait::generated_builtin_result(&json!({})),
                 tool_use_id: ToolUseId::new(),
-                tool_response: Some(json!("done")),
+                tool_response: Some(tool_api::tool_trait::generated_builtin_result(&json!(
+                    "done"
+                ))),
             }],
             publication_guard: Some(Arc::new(fence)),
         },
@@ -574,11 +612,10 @@ async fn a_quiet_post_tool_batch_hook_does_not_stop_the_turn() {
 /// because the event covers the whole batch.
 #[test]
 fn post_tool_batch_stopped_continuation_matches_the_oracle_shape() {
-    let attachment = hooks::stopped_continuation_attachment(
-        &post_tool_batch_identity(),
-        "Execution stopped by PostToolBatch hook",
-    );
-    let id = attachment["toolUseID"].as_str().expect("toolUseID");
+    let message: lingxi_core::types::utf16_json::Utf16JsonProjection =
+        "Execution stopped by PostToolBatch hook".into();
+    let attachment = hooks::stopped_continuation_attachment(&post_tool_batch_identity(), &message);
+    let id = attachment.string_at("/toolUseID").expect("toolUseID");
     assert!(
         id.starts_with("hook-"),
         "the batch attachment carries a synthetic `hook-<uuid>` id, got {id}"
@@ -608,9 +645,13 @@ async fn post_tool_use_additional_context_is_not_folded_into_the_tool_result() {
         panic!("expected ToolResult");
     };
     assert!(
-        !content.contains("POST-CTX"),
+        !content
+            .string_at("")
+            .expect("tool result root string")
+            .contains("POST-CTX"),
         "claude never folds PostToolUse additionalContext into the \
-         tool_result string (BIN off 235420375 / 234726655), got: {content}"
+         tool_result string (BIN off 235420375 / 234726655), got: {}",
+        content.string_at("").unwrap_or("<non-string>")
     );
     assert_eq!(injected.len(), 1, "exactly one model-facing rendering");
     assert!(
@@ -639,7 +680,7 @@ async fn post_tool_use_additional_context_is_queued_as_an_attachment() {
         "one attachment, got {:?}",
         queued
             .iter()
-            .map(|(projection, _)| &projection.value)
+            .map(|(projection, _)| projection)
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -687,9 +728,14 @@ async fn mod_screens_hook_context_without_changing_its_recorded_attachment() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("hook-context-mod", dir.path(), &module, json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "hook-context-mod",
+        dir.path(),
+        &module,
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+    )
+    .await
+    .unwrap();
 
     let mut pre_registry = HookRegistry::new();
     pre_registry.set_mod_host(host.clone());
@@ -749,7 +795,10 @@ async fn mod_screens_hook_context_without_changing_its_recorded_attachment() {
         .any(|message| message.text_content().contains("modded 1 PreToolUse")));
     host.dispatch_with_log_at_session(
         "prompt.submit",
-        json!({"text":"invalidate"}),
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &json!({"text":"invalidate"}),
+        )
+        .expect("fixed prompt.submit input JSON"),
         &pre,
         |event| async move { Ok(event) },
         |_, _| async {},
@@ -798,8 +847,12 @@ async fn mod_screens_hook_context_without_changing_its_recorded_attachment() {
         .all(|message| !message.text_content().contains("POST-CTX")));
     let recorded = post.take_queued_hook_attachments(&use_batch[0].0).await;
     assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].0.value["type"], "hook_additional_context");
-    assert_eq!(recorded[0].0.value["content"], json!(["POST-CTX"]));
+    assert_eq!(
+        recorded[0].0.string_at("/type"),
+        Some("hook_additional_context")
+    );
+    assert_eq!(recorded[0].0.array_len("/content"), Some(1));
+    assert_eq!(recorded[0].0.string_at("/content/0"), Some("POST-CTX"));
 
     let mut block_registry = HookRegistry::new();
     block_registry.set_mod_host(host.clone());
@@ -823,7 +876,7 @@ async fn mod_screens_hook_context_without_changing_its_recorded_attachment() {
     let recorded = blocked.take_queued_hook_attachments(&use_batch[0].0).await;
     assert!(recorded
         .iter()
-        .any(|attachment| attachment.0.value["type"] == "hook_blocking_error"));
+        .any(|attachment| attachment.0.string_at("/type") == Some("hook_blocking_error")));
 
     let mut stop_registry = HookRegistry::new();
     stop_registry.set_mod_host(host);
@@ -845,9 +898,9 @@ async fn mod_screens_hook_context_without_changing_its_recorded_attachment() {
         .iter()
         .all(|message| !message.text_content().contains("hook stopped continuation")));
     let recorded = stopped.take_queued_hook_attachments(&use_batch[0].0).await;
-    assert!(recorded
-        .iter()
-        .any(|attachment| attachment.0.value["type"] == "hook_stopped_continuation"));
+    assert!(recorded.iter().any(|attachment| {
+        attachment.0.string_at("/type") == Some("hook_stopped_continuation")
+    }));
 }
 
 struct GatePublicationGuard {
@@ -1078,9 +1131,14 @@ async fn guarded_injected_row_runs_session_append_under_its_generation_guard() {
     let host = hooks::mods::ModHost::start(None)
         .await
         .expect("start Mod host");
-    host.load("guarded-injected-row", dir.path(), &module, json!({}))
-        .await
-        .expect("load session.append Mod");
+    host.load(
+        "guarded-injected-row",
+        dir.path(),
+        &module,
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+    )
+    .await
+    .expect("load session.append Mod");
     let mut hook_registry = HookRegistry::new();
     hook_registry.set_mod_host(host);
     let output = Arc::new(MockOutputStream::new());
@@ -1191,7 +1249,7 @@ async fn post_tool_use_block_emits_a_blocking_error_attachment_and_meta() {
         "one attachment, got {:?}",
         queued
             .iter()
-            .map(|(projection, _)| &projection.value)
+            .map(|(projection, _)| projection)
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -1222,8 +1280,8 @@ async fn post_tool_use_block_without_a_reason_uses_the_oracle_default() {
         .expect("dispatch");
     let queued = orch.take_queued_hook_attachments(&id).await;
     assert_eq!(
-        queued[0].0.value["blockingError"]["blockingError"],
-        "Blocked by hook"
+        queued[0].0.string_at("/blockingError/blockingError"),
+        Some("Blocked by hook")
     );
 }
 
@@ -1258,7 +1316,7 @@ async fn post_tool_use_prevent_continuation_is_persisted_as_an_attachment() {
         "one attachment, got {:?}",
         queued
             .iter()
-            .map(|(projection, _)| &projection.value)
+            .map(|(projection, _)| projection)
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -1293,7 +1351,7 @@ async fn blocking_error_is_ordered_before_stopped_continuation() {
     let queued = orch.take_queued_hook_attachments(&id).await;
     let kinds: Vec<_> = queued
         .iter()
-        .map(|(projection, _)| projection.value["type"].as_str().unwrap_or_default())
+        .map(|(projection, _)| projection.string_at("/type").unwrap_or_default())
         .collect();
     assert_eq!(kinds, ["hook_blocking_error", "hook_stopped_continuation"]);
 }
@@ -1357,7 +1415,9 @@ async fn dispatched_tool_result_reaches_the_transcript_as_tool_use_result() {
 #[tokio::test]
 async fn schema_mismatch_notice_is_an_attachment_the_model_never_sees() {
     let orch = orch_with_post_hook(HookResponse {
-        updated_tool_output: Some(Some(json!({ "unexpected": true }))),
+        updated_tool_output: Some(tool_api::tool_trait::generated_builtin_result(
+            &json!({ "unexpected": true }),
+        )),
         ..HookResponse::default()
     });
     let uses = uses();
@@ -1378,22 +1438,16 @@ async fn schema_mismatch_notice_is_an_attachment_the_model_never_sees() {
         "one attachment, got {:?}",
         queued
             .iter()
-            .map(|(projection, _)| &projection.value)
+            .map(|(projection, _)| projection)
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        queued[0]
-            .0
-            .value
-            .get("type")
-            .and_then(serde_json::Value::as_str),
+        queued[0].0.string_at("/type"),
         Some("hook_error_during_execution")
     );
     assert!(queued[0]
         .0
-        .value
-        .get("content")
-        .and_then(serde_json::Value::as_str)
+        .string_at("/content")
         .expect("string content")
         .contains("does not match Echo's output shape"));
 }
@@ -1434,6 +1488,7 @@ fn orch_with_pre_hook_and_output(
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     };
     let mut registry = HookRegistry::new();
     registry.register(hook);
@@ -1552,7 +1607,7 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
             "interleaved-append-log",
             dir.path(),
             &module,
-            serde_json::json!({}),
+            tool_api::tool_trait::generated_builtin_result(&json!({})),
         )
         .await
         .expect("load session.append Mod");
@@ -1591,7 +1646,7 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         content: vec![ContentBlock::ToolUse {
             id: tool_use_id.clone(),
             name: "Echo".into(),
-            input: json!({}),
+            input: tool_api::tool_trait::generated_builtin_result(&json!({})),
             provider_id: None,
         }],
         stop_reason: Some("tool_use".into()),
@@ -1612,7 +1667,12 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         .await
         .expect("session.append reached the guarded log sink");
 
-    let tool_use = (tool_use_id.clone(), "Echo".to_string(), json!({}), None);
+    let tool_use = (
+        tool_use_id.clone(),
+        "Echo".to_string(),
+        tool_api::tool_trait::generated_builtin_result(&json!({})),
+        None,
+    );
     let facts = crate::turn_loop::ToolUseDispatchFacts {
         native_query_depth: 0,
         query_history: vec![prompt.clone()],
@@ -1684,7 +1744,10 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         .collect::<Vec<_>>();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[1].message_type, "attachment");
-    assert_eq!(rows[1].extra["attachment"]["type"], "hook_deferred_tool");
+    assert_eq!(
+        rows[1].extra.string_at("/attachment/type"),
+        Some("hook_deferred_tool")
+    );
     assert_eq!(rows[2].message_type, "assistant");
     assert_eq!(rows[2].parent_uuid.as_deref(), Some(rows[1].uuid.as_str()));
     assert_eq!(
@@ -1725,7 +1788,7 @@ async fn pre_tool_use_prevent_continuation_is_persisted_as_an_attachment() {
         "one attachment, got {:?}",
         queued
             .iter()
-            .map(|(projection, _)| &projection.value)
+            .map(|(projection, _)| projection)
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -1856,6 +1919,7 @@ async fn pre_tool_use_additional_context_is_queued_and_rendered_as_meta() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     };
     let mut registry = HookRegistry::new();
     registry.register(hook);
@@ -1892,17 +1956,10 @@ async fn pre_tool_use_additional_context_is_queued_and_rendered_as_meta() {
         "one attachment, got {:?}",
         queued
             .iter()
-            .map(|(projection, _)| &projection.value)
+            .map(|(projection, _)| projection)
             .collect::<Vec<_>>()
     );
-    assert_eq!(
-        queued[0]
-            .0
-            .value
-            .get("hookName")
-            .and_then(serde_json::Value::as_str),
-        Some("PreToolUse:Echo")
-    );
+    assert_eq!(queued[0].0.string_at("/hookName"), Some("PreToolUse:Echo"));
     let rendering = injected
         .iter()
         .find(|(m, _)| matches!(m, ConversationMessage::User { .. }))

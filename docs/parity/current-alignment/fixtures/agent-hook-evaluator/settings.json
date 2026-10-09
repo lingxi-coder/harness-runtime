@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "FIXED_AGENT_HOOK_EVALUATOR_INSTRUCTION: Inspect the completed response and report the fixed fixture decision. Return only {\"ok\":true}.",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

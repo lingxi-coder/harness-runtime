@@ -2,14 +2,20 @@
 
 use super::*;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use lingxi_core::host::{OrchestratorHandle, ResumeRuntimeSnapshot};
 use platform_posix::fs::PosixFileSystem;
 use serde_json::json;
 
-fn native_attachment() -> Value {
-    json!({
+type SourceJson = lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+fn source_json(value: &serde_json::Value) -> SourceJson {
+    SourceJson::from_serde_value(value).expect("test JSON is valid source")
+}
+
+fn native_attachment() -> SourceJson {
+    source_json(&json!({
         "type": "nested_memory",
         "path": "/repo/folder/LINGXI.md",
         "displayPath": "folder/LINGXI.md",
@@ -22,22 +28,17 @@ fn native_attachment() -> Value {
             "rawContent": "---\npaths: src/**\n---\n \nraw instruction body\r\n\t",
             "parent": "/repo/LINGXI.md"
         }
-    })
+    }))
 }
 
-fn raw_row(session: Uuid, id: Uuid, attachment: Value) -> JsonlMessage {
-    serde_json::from_value(json!({
-        "type": "attachment",
-        "uuid": id.to_string(),
-        "parentUuid": null,
-        "sessionId": session.to_string(),
-        "timestamp": "2026-10-01T00:00:00.000Z",
-        "cwd": "/repo",
-        "version": "2.1.287",
-        "isSidechain": false,
-        "message": null,
-        "attachment": attachment
-    }))
+fn raw_row(session: Uuid, id: Uuid, attachment: SourceJson) -> JsonlMessage {
+    let attachment = attachment.to_json_string().unwrap();
+    serde_json::from_str(&format!(
+        "{{\"type\":\"attachment\",\"uuid\":\"{id}\",\"parentUuid\":null,\
+         \"sessionId\":\"{session}\",\"timestamp\":\"2026-10-01T00:00:00.000Z\",\
+         \"cwd\":\"/repo\",\"version\":\"2.1.287\",\"isSidechain\":false,\
+         \"message\":null,\"attachment\":{attachment}}}"
+    ))
     .unwrap()
 }
 
@@ -59,10 +60,13 @@ fn nested_memory_replay_preserves_uuid_full_file_fields_and_untrimmed_rendering(
     let restored = &sidecars[&MessageId::from_uuid(uuid)];
     assert_eq!(restored, &attachment);
     assert_eq!(
-        serde_json::to_vec(restored).unwrap(),
-        serde_json::to_vec(&attachment).unwrap()
+        restored.to_json_string().unwrap(),
+        attachment.to_json_string().unwrap()
     );
-    assert!(row.message.is_null());
+    assert!(row
+        .message
+        .at_pointer("")
+        .is_some_and(|value| value.is_null()));
 }
 
 #[test]
@@ -71,21 +75,26 @@ fn raw_sidecars_keep_opaque_attachment_values_without_synthesizing_projections()
     let object_uuid = Uuid::new_v4();
     let array_uuid = Uuid::new_v4();
     let null_uuid = Uuid::new_v4();
-    let opaque = json!({"type": "opaque-test-attachment", "payload": {"unrecognized": [1, null]}});
-    let array = json!(["raw", {"kind": "opaque"}]);
+    let opaque = source_json(
+        &json!({"type": "opaque-test-attachment", "payload": {"unrecognized": [1, null]}}),
+    );
+    let array = source_json(&json!(["raw", {"kind": "opaque"}]));
     let mut invalid = raw_row(session, Uuid::new_v4(), native_attachment());
     invalid.uuid = "invalid-current-row-uuid".to_owned();
     let rows = vec![
         raw_row(session, object_uuid, opaque.clone()),
         raw_row(session, array_uuid, array.clone()),
-        raw_row(session, null_uuid, Value::Null),
+        raw_row(session, null_uuid, SourceJson::parse("null").unwrap()),
         invalid,
     ];
     let sidecars = model_reminder_attachments_from_messages(&rows);
     assert_eq!(sidecars.len(), 3);
     assert_eq!(sidecars[&MessageId::from_uuid(object_uuid)], opaque);
     assert_eq!(sidecars[&MessageId::from_uuid(array_uuid)], array);
-    assert_eq!(sidecars[&MessageId::from_uuid(null_uuid)], Value::Null);
+    assert_eq!(
+        sidecars[&MessageId::from_uuid(null_uuid)],
+        SourceJson::parse("null").unwrap()
+    );
     assert!(hook_attachment_message_for_api(&rows[0], object_uuid).is_none());
     assert!(hook_attachment_message_for_api(&rows[1], array_uuid).is_none());
     assert!(hook_attachment_message_for_api(&rows[2], null_uuid).is_none());
@@ -140,8 +149,11 @@ async fn persisted_nested_memory_has_identical_hot_and_cold_payload_and_projecti
     let row: JsonlMessage = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(row.message_type, "attachment");
     assert_eq!(row.uuid, id.as_uuid().to_string());
-    assert!(row.message.is_null());
-    assert_eq!(row.extra["attachment"], attachment);
+    assert!(row
+        .message
+        .at_pointer("")
+        .is_some_and(|value| value.is_null()));
+    assert_eq!(row.extra.subprojection("/attachment").unwrap(), attachment);
     let cold = state_from_messages(session_uuid, std::slice::from_ref(&row));
     assert_eq!(cold.model_context_history(), vec![projection.clone()]);
     let raw_sidecars = model_reminder_attachments_from_messages(std::slice::from_ref(&row));
@@ -164,7 +176,11 @@ async fn persisted_nested_memory_has_identical_hot_and_cold_payload_and_projecti
     let restored = root.transcript.model_reminder_attachments.lock().unwrap();
     assert_eq!(restored[&id], attachment);
     assert_eq!(
-        serde_json::to_vec(&restored[&id]).unwrap(),
-        serde_json::to_vec(&row.extra["attachment"]).unwrap()
+        restored[&id].to_json_string().unwrap(),
+        row.extra
+            .subprojection("/attachment")
+            .unwrap()
+            .to_json_string()
+            .unwrap()
     );
 }

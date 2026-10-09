@@ -49,6 +49,7 @@ impl BuiltinCommandHandler for HelpHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     #[tokio::test]
     async fn returns_done_with_render_help_screen_output() {
@@ -79,7 +80,7 @@ mod tests {
                 // carry `isEnabled:()=>!1`; SLASH-13 added the ungated
                 // `/powerup` object (2.1.238 @296124285); cc2.1.269 brought
                 // `/output-style` back as a visible `type:"local"` command.
-                assert_eq!(s.matches('\n').count(), 80);
+                assert_eq!(s.string_at("").unwrap().matches('\n').count(), 80);
                 assert!(s.contains("  /bug "));
                 assert!(s.contains("  /powerup "));
                 assert!(s.contains("  /output-style "));

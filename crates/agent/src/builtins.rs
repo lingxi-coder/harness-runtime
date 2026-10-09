@@ -997,7 +997,8 @@ mod tests {
             assert!(!tools.iter().any(|t| t == tool), "{tool}");
         }
         assert!(matches!(def.permission_mode, AgentPermissionMode::Isolated));
-        let prompt = def.system_prompt.unwrap().string_at("").unwrap();
+        let source = def.system_prompt.unwrap();
+        let prompt = source.string_at("").unwrap();
         assert!(prompt.contains("git commit"));
         assert!(prompt.contains("current directory"));
         assert!(!builtin_agent_definitions_gated(true)
@@ -1283,10 +1284,9 @@ mod tests {
         // one `\n` after "…explicitly requested.", with a literal em dash
         // (U+2014) between "directly" and "do not". Byte-exact.
         let defs = builtin_agent_definitions();
-        let p = find(&defs, "general-purpose")
-            .system_prompt
-            .as_deref()
-            .unwrap();
+        let definition = find(&defs, "general-purpose");
+        let source = definition.system_prompt.as_ref().unwrap();
+        let p = source.string_at("").unwrap();
         assert!(
             p.ends_with(
                 "Only create documentation files if explicitly requested.\n- You are already the dedicated agent for this task. Do the work directly \u{2014} do not re-delegate your entire assignment to another single subagent."

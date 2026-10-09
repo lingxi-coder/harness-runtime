@@ -1115,6 +1115,7 @@ impl ConversationOrchestrator {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         };
         let _ = self
             .hooks

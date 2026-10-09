@@ -397,7 +397,10 @@ mod tests {
         use lingxi_core::host::OrchestratorHandle;
         for (interactive, wire) in [(false, true), (true, false)] {
             let (orch, _, queue) = fixture_config(interactive, wire);
-            orch.set_active_goal("finish").await;
+            orch.set_active_goal(&lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "finish",
+            ))
+            .await;
             orch.handle_goal_interruption(GoalInterruption::Retry(RetryCause::ApiUnavailable))
                 .await;
             let state = orch.lifecycle_runtime.goal_retry.lock().unwrap();
@@ -411,7 +414,10 @@ mod tests {
     async fn retry_delivers_a_real_meta_turn_and_stale_goal_does_not() {
         let (orch, api, queue) = fixture();
         use lingxi_core::host::OrchestratorHandle;
-        orch.set_active_goal("finish").await;
+        orch.set_active_goal(&lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            "finish",
+        ))
+        .await;
         let goal = orch.session.lock().await.active_goal.clone().unwrap();
         let cancel = CancellationToken::new();
         {
@@ -446,7 +452,10 @@ mod tests {
                 && m.text_content()
                     .contains("The last turn ended before the goal could be evaluated")
         }));
-        orch.set_active_goal("replacement").await;
+        orch.set_active_goal(&lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            "replacement",
+        ))
+        .await;
         orch.run_queued_prompt_batch(
             vec![crate::QueuedPromptInput {
                 goal_retry_id: Some(id),
@@ -465,7 +474,10 @@ mod tests {
     async fn retry_streak_dedupes_caps_and_resets() {
         let (orch, _, _) = fixture();
         use lingxi_core::host::OrchestratorHandle;
-        orch.set_active_goal("finish").await;
+        orch.set_active_goal(&lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            "finish",
+        ))
+        .await;
         for expected in 1..=3 {
             orch.handle_goal_interruption(GoalInterruption::Retry(RetryCause::ApiUnavailable))
                 .await;
@@ -490,7 +502,10 @@ mod tests {
     async fn checkin_queues_separately_and_is_cancelled_by_new_goal() {
         let (orch, _, queue) = fixture();
         use lingxi_core::host::OrchestratorHandle;
-        orch.set_active_goal("finish").await;
+        orch.set_active_goal(&lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            "finish",
+        ))
+        .await;
         let goal = orch.session.lock().await.active_goal.clone().unwrap();
         assert!(
             orch.queue_goal_checkin("check progress".into(), &goal)
@@ -503,7 +518,10 @@ mod tests {
         );
         assert_eq!(orch.lifecycle_runtime.goal_retry.lock().unwrap().retries, 0);
         let (id, _, token) = queue.0.lock().unwrap().pop().unwrap();
-        orch.set_active_goal("replacement").await;
+        orch.set_active_goal(&lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            "replacement",
+        ))
+        .await;
         assert!(token.is_cancelled());
         assert!(!orch.admit_goal_retry(&id).await);
     }
@@ -520,7 +538,10 @@ mod tests {
     async fn human_input_invalidates_dequeued_retry_before_admission() {
         let (orch, api, queue) = fixture();
         use lingxi_core::host::OrchestratorHandle;
-        orch.set_active_goal("finish").await;
+        orch.set_active_goal(&lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+            "finish",
+        ))
+        .await;
         let goal = orch.session.lock().await.active_goal.clone().unwrap();
         assert!(orch.queue_goal_checkin("same body".into(), &goal).await);
         let (old_id, body, token) = queue.0.lock().unwrap().pop().unwrap();
@@ -543,7 +564,7 @@ mod tests {
         .unwrap();
         assert!(token.is_cancelled());
         let calls = api.captured_calls().await;
-        let body_display = body.string_at("").unwrap().into_owned();
+        let body_display = body.string_at("").unwrap().to_owned();
         assert!(!calls[0]
             .messages
             .iter()

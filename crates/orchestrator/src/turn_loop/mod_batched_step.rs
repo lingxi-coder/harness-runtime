@@ -322,6 +322,8 @@ pub(super) async fn dispatch(
                 model: model.clone(),
                 profile: profile.clone(),
             });
+            let tool_result_reminder_suffixes =
+                orch.tool_result_reminder_suffixes_for_snapshot(&params.history);
             let outcome = lingxi_core::host::refusal_driver::scope_fallback_target(
                 fallback_context,
                 crate::provider_adapter::with_mod_turn_step_effort(
@@ -339,6 +341,7 @@ pub(super) async fn dispatch(
                         params.deferred,
                         params.date_change,
                         params.reminders.clone(),
+                        tool_result_reminder_suffixes,
                         &mut params.guarded_async_hook_reminders,
                         &params.context_announcements,
                         params.cost_scope.as_ref(),
@@ -462,6 +465,8 @@ pub(super) async fn dispatch(
                 model: params.model.clone(),
                 profile: params.profile.clone(),
             });
+            let tool_result_reminder_suffixes =
+                orch.tool_result_reminder_suffixes_for_snapshot(&params.history);
             let outcome = lingxi_core::host::refusal_driver::scope_fallback_target(
                 fallback_context,
                 call_api_with_ptl_recovery(
@@ -477,6 +482,7 @@ pub(super) async fn dispatch(
                     params.deferred,
                     params.date_change,
                     params.reminders.clone(),
+                    tool_result_reminder_suffixes,
                     &mut params.guarded_async_hook_reminders,
                     &params.context_announcements,
                     params.cost_scope.as_ref(),

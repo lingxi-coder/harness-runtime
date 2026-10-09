@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use hooks::registry::HookRegistry;
 use hooks::HookExecutorImpl;
 use lingxi_core::host::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
-use lingxi_core::types::{HttpRequest, HttpResponse};
+use lingxi_core::types::{utf16_json::Utf16JsonProjection, HttpRequest, HttpResponse};
 use orchestrator::test_support::{
     MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
@@ -32,6 +32,10 @@ use tokio::sync::RwLock;
 use tool_api::registry::ToolRegistry;
 use tool_api::test_support::{fresh_ctx, fresh_tx};
 use tool_api::tool_trait::Tool;
+
+fn generated_input(value: serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).expect("generated tool input is valid")
+}
 
 struct UnusedHttp;
 #[async_trait]
@@ -126,7 +130,7 @@ async fn nested_memory_surfaces_on_a_real_read_then_dedups_on_a_real_read() {
     // ── (2) a REAL Read of the nested source file marks it as touched ───────
     read_tool
         .call(
-            json!({ "file_path": source.to_str().unwrap() }),
+            generated_input(json!({ "file_path": source.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
@@ -161,18 +165,19 @@ async fn nested_memory_surfaces_on_a_real_read_then_dedups_on_a_real_read() {
     // ── (4) a REAL Read of the surfaced file must now dedup ─────────────────
     let after = read_tool
         .call(
-            json!({ "file_path": nested_mem.to_str().unwrap() }),
+            generated_input(json!({ "file_path": nested_mem.to_str().unwrap() })),
             fresh_ctx(),
             fresh_tx(),
         )
         .await
         .unwrap();
     assert_eq!(
-        after.data["type"], "file_unchanged",
+        after.data.string_at("/type"),
+        Some("file_unchanged"),
         "the surfaced memory file must dedup — this is the whole point of \
          seeding it, and it only works if the seed used the CANONICAL path"
     );
-    assert_eq!(after.data["source"], "seeded");
+    assert_eq!(after.data.string_at("/source"), Some("seeded"));
 
     // The oracle's `k$o` returns RECORDS; the reminder is one rendering of them
     // and the UI attachment line is the other. The port originally emitted only

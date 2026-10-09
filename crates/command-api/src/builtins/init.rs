@@ -45,6 +45,10 @@ impl BuiltinCommandHandler for InitHandler {
     fn description(&self) -> &str {
         core_description("init")
     }
+
+    fn is_prompt_command(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -62,7 +66,7 @@ mod tests {
         };
         match h.handle(&args).await {
             CommandResult::InjectMessage { content } => {
-                assert_eq!(content, OLD_INIT_PROMPT);
+                assert_eq!(content, OLD_INIT_PROMPT.into());
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }

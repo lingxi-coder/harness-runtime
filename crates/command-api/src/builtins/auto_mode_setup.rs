@@ -241,7 +241,9 @@ mod tests {
     async fn run(raw: &str) -> serde_json::Value {
         let h = AutoModeSetupHandler::new();
         match h.handle(&cmd(raw)).await {
-            CommandResult::Done { display: Some(s) } => serde_json::from_str(&s).unwrap(),
+            CommandResult::Done { display: Some(s) } => {
+                serde_json::from_str(s.string_at("").expect("generated JSON string")).unwrap()
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -335,12 +337,13 @@ mod tests {
         let CommandResult::Done { display: Some(s) } = h.handle(&cmd(&raw)).await else {
             panic!("expected Done");
         };
-        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let text = s.string_at("").expect("generated JSON string");
+        let v: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["proposal"]["scope"], "all");
         assert_eq!(v["requestId"], UUID);
         // `requestId` is merged LAST, as `zay` does.
-        assert!(s
+        assert!(text
             .trim_end()
             .ends_with(&format!("\"requestId\": \"{UUID}\"\n}}")));
     }
@@ -363,7 +366,8 @@ mod tests {
         let CommandResult::Done { display: Some(s) } = h.handle(&cmd(&raw)).await else {
             panic!("expected Done");
         };
-        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(s.string_at("").expect("generated JSON string")).unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["removed_count"], 2);
     }

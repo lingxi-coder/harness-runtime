@@ -790,7 +790,7 @@ mod api_error_status_tests {
         );
     }
 
-    use super::{LlmError, api_error_status};
+    use super::{api_error_status, LlmError};
 
     #[test]
     fn parses_the_shape_make_message_emits() {

@@ -15,7 +15,7 @@ use orchestrator::test_support::{
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tool_api::progress::ToolProgressSender;
 use tool_api::registry::ToolRegistry;
@@ -25,7 +25,7 @@ use tool_api::tool_trait::{
 use tool_api::ToolUseContext;
 
 struct InspectTool {
-    schema: Value,
+    schema: lingxi_core::types::utf16_json::Utf16JsonProjection,
 }
 
 #[async_trait]
@@ -34,8 +34,16 @@ impl Tool for InspectTool {
         "Inspect"
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         &self.schema
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -46,15 +54,22 @@ impl Tool for InspectTool {
         1024
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
 
-    fn is_read_only(&self, _input: &Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _ctx: &ToolUseContext,
+    ) -> PermissionResult {
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "structured-output fallback test".into(),
@@ -65,7 +80,11 @@ impl Tool for InspectTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "Inspect before returning the final result".into()
     }
 
@@ -78,19 +97,44 @@ impl Tool for InspectTool {
 
     async fn call(
         &self,
-        _input: Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: ToolUseContext,
         _progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: json!({"inspected": true}),
+            data: tool_api::tool_trait::generated_builtin_result(&json!({"inspected": true})),
             model_content: None,
             new_messages: Vec::new(),
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
+}
+
+struct AcceptingSchema;
+
+#[async_trait]
+impl lingxi_core::host::json_schema_validator::CompiledJsonSchema for AcceptingSchema {
+    async fn validate(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<
+        lingxi_core::host::json_schema_validator::JsonSchemaValidation,
+        lingxi_core::host::json_schema_validator::SchemaWorkerError,
+    > {
+        Ok(lingxi_core::host::json_schema_validator::JsonSchemaValidation::Valid)
+    }
+}
+
+fn structured_output_tool(schema: &str, slot: StructuredOutputSlot) -> StructuredOutputTool {
+    StructuredOutputTool::new(
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(schema)
+            .expect("generated JSON schema fixture"),
+        Arc::new(AcceptingSchema),
+        slot,
+    )
 }
 
 #[tokio::test]
@@ -103,7 +147,10 @@ async fn forced_structured_output_call_captures_and_does_not_loop() {
         vec![LlmContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
-            input: json!({ "answer": 4 }),
+            input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                &json!({ "answer": 4 }),
+            )
+            .expect("generated tool input fixture"),
         }],
         Some("tool_use"),
     );
@@ -112,8 +159,8 @@ async fn forced_structured_output_call_captures_and_does_not_loop() {
     let sink = Arc::new(telemetry::InMemorySink::new());
     bus.attach_sink(sink.clone()).await;
     let mut registry = ToolRegistry::new();
-    registry.register_builtin(Arc::new(StructuredOutputTool::new(
-        json!({ "type": "object", "required": ["answer"] }),
+    registry.register_builtin(Arc::new(structured_output_tool(
+        r#"{"type":"object","required":["answer"]}"#,
         slot.clone(),
     )));
 
@@ -140,7 +187,12 @@ async fn forced_structured_output_call_captures_and_does_not_loop() {
 
     assert_eq!(
         slot.lock().unwrap().as_ref(),
-        Some(&json!({ "answer": 4 })),
+        Some(
+            &lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({ "answer": 4 }),
+            )
+            .expect("generated expected output is representable")
+        ),
         "the forced StructuredOutput call must capture the model's result into the slot"
     );
     let events = sink.events().await;
@@ -161,7 +213,10 @@ async fn prompt_only_fallback_can_retry_after_another_tool() {
         vec![LlmContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "Inspect".into(),
-            input: json!({}),
+            input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(&json!(
+                {}
+            ))
+            .expect("generated tool input fixture"),
         }],
         Some("tool_use"),
     );
@@ -169,17 +224,20 @@ async fn prompt_only_fallback_can_retry_after_another_tool() {
         vec![LlmContentBlock::ToolCall {
             id: ToolUseId::new().to_string(),
             name: "StructuredOutput".into(),
-            input: json!({"answer": 4}),
+            input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                &json!({"answer": 4}),
+            )
+            .expect("generated tool input fixture"),
         }],
         Some("tool_use"),
     );
     let api = Arc::new(MockApiClient::new(vec![inspect, structured]));
     let mut registry = ToolRegistry::new();
     registry.register_builtin(Arc::new(InspectTool {
-        schema: json!({"type": "object"}),
+        schema: tool_api::tool_trait::generated_builtin_schema(&json!({"type": "object"})),
     }));
-    registry.register_builtin(Arc::new(StructuredOutputTool::new(
-        json!({"type": "object", "required": ["answer"]}),
+    registry.register_builtin(Arc::new(structured_output_tool(
+        r#"{"type":"object","required":["answer"]}"#,
         slot.clone(),
     )));
 
@@ -213,6 +271,10 @@ async fn prompt_only_fallback_can_retry_after_another_tool() {
         )
         .await;
     assert!(matches!(second, Ok(ConversationOutcome::EndTurn { .. })));
-    assert_eq!(slot.lock().unwrap().as_ref(), Some(&json!({"answer": 4})));
+    let expected = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+        &json!({"answer": 4}),
+    )
+    .expect("generated expected output is representable");
+    assert_eq!(slot.lock().unwrap().as_ref(), Some(&expected));
     assert_eq!(api.captured_msgs().await.len(), 2);
 }

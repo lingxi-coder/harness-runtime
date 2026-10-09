@@ -1,7 +1,18 @@
-use super::apply_spawn_rewrite;
+use super::apply_spawn_rewrite as apply_spawn_rewrite_source;
 
 use lingxi_core::host::subagent_spawn::SubagentSpawnRequest;
 use serde_json::json;
+
+fn apply_spawn_rewrite(
+    request: &SubagentSpawnRequest,
+    modified_input: Option<&serde_json::Value>,
+) -> Result<Option<SubagentSpawnRequest>, lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    let modified_input = modified_input.map(|value| {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(value)
+            .expect("generated test JSON is valid")
+    });
+    apply_spawn_rewrite_source(request, modified_input.as_ref())
+}
 
 fn request() -> SubagentSpawnRequest {
     SubagentSpawnRequest {
@@ -134,7 +145,12 @@ fn setting_cwd_on_a_worktree_isolated_spawn_is_refused() {
     worktree.isolation = Some("worktree".into());
     let error = apply_spawn_rewrite(&worktree, Some(&json!({"cwd": "/elsewhere"})))
         .expect_err("cwd + worktree isolation are mutually exclusive");
-    assert!(error.contains("mutually exclusive"), "{error}");
+    assert!(
+        error
+            .string_at("")
+            .is_some_and(|message| message.contains("mutually exclusive")),
+        "{error:?}"
+    );
 
     // The same rewrite is fine without worktree isolation.
     assert!(

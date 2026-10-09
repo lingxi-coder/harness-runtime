@@ -1,0 +1,478 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "76e444033aa8be82e8d352fdb53cc956cd3be501eb037a0bfb6560f9a3458589",
+  "cases_sha256": "02e0377c022af3e988622834fc3e21706d642c8390533c678188c3841c5550ae",
+  "network_boundary": "loopback-only Anthropic Messages stub with dummy key; local /bin/sh hooks; isolated HOME/config/cwd; nonessential traffic disabled",
+  "cases": {
+    "pretool-exit-1-default": {
+      "event": "PreToolUse",
+      "on_failure": null,
+      "native_exit_code": 0,
+      "timed_out": false,
+      "provider_request_count": 2,
+      "hook_input_count": 1,
+      "hook_invocation_marker_count": 1,
+      "bash_side_effect": {
+        "path": "bash-side-effect.marker",
+        "bytes": 19,
+        "sha256": "927dfb89e328166def87d878e7b5b550bbc87d1e272417908d835b63a485c0e1",
+        "content_ascii": "PRETOOL_SIDE_EFFECT"
+      },
+      "stdout_summary": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "FIXED_HOOK_EVENT_ON_FAILURE_FINAL",
+        "session_id": "00000000-0000-4000-8000-000000002f41",
+        "num_turns": 2,
+        "stop_reason": "end_turn"
+      },
+      "session_jsonl": {
+        "path": "native-session.raw.jsonl",
+        "bytes": 117017,
+        "sha256": "c09042606ccbdc923c54b5da40d698f1250136f55c0d653eb0e1260ff34dadf8"
+      },
+      "request_message_summaries": [
+        {
+          "sequence": 1,
+          "messages": [
+            {
+              "index": 0,
+              "role": "user",
+              "content": [
+                {
+                  "kind": "text",
+                  "text": "Run the supplied harmless Bash command once, then finish."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "messages": [
+            {
+              "index": 0,
+              "role": "user",
+              "content": [
+                {
+                  "kind": "text",
+                  "text": "Run the supplied harmless Bash command once, then finish."
+                }
+              ]
+            },
+            {
+              "index": 1,
+              "role": "assistant",
+              "content": [
+                {
+                  "kind": "tool_use",
+                  "content": {
+                    "type": "tool_use",
+                    "id": "toolu_native_pretool_failure_295",
+                    "name": "Bash",
+                    "input": {
+                      "command": "printf 'PRETOOL_SIDE_EFFECT' > /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/run-output/pretool-exit-1-default/bash-side-effect.marker; printf 'PRETOOL_STDOUT\\n'",
+                      "description": "fixed harmless marker write"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "index": 2,
+              "role": "user",
+              "content": [
+                {
+                  "kind": "tool_result",
+                  "content": {
+                    "tool_use_id": "toolu_native_pretool_failure_295",
+                    "type": "tool_result",
+                    "content": "PRETOOL_STDOUT\n\n<system-reminder>\n<total_tokens>14999988 tokens left</total_tokens>\n</system-reminder>\n\n<system-reminder>\nUSD budget: $0.000084/$1; $0.999916 remaining\n</system-reminder>",
+                    "is_error": false,
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "pretool-exit-1-block": {
+      "event": "PreToolUse",
+      "on_failure": "block",
+      "native_exit_code": 0,
+      "timed_out": false,
+      "provider_request_count": 2,
+      "hook_input_count": 1,
+      "hook_invocation_marker_count": 1,
+      "bash_side_effect": null,
+      "stdout_summary": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "FIXED_HOOK_EVENT_ON_FAILURE_FINAL",
+        "session_id": "00000000-0000-4000-8000-000000002f42",
+        "num_turns": 2,
+        "stop_reason": "end_turn"
+      },
+      "session_jsonl": {
+        "path": "native-session.raw.jsonl",
+        "bytes": 116187,
+        "sha256": "8dcf4c84f23b674e23a667b69a7867e307803358f3988fd393ffee3563462900"
+      },
+      "request_message_summaries": [
+        {
+          "sequence": 1,
+          "messages": [
+            {
+              "index": 0,
+              "role": "user",
+              "content": [
+                {
+                  "kind": "text",
+                  "text": "Run the supplied harmless Bash command once, then finish."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "sequence": 2,
+          "messages": [
+            {
+              "index": 0,
+              "role": "user",
+              "content": [
+                {
+                  "kind": "text",
+                  "text": "Run the supplied harmless Bash command once, then finish."
+                }
+              ]
+            },
+            {
+              "index": 1,
+              "role": "assistant",
+              "content": [
+                {
+                  "kind": "tool_use",
+                  "content": {
+                    "type": "tool_use",
+                    "id": "toolu_native_pretool_failure_295",
+                    "name": "Bash",
+                    "input": {
+                      "command": "printf 'PRETOOL_SIDE_EFFECT' > /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/run-output/pretool-exit-1-block/bash-side-effect.marker; printf 'PRETOOL_STDOUT\\n'",
+                      "description": "fixed harmless marker write"
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "index": 2,
+              "role": "user",
+              "content": [
+                {
+                  "kind": "tool_result",
+                  "content": {
+                    "type": "tool_result",
+                    "content": "PreToolUse:Bash hook error: [/bin/sh /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/run-output/pretool-exit-1-block/hook-failure.sh]: failed; blocking because onFailure is \"block\"\nFIXED_PRETOOL_HOOK_STDERR\n\n<system-reminder>\n<total_tokens>14999988 tokens left</total_tokens>\n</system-reminder>\n\n<system-reminder>\nUSD budget: $0.000084/$1; $0.999916 remaining\n</system-reminder>",
+                    "is_error": true,
+                    "tool_use_id": "toolu_native_pretool_failure_295",
+                    "cache_control": {
+                      "type": "ephemeral"
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "stop-exit-1-default": {
+      "event": "Stop",
+      "on_failure": null,
+      "native_exit_code": 0,
+      "timed_out": false,
+      "provider_request_count": 1,
+      "hook_input_count": 1,
+      "hook_invocation_marker_count": 1,
+      "bash_side_effect": null,
+      "stdout_summary": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "FIXED_STOP_HOOK_FIRST_RESPONSE",
+        "session_id": "00000000-0000-4000-8000-000000002f43",
+        "num_turns": 1,
+        "stop_reason": "end_turn"
+      },
+      "session_jsonl": {
+        "path": "native-session.raw.jsonl",
+        "bytes": 89843,
+        "sha256": "753f3d937322992ca1c08fe914c98d46e675b2b5cff06c151fdb2da462f3e3f5"
+      },
+      "request_message_summaries": [
+        {
+          "sequence": 1,
+          "messages": [
+            {
+              "index": 0,
+              "role": "user",
+              "content": [
+                {
+                  "kind": "text",
+                  "text": "Finish the fixed stop-hook fixture."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "stop-exit-1-block": {
+      "event": "Stop",
+      "on_failure": "block",
+      "native_exit_code": 0,
+      "timed_out": false,
+      "provider_request_count": 1,
+      "hook_input_count": 1,
+      "hook_invocation_marker_count": 1,
+      "bash_side_effect": null,
+      "stdout_summary": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": "FIXED_STOP_HOOK_FIRST_RESPONSE",
+        "session_id": "00000000-0000-4000-8000-000000002f44",
+        "num_turns": 1,
+        "stop_reason": "end_turn"
+      },
+      "session_jsonl": {
+        "path": "native-session.raw.jsonl",
+        "bytes": 89804,
+        "sha256": "8df2bf5480e2ee730bad0a24db4919809301693d3cee17087ade0958b93d24a2"
+      },
+      "request_message_summaries": [
+        {
+          "sequence": 1,
+          "messages": [
+            {
+              "index": 0,
+              "role": "user",
+              "content": [
+                {
+                  "kind": "text",
+                  "text": "Finish the fixed stop-hook fixture."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "dynamic_fields_retained_raw": [
+    "session UUIDs",
+    "hook prompt_id",
+    "transcript_path",
+    "cwd",
+    "timestamps",
+    "model request body system text"
+  ],
+  "artifacts": {
+    "pretool-exit-1-block/hook-failure.sh": {
+      "bytes": 540,
+      "sha256": "1f4dc93d111c5fed291578e554052b2182575cceabcf8aaae96d54b22507901b"
+    },
+    "pretool-exit-1-block/model-request-01.raw.json": {
+      "bytes": 54008,
+      "sha256": "8b5425de8450e185baff4e861b11e029f53574cf661a2b8b9ffce8d73996ccb8"
+    },
+    "pretool-exit-1-block/model-request-02.raw.json": {
+      "bytes": 55050,
+      "sha256": "e2428e8899ffc29b19856d8ffa1018bfb442ce0f343463176a0d9d49ef8d65ea"
+    },
+    "pretool-exit-1-block/model-response-01.raw.sse": {
+      "bytes": 1182,
+      "sha256": "efee95f9883a32fc8a0aa73eb1a0b9bada69406f4bb65b4ee4f8b403a633fd75"
+    },
+    "pretool-exit-1-block/model-response-02.raw.sse": {
+      "bytes": 818,
+      "sha256": "47540c9f6157c973a15477b7ef7af0094dd035bdddd661a0c1efb00f758b51af"
+    },
+    "pretool-exit-1-block/native-session.raw.jsonl": {
+      "bytes": 116187,
+      "sha256": "8dcf4c84f23b674e23a667b69a7867e307803358f3988fd393ffee3563462900"
+    },
+    "pretool-exit-1-block/native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "pretool-exit-1-block/native.stdout.raw.json": {
+      "bytes": 1996,
+      "sha256": "857ae99157e0eaf68f22fd5d13565a553333469beceab398c54439527c14abae"
+    },
+    "pretool-exit-1-block/pretool-hook-input.raw.json": {
+      "bytes": 1187,
+      "sha256": "1896e5855ae970c0f6ca5c840e5f576a1058465509fc5984c4c6ab225c5057e8"
+    },
+    "pretool-exit-1-block/pretool-hook-invocation.marker": {
+      "bytes": 4,
+      "sha256": "f4472a14b6160e58b35bfeb710d23d240ab59402cc84bc7b5a579c7373849295"
+    },
+    "pretool-exit-1-block/receipt.json": {
+      "bytes": 11035,
+      "sha256": "7c5ca6a627631da111e97fe96a0a7f94413ef457adb80194b02ebb55afb3a33c"
+    },
+    "pretool-exit-1-block/settings.json": {
+      "bytes": 510,
+      "sha256": "388dcdcb918e9bd475c092aa1548272a1a3de7deb96f5378d85e04f457e7b98f"
+    },
+    "pretool-exit-1-default/bash-side-effect.marker": {
+      "bytes": 19,
+      "sha256": "927dfb89e328166def87d878e7b5b550bbc87d1e272417908d835b63a485c0e1"
+    },
+    "pretool-exit-1-default/hook-failure.sh": {
+      "bytes": 544,
+      "sha256": "1ba70f7be18b45afd7decc4d68f5ac6dc5204d82a0621cfce7f0fdc9f9853753"
+    },
+    "pretool-exit-1-default/model-request-01.raw.json": {
+      "bytes": 54012,
+      "sha256": "caf70236ce0e0cba37a4dbd90eee22d4e05b367390d961feb9d16fc25f8ebd22"
+    },
+    "pretool-exit-1-default/model-request-02.raw.json": {
+      "bytes": 54768,
+      "sha256": "b20fe8d69916a8edb48c06f408913a472540e699800fa89e2efef35e77ff285e"
+    },
+    "pretool-exit-1-default/model-response-01.raw.sse": {
+      "bytes": 1186,
+      "sha256": "c8d906f8da7c8922c4eda22626c2724df0a05d13322020a488534168e9a37279"
+    },
+    "pretool-exit-1-default/model-response-02.raw.sse": {
+      "bytes": 820,
+      "sha256": "3f71cbc75d2b3b4aab7435cca01217304312846d49213eeeb88f8dc3ecc1021c"
+    },
+    "pretool-exit-1-default/native-session.raw.jsonl": {
+      "bytes": 117017,
+      "sha256": "c09042606ccbdc923c54b5da40d698f1250136f55c0d653eb0e1260ff34dadf8"
+    },
+    "pretool-exit-1-default/native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "pretool-exit-1-default/native.stdout.raw.json": {
+      "bytes": 1599,
+      "sha256": "305c52804b33359fd6d29cb6587e38ed209ff73aeae9537b2ef7d89266d9da07"
+    },
+    "pretool-exit-1-default/pretool-hook-input.raw.json": {
+      "bytes": 1195,
+      "sha256": "c68cf43710264ff577790420accf2d2cbf2cb943887009741ad68148f30a925d"
+    },
+    "pretool-exit-1-default/pretool-hook-invocation.marker": {
+      "bytes": 4,
+      "sha256": "f4472a14b6160e58b35bfeb710d23d240ab59402cc84bc7b5a579c7373849295"
+    },
+    "pretool-exit-1-default/receipt.json": {
+      "bytes": 10898,
+      "sha256": "d87f9597db4ec596c48913d90885c32bd915a11b36d494a7d7f440996855b930"
+    },
+    "pretool-exit-1-default/settings.json": {
+      "bytes": 478,
+      "sha256": "a3d367810dca811a61bfde49b04756b5a3d87a1d737f547b4971a54ac12cd087"
+    },
+    "stop-exit-1-block/hook-failure.sh": {
+      "bytes": 1285,
+      "sha256": "ce8b38f7a73feca422f0e128e3ec6a8e761791ecb1594f1d7c393356d0ff7765"
+    },
+    "stop-exit-1-block/model-request-01.raw.json": {
+      "bytes": 41388,
+      "sha256": "5c83460720ba5166f154a8506e2b37373fa32465c9be924b5629652679f5bcda"
+    },
+    "stop-exit-1-block/model-response-01.raw.sse": {
+      "bytes": 812,
+      "sha256": "09f43ba18c906897cda9737a1cba0a9badf9c78631db9a7d17d8d0a959524134"
+    },
+    "stop-exit-1-block/native-session.raw.jsonl": {
+      "bytes": 89804,
+      "sha256": "8df2bf5480e2ee730bad0a24db4919809301693d3cee17087ade0958b93d24a2"
+    },
+    "stop-exit-1-block/native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "stop-exit-1-block/native.stdout.raw.json": {
+      "bytes": 1593,
+      "sha256": "bd8564668b8e89168667b50247223e28a3112e811303e84388572753cae124b1"
+    },
+    "stop-exit-1-block/receipt.json": {
+      "bytes": 6467,
+      "sha256": "2d5a73e1399ee66fa7426359db180eed1baf082edbdea102f4127b0d7a40a7f1"
+    },
+    "stop-exit-1-block/settings.json": {
+      "bytes": 474,
+      "sha256": "460ba13145091990868e1cb5bceaadfd820dca8e0e979a33f7265b21a8bbf17f"
+    },
+    "stop-exit-1-block/stop-hook-attempt-1.marker": {
+      "bytes": 10,
+      "sha256": "4168ac456d70361429967d7457e0d5850cd014c0b0ea7b8e45e3183372ec766d"
+    },
+    "stop-exit-1-block/stop-hook-attempt-count": {
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "stop-exit-1-block/stop-hook-input-1.raw.json": {
+      "bytes": 900,
+      "sha256": "5f10658ad518c6e77c3aca1368daee4bf3521961c429370a745946e2c863849b"
+    },
+    "stop-exit-1-default/hook-failure.sh": {
+      "bytes": 1295,
+      "sha256": "5b175620928371e98d66bd78dc5925e6f6d5b7055c3dbe8747bdfae88fdfd993"
+    },
+    "stop-exit-1-default/model-request-01.raw.json": {
+      "bytes": 41392,
+      "sha256": "9305dcad4e9f4abe1bb1afe4a21925ba1c60702f7ecafc52ddef72e0941b68de"
+    },
+    "stop-exit-1-default/model-response-01.raw.sse": {
+      "bytes": 814,
+      "sha256": "dce9c036b50090437e9540a6a66eb43e0b76de2981b9824313cf9a6854e44c1f"
+    },
+    "stop-exit-1-default/native-session.raw.jsonl": {
+      "bytes": 89843,
+      "sha256": "753f3d937322992ca1c08fe914c98d46e675b2b5cff06c151fdb2da462f3e3f5"
+    },
+    "stop-exit-1-default/native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "stop-exit-1-default/native.stdout.raw.json": {
+      "bytes": 1593,
+      "sha256": "035ed1d25d8adc7e79e491ee5ea46757361f5b9b72073d1bf255cbefca544f31"
+    },
+    "stop-exit-1-default/receipt.json": {
+      "bytes": 6434,
+      "sha256": "c73fa8d537ab791694f8da5de04c5b96a6e355c833f017f07a28a704b2719b25"
+    },
+    "stop-exit-1-default/settings.json": {
+      "bytes": 442,
+      "sha256": "441497fa3d74c5fed03b12d553dc1a23c4a43127d3e457adc124780e677ce37c"
+    },
+    "stop-exit-1-default/stop-hook-attempt-1.marker": {
+      "bytes": 10,
+      "sha256": "4168ac456d70361429967d7457e0d5850cd014c0b0ea7b8e45e3183372ec766d"
+    },
+    "stop-exit-1-default/stop-hook-attempt-count": {
+      "bytes": 2,
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "stop-exit-1-default/stop-hook-input-1.raw.json": {
+      "bytes": 906,
+      "sha256": "a0f285da0389b3ac4177a1aa9e1be201d0d439bce5a8826dc699d2c3909b394d"
+    }
+  }
+}

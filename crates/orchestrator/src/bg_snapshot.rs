@@ -342,7 +342,7 @@ mod tests {
             ..
         } = &mut message
         {
-            *turn_companion = Some(true);
+            *turn_companion = Some(Some(true));
             *origin = Some(Source::parse(r#"{"kind":"fixture","text":"\ud800"}"#).unwrap());
         }
         let lines = history_to_jsonl_lines(
@@ -355,7 +355,7 @@ mod tests {
         let row = source(&lines[0]);
         assert_eq!(row.string_units("/message/content/0/text"), Some(units));
         assert_eq!(row.string_units("/origin/text"), Some(vec![0xd800]));
-        assert_eq!(lines[0].turn_companion, Some(true));
+        assert_eq!(lines[0].turn_companion, Some(Some(true)));
 
         let attachment = Source::parse(r#"{"type":"fixture","body":"\ud800"}"#).unwrap();
         let mut snapshot = snapshot(&[message]);
@@ -670,7 +670,7 @@ mod tests {
                 Ok("forked".into())
             }
 
-            async fn resume_to_background(&self, _session_id: &str) -> Result<Source, BgForkError> {
+            async fn resume_to_background(&self, _session_id: &str) -> Result<String, BgForkError> {
                 unreachable!("test exercises live copies")
             }
         }

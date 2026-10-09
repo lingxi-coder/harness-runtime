@@ -10,6 +10,10 @@ macro_rules! source_json {
     };
 }
 
+fn source_text<'a>(value: &'a Utf16JsonProjection, pointer: &str) -> Option<&'a str> {
+    value.string_at(pointer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,10 +65,6 @@ mod tests {
             body: "body here".into(),
             ..SkillDescriptor::default()
         }
-    }
-
-    fn source_text(value: &Utf16JsonProjection, pointer: &str) -> Option<&str> {
-        value.string_at(pointer)
     }
 
     #[test]
@@ -615,14 +615,14 @@ mod tests {
     async fn dynamic_body_checked_error_is_not_injected_as_instructions() {
         struct Checked;
         impl command_api::BundledPromptFn for Checked {
-            fn build(&self, _: &str) -> String {
+            fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
                 panic!("unchecked expansion");
             }
             fn try_build_at(
                 &self,
-                _: &str,
+                _: &Utf16JsonProjection,
                 context: command_api::BundledPromptContext<'_>,
-            ) -> std::io::Result<String> {
+            ) -> std::io::Result<Utf16JsonProjection> {
                 let root = context.project_root;
                 let cwd = context.cwd;
                 let preload = context.is_preload;
@@ -663,12 +663,15 @@ mod tests {
         // Test builder mirroring loop.ts's empty→usage vs non-empty branch.
         struct TestBuilder;
         impl command_api::BundledPromptFn for TestBuilder {
-            fn build(&self, args: &str) -> String {
-                let t = args.trim();
+            fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+                let t = args
+                    .string_at("")
+                    .expect("fixture arguments are valid UTF-16")
+                    .trim();
                 if t.is_empty() {
                     "USAGE".into()
                 } else {
-                    format!("BUILT[{t}]")
+                    format!("BUILT[{t}]").into()
                 }
             }
         }
@@ -985,7 +988,10 @@ mod tests {
             .validate_input(&source_json!({"skill": "/absent"}), &fresh_ctx())
             .await
             .expect_err("unknown");
-        assert!(err.0.contains("Unknown skill: absent"));
+        assert!(err
+            .0
+            .string_at("")
+            .is_some_and(|text| text.contains("Unknown skill: absent")));
 
         // disable-model-invocation.
         let desc = SkillDescriptor {
@@ -1976,8 +1982,9 @@ mod fork_dispatch_tests {
         let mut units = "skill-".encode_utf16().collect::<Vec<_>>();
         units.push(0xd800);
         units.extend("-probe".encode_utf16());
-        let exact_name = Utf16JsonProjection::root_string("skill-�-probe", units.clone())
-            .expect("exact UTF-16 skill name");
+        let exact_name =
+            Utf16JsonProjection::root_string("skill-�-probe".to_owned(), units.clone())
+                .expect("exact UTF-16 skill name");
         let desc = SkillDescriptor {
             name: exact_name.clone(),
             description: "a forking skill".into(),
@@ -2415,9 +2422,8 @@ fn declared_effort_matches_the_oracle_union() {
 fn a_single_suffix_match_is_named() {
     let names = vec!["some-plugin:deploy".into(), "other:unrelated".into()];
     assert_eq!(
-        super::unknown_skill_suffix_hint(&"deploy".into(), &names)
-            .and_then(|hint| hint.string_at("")),
-        Some(" Did you mean some-plugin:deploy? Invoke it by that full name.")
+        super::unknown_skill_suffix_hint(&"deploy".into(), &names),
+        Some(" Did you mean some-plugin:deploy? Invoke it by that full name.".into())
     );
 }
 
@@ -2426,9 +2432,8 @@ fn a_single_suffix_match_is_named() {
 fn several_suffix_matches_are_listed() {
     let names = vec!["b-plugin:deploy".into(), "a-plugin:deploy".into()];
     assert_eq!(
-        super::unknown_skill_suffix_hint(&"deploy".into(), &names)
-            .and_then(|hint| hint.string_at("")),
-        Some(" Several skills match that name: a-plugin:deploy, b-plugin:deploy \u{2014} invoke one by its full name.")
+        super::unknown_skill_suffix_hint(&"deploy".into(), &names),
+        Some(" Several skills match that name: a-plugin:deploy, b-plugin:deploy \u{2014} invoke one by its full name.".into())
     );
 }
 

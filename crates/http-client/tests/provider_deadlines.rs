@@ -32,6 +32,7 @@ async fn provider_http_keeps_reading_past_the_sdk_default_idle_limit() {
             headers: vec![],
             body: Default::default(),
             timeout: None,
+            http1_header_layout: None,
         })
         .await
         .unwrap();

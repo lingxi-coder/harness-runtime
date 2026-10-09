@@ -305,7 +305,11 @@ async fn local_notice_write_fork_projection_and_clear_preserve_the_original_mode
     assert_eq!(encoded["subtype"], "model_refusal_fallback");
     assert!(encoded.get("message").is_none());
     assert_eq!(encoded["fallbackModel"], MODEL);
-    producer.fork_to_background_session("").await.unwrap();
+    let empty_prompt: lingxi_core::types::utf16_json::Utf16JsonProjection = "".into();
+    producer
+        .fork_to_background_session(&empty_prompt)
+        .await
+        .unwrap();
     let (snapshot, fork_model) = forker.0.lock().unwrap().clone().unwrap();
     assert_eq!(fork_model, "original");
     assert_eq!(producer.session.lock().await.model, MODEL);
@@ -316,8 +320,17 @@ async fn local_notice_write_fork_projection_and_clear_preserve_the_original_mode
         "2.1.288",
         &fork_model,
     );
-    assert_eq!(lines[0].extra["neutralizedByFork"], true);
-    assert!(lines[0].message.is_null());
+    assert_eq!(
+        lines[0]
+            .extra
+            .at_pointer("/neutralizedByFork")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert!(lines[0]
+        .message
+        .at_pointer("")
+        .is_some_and(|value| value.is_null()));
     assert!(
         matches!(notice,ConversationMessage::System { refusal_fallback:Some(ref meta),.. } if meta.neutralized_by_fork.is_none())
     );

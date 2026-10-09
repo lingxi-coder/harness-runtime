@@ -19,17 +19,17 @@
 
 use llm_runtime::{ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-    StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
-    message_start, message_stop, noop_hook_executor, text_delta,
+    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
+    noop_hook_executor, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient,
+    NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{
-    ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, TurnOutcome, scripted,
+    scripted, ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, TurnOutcome,
 };
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
 
@@ -108,6 +108,47 @@ fn streaming_orch() -> ConversationOrchestrator {
         Arc::new(StaticMemoryProvider::empty()),
         PathBuf::from("/tmp"),
     )
+}
+
+#[test]
+fn rewake_metrics_include_the_terminal_reason_from_the_outer_turn_boundary() {
+    run_with_large_stack(|| async {
+        use lingxi_core::types::ToolUseId;
+        use orchestrator::test_support::{content_block_start_tool_use, input_json_delta};
+
+        let script = scripted![
+            message_start("rewake-limit", "claude-opus-4-7"),
+            content_block_start_tool_use(0, ToolUseId::from("missing-tool"), "MissingTool"),
+            input_json_delta(0, "{}"),
+            content_block_stop(0),
+            message_delta_stop("tool_use"),
+            message_stop(),
+        ];
+        let orch =
+            ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
+                OrchestratorConfig {
+                    max_turns: 1,
+                    ..OrchestratorConfig::default()
+                },
+                Arc::new(MockApiClient::new(Vec::new())),
+                Arc::new(MockStreamingApiClient::with_turns(vec![script])),
+                Arc::new(ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                PathBuf::from("/tmp"),
+            ));
+
+        assert_eq!(
+            orch.run_async_hook_rewake(None).await.expect("rewake"),
+            TurnOutcome::MaxTurns,
+        );
+        let metrics = orch.completed_turn_metrics().expect("completed rewake");
+        assert_eq!(metrics.num_turns, 1);
+        assert_eq!(metrics.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(metrics.api_error_status, None);
+    });
 }
 
 /// Every entry captures the output-token baseline at TURN START.

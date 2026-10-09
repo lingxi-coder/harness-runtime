@@ -1,10 +1,10 @@
+use futures::future::{poll_fn, BoxFuture};
 use futures::FutureExt;
-use futures::future::{BoxFuture, poll_fn};
-use lingxi_core::host::CancellationToken;
 use lingxi_core::host::tool_invoker::{ToolInvocationContextModifier, ToolInvocationContextState};
 use lingxi_core::host::tool_use_lifecycle::{
     ToolUseLifecycleTracker, ToolUseRemoval, ToolUseRemovalReason,
 };
+use lingxi_core::host::CancellationToken;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{MessageId, ToolUseId};
 use std::future::Future;
@@ -1213,7 +1213,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use lingxi_core::types::{ContentBlock, ConversationMessage};
-    use permission::{PermissionDecisionReason, PermissionResult, result::PermissionMetadata};
+    use permission::{result::PermissionMetadata, PermissionDecisionReason, PermissionResult};
     use serde_json::json;
     use std::collections::HashMap;
     use tool_api::progress::ToolProgressSender;
@@ -1311,7 +1311,10 @@ mod tests {
             _: ToolUseContext,
             _: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
-            Ok(ToolCallResult::from_data(json!({"ok":true})))
+            Ok(ToolCallResult::from_data(
+                Utf16JsonProjection::from_serde_value(&json!({"ok":true}))
+                    .expect("test result is valid JSON"),
+            ))
         }
     }
 
@@ -1552,11 +1555,9 @@ mod tests {
         // call or leak a stale-generation result into Tn.
         tokio::task::yield_now().await;
         assert!(started_rx.try_recv().is_err());
-        assert!(
-            bounded(scheduler.is_current_generation_idle())
-                .await
-                .unwrap()
-        );
+        assert!(bounded(scheduler.is_current_generation_idle())
+            .await
+            .unwrap());
         assert!(bounded(scheduler.take_ready()).await.unwrap().is_empty());
         drop(release_senders);
     }
@@ -2392,11 +2393,9 @@ mod tests {
         assert!(bounded(scheduler.finish_normal()).await.unwrap().is_none());
         assert_eq!(apply_count.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(started_rx.try_recv().is_err(), "queued B never enters W1");
-        assert!(
-            bounded(scheduler.is_current_generation_idle())
-                .await
-                .unwrap()
-        );
+        assert!(bounded(scheduler.is_current_generation_idle())
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -2497,11 +2496,9 @@ mod tests {
         // second wrapper from a cloned or replayed closure.
         let modifier = ToolInvocationContextModifier::new::<ToolUseContext, _>(tool_api_modifier);
         let shared = modifier.clone();
-        assert!(
-            modifier
-                .apply(ToolUseContext::model_seed("seed".into()))
-                .is_ok()
-        );
+        assert!(modifier
+            .apply(ToolUseContext::model_seed("seed".into()))
+            .is_ok());
         assert_eq!(applications.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(matches!(
             shared.apply(ToolUseContext::model_seed("seed".into())),

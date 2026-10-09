@@ -51,6 +51,7 @@ impl BuiltinCommandHandler for StickersHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
 
     /// URL opened by the TS `/stickers` command.
     const STICKERS_URL: &str = "https://www.stickermule.com/claudecode";
@@ -69,8 +70,9 @@ mod tests {
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
                 assert!(
-                    s.contains("Opening sticker page in browser"),
-                    "unexpected display text: {s}"
+                    s.string_at("")
+                        .is_some_and(|text| text.contains("Opening sticker page in browser")),
+                    "unexpected display text: {s:?}"
                 );
             }
             other => panic!("expected Done with display, got {other:?}"),

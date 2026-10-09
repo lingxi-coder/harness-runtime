@@ -252,7 +252,10 @@ mod tests {
 
     async fn display(h: &OutputStyleHandler, raw: &str) -> String {
         match h.handle(&args(raw)).await {
-            CommandResult::Done { display: Some(s) } => s,
+            CommandResult::Done { display: Some(s) } => s
+                .string_at("")
+                .expect("generated output style text")
+                .to_owned(),
             other => panic!("expected a display, got {other:?}"),
         }
     }

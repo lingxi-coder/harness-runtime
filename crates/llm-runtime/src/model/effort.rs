@@ -114,6 +114,7 @@ pub(crate) fn command_snapshot(
     provider_id: &ProviderId,
     profile: &lingxi_llm_client::protocol::ProviderProfile,
     model: &str,
+    native_anthropic_route_admitted: bool,
 ) -> Option<lingxi_core::host::effort::EffortCommandSnapshot> {
     if !request.execution.resolve_native_effort {
         return None;
@@ -121,11 +122,12 @@ pub(crate) fn command_snapshot(
     let provider = match protocol {
         ProtocolFamily::AnthropicMessages
             if *provider_id == ProviderId::AnthropicFirstParty
-                && url::Url::parse(&profile.base_url).is_ok_and(|url| {
-                    url.scheme() == "https"
-                        && url.host_str() == Some("api.anthropic.com")
-                        && url.port_or_known_default() == Some(443)
-                }) =>
+                && (native_anthropic_route_admitted
+                    || url::Url::parse(&profile.base_url).is_ok_and(|url| {
+                        url.scheme() == "https"
+                            && url.host_str() == Some("api.anthropic.com")
+                            && url.port_or_known_default() == Some(443)
+                    })) =>
         {
             Provider::Anthropic
         }
@@ -244,8 +246,16 @@ pub(crate) fn prepare(
     provider_id: &ProviderId,
     profile: &lingxi_llm_client::protocol::ProviderProfile,
     model: &str,
+    native_anthropic_route_admitted: bool,
 ) -> Option<AnthropicEffortPolicy> {
-    let snapshot = command_snapshot(request, protocol, provider_id, profile, model)?;
+    let snapshot = command_snapshot(
+        request,
+        protocol,
+        provider_id,
+        profile,
+        model,
+        native_anthropic_route_admitted,
+    )?;
     let capabilities = snapshot.capabilities;
     let primary = snapshot.primary;
     let mut state = snapshot.state;

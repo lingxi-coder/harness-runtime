@@ -188,6 +188,7 @@ impl BuiltinCommandHandler for ConnectHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
     use std::sync::Mutex as StdMutex;
 
     fn args(raw: &str) -> ParsedSlashCommand {
@@ -287,7 +288,7 @@ mod tests {
         let writer = Arc::new(MockWriter::ok());
         let h = handler_with_panic_chatgpt(writer.clone());
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("openrouter")).await {
-            assert_eq!(s, "Connected openrouter.");
+            assert_eq!(s, "Connected openrouter.".into());
         } else {
             panic!("expected Done");
         }
@@ -306,7 +307,7 @@ mod tests {
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("deepseek")).await {
             assert_eq!(
                 s,
-                "Could not connect deepseek: could not store credential: keychain locked"
+                "Could not connect deepseek: could not store credential: keychain locked".into()
             );
         } else {
             panic!("expected Done");
@@ -332,7 +333,7 @@ mod tests {
             Arc::new(MockChatGpt::ok("Connected chatgpt (account acct_test).")),
         );
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("chatgpt")).await {
-            assert_eq!(s, "Connected chatgpt (account acct_test).");
+            assert_eq!(s, "Connected chatgpt (account acct_test).".into());
         } else {
             panic!("expected Done");
         }
@@ -346,7 +347,7 @@ mod tests {
             Arc::new(MockChatGpt::ok("Connected chatgpt (account acct_test).")),
         );
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("openai-chatgpt")).await {
-            assert_eq!(s, "Connected chatgpt (account acct_test).");
+            assert_eq!(s, "Connected chatgpt (account acct_test).".into());
         } else {
             panic!("expected Done");
         }
@@ -362,7 +363,7 @@ mod tests {
             ))),
         );
         if let CommandResult::Done { display: Some(s) } = h.handle(&args("chatgpt")).await {
-            assert!(s.starts_with("Could not connect chatgpt:"), "got: {s}");
+            assert!(s.starts_with("Could not connect chatgpt:"), "got: {s:?}");
         } else {
             panic!("expected Done");
         }

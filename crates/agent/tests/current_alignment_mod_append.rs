@@ -45,7 +45,7 @@ async fn native_session_append_middleware_contract_reaches_host_and_transcript()
         "current-alignment-middleware",
         &fixture_root,
         &module,
-        json!({}),
+        Utf16JsonProjection::parse("{}").expect("empty Mod options JSON"),
     )
     .await
     .expect("load checked-in Native fixture module");
@@ -64,7 +64,8 @@ async fn native_session_append_middleware_contract_reaches_host_and_transcript()
         let result = host
             .dispatch(
                 "session.append",
-                Utf16JsonProjection::plain(input),
+                Utf16JsonProjection::from_serde_value(&input)
+                    .expect("fixed session.append input projection"),
                 move |event| {
                     let observed = observed.clone();
                     async move {
@@ -218,7 +219,7 @@ async fn native_system_lone_session_append_reaches_bun_worker_and_host_writer() 
         "current-alignment-session-append",
         &fixture_root,
         &module,
-        json!({}),
+        Utf16JsonProjection::parse("{}").expect("empty Mod options JSON"),
     )
     .await
     .expect("load the Native system append module into Bun");

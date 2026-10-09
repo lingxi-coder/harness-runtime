@@ -1381,6 +1381,7 @@ impl Tool for MonitorTool {
 }
 
 #[cfg(test)]
+#[derive(Debug)]
 struct TestMonitorCallResult {
     data: Value,
     model_content: Option<String>,
@@ -1457,6 +1458,10 @@ mod tests {
     use mobile_linux_api::ProcessOutput;
     use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+
+    fn empty_input() -> Utf16JsonProjection {
+        Utf16JsonProjection::parse("{}").expect("empty object is valid JSON")
+    }
 
     #[derive(Default)]
     struct RecordingRegistry {
@@ -1647,7 +1652,7 @@ mod tests {
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
         let enabled = t
             .description(
-                &json!({}),
+                &empty_input(),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -1664,7 +1669,7 @@ mod tests {
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
         let disabled = t
             .description(
-                &json!({}),
+                &empty_input(),
                 &DescriptionOptions {
                     is_non_interactive_session: false,
                 },
@@ -1692,7 +1697,7 @@ mod tests {
         assert_eq!(t.name(), "Monitor");
         assert!(t.should_defer());
         assert_eq!(t.max_result_size_chars(), 10_000);
-        assert!(!t.is_read_only(&json!({})));
+        assert!(!t.is_read_only(&empty_input()));
         // Default: amber flag off → disabled.
         assert!(!t.is_enabled(&ToolStaticContext::default()));
         telemetry::test_set_flag(AMBER_SENTINEL_FLAG, true);
@@ -1705,7 +1710,7 @@ mod tests {
         let _g = guard();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let d = rt.block_on(tool().description(
-            &json!({}),
+            &empty_input(),
             &DescriptionOptions {
                 is_non_interactive_session: false,
             },
@@ -1728,7 +1733,7 @@ mod tests {
         assert!(cron::is_push_notif_enabled());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let d = rt.block_on(tool().description(
-            &json!({}),
+            &empty_input(),
             &DescriptionOptions {
                 is_non_interactive_session: false,
             },
@@ -1790,14 +1795,14 @@ mod tests {
         // No sandbox on this host ⇒ `should_use_sandbox` short-circuits and the
         // raw command is spawned, exactly as Bash would.
         let (command, unconfined) = spawn_command_for(false).await;
-        assert_eq!(command, "tail -f app.log");
+        assert_eq!(command.string_at(""), Some("tail -f app.log"));
         assert_eq!(unconfined, None);
 
         // Sandbox available and enabled ⇒ the SPAWNED form is wrapped, while
         // the recorded `command` stays the raw text the model wrote (that is
         // what `/tasks` and the notifications show).
         let (command, confined) = spawn_command_for(true).await;
-        assert_eq!(command, "tail -f app.log");
+        assert_eq!(command.string_at(""), Some("tail -f app.log"));
         let confined = confined.expect("an available sandbox must confine the command");
         assert_ne!(confined, "tail -f app.log", "the command must be wrapped");
         assert!(
@@ -1842,7 +1847,7 @@ mod tests {
             .expect("monitor lock")
             .clone()
             .unwrap();
-        assert_eq!(launched.command, "tail -f log");
+        assert_eq!(launched.command.string_at(""), Some("tail -f log"));
         assert_eq!(launched.description.string_at(""), Some("ci"));
         assert!(launched.persistent);
         assert_eq!(launched.timeout_ms, 0);
@@ -1935,15 +1940,20 @@ mod tests {
                     "display {index}"
                 );
                 let error = invoker
-                    .invoke("Monitor", case["input"].clone(), invocation_context())
+                    .invoke(
+                        "Monitor",
+                        generated_builtin_result(&case["input"]),
+                        invocation_context(),
+                    )
                     .await
                     .unwrap_err();
+                let expected = format!(
+                    "<tool_use_error>InputValidationError: {}</tool_use_error>",
+                    case["display"].as_str().unwrap()
+                );
                 assert_eq!(
-                    error.model_tool_result_content(),
-                    format!(
-                        "<tool_use_error>InputValidationError: {}</tool_use_error>",
-                        case["display"].as_str().unwrap()
-                    ),
+                    error.model_tool_result_content().string_at(""),
+                    Some(expected.as_str()),
                     "nested {index}"
                 );
             }
@@ -2025,14 +2035,23 @@ mod tests {
         context.task_registry = Some(registry.clone());
         context.http = Arc::new(PreflightHttp { allow: true });
         let t = MonitorTool::new(context);
-        let input = json!({"ws":{"url":"wss://events.example.com/feed","protocols":["v1"]},"description":"deploy","persistent":true});
+        let input = generated_builtin_result(
+            &json!({"ws":{"url":"wss://events.example.com/feed","protocols":["v1"]},"description":"deploy","persistent":true}),
+        );
         t.validate_input(&input, &fresh_ctx()).await.unwrap();
         assert!(matches!(
             t.check_permissions(&input, &fresh_ctx()).await,
             PermissionResult::Ask { .. }
         ));
-        let result = t.call(input, fresh_ctx(), fresh_tx()).await.unwrap();
-        assert_eq!(result.data["taskId"], "s12345678");
+        let result = t
+            .call(
+                serde_json::from_str(&input.to_json_string().unwrap()).unwrap(),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["taskId"].as_str(), Some("s12345678"));
         let reg = registry.websocket.lock().unwrap().clone().unwrap();
         assert_eq!(reg.url, "wss://events.example.com/feed");
         assert_eq!(reg.protocols, vec!["v1"]);
@@ -2052,8 +2071,11 @@ mod tests {
             assert!(t.parse_native_input(&bad).unwrap().is_err(), "{bad}");
         }
         assert!(matches!(
-            t.check_permissions(&json!({"ws":{"url":"ws://169.254.169.254"}}), &fresh_ctx())
-                .await,
+            t.check_permissions(
+                &generated_builtin_result(&json!({"ws":{"url":"ws://169.254.169.254"}})),
+                &fresh_ctx(),
+            )
+            .await,
             PermissionResult::Deny { .. }
         ));
     }
@@ -2076,17 +2098,17 @@ mod tests {
                 ),
             ),
         ] {
-            let input =
-                json!({"ws":{"url":"wss://events.example.com/feed", "protocols":protocols}});
+            let input = generated_builtin_result(
+                &json!({"ws":{"url":"wss://events.example.com/feed", "protocols":protocols}}),
+            );
             let PermissionResult::Ask { prompt, .. } =
                 tool.check_permissions(&input, &fresh_ctx()).await
             else {
                 panic!("public WebSocket should request permission");
             };
-            assert_eq!(
-                prompt.message,
-                format!("Monitor will open a WebSocket to wss://events.example.com/feed{suffix}")
-            );
+            let expected =
+                format!("Monitor will open a WebSocket to wss://events.example.com/feed{suffix}");
+            assert_eq!(prompt.message.string_at(""), Some(expected.as_str()));
         }
     }
     struct PreflightHttp {

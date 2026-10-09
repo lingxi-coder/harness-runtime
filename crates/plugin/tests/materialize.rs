@@ -39,6 +39,10 @@ use platform_posix::{
     PosixMcpTransport, PosixRuntime,
 };
 
+fn source(value: &serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("test fixture is valid JSON")
+}
+
 fn write_fixture_plugin(root: &Path, name: &str) {
     let plugin_dir = root.join(name);
     fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
@@ -189,7 +193,9 @@ async fn enable_materializes_command_and_hook_into_live_registries() {
                 prompt_template, ..
             } => {
                 assert!(
-                    prompt_template.contains("Hello from the plugin."),
+                    prompt_template
+                        .string_at("")
+                        .is_some_and(|text| text.contains("Hello from the plugin.")),
                     "command body loaded into prompt_template, got: {prompt_template:?}"
                 );
             }
@@ -271,24 +277,24 @@ async fn enable_and_disable_materialize_and_remove_mod_handlers() {
     let result = host
         .dispatch(
             "tool.call",
-            serde_json::json!({"tool":"Bash","command":"ls"}),
-            |_| async { Ok(serde_json::json!({"result":"core"})) },
+            source(&serde_json::json!({"tool":"Bash","command":"ls"})),
+            |_| async { Ok(Some(source(&serde_json::json!({"result":"core"})))) },
         )
         .await
         .unwrap();
-    assert_eq!(result, serde_json::json!({"deny":"blocked by plugin"}));
+    assert!(result.semantically_eq(&source(&serde_json::json!({"deny":"blocked by plugin"}))));
 
     manager.disable(&id).await.unwrap();
     assert!(hook_registry.read().await.mod_host().is_none());
     let result = host
         .dispatch(
             "tool.call",
-            serde_json::json!({"tool":"Bash","command":"ls"}),
-            |_| async { Ok(serde_json::json!({"result":"core"})) },
+            source(&serde_json::json!({"tool":"Bash","command":"ls"})),
+            |_| async { Ok(Some(source(&serde_json::json!({"result":"core"})))) },
         )
         .await
         .unwrap();
-    assert_eq!(result, serde_json::json!({"result":"core"}));
+    assert!(result.semantically_eq(&source(&serde_json::json!({"result":"core"}))));
 
     for (trusted, mods_enabled) in [(false, true), (true, false)] {
         let gated_hooks = Arc::new(RwLock::new(HookRegistry::new()));
@@ -499,13 +505,13 @@ async fn managed_plugin_register_policy_refuses_declarative_user_plugin() {
         }
         async fn settings_read(
             &self,
-            _: serde_json::Value,
-        ) -> Result<serde_json::Value, hooks::mods::ModError> {
-            Ok(
-                serde_json::json!({"pluginConfigs":{"cc-plugin-sec-default@builtin":{
+            _: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+            Ok(source(
+                &serde_json::json!({"pluginConfigs":{"cc-plugin-sec-default@builtin":{
                     "options":{"allowManagedModsOnly":true}
                 }}}),
-            )
+            ))
         }
     }
 
@@ -635,12 +641,14 @@ async fn managed_mod_seat_survives_managed_only_but_not_disable_all() {
         assert_eq!(host.is_some(), expected_loaded);
         if let Some(host) = host {
             let result = host
-                .dispatch("tool.call", serde_json::json!({"tool":"Bash"}), |_| async {
-                    Ok(serde_json::json!({"result":"core"}))
-                })
+                .dispatch(
+                    "tool.call",
+                    source(&serde_json::json!({"tool":"Bash"})),
+                    |_| async { Ok(Some(source(&serde_json::json!({"result":"core"})))) },
+                )
                 .await
                 .unwrap();
-            assert_eq!(result, serde_json::json!({"result":"core"}));
+            assert!(result.semantically_eq(&source(&serde_json::json!({"result":"core"}))));
         }
     }
 }
@@ -1243,7 +1251,10 @@ impl McpTransport for RoleMcpTransport {
             server_name: "echo".into(),
             tool_name: "send".into(),
             description: "send through the role fixture".into(),
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"type": "object"}),
+            )
+            .expect("test input schema is valid source JSON"),
             output_schema: None,
             annotations: None,
             icons: Vec::new(),
@@ -1277,7 +1288,7 @@ impl McpTransport for RoleMcpTransport {
         &self,
         _connection: &McpRawConnection,
         _tool: &str,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         Err(McpError::Internal("unused in role fixture".into()))
     }
@@ -1285,7 +1296,7 @@ impl McpTransport for RoleMcpTransport {
     async fn read_resource(
         &self,
         _connection: &McpRawConnection,
-        _uri: &str,
+        _uri: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         Err(McpError::Internal("unused in role fixture".into()))
     }

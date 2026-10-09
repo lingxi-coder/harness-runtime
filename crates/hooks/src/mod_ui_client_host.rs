@@ -1427,6 +1427,39 @@ fn exact_string_projection(units: Vec<u16>) -> Utf16JsonProjection {
         .expect("display is derived from exact UTF-16 units")
 }
 
+fn client_frame_identity_projections(
+    key: &ClientUiInstanceKey,
+) -> (Utf16JsonProjection, Utf16JsonProjection) {
+    let parent = Utf16JsonProjection::object(vec![
+        ("surface".into(), plain_text_projection("desktop")),
+        (
+            "component".into(),
+            plain_text_projection(key.site.component().as_str()),
+        ),
+        (
+            "instance_id".into(),
+            exact_text_projection(key.site.request_id()),
+        ),
+    ])
+    .expect("Client frame parent identity is an object");
+    let client = Utf16JsonProjection::object(vec![
+        (
+            "plugin".into(),
+            exact_text_projection(key.identity.plugin()),
+        ),
+        (
+            "key".into(),
+            exact_string_projection(key.identity.key_units().to_vec()),
+        ),
+        (
+            "module".into(),
+            exact_text_projection(key.identity.module()),
+        ),
+    ])
+    .expect("Client frame identity is an object");
+    (parent, client)
+}
+
 fn set_exact_string_field(
     projection: &mut Utf16JsonProjection,
     field: &str,
@@ -2927,6 +2960,13 @@ impl ModHost {
         revision: u64,
         frame: &Utf16JsonProjection,
     ) {
+        let Some(instance_key) = lock(&self.client_ui.data)
+            .instances
+            .get(runtime_id)
+            .map(|instance| instance.key.clone())
+        else {
+            return;
+        };
         let (Ok(frame_sequence), Ok(has_pointer_listener), Ok(has_key_listener)) = (
             frame.subprojection("/frameSequence"),
             frame.subprojection("/hasPointerListener"),
@@ -2950,6 +2990,12 @@ impl ModHost {
             return;
         };
         if public.set_field("tree", tree).is_err() {
+            return;
+        }
+        let (parent, client) = client_frame_identity_projections(&instance_key);
+        if public.set_field("parent", parent).is_err()
+            || public.set_field("client", client).is_err()
+        {
             return;
         }
         session.emit_mod_ui_client_frame(runtime_id, &public).await;
@@ -4940,6 +4986,39 @@ mod tests {
                 })),
             )
             .is_none());
+    }
+
+    #[test]
+    fn client_frame_identity_keeps_the_parent_and_client_source_units() {
+        let site = ClientUiRenderSite::new(
+            ClientUiComponent::AbovePrompt,
+            ExactHookText::from_utf16(vec![u16::from(b'i'), 0xd800]),
+        )
+        .unwrap();
+        let identity = ClientUiIdentity::new(
+            ExactHookText::from("plugin"),
+            ExactHookText::from_utf16(vec![u16::from(b'm'), 0xd800]),
+            vec![u16::from(b'k'), 0xd800],
+        )
+        .unwrap();
+        let (parent, client) =
+            client_frame_identity_projections(&ClientUiInstanceKey { site, identity });
+
+        assert_eq!(parent.string_at("/surface"), Some("desktop"));
+        assert_eq!(parent.string_at("/component"), Some("AbovePrompt"));
+        assert_eq!(
+            parent.string_units("/instance_id"),
+            Some(vec![u16::from(b'i'), 0xd800])
+        );
+        assert_eq!(client.string_at("/plugin"), Some("plugin"));
+        assert_eq!(
+            client.string_units("/key"),
+            Some(vec![u16::from(b'k'), 0xd800])
+        );
+        assert_eq!(
+            client.string_units("/module"),
+            Some(vec![u16::from(b'm'), 0xd800])
+        );
     }
 
     #[tokio::test]

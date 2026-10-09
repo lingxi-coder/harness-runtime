@@ -7,8 +7,8 @@
 //! prompt formats.
 #![forbid(unsafe_code)]
 
-use async_trait::async_trait;
 use crate::types::utf16_json::Utf16JsonProjection;
+use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::host::permission_gate::PermissionGate;

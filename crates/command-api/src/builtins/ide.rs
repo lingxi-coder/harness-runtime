@@ -10,6 +10,7 @@ use crate::model::{BuiltinCommandHandler, CommandResult};
 use crate::parser::ParsedSlashCommand;
 use async_trait::async_trait;
 use lingxi_core::host::{IdeEndpointInfo, IdeStatus, IdeTransport, OrchestratorHandle};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::sync::Arc;
 
 /// Handle for `/ide`, backed by the live orchestrator.
@@ -180,7 +181,7 @@ mod tests {
         let positional_args = raw
             .split_whitespace()
             .filter(|part| !part.is_empty())
-            .map(str::to_string)
+            .map(Utf16JsonProjection::from)
             .collect();
         ParsedSlashCommand {
             name: "ide".into(),
@@ -198,8 +199,8 @@ mod tests {
         else {
             panic!("expected display")
         };
-        assert_eq!(display, "No valid IDE endpoints found.");
-        assert!(!display.contains("auth"));
+        assert_eq!(display, "No valid IDE endpoints found.".into());
+        assert!(!display.string_at("").unwrap().contains("auth"));
     }
 
     #[test]

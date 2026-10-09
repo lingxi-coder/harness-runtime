@@ -412,10 +412,17 @@ impl McpRegistry {
                 completion = &mut completion => {
                     #[cfg(test)]
                     notify_catalog_change_listener_closed_for_test();
-                    let trigger = if completion.is_ok() {
-                        telemetry::tengu::mcp::ListenReopenTrigger::Graceful
-                    } else {
-                        telemetry::tengu::mcp::ListenReopenTrigger::Remote
+                    let trigger = match completion {
+                        Ok(_) => telemetry::tengu::mcp::ListenReopenTrigger::Graceful,
+                        Err(jsonrpc::RouterError::Remote(_)) => {
+                            // A JSON-RPC error is a server response, not proof
+                            // that the transport dropped. In particular, do
+                            // not infer a network disconnect from error text
+                            // such as "ECONNRESET" and retire a live MCP
+                            // connection generation for that server error.
+                            return;
+                        }
+                        Err(_) => telemetry::tengu::mcp::ListenReopenTrigger::Remote,
                     };
                     self.handle_modern_catalog_listener_end(&server_name, connection_id, trigger)
                         .await;

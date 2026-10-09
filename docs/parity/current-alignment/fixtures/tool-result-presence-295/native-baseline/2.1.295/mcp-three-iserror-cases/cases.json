@@ -1,0 +1,15 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "session_id": "00000000-0000-4000-8000-000000002300",
+  "model": "claude-sonnet-4-5",
+  "server_name": "fixture",
+  "prompt": "Call the three fixture MCP tools in the order they are listed, then finish with the fixed response.",
+  "final_text": "NATIVE_MCP_TOOL_RESULT_PRESENCE_FINISHED",
+  "timeout_seconds": 45,
+  "tool_cases": [
+    {"name": "result_omitted", "tool_use_id": "toolu_native_iserror_omitted_295", "marker": "MCP_RESULT_ISERROR_OMITTED", "is_error": "omitted"},
+    {"name": "result_false", "tool_use_id": "toolu_native_iserror_false_295", "marker": "MCP_RESULT_ISERROR_FALSE", "is_error": false},
+    {"name": "result_true", "tool_use_id": "toolu_native_iserror_true_295", "marker": "MCP_RESULT_ISERROR_TRUE", "is_error": true}
+  ]
+}

@@ -59,7 +59,7 @@ async fn ping_between_deltas_does_not_disturb_output() {
         .collect();
     // Expect: Text("abc"), Text("def"), EndTurn — pings filtered out.
     assert_eq!(events.len(), 3, "got {events:?}");
-    assert!(matches!(events[0], OutputEvent::Text { text } if text == "abc"));
-    assert!(matches!(events[1], OutputEvent::Text { text } if text == "def"));
+    assert!(matches!(events[0], OutputEvent::Text { text } if text.string_at("") == Some("abc")));
+    assert!(matches!(events[1], OutputEvent::Text { text } if text.string_at("") == Some("def")));
     assert!(matches!(events[2], OutputEvent::EndTurn { .. }));
 }

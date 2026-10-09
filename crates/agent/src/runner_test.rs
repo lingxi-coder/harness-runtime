@@ -27,6 +27,34 @@ fn json_payload(value: &serde_json::Value) -> llm_runtime::services::sdk::protoc
         .expect("test JSON payload is valid")
 }
 
+fn content_block_text_units(block: &ContentBlock) -> Option<Vec<u16>> {
+    match block {
+        ContentBlock::Text { text, .. } => Some(text.encode_utf16().collect()),
+        ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } => Some(utf16_code_units.clone()),
+        _ => None,
+    }
+}
+
+fn text_units_contain(units: &[u16], needle: &str) -> bool {
+    let needle = needle.encode_utf16().collect::<Vec<_>>();
+    needle.is_empty()
+        || units
+            .windows(needle.len())
+            .any(|window| window == needle.as_slice())
+}
+
+fn content_block_text_contains(block: &ContentBlock, needle: &str) -> bool {
+    content_block_text_units(block).is_some_and(|units| text_units_contain(&units, needle))
+}
+
+fn assert_single_text_block_units(content: &[ContentBlock], expected: &str) {
+    assert_eq!(content.len(), 1, "expected one source text block");
+    let actual = content_block_text_units(&content[0]).expect("block is source text");
+    assert_eq!(actual, expected.encode_utf16().collect::<Vec<_>>());
+}
+
 fn source_tool(
     name: &str,
     description: &str,
@@ -101,7 +129,7 @@ fn completed_result_keeps_exact_utf16_text_from_the_final_agent_row() {
 #[test]
 fn current_usage_limit_note_scan_preserves_explicit_null_as_the_latest_value() {
     let wrap_up = ConversationMessage::user_meta(MessageId::new(), "wrap-up".into())
-        .with_turn_companion(lingxi_core::types::UsageLimitNote::WrapUp);
+        .with_turn_companion(lingxi_core::types::messages::UsageLimitNote::WrapUp);
     let mut explicit_null = ConversationMessage::user_meta(MessageId::new(), "later null".into());
     if let ConversationMessage::User {
         usage_limit_note, ..
@@ -112,9 +140,14 @@ fn current_usage_limit_note_scan_preserves_explicit_null_as_the_latest_value() {
         panic!("user_meta constructs a User row");
     }
 
+    let wrap_up_json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&wrap_up).unwrap()).unwrap();
+    let explicit_null_json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&explicit_null).unwrap()).unwrap();
+    assert_eq!(wrap_up_json["usageLimitNote"], "wrap_up");
     assert_eq!(
-        super::last_usage_limit_note(&[wrap_up, explicit_null]),
-        Some(None)
+        explicit_null_json["usageLimitNote"],
+        serde_json::Value::Null
     );
 }
 
@@ -2047,6 +2080,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         structured_output_mode: lingxi_core::host::subagent_spawn::StructuredOutputMode::Forced,
         budget: None,
         hook_executor: None,
+        agent_spawn_token: None,
         strict_plugin_only_hooks: false,
         skill_loader: None,
         hook_session_id: lingxi_core::types::SessionId::nil(),
@@ -2565,12 +2599,9 @@ async fn managed_denial_discards_received_fallback_before_tools_or_reply() {
     );
     assert_eq!(api_error_rows[0].error, "invalid_request");
     assert_eq!(api_error_rows[0].message.model, "<synthetic>");
-    assert_eq!(
-        api_error_rows[0].message.content,
-        [ContentBlock::Text {
-            text: lingxi_core::host::refusal_server_control::SERVER_FALLBACK_ALLOWLIST_ERROR.into(),
-            citations: None,
-        }]
+    assert_single_text_block_units(
+        &api_error_rows[0].message.content,
+        lingxi_core::host::refusal_server_control::SERVER_FALLBACK_ALLOWLIST_ERROR,
     );
     let settled_history = events.iter().find_map(|event| match event {
         SubagentEvent::TranscriptSnapshot { messages, .. } => Some(messages),
@@ -2684,26 +2715,23 @@ async fn denied_refusal_fallback_uses_the_source_route_snapshot_and_preserves_na
     assert_eq!(row.0.request_id.as_deref(), Some("server-fallback-request"));
     assert_eq!(row.0.error, "invalid_request");
     assert_eq!(row.0.message.stop_reason, "refusal");
-    assert_eq!(
-        row.0.message.stop_details,
-        Some(serde_json::json!({
-            "type": "refusal",
-            "category": "cyber",
-            "explanation": null,
-            "fallback_credit_token": null,
-            "fallback_has_prefill_claim": null,
-            "recommended_model": null,
-        }))
-    );
-    assert_eq!(
-        row.0.message.content,
-        [ContentBlock::Text {
-            text: snapshot
-                .format(Some("cyber"), Some("server-fallback-request"))
-                .unwrap(),
-            citations: None,
-        }]
-    );
+    assert!(row.0.message.stop_details.as_ref().is_some_and(|source| {
+        projection_matches_json(
+            source,
+            &serde_json::json!({
+                "type": "refusal",
+                "category": "cyber",
+                "explanation": null,
+                "fallback_credit_token": null,
+                "fallback_has_prefill_claim": null,
+                "recommended_model": null,
+            }),
+        )
+    }));
+    let expected_text = snapshot
+        .format(Some("cyber"), Some("server-fallback-request"))
+        .unwrap();
+    assert_single_text_block_units(&row.0.message.content, &expected_text);
     assert_eq!(
         row.1, 0,
         "the first visible row receives stable zero-based stream index zero"
@@ -2777,15 +2805,10 @@ async fn streamed_declined_refusal_uses_event_source_profile_and_emits_typed_row
     let row = row.expect("streamed refusal decline emits its typed API-error row");
     assert_eq!(row.request_id.as_deref(), Some("stream-refusal-request"));
     assert_eq!(row.message.stop_reason, "refusal");
-    assert_eq!(
-        row.message.content,
-        [ContentBlock::Text {
-            text: snapshot
-                .format(Some("cyber"), Some("stream-refusal-request"))
-                .unwrap(),
-            citations: None,
-        }]
-    );
+    let expected_text = snapshot
+        .format(Some("cyber"), Some("stream-refusal-request"))
+        .unwrap();
+    assert_single_text_block_units(&row.message.content, &expected_text);
 }
 
 #[tokio::test]
@@ -2830,11 +2853,12 @@ async fn refusal_snapshot_after_an_accepted_hop_uses_the_current_source_route() 
         event,
         SubagentEvent::ServerFallbackApiErrorRow { row, .. }
             if row.message.model == "<synthetic>"
-                && row.message.content.iter().any(|block| matches!(
-                    block,
-                    ContentBlock::Text { text, .. }
-                        if text.contains("Test model's safeguards flagged this message")
-                ))
+                && row.message.content.iter().any(|block| {
+                    content_block_text_contains(
+                        block,
+                        "Test model's safeguards flagged this message",
+                    )
+                })
     )));
 }
 
@@ -2892,11 +2916,12 @@ async fn same_request_refusal_decline_uses_the_last_accepted_hop_not_lane_source
     assert!(events.iter().any(|event| matches!(
         event,
         SubagentEvent::ServerFallbackApiErrorRow { row, .. }
-            if row.message.content.iter().any(|block| matches!(
-                block,
-                ContentBlock::Text { text, .. }
-                    if text.contains("Test model's safeguards flagged this message")
-            ))
+            if row.message.content.iter().any(|block| {
+                content_block_text_contains(
+                    block,
+                    "Test model's safeguards flagged this message",
+                )
+            })
     )));
 }
 
@@ -3863,7 +3888,7 @@ export function register(on) {
         "child-turn-complete",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -3894,12 +3919,12 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            if result["text"] != "null" {
+            if result.get_property("text").and_then(|value| value.as_str()) != Some("null") {
                 break result;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -3907,8 +3932,13 @@ export function register(on) {
     })
     .await
     .expect("child turn.complete dispatches");
-    let event: serde_json::Value =
-        serde_json::from_str(observed["text"].as_str().unwrap()).unwrap();
+    let event: serde_json::Value = serde_json::from_str(
+        observed
+            .get_property("text")
+            .and_then(|value| value.as_str())
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(event["agentId"], agent_id);
     assert_eq!(event["answer"], "child answer");
     assert_eq!(event["reason"], "answer");
@@ -3935,13 +3965,18 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            let event: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            let event: serde_json::Value = serde_json::from_str(
+                result
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap(),
+            )
+            .unwrap();
             if event["agentId"] == failing_id {
                 break event;
             }
@@ -3976,13 +4011,18 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            let event: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            let event: serde_json::Value = serde_json::from_str(
+                result
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap(),
+            )
+            .unwrap();
             if event["agentId"] == abort_id {
                 break event;
             }
@@ -4018,13 +4058,18 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            let event: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            let event: serde_json::Value = serde_json::from_str(
+                result
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap(),
+            )
+            .unwrap();
             if event["agentId"] == multi_id {
                 break event;
             }
@@ -4087,9 +4132,14 @@ async fn child_turn_complete_mod_uses_bound_session_ui() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("child-ui", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "child-ui",
+        dir.path(),
+        &module,
+        test_projection(&serde_json::json!({})),
+    )
+    .await
+    .unwrap();
     let logs = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let session: Arc<dyn hooks::mods::ModSessionContext> = Arc::new(ChildSession {
         cwd: dir.path().to_path_buf(),
@@ -4194,9 +4244,14 @@ export function register(on) {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("child-step", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "child-step",
+        dir.path(),
+        &module,
+        test_projection(&serde_json::json!({})),
+    )
+    .await
+    .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host.clone());
     let executor = Arc::new(hooks::HookExecutorImpl::new(
@@ -4237,13 +4292,18 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            let event: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            let event: serde_json::Value = serde_json::from_str(
+                result
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap(),
+            )
+            .unwrap();
             if !event.is_null() {
                 break event;
             }
@@ -4276,9 +4336,14 @@ export function register(on) {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("stream-result", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "stream-result",
+        dir.path(),
+        &module,
+        test_projection(&serde_json::json!({})),
+    )
+    .await
+    .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host.clone());
     let executor = Arc::new(hooks::HookExecutorImpl::new(
@@ -4309,7 +4374,7 @@ export function register(on) {
     .expect("child streamed Mod step completes");
     assert_eq!(
         one_completed(&drain(out_rx).await).string_at("/text"),
-        "streamed child"
+        Some("streamed child")
     );
     assert_eq!(api.call_count(), 1);
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -4317,13 +4382,18 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            let result: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            let result: serde_json::Value = serde_json::from_str(
+                result
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap(),
+            )
+            .unwrap();
             if !result.is_null() {
                 break result;
             }
@@ -4347,9 +4417,9 @@ async fn child_turn_step_managed_policy_rejects_model_rewrite() {
     impl hooks::mods::ModSettingsReader for DenyRewrite {
         async fn read(
             &self,
-            _input: serde_json::Value,
-        ) -> Result<serde_json::Value, hooks::mods::ModError> {
-            Ok(serde_json::json!({}))
+            _input: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+            Ok(test_projection(&serde_json::json!({})))
         }
 
         async fn model_allowed(&self, model: &str) -> Result<Option<bool>, hooks::mods::ModError> {
@@ -4427,7 +4497,7 @@ async fn child_turn_step_managed_policy_rejects_model_rewrite() {
         "deny-child-model",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -4460,7 +4530,7 @@ async fn child_turn_step_managed_policy_rejects_model_rewrite() {
     .expect("child Mod stream completes");
     assert_eq!(
         one_completed(&drain(out_rx).await).string_at("/text"),
-        "original model answer"
+        Some("original model answer")
     );
     assert_eq!(*checked.lock().unwrap(), vec!["wire-child-model"]);
     assert_eq!(*models.lock().unwrap(), vec!["inherit"]);
@@ -4493,7 +4563,7 @@ export function register(on) {
         "child-synthetic-step",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -4513,7 +4583,7 @@ export function register(on) {
     run_subagent(ctx, event_rx, out_tx).await;
     assert_eq!(
         one_completed(&drain(out_rx).await).string_at("/text"),
-        "synthetic child"
+        Some("synthetic child")
     );
     assert_eq!(api.call_count(), 0);
     let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -4521,13 +4591,18 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            let event: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            let event: serde_json::Value = serde_json::from_str(
+                result
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap(),
+            )
+            .unwrap();
             if !event.is_null() {
                 break event;
             }
@@ -4561,7 +4636,7 @@ async fn child_turn_step_keeps_synthetic_and_physical_responses_in_one_step() {
         "child-two-records",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -4640,7 +4715,7 @@ async fn child_turn_step_drains_tool_before_later_response() {
         "child-tool-then-answer",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -4738,7 +4813,7 @@ async fn child_turn_step_two_visible_next_calls_share_one_turn_index() {
         "child-two-visible-next",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -4872,7 +4947,7 @@ export function register(on) {
         "child-multiple-next",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -4918,13 +4993,18 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            let event: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            let event: serde_json::Value = serde_json::from_str(
+                result
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap(),
+            )
+            .unwrap();
             if !event.is_null() {
                 break event;
             }
@@ -4993,7 +5073,7 @@ export function register(on) {
         "child-cancel-step",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -5043,13 +5123,18 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            let event: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            let event: serde_json::Value = serde_json::from_str(
+                result
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap(),
+            )
+            .unwrap();
             if !event.is_null() {
                 break event;
             }
@@ -5082,7 +5167,7 @@ async fn child_turn_step_failure_before_next_runs_original_request() {
         "child-fallback-step",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -5382,7 +5467,7 @@ async fn schema_rejected_attempt_is_not_surfaced_beside_its_retry() {
             .to_json_string()
             .unwrap()
             .contains("REJECTED-SENTINEL"),
-        "rejected payload must not leak into the surfaced result: {result}"
+        "rejected payload must not leak into the surfaced result: {result:?}"
     );
     assert!(
         !evs.iter()
@@ -5986,7 +6071,7 @@ async fn schema_run_exhausting_max_turns_fails_instead_of_completing_off_schema(
     assert_eq!(api.forced_tools().len(), 3, "3 round-trips expected");
     assert_eq!(invoker.call_count(), 3, "OtherTool dispatched every turn");
 
-    let completed: Vec<&serde_json::Value> = evs
+    let completed: Vec<&Utf16JsonProjection> = evs
         .iter()
         .filter_map(|e| match e {
             SubagentEvent::Completed { result, .. } => Some(result),
@@ -6726,6 +6811,11 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
     let api = MockSubagentApiClient::new(vec![Ok(text_response("unused", Some("end_turn")))]);
     let mut ctx = loop_ctx(api.clone(), None, 4);
     ctx.budget = Some(Arc::new(MockBudget { exceeded: true }));
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    let token = statistics.prepare_spawn("general-purpose".into(), Some(false), false, 1);
+    token.started();
+    ctx.agent_spawn_token = Some(token);
 
     let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -6751,6 +6841,11 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
             .any(|e| matches!(e, SubagentEvent::Completed { .. })),
         "no Completed when stopped on budget; got events: {evs:?}"
     );
+    let statistics = statistics.snapshot();
+    assert_eq!(statistics.spawned, 1);
+    assert_eq!(statistics.completed, 0);
+    assert_eq!(statistics.failed, 0);
+    assert_eq!(statistics.killed.system, 1);
 }
 
 #[tokio::test]
@@ -7230,7 +7325,7 @@ export function register(on) {
         "persistent-turn-complete",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -7282,13 +7377,18 @@ export function register(on) {
             let result = host
                 .dispatch(
                     "prompt.submit",
-                    serde_json::json!({"text":"probe"}),
+                    test_projection(&serde_json::json!({"text":"probe"})),
                     |event| async move { Ok(event) },
                 )
                 .await
                 .unwrap();
-            let events: serde_json::Value =
-                serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+            let events: serde_json::Value = serde_json::from_str(
+                result
+                    .get_property("text")
+                    .and_then(|value| value.as_str())
+                    .unwrap(),
+            )
+            .unwrap();
             if events["seen"]
                 .as_array()
                 .is_some_and(|seen| seen.len() == 2)
@@ -7327,13 +7427,18 @@ export function register(on) {
     let result = host
         .dispatch(
             "prompt.submit",
-            serde_json::json!({"text":"probe"}),
+            test_projection(&serde_json::json!({"text":"probe"})),
             |event| async move { Ok(event) },
         )
         .await
         .unwrap();
-    let after_rejection: serde_json::Value =
-        serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+    let after_rejection: serde_json::Value = serde_json::from_str(
+        result
+            .get_property("text")
+            .and_then(|value| value.as_str())
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(after_rejection["started"].as_array().unwrap().len(), 2);
     assert_eq!(after_rejection["seen"].as_array().unwrap().len(), 2);
 }
@@ -7597,10 +7702,11 @@ async fn persist_mode_message_wakes_stuck_round_trip_and_carries_the_text() {
     // pendingUserMessages; here it rides on the re-issued history).
     let later = api.later_messages.lock().unwrap().clone();
     let retry_history = later.first().expect("retry captured");
-    let carried = retry_history.iter().any(|m| {
-        matches!(m, ConversationMessage::User { content, .. }
-            if content.iter().any(|b| matches!(b, ContentBlock::Text { text, .. }
-                if text.contains("are you alive? try again"))))
+    let carried = retry_history.iter().any(|message| {
+        matches!(message, ConversationMessage::User { content, .. }
+        if content.iter().any(|block| {
+            content_block_text_contains(block, "are you alive? try again")
+        }))
     });
     assert!(
         carried,
@@ -7874,8 +7980,8 @@ impl hooks::executor::BuiltinHookHandler for AdditionalContextStartHook {
     ) -> hooks::response::HookResult {
         hooks::response::HookResult {
             outcome: hooks::response::HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: Some(hooks::response::HookResponse {
                 additional_context: Some(self.context.clone().into()),
@@ -7908,6 +8014,7 @@ async fn exec_with_start_context(context: &str) -> Arc<hooks::HookExecutorImpl> 
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
     let mut exec = hooks::HookExecutorImpl::new(
         registry,
@@ -7951,6 +8058,7 @@ async fn exec_with_two_start_contexts(c0: &str, c1: &str) -> Arc<hooks::HookExec
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         });
     }
     let mut exec = hooks::HookExecutorImpl::new(
@@ -7990,8 +8098,8 @@ impl hooks::executor::BuiltinHookHandler for RecordingStopHook {
         }
         hooks::response::HookResult {
             outcome: hooks::response::HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -8043,8 +8151,8 @@ impl hooks::executor::BuiltinHookHandler for RecordingStopContextHook {
         }
         hooks::response::HookResult {
             outcome: hooks::response::HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -8086,6 +8194,7 @@ fn frontmatter_stop_hook(handler_id: &str) -> hooks::definition::HookDefinition 
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -8194,8 +8303,8 @@ impl hooks::executor::BuiltinHookHandler for StartStopCounter {
         }
         hooks::response::HookResult {
             outcome: hooks::response::HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -8237,6 +8346,7 @@ async fn runner_fires_subagent_start_and_frontmatter_stop_exactly_once_each() {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
     let mut exec = hooks::HookExecutorImpl::new(
         registry,
@@ -8297,7 +8407,7 @@ impl lingxi_core::host::skill_loader::SkillLoader for MockSkillLoader {
         }
         Ok(if skill_name == self.known {
             Some(lingxi_core::host::skill_loader::SkillLoad {
-                display_name: skill_name.to_string(),
+                display_name: skill_name.to_string().into(),
                 progress_message: None,
                 content: vec![ContentBlock::Text {
                     text: self.content_text.clone(),
@@ -8311,18 +8421,27 @@ impl lingxi_core::host::skill_loader::SkillLoader for MockSkillLoader {
 }
 
 fn user_text(msg: &ConversationMessage) -> Option<String> {
-    if let ConversationMessage::User { content, .. } = msg {
-        let t: Vec<String> = content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text, .. } => Some(text.clone()),
-                _ => None,
-            })
-            .collect();
-        Some(t.join("\n"))
-    } else {
-        None
+    let units = user_text_units(msg)?;
+    String::from_utf16(&units).ok()
+}
+
+fn user_text_units(msg: &ConversationMessage) -> Option<Vec<u16>> {
+    let ConversationMessage::User { content, .. } = msg else {
+        return None;
+    };
+    let mut units = Vec::new();
+    let mut first = true;
+    for block in content {
+        let Some(block_units) = content_block_text_units(block) else {
+            continue;
+        };
+        if !first {
+            units.push(u16::from(b'\n'));
+        }
+        first = false;
+        units.extend(block_units);
     }
+    Some(units)
 }
 
 #[tokio::test]
@@ -8382,8 +8501,8 @@ impl hooks::executor::BuiltinHookHandler for CountingAdditionalContextStartHook 
         *self.calls.lock().unwrap() += 1;
         hooks::response::HookResult {
             outcome: hooks::response::HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: Some(hooks::response::HookResponse {
                 additional_context: Some(self.context.clone().into()),
@@ -8420,6 +8539,7 @@ async fn exec_with_counting_start_context(
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     });
     let mut exec = hooks::HookExecutorImpl::new(
         registry,
@@ -8643,14 +8763,16 @@ async fn resolved_skill_prepends_metadata_then_content() {
     // then the loaded content.
     let skill_text = msgs
         .iter()
-        .filter_map(user_text)
-        .find(|t| t.contains("<skill-format>true</skill-format>"))
+        .filter_map(user_text_units)
+        .find(|units| text_units_contain(units, "<skill-format>true</skill-format>"))
         .expect("skill meta message present");
     assert_eq!(
         skill_text,
         "<command-message>my-skill</command-message>\n\
 <command-name>my-skill</command-name>\n\
-<skill-format>true</skill-format>\nSKILL BODY",
+<skill-format>true</skill-format>\nSKILL BODY"
+            .encode_utf16()
+            .collect::<Vec<_>>(),
         "metadata block then content"
     );
 }
@@ -8729,14 +8851,14 @@ async fn preload_order_additional_context_then_skills() {
     run_subagent(ctx, event_rx, out_tx).await;
     let _ = drain(out_rx).await;
 
-    let texts: Vec<String> = api.captured().iter().filter_map(user_text).collect();
+    let texts: Vec<Vec<u16>> = api.captured().iter().filter_map(user_text_units).collect();
     let ac_idx = texts
         .iter()
-        .position(|t| t.contains("ctx0"))
+        .position(|units| text_units_contain(units, "ctx0"))
         .expect("additionalContext present");
     let skill_idx = texts
         .iter()
-        .position(|t| t.contains("<skill-format>"))
+        .position(|units| text_units_contain(units, "<skill-format>"))
         .expect("skill present");
     assert!(
         ac_idx < skill_idx,
@@ -9510,7 +9632,7 @@ async fn local_app_create_json_correction_rejects_mixed_server_or_incomplete_res
             let content_block = if other_tool == "server result" {
                 llm_runtime::ContentBlock::AdvisorToolResult {
                     tool_use_id: "server-other".into(),
-                    content: serde_json::json!({"result": "executed"}),
+                    content: json_payload(&serde_json::json!({"result": "executed"})),
                     is_error: false,
                 }
             } else if other_tool == "server" {
@@ -10305,8 +10427,8 @@ fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessag
         content: vec![ContentBlock::ToolResult {
             tool_use_id,
             content: lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
-                (conten).to_owned(),
-                (conten).encode_utf16().collect(),
+                content.to_owned(),
+                content.encode_utf16().collect(),
             )
             .expect("test text is valid UTF-16"),
             is_error: Some(false),
@@ -11818,7 +11940,7 @@ async fn child_tool_context_is_one_plugin_attachment_in_the_model_snapshot() {
         "child-attachment",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -11906,15 +12028,17 @@ async fn child_tool_context_is_one_plugin_attachment_in_the_model_snapshot() {
         .expect("the rewritten source attachment is persisted with its row");
     assert!(entry.message.text_content().contains("row rewritten"));
     assert!(entry.source_attachment_uuid.is_some());
-    let append_events: Vec<serde_json::Value> = host
+    let append_result = host
         .dispatch(
             "prompt.submit",
-            serde_json::json!({"text":"probe"}),
+            test_projection(&serde_json::json!({"text":"probe"})),
             |event| async move { Ok(event) },
         )
         .await
-        .unwrap()["text"]
-        .as_str()
+        .unwrap();
+    let append_events: Vec<serde_json::Value> = append_result
+        .get_property("text")
+        .and_then(|value| value.as_str())
         .and_then(|text| serde_json::from_str(text).ok())
         .expect("the Mod captured session.append inputs");
     let attachment_event = append_events
@@ -11969,7 +12093,7 @@ async fn child_session_append_runs_without_a_transcript_filesystem() {
         "append-without-transcript",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -11996,13 +12120,14 @@ async fn child_session_append_runs_without_a_transcript_filesystem() {
     let observed = host
         .dispatch(
             "prompt.submit",
-            serde_json::json!({"text":"probe"}),
+            test_projection(&serde_json::json!({"text":"probe"})),
             |event| async move { Ok(event) },
         )
         .await
         .unwrap();
-    assert!(observed["text"]
-        .as_str()
+    assert!(observed
+        .get_property("text")
+        .and_then(|value| value.as_str())
         .is_some_and(|types| types.split(',').any(|kind| kind == "assistant")));
 }
 
@@ -12032,7 +12157,7 @@ async fn accepted_text_only_session_append_updates_query_row_without_changing_to
         "accepted-tool-row",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -12139,7 +12264,7 @@ async fn accepted_text_only_session_append_updates_query_row_without_changing_to
     assert!(matches!(
         &accepted_content[1],
         ContentBlock::ToolUse { id, name, input, .. }
-            if id.as_str() == tool_id && name == "Bash" && input == &tool_input
+            if id.as_str() == tool_id && name == "Bash" && projection_matches_json(input, &tool_input)
     ));
     assert_eq!(
         accepted_content
@@ -12184,12 +12309,13 @@ async fn accepted_text_only_session_append_updates_query_row_without_changing_to
     let hook_rows: Vec<serde_json::Value> = host
         .dispatch(
             "prompt.submit",
-            serde_json::json!({"text":"inspect accepted row"}),
+            test_projection(&serde_json::json!({"text":"inspect accepted row"})),
             |event| async move { Ok(event) },
         )
         .await
-        .unwrap()["text"]
-        .as_str()
+        .unwrap()
+        .get_property("text")
+        .and_then(|value| value.as_str())
         .and_then(|text| serde_json::from_str(text).ok())
         .expect("the hook captured its accepted session.append row");
     assert_eq!(hook_rows.len(), 1);
@@ -12252,9 +12378,14 @@ async fn complete_only_assistant_row_keeps_one_native_row_for_mod_and_sibling_to
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("complete-row", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "complete-row",
+        dir.path(),
+        &module,
+        test_projection(&serde_json::json!({})),
+    )
+    .await
+    .unwrap();
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host.clone());
     let executor = Arc::new(hooks::HookExecutorImpl::new(
@@ -12447,7 +12578,7 @@ async fn complete_only_assistant_row_keeps_one_native_row_for_mod_and_sibling_to
         matches!(
             calls[1].4.as_slice(),
             [ContentBlock::ToolUse { id, name, input, .. }]
-                if id.as_str() == tool_a_id && name == "ToolA" && input == &tool_a_input
+                if id.as_str() == tool_a_id && name == "ToolA" && projection_matches_json(input, &tool_a_input)
         ),
         "the second ToolUse receives only its earlier same-row sibling"
     );
@@ -12470,12 +12601,13 @@ async fn complete_only_assistant_row_keeps_one_native_row_for_mod_and_sibling_to
     let hook_rows: Vec<serde_json::Value> = host
         .dispatch(
             "prompt.submit",
-            serde_json::json!({"text":"inspect complete row"}),
+            test_projection(&serde_json::json!({"text":"inspect complete row"})),
             |event| async move { Ok(event) },
         )
         .await
-        .unwrap()["text"]
-        .as_str()
+        .unwrap()
+        .get_property("text")
+        .and_then(|value| value.as_str())
         .and_then(|text| serde_json::from_str(text).ok())
         .expect("the real Mod captured the accepted session.append input");
     assert_eq!(
@@ -12548,7 +12680,7 @@ async fn cold_resumed_child_screens_source_attachment_without_sending_restore_ma
         "resume-attachment",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        test_projection(&serde_json::json!({})),
     )
     .await
     .unwrap();
@@ -12565,17 +12697,19 @@ async fn cold_resumed_child_screens_source_attachment_without_sending_restore_ma
     );
     let marker = ConversationMessage::System {
         id: MessageId::new(),
-        content: serde_json::json!({
-            "messageId":original.id(),
-            "attachment":{
-                "type":"hook_additional_context",
-                "content":["original"],
-                "hookName":"tool.call",
-                "toolUseID":"toolu_before_restart-context",
-                "hookEvent":"PostToolUse",
-            },
-        })
-        .to_string(),
+        content: Utf16JsonProjection::from(
+            serde_json::to_string(&serde_json::json!({
+                "messageId":original.id(),
+                "attachment":{
+                    "type":"hook_additional_context",
+                    "content":["original"],
+                    "hookName":"tool.call",
+                    "toolUseID":"toolu_before_restart-context",
+                    "hookEvent":"PostToolUse",
+                },
+            }))
+            .unwrap(),
+        ),
         subtype: Some("mod_attachment_source".into()),
         compact_metadata: None,
         model_fallback: None,
@@ -12809,8 +12943,8 @@ impl tool_api::Tool for NestedToolEffectsProbe {
         String::new()
     }
 
-    async fn prompt(&self, _: &tool_api::PromptOptions) -> String {
-        String::new()
+    async fn prompt(&self, _: &tool_api::PromptOptions) -> Utf16JsonProjection {
+        Utf16JsonProjection::from("")
     }
 
     async fn call(
@@ -12862,6 +12996,7 @@ impl tool_api::Tool for NestedToolEffectsProbe {
                         &serde_json::json!({"opaque":"nested"}),
                     )),
                     is_error: false,
+                    subagent_hooks_fired: false,
                 })
             }
             "NestedMutateSecond" => {
@@ -12897,6 +13032,7 @@ impl tool_api::Tool for NestedToolEffectsProbe {
                     })),
                     mcp_meta: None,
                     is_error: false,
+                    subagent_hooks_fired: false,
                 })
             }
             _ => Ok(tool_api::ToolCallResult::from_data(

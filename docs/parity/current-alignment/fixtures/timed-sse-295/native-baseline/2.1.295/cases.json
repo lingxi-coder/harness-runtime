@@ -1,0 +1,25 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "session_id": "00000000-0000-4000-8000-000000002297",
+  "model": "claude-sonnet-4-5",
+  "system_prompt": "Fixed isolated streaming-timing fixture.",
+  "prompt": "Return the fixed timing probe result.",
+  "final_text": "NATIVE_TIMED_SSE_RESULT",
+  "message_id": "msg_native_timed_sse_295",
+  "thinking_text": "NATIVE_THINKING_SENTINEL",
+  "text": "NATIVE_TIMED_SSE_RESULT",
+  "events": [
+    {"event":"message_start","delay_before_ms":400},
+    {"event":"thinking_block_start","delay_before_ms":300},
+    {"event":"thinking_delta","delay_before_ms":300},
+    {"event":"signature_delta","delay_before_ms":100},
+    {"event":"thinking_block_stop","delay_before_ms":300},
+    {"event":"text_block_start","delay_before_ms":300},
+    {"event":"text_delta","delay_before_ms":300},
+    {"event":"text_block_stop","delay_before_ms":300},
+    {"event":"message_delta","delay_before_ms":300},
+    {"event":"message_stop","delay_before_ms":100}
+  ],
+  "timeout_seconds": 45
+}

@@ -1,0 +1,1 @@
+]},{"role":"user","content":[{"tool_use_id":"toolu_native_mcp_pagination_295","type":"tool_result","content":"{\"tool\":\"page_tool_01\",\"page\":1}\n\n<system-reminder>\n<total_tokens>14999985 tokens left</total_tokens>\n</system-reminder>","cache_c

@@ -944,6 +944,7 @@ mod region_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use migrations::settings_update::read_settings_map;
     use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1087,12 +1088,12 @@ mod tests {
             .unwrap();
         assert!(
             user_providers.get_property("userProvider").is_some(),
-            "the user layer's own map must have userProvider, got {user_providers}"
+            "the user layer's own map must have userProvider"
         );
         assert!(
             user_providers.get_property("localProvider").is_none()
                 && user_providers.get_property("projectProvider").is_none(),
-            "the user layer's own map must NOT carry another layer's entries, got {user_providers}"
+            "the user layer's own map must NOT carry another layer's entries"
         );
 
         let project_providers = snap
@@ -1105,7 +1106,7 @@ mod tests {
             project_providers.get_property("projectProvider").is_some()
                 && project_providers.get_property("userProvider").is_none()
                 && project_providers.get_property("localProvider").is_none(),
-            "the project layer's own map must be exactly its own value, got {project_providers}"
+            "the project layer's own map must be exactly its own value"
         );
 
         let local_providers = snap
@@ -1118,7 +1119,7 @@ mod tests {
             local_providers.get_property("localProvider").is_some()
                 && local_providers.get_property("userProvider").is_none()
                 && local_providers.get_property("projectProvider").is_none(),
-            "the local layer's own map must be exactly its own value, got {local_providers}"
+            "the local layer's own map must be exactly its own value"
         );
 
         // `routing` is defined ONLY at `project` — a merged-view bug would
@@ -2226,7 +2227,13 @@ mod tests {
             WritableScopeDto::Project,
         );
         assert_eq!(rule.value.tool_name, "Bash");
-        assert_eq!(rule.value.rule_content.as_deref(), Some("ls:*"));
+        assert_eq!(
+            rule.value
+                .rule_content
+                .as_ref()
+                .and_then(|content| content.string_at("")),
+            Some("ls:*")
+        );
         assert_eq!(rule.behavior, permission::PermissionBehavior::Allow);
         assert_eq!(
             rule.source,

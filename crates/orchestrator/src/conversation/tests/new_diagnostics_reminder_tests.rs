@@ -1,8 +1,8 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 
@@ -59,17 +59,13 @@ async fn injects_block_when_source_has_new_diagnostics() {
 #[tokio::test]
 async fn no_reminder_without_source_or_when_empty() {
     // No source wired (the common no-LSP case).
-    assert!(
-        orch_with_diag(None)
-            .new_diagnostics_reminder_message()
-            .await
-            .is_none()
-    );
+    assert!(orch_with_diag(None)
+        .new_diagnostics_reminder_message()
+        .await
+        .is_none());
     // Source wired but nothing new.
-    assert!(
-        orch_with_diag(Some(Arc::new(MockDiag(None))))
-            .new_diagnostics_reminder_message()
-            .await
-            .is_none()
-    );
+    assert!(orch_with_diag(Some(Arc::new(MockDiag(None))))
+        .new_diagnostics_reminder_message()
+        .await
+        .is_none());
 }

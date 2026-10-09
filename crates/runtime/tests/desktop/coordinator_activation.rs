@@ -7,19 +7,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use client::adapter::AdapterOutputStream;
 use client::adapter::test_support::MockSink;
+use client::adapter::AdapterOutputStream;
 use client::protocol::events::ClientEvent;
 use lingxi_core::host::filesystem::FileSystem;
 use lingxi_core::host::team_spawn::TeamSpawnSeam;
 use lingxi_core::host::{OutputStream, RuntimeSpawner};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::AgentId;
+use lingxi_llm_client::protocol::JsonPayload;
 use platform_posix::{PosixFileSystem, PosixRuntime};
-use tasks::TaskType;
 use tasks::handlers::InProcessTeammateHandler;
 use tasks::output_manager::TaskOutputManager;
 use tasks::registry::TaskRegistry;
 use tasks::task_trait::TaskSpawnInput;
+use tasks::TaskType;
 
 // ---------------------------------------------------------------------------
 // Scripted SubagentApiClient — one round-trip per `stream(request)`, returning
@@ -72,7 +74,7 @@ impl agent::api::SubagentApiClient for ScriptedApiClient {
                 stop_details: None,
                 usage: llm_runtime::ExecutionUsage::default(),
                 cost: None,
-                provider_metadata: llm_runtime::JsonPayload::default(),
+                provider_metadata: JsonPayload::default(),
                 resumable: None,
             }))
         };
@@ -168,10 +170,10 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for MockInvoker {
     async fn invoke(
         &self,
         _: &str,
-        _: serde_json::Value,
+        _: Utf16JsonProjection,
         _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
-        Ok(serde_json::Value::Null)
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Ok(Utf16JsonProjection::parse("null").expect("null is valid JSON"))
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -590,9 +592,12 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
     let (progress, _events) = tool_api::progress_channel();
     let error = approval
         .call(
-            serde_json::json!({"to":"team-lead", "message":{
-                "type":"shutdown_response", "request_id":"real-inprocess-stop", "approve":true
-            }}),
+            Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"to":"team-lead", "message":{
+                    "type":"shutdown_response", "request_id":"real-inprocess-stop", "approve":true
+                }}),
+            )
+            .unwrap(),
             context,
             progress,
         )
@@ -621,14 +626,18 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
         message
             .content
             .string_at("")
-            .and_then(|source| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok())
+            .and_then(|source| {
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok()
+            })
             .is_some_and(|frame| frame.string_at("/type") == Some("shutdown_approved"))
     }));
     assert!(!initial.iter().any(|message| {
         message
             .content
             .string_at("")
-            .and_then(|source| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok())
+            .and_then(|source| {
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok()
+            })
             .is_some_and(|frame| frame.string_at("/type") == Some("teammate_terminated"))
     }));
     std::fs::remove_dir(&config_path).unwrap();
@@ -639,7 +648,8 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
     let stop = tool_task::TaskStopTool::new(builtin);
     let (progress, _events) = tool_api::progress_channel();
     stop.call(
-        serde_json::json!({"task_id":worker.task_id}),
+        Utf16JsonProjection::from_serde_value(&serde_json::json!({"task_id":worker.task_id}))
+            .unwrap(),
         tool_api::ToolUseContext::model_seed("scripted".into()),
         progress,
     )
@@ -653,13 +663,11 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
     );
     let config: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-    assert!(
-        !config["members"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|member| member["name"] == "alpha")
-    );
+    assert!(!config["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| member["name"] == "alpha"));
     let task: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&task_path).unwrap()).unwrap();
     assert!(task.get("owner").is_none());
@@ -668,29 +676,29 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
     assert_eq!(
         completed
             .iter()
-            .filter(
-                |message| message
-                    .content
-                    .string_at("")
-                    .and_then(|source| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok())
-                    .is_some_and(|frame| frame.string_at("/type") == Some("teammate_terminated"))
-            )
+            .filter(|message| message
+                .content
+                .string_at("")
+                .and_then(
+                    |source| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source)
+                        .ok()
+                )
+                .is_some_and(|frame| frame.string_at("/type") == Some("teammate_terminated")))
             .count(),
         1
     );
     let (progress, _events) = tool_api::progress_channel();
     let error = stop
         .call(
-            serde_json::json!({"task_id":worker.task_id}),
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({"task_id":worker.task_id}))
+                .unwrap(),
             tool_api::ToolUseContext::model_seed("scripted".into()),
             progress,
         )
         .await
         .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("is not running (status: killed)")
-    );
+    assert!(error
+        .to_string()
+        .contains("is not running (status: killed)"));
     assert!(mailbox.drain().is_empty());
 }

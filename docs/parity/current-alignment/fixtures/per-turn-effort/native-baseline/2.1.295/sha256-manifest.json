@@ -1,0 +1,37 @@
+[
+  {
+    "file": "assistant-rows.raw.jsonl",
+    "bytes": 2338,
+    "sha256": "520d5d8ffb79f4b3d7737ee82a11c549b4d4e17e21f77dda104a62da8e522d50"
+  },
+  {
+    "file": "receipt.json",
+    "bytes": 2049,
+    "sha256": "7fc025e6f871fa15698171a378e4b5a6cf82b12fb9352e43cbffac9b1addf806"
+  },
+  {
+    "file": "request-01.message-01.raw.json",
+    "bytes": 1082,
+    "sha256": "8af6f472a43cc408f7463323620c3a8d6047a519a39e9690b520f48afcfc63ea"
+  },
+  {
+    "file": "request-01.messages.raw.json",
+    "bytes": 1132,
+    "sha256": "e63a7c196246c64a7c736f97a2c9b4ece829e70f0caefafec0016a9689d73a68"
+  },
+  {
+    "file": "request-02.message-01.raw.json",
+    "bytes": 1020,
+    "sha256": "64920041561ecab6e5a5c81389928cf5c15f5865ccb15dec9c5116a94edd86f8"
+  },
+  {
+    "file": "request-02.message-04.raw.json",
+    "bytes": 175,
+    "sha256": "668699c4548e020445dc5ab1ac51fca3d69dca6aa8ea17828cb84d1b466d8a38"
+  },
+  {
+    "file": "request-02.messages.raw.json",
+    "bytes": 1377,
+    "sha256": "7c49cb5cdb093e5c9711416f2350f59b722f44ddbff1848cf4e82f7928bea78d"
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "session_id": "00000000-0000-4000-8000-000000002301",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Run the fixed harmless printf probe once, then finish with the fixed response.",
+  "bash_tool_name": "Bash",
+  "tool_use_id": "toolu_native_bash_result_false_295",
+  "command": "printf NATIVE_BASH_TOOL_RESULT_FALSE_CONTROL",
+  "command_stdout": "NATIVE_BASH_TOOL_RESULT_FALSE_CONTROL",
+  "final_text": "NATIVE_BASH_TOOL_RESULT_FALSE_FINISHED",
+  "timeout_seconds": 45
+}

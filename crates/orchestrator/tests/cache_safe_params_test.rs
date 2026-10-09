@@ -28,7 +28,8 @@ fn make_orch(
     let api = Arc::new(MockApiClient::new(vec![mock_message_response(
         vec![LlmContentBlock::Text {
             text: "done".to_string(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     )]));
@@ -136,11 +137,22 @@ async fn failed_first_call_keeps_the_pre_call_snapshot_without_a_success_save() 
         calls[0][1..calls[0].len() - 1],
         "pre-call snapshot excludes the same transient reminders as the success snapshot"
     );
-    assert_eq!(
-        saved.tools,
-        api.captured_tools().await[0],
-        "a first-call recovery fork has the parent tool definitions available"
-    );
+    let captured = api.captured_tools().await;
+    let wire = &captured[0];
+    assert_eq!(saved.tools.len(), wire.len());
+    for (source, declaration) in saved.tools.iter().zip(wire) {
+        assert_eq!(source.name, declaration.name);
+        assert_eq!(
+            source.description.to_json_string().unwrap(),
+            declaration.description.as_json_source()
+        );
+        assert_eq!(
+            source.input_schema.to_json_string().unwrap(),
+            declaration.input_schema.as_json_source()
+        );
+        assert_eq!(source.strict, declaration.strict);
+        assert_eq!(source.defer_loading, declaration.defer_loading);
+    }
 }
 
 #[tokio::test]

@@ -1125,6 +1125,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: true,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         };
         let raw = format!(
             "{}\n{}\n",
@@ -1338,6 +1342,7 @@ mod tests {
                         citations: None,
                     }],
                     stop_reason: None,
+                    resumable: None,
                 },
             })
             .await;

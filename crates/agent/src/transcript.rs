@@ -2801,9 +2801,14 @@ mod tests {
         )
         .unwrap();
         let host = ModHost::start(None).await.unwrap();
-        host.load("append-retry", dir.path(), &module, serde_json::json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "append-retry",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({})).unwrap(),
+        )
+        .await
+        .unwrap();
         let mut registry = hooks::HookRegistry::new();
         registry.set_mod_host(host.clone());
         let executor = Arc::new(hooks::HookExecutorImpl::new(
@@ -2861,12 +2866,17 @@ mod tests {
         let calls = host
             .dispatch(
                 "prompt.submit",
-                serde_json::json!({"text":"probe"}),
+                Utf16JsonProjection::from_serde_value(&serde_json::json!({"text":"probe"}))
+                    .unwrap(),
                 |event| async move { Ok(event) },
             )
             .await
             .unwrap();
-        assert_eq!(calls["text"], "2", "attachment and row dispatch once each");
+        assert_eq!(
+            calls.get_property("text").and_then(|value| value.as_str()),
+            Some("2"),
+            "attachment and row dispatch once each"
+        );
         assert_eq!(entry.agent_id, agent_id);
     }
 
@@ -2888,9 +2898,14 @@ mod tests {
         )
         .unwrap();
         let host = ModHost::start(None).await.unwrap();
-        host.load("append-utf16", dir.path(), &module, serde_json::json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "append-utf16",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({})).unwrap(),
+        )
+        .await
+        .unwrap();
         let mut registry = hooks::HookRegistry::new();
         registry.set_mod_host(host);
         let executor = Arc::new(hooks::HookExecutorImpl::new(
@@ -2963,9 +2978,14 @@ mod tests {
         )
         .unwrap();
         let host = ModHost::start(None).await.unwrap();
-        host.load("append-nontext", dir.path(), &module, serde_json::json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "append-nontext",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({})).unwrap(),
+        )
+        .await
+        .unwrap();
         assert!(host.has_event("session.append"));
         let mut registry = hooks::HookRegistry::new();
         registry.set_mod_host(host);

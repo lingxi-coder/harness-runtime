@@ -111,7 +111,9 @@ fn append_ascii(units: &mut Vec<u16>, text: &str) {
 pub fn connection_error_diagnostic(error: &jsonrpc::ConnectionError) -> Utf16JsonProjection {
     match error {
         jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Remote(remote)) => {
-            let mut units = "router: remote error: code=".encode_utf16().collect::<Vec<_>>();
+            let mut units = "router: remote error: code="
+                .encode_utf16()
+                .collect::<Vec<_>>();
             append_ascii(&mut units, &remote.code.to_string());
             append_ascii(&mut units, ", message=");
             units.extend_from_slice(remote.message.code_units());

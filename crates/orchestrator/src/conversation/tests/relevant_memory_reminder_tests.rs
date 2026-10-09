@@ -1,8 +1,8 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use memory::surfacing::SurfacedMemory;
 use std::path::PathBuf;
@@ -234,9 +234,7 @@ async fn multiple_memories_keep_independent_meta_message_boundaries() {
     assert!(messages.iter().all(ConversationMessage::is_meta));
     assert!(messages[0].text_content().contains("Memory: /m/a.md:"));
     assert!(messages[1].text_content().contains("Memory: /m/b.md:"));
-    assert!(
-        !messages[1]
-            .text_content()
-            .contains("Retrieved for possible relevance")
-    );
+    assert!(!messages[1]
+        .text_content()
+        .contains("Retrieved for possible relevance"));
 }

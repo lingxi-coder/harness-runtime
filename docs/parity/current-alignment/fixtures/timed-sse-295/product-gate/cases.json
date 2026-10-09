@@ -1,0 +1,39 @@
+{
+  "native_reference": {
+    "version": "2.1.295",
+    "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "timed_sse_receipt": "../native-baseline/2.1.295/receipt.json",
+    "fallback_404_receipt": "../native-baseline/2.1.295/edge-cases/http404-nonstream-fallback/receipt.json"
+  },
+  "model": "claude-sonnet-4-5",
+  "timeout_seconds": 45,
+  "cases": [
+    {
+      "id": "product-default-json-sse",
+      "mode": "sse",
+      "session_id": "00000000-0000-4000-8000-000000002297",
+      "prompt": "Return the fixed timing probe result.",
+      "expected_result": "NATIVE_TIMED_SSE_RESULT",
+      "expected_stream_sequence": [true],
+      "native_timing_reference": "timed_sse"
+    },
+    {
+      "id": "product-default-json-404-fallback",
+      "mode": "fallback-404",
+      "session_id": "00000000-0000-4000-8000-000000002361",
+      "prompt": "Return the fixed fallback timing result.",
+      "expected_result": "NATIVE_404_NONSTREAM_FALLBACK_SUCCESS",
+      "expected_stream_sequence": [true, false],
+      "native_timing_reference": "fallback_404"
+    },
+    {
+      "id": "product-explicit-no-stream",
+      "mode": "direct-nonstream",
+      "session_id": "00000000-0000-4000-8000-000000002400",
+      "prompt": "Return the fixed fallback timing result.",
+      "expected_result": "NATIVE_404_NONSTREAM_FALLBACK_SUCCESS",
+      "expected_stream_sequence": [false],
+      "native_timing_reference": null
+    }
+  ]
+}

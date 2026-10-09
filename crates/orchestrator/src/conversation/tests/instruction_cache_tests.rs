@@ -1,18 +1,18 @@
 use super::*;
-use crate::prompt::MemoryFile;
 use crate::prompt::memory_block::{
     InstructionFilesMode, InstructionUserEmailProvider, MemoryHierarchyProvider,
     RootInstructionContextProvider,
 };
+use crate::prompt::MemoryFile;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
 };
 use lingxi_core::host::instructions::{
     InstructionContextKey, InstructionContextProvider, InstructionRefreshReason,
     InstructionRendering, InstructionScope,
 };
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
 
 struct MutableMemory {
     files: RwLock<Vec<MemoryFile>>,
@@ -166,10 +166,8 @@ async fn pt_rebuilds_live_identity_with_the_same_eager_file_promise() {
         context.eager_instructions.unwrap()[0].content,
         "original instructions"
     );
-    assert!(
-        context.user_context["userEmail"]
-            .starts_with("The user's email address is next@example.test.")
-    );
+    assert!(context.user_context["userEmail"]
+        .starts_with("The user's email address is next@example.test."));
     assert_eq!(source.loads.load(Ordering::SeqCst), 1);
     assert_eq!(
         orch.frozen_instruction_refresh_reason(),
@@ -194,12 +192,12 @@ async fn directory_added_emits_its_real_refresh_reason_and_reloads_files() {
     let payloads = orch.context_attachment_history(&rows);
     let instructions = payloads
         .iter()
-        .find(|row| row["type"] == "instructions")
+        .find(|row| row.string_at("/type") == Some("instructions"))
         .unwrap();
-    assert_eq!(instructions["reason"], "directory_added");
+    assert_eq!(instructions.string_at("/reason"), Some("directory_added"));
     assert_eq!(
-        instructions["files"][0]["content"],
-        "directory event instructions"
+        instructions.string_at("/files/0/content"),
+        Some("directory event instructions")
     );
     assert_eq!(source.loads.load(Ordering::SeqCst), 2);
 }
@@ -246,15 +244,14 @@ async fn owned_clear_changes_the_typed_identity_and_retires_both_caches() {
     orch.clear_session().await.unwrap();
     let new = orch.session.lock().await.session_id;
     assert_ne!(old, new);
-    assert!(
-        orch.prompt_runtime
-            .instruction_cache
-            .current_context(InstructionContextKey {
-                session_id: old,
-                agent_id: None,
-            })
-            .is_none()
-    );
+    assert!(orch
+        .prompt_runtime
+        .instruction_cache
+        .current_context(InstructionContextKey {
+            session_id: old,
+            agent_id: None,
+        })
+        .is_none());
     orch.additional_context_message().await.unwrap();
     assert_eq!(body(&orch).await, "after clear");
     assert_eq!(source.loads.load(Ordering::SeqCst), 2);
@@ -276,21 +273,17 @@ async fn injected_identity_none_omits_configured_fallback_and_raw_whitespace_is_
     let orch = orchestrator(config, source, dir.path())
         .with_instruction_user_email_provider(identity.clone());
     orch.additional_context_message().await.unwrap();
-    assert!(
-        !orch
-            .instruction_context_snapshot()
-            .await
-            .user_context
-            .contains_key("userEmail")
-    );
+    assert!(!orch
+        .instruction_context_snapshot()
+        .await
+        .user_context
+        .contains_key("userEmail"));
     *identity.0.write().unwrap() = Some("  raw@example.test \t".into());
     orch.invalidate_instruction_context(InstructionRefreshReason::AccountChange);
     orch.additional_context_message().await.unwrap();
     let context = orch.instruction_context_snapshot().await;
-    assert!(
-        context.user_context["userEmail"]
-            .starts_with("The user's email address is   raw@example.test \t.")
-    );
+    assert!(context.user_context["userEmail"]
+        .starts_with("The user's email address is   raw@example.test \t."));
     assert!(context.user_context["userEmail"].contains("Never send it to an unrelated service"));
 }
 
@@ -387,11 +380,9 @@ async fn inline_preparation_and_reattach_reuse_the_same_precompaction_envelope()
         .inline_context
         .as_ref()
         .unwrap();
-    assert!(
-        serde_json::to_string(envelope)
-            .unwrap()
-            .contains("prepared instructions")
-    );
+    assert!(serde_json::to_string(envelope)
+        .unwrap()
+        .contains("prepared instructions"));
     source.replace_body("instructions for the next query");
     orch.refresh_instruction_context(InstructionRefreshReason::Compaction);
     let mut rebuilt = prepared.snapshot.clone();
@@ -413,11 +404,9 @@ async fn inline_preparation_and_reattach_reuse_the_same_precompaction_envelope()
             .filter(|message| message.id() == envelope.id())
             .collect::<Vec<_>>();
         assert_eq!(copies, vec![envelope]);
-        assert!(
-            !serde_json::to_string(&rebuilt)
-                .unwrap()
-                .contains("instructions for the next query")
-        );
+        assert!(!serde_json::to_string(&rebuilt)
+            .unwrap()
+            .contains("instructions for the next query"));
     }
     assert_eq!(source.loads.load(Ordering::SeqCst), 1);
 }
@@ -445,11 +434,9 @@ async fn scalar_projection_retains_its_ingress_handle_across_a_host_refresh() {
     assert!(!original.contains("instructions for a later ingress"));
     assert_eq!(source.loads.load(Ordering::SeqCst), 1);
     let later = orch.additional_context_message().await.unwrap();
-    assert!(
-        serde_json::to_string(&later)
-            .unwrap()
-            .contains("instructions for a later ingress")
-    );
+    assert!(serde_json::to_string(&later)
+        .unwrap()
+        .contains("instructions for a later ingress"));
     assert_eq!(source.loads.load(Ordering::SeqCst), 2);
 }
 
@@ -590,11 +577,9 @@ async fn rejected_managed_context_stays_sticky_and_prevents_model_dispatch() {
     );
     for _ in 0..2 {
         let error = root.run_turn("hello").await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("native context acquisition failed")
-        );
+        assert!(error
+            .to_string()
+            .contains("native context acquisition failed"));
     }
     assert!(api.captured_msgs().await.is_empty());
     assert_eq!(memory.0.load(Ordering::SeqCst), 1);
@@ -708,12 +693,11 @@ async fn root_reservation_retains_identity_through_clear_and_preserves_old_waite
     );
     source.file_entered.notified().await;
     clear.await.unwrap().unwrap();
-    assert!(
-        root.prompt_runtime
-            .instruction_cache
-            .current_context(old_key)
-            .is_none()
-    );
+    assert!(root
+        .prompt_runtime
+        .instruction_cache
+        .current_context(old_key)
+        .is_none());
     let current = provider
         .load(dir.path(), InstructionScope::Full)
         .await
@@ -722,11 +706,10 @@ async fn root_reservation_retains_identity_through_clear_and_preserves_old_waite
     source.release_file.notify_one();
     let retired = old_reader.await.unwrap().unwrap();
     assert!(retired.user_context["claudeMd"].contains("original waiter"));
-    assert!(
-        root.prompt_runtime
-            .instruction_cache
-            .current_context(old_key)
-            .is_none()
-    );
+    assert!(root
+        .prompt_runtime
+        .instruction_cache
+        .current_context(old_key)
+        .is_none());
     assert_eq!(source.loads.load(Ordering::SeqCst), 2);
 }

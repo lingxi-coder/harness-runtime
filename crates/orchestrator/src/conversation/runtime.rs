@@ -331,7 +331,296 @@ pub(crate) struct ModCommandDescribeAnswer {
     pub(crate) cacheable: bool,
 }
 
+/// Owner-published facts for one completed external turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TurnExecutionMetrics {
+    /// The shared driver's own turn counter, independent of cumulative usage.
+    pub num_turns: u32,
+    /// Elapsed wall-clock time to the first physical provider dispatch whose
+    /// response produced a streamed message-start event.
+    pub time_to_request_ms: Option<u64>,
+    /// Elapsed wall-clock time to the first streamed response start.
+    pub ttft_stream_ms: Option<u64>,
+    /// Elapsed wall-clock time to the first assistant content frame, including thinking.
+    pub first_content_frame_ms: Option<u64>,
+    /// Elapsed wall-clock time to the first accepted assistant row, including thinking.
+    pub ttft_ms: Option<u64>,
+    /// Actual terminal reason emitted by the driver; absent if it emitted none.
+    pub stop_reason: Option<String>,
+    /// HTTP status retained from the typed provider error, absent for local errors.
+    pub api_error_status: Option<u16>,
+    /// Inner stop reason of the final synthetic API-error assistant, if any.
+    pub api_error_stop_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct TurnTimingMarks {
+    pub(crate) time_to_request_ms: Option<u64>,
+    pub(crate) ttft_stream_ms: Option<u64>,
+    pub(crate) first_content_frame_ms: Option<u64>,
+    pub(crate) ttft_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TurnTimingField {
+    Request,
+    StreamStart,
+    FirstContentFrame,
+    FirstAcceptedAssistantRow,
+}
+
+/// One external turn's immutable clock origin and first-observation latch.
+/// Async dispatch callbacks keep this `Arc`; after the owner completes, later
+/// writes can only reach this detached capture, never the next turn's metrics.
+#[derive(Debug)]
+pub(crate) struct TurnTimingCapture {
+    started_at: std::time::Instant,
+    marks: std::sync::Mutex<TurnTimingMarks>,
+    first_request_dispatch_at: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl TurnTimingCapture {
+    pub(crate) fn new() -> Self {
+        Self {
+            started_at: std::time::Instant::now(),
+            marks: std::sync::Mutex::new(TurnTimingMarks::default()),
+            first_request_dispatch_at: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn elapsed_ms_at(&self, observed_at: std::time::Instant) -> u64 {
+        u64::try_from(
+            observed_at
+                .saturating_duration_since(self.started_at)
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX)
+    }
+
+    fn observe_first(&self, field: TurnTimingField) {
+        self.observe_first_at(field, std::time::Instant::now());
+    }
+
+    fn observe_first_at(&self, field: TurnTimingField, observed_at: std::time::Instant) {
+        let mut marks = self
+            .marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let slot = match field {
+            TurnTimingField::Request => &mut marks.time_to_request_ms,
+            TurnTimingField::StreamStart => &mut marks.ttft_stream_ms,
+            TurnTimingField::FirstContentFrame => &mut marks.first_content_frame_ms,
+            TurnTimingField::FirstAcceptedAssistantRow => &mut marks.ttft_ms,
+        };
+        if slot.is_none() {
+            *slot = Some(self.elapsed_ms_at(observed_at));
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> TurnTimingMarks {
+        *self
+            .marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn observe_first_stream_start(&self) {
+        self.observe_first_stream_start_at(std::time::Instant::now());
+    }
+
+    pub(crate) fn observe_first_stream_start_at(&self, observed_at: std::time::Instant) {
+        let request_dispatched_at = self
+            .first_request_dispatch_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(request_dispatched_at) = request_dispatched_at {
+            self.observe_first_at(TurnTimingField::Request, request_dispatched_at);
+        }
+        self.observe_first_at(TurnTimingField::StreamStart, observed_at);
+    }
+
+    pub(crate) fn observe_first_content_frame(&self) {
+        self.observe_first(TurnTimingField::FirstContentFrame);
+    }
+
+    pub(crate) fn observe_first_content_frame_at(&self, observed_at: std::time::Instant) {
+        self.observe_first_at(TurnTimingField::FirstContentFrame, observed_at);
+    }
+
+    pub(crate) fn observe_first_accepted_assistant_row(&self) {
+        self.observe_first(TurnTimingField::FirstAcceptedAssistantRow);
+    }
+
+    pub(crate) fn observe_first_request_dispatch(&self) {
+        let mut dispatched_at = self
+            .first_request_dispatch_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if dispatched_at.is_none() {
+            *dispatched_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Discard a physical request that returned through a non-streaming path
+    /// without producing MessageStart. Its candidate must not be attributed to
+    /// a later streamed request in the same external turn.
+    pub(crate) fn discard_unobserved_request_dispatch(&self) {
+        self.first_request_dispatch_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct TurnExecutionMetricsState {
+    active: Option<TurnExecutionMetrics>,
+    completed: Option<TurnExecutionMetrics>,
+    active_timing: Option<std::sync::Arc<TurnTimingCapture>>,
+}
+
+impl TurnExecutionMetricsState {
+    fn begin_turn(&mut self) {
+        self.active = Some(TurnExecutionMetrics::default());
+        self.completed = None;
+        self.active_timing = Some(std::sync::Arc::new(TurnTimingCapture::new()));
+    }
+
+    fn active_timing_capture(&self) -> Option<std::sync::Arc<TurnTimingCapture>> {
+        self.active_timing.clone()
+    }
+
+    fn complete_turn(&mut self) {
+        let timing = self.active_timing.take();
+        self.completed = self.active.take().map(|mut metrics| {
+            if let Some(marks) = timing.map(|capture| capture.snapshot()) {
+                metrics.time_to_request_ms = marks.time_to_request_ms;
+                metrics.ttft_stream_ms = marks.ttft_stream_ms;
+                metrics.first_content_frame_ms = marks.first_content_frame_ms;
+                metrics.ttft_ms = marks.ttft_ms;
+            }
+            metrics
+        });
+    }
+}
+
+impl ConversationOrchestrator {
+    /// Read the last completed external turn after its execution and cleanup.
+    /// Returns None while a new external turn owns execution.
+    pub fn completed_turn_metrics(&self) -> Option<TurnExecutionMetrics> {
+        self.prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .completed
+            .clone()
+    }
+
+    pub(super) fn begin_turn_metrics(&self) {
+        let mut state = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.begin_turn();
+    }
+
+    pub(crate) fn active_turn_timing_capture(&self) -> Option<std::sync::Arc<TurnTimingCapture>> {
+        self.prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_timing_capture()
+    }
+
+    pub(crate) fn turn_request_dispatch_observer(
+        &self,
+    ) -> Option<llm_runtime::RequestDispatchObserver> {
+        let capture = self.active_turn_timing_capture()?;
+        Some(llm_runtime::RequestDispatchObserver::new(move || {
+            capture.observe_first_request_dispatch();
+        }))
+    }
+
+    pub(super) fn note_turn_count(&self, num_turns: u32) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.num_turns = num_turns;
+        }
+    }
+
+    pub(super) fn note_turn_terminal_reason(&self, stop_reason: &str) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.stop_reason = Some(stop_reason.to_owned());
+        }
+    }
+
+    pub(crate) fn note_turn_api_error_stop_reason(&self, reason: Option<&str>) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.api_error_stop_reason = reason.map(str::to_owned);
+            if reason.is_none() {
+                active.api_error_status = None;
+            }
+        }
+    }
+
+    pub(crate) fn note_turn_api_error_status(&self, status: Option<u16>) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.api_error_status = status;
+        }
+    }
+
+    pub(super) fn complete_turn_metrics(&self) {
+        let mut state = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.complete_turn();
+    }
+
+    /// Record the same reason that reaches output, without inferring it from
+    /// the lossy external TurnOutcome enum or the latest history row.
+    pub(super) async fn emit_turn_terminal(
+        &self,
+        stop_reason: &str,
+        cost: &lingxi_core::host::CostSnapshot,
+    ) {
+        self.note_turn_terminal_reason(stop_reason);
+        self.output.emit_end_turn(stop_reason, cost).await;
+    }
+}
+
 pub(crate) struct PromptRuntime {
+    pub(crate) turn_execution_metrics: std::sync::Mutex<TurnExecutionMetricsState>,
     /// Frozen gitStatus probe + rendered attachment for this conversation.
     /// Claude documents gitStatus as a start-of-conversation snapshot that does
     /// not update, including after a worktree/session-cwd swap.
@@ -616,6 +905,7 @@ pub(crate) struct PromptRuntime {
 impl PromptRuntime {
     pub(crate) fn new() -> Self {
         Self {
+            turn_execution_metrics: std::sync::Mutex::new(TurnExecutionMetricsState::default()),
             git_status_snapshot: Mutex::new(None),
             mod_prompt_sections: Mutex::new(ModPromptSectionCache::default()),
             mod_prompt_context: Mutex::new(ModPromptContextCache::default()),
@@ -857,7 +1147,7 @@ mod prompt_runtime_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(crate::prompt::memory_update::PendingMemoryUpdate {
                 source: crate::prompt::memory_update::MemoryUpdateSource::Dream,
-                summary: "old memory update".to_string(),
+                summary: "old memory update".into(),
             });
         runtime
             .tool_search_reminder_marks
@@ -1890,6 +2180,87 @@ mod session_switch_supervisor_tests {
             .expect("drain task");
         assert!(errors.is_empty());
         assert!(supervisor.claim().is_err(), "shutdown closes admission");
+    }
+}
+
+#[cfg(test)]
+mod turn_timing_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn timing_marks_share_turn_origin_and_keep_first_observation() {
+        let mut state = TurnExecutionMetricsState::default();
+        state.begin_turn();
+        let capture = state.active_timing_capture().expect("active turn capture");
+
+        std::thread::sleep(Duration::from_millis(3));
+        capture.observe_first_request_dispatch();
+        assert_eq!(capture.snapshot().time_to_request_ms, None);
+        std::thread::sleep(Duration::from_millis(3));
+        capture.observe_first_stream_start();
+        let first_request = capture.snapshot().time_to_request_ms.expect("request mark");
+        std::thread::sleep(Duration::from_millis(3));
+        capture.observe_first_content_frame();
+        std::thread::sleep(Duration::from_millis(3));
+        capture.observe_first_accepted_assistant_row();
+
+        // A retry/late transport callback must not replace the first physical request.
+        std::thread::sleep(Duration::from_millis(2));
+        capture.observe_first_request_dispatch();
+        state.complete_turn();
+
+        let completed = state.completed.clone().expect("completed turn metrics");
+        let request = completed.time_to_request_ms.expect("request mark");
+        let stream = completed.ttft_stream_ms.expect("stream mark");
+        let content = completed
+            .first_content_frame_ms
+            .expect("content frame mark");
+        let ttft = completed.ttft_ms.expect("completed content mark");
+        assert_eq!(
+            request, first_request,
+            "first request observation is latched"
+        );
+        assert!(request < stream && stream < content && content < ttft);
+        assert!(state.active_timing_capture().is_none());
+    }
+
+    #[test]
+    fn non_stream_response_does_not_publish_dispatch_or_frame_marks() {
+        let capture = TurnTimingCapture::new();
+        capture.observe_first_request_dispatch();
+        capture.discard_unobserved_request_dispatch();
+        capture.observe_first_accepted_assistant_row();
+
+        let marks = capture.snapshot();
+        assert_eq!(marks.time_to_request_ms, None);
+        assert_eq!(marks.ttft_stream_ms, None);
+        assert_eq!(marks.first_content_frame_ms, None);
+        assert!(marks.ttft_ms.is_some());
+    }
+
+    #[test]
+    fn late_callback_from_completed_turn_cannot_change_the_next_turn() {
+        let mut state = TurnExecutionMetricsState::default();
+        state.begin_turn();
+        let previous = state.active_timing_capture().expect("first capture");
+        previous.observe_first_request_dispatch();
+        state.complete_turn();
+        let previous_metrics = state.completed.clone().expect("first metrics");
+
+        state.begin_turn();
+        let current = state.active_timing_capture().expect("second capture");
+        current.observe_first_stream_start();
+        previous.observe_first_stream_start();
+        previous.observe_first_content_frame();
+        state.complete_turn();
+
+        let current_metrics = state.completed.expect("second metrics");
+        assert_eq!(current_metrics.time_to_request_ms, None);
+        assert!(current_metrics.ttft_stream_ms.is_some());
+        assert_eq!(current_metrics.first_content_frame_ms, None);
+        assert_eq!(previous_metrics.ttft_stream_ms, None);
+        assert_eq!(previous_metrics.first_content_frame_ms, None);
     }
 }
 

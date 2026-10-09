@@ -35,6 +35,7 @@ pub mod persistence;
 pub mod pricing;
 pub mod prompt_cache_ledger;
 pub mod render;
+pub mod safety;
 pub mod summary;
 pub mod token_usage_replay;
 pub mod tracker;

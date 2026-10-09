@@ -591,7 +591,7 @@ mod tests {
         async fn send_message(
             &self,
             _task_id: &str,
-            _message: String,
+            _message: Utf16JsonProjection,
             _ctx: TaskContext,
         ) -> Result<(), TaskError> {
             if self.terminate_on_message {
@@ -781,10 +781,10 @@ mod tests {
         async fn invoke(
             &self,
             _name: &str,
-            _input: serde_json::Value,
+            _input: Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-        ) -> Result<serde_json::Value, ToolInvokerError> {
-            Ok(json!(null))
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+            Ok(Utf16JsonProjection::parse("null").unwrap())
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -914,7 +914,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingToolInvoker {
-        inputs: Arc<StdMutex<Vec<serde_json::Value>>>,
+        inputs: Arc<StdMutex<Vec<Utf16JsonProjection>>>,
     }
 
     #[async_trait]
@@ -922,9 +922,9 @@ mod tests {
         async fn invoke(
             &self,
             _name: &str,
-            input: serde_json::Value,
+            input: Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-        ) -> Result<serde_json::Value, ToolInvokerError> {
+        ) -> Result<Utf16JsonProjection, ToolInvokerError> {
             self.inputs.lock().unwrap().push(input.clone());
             Ok(input)
         }
@@ -944,7 +944,7 @@ mod tests {
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
-            _input: &serde_json::Value,
+            _input: &Utf16JsonProjection,
         ) {
         }
 
@@ -952,8 +952,8 @@ mod tests {
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
-            _model_text: &str,
-            _result: &serde_json::Value,
+            _model_text: &Utf16JsonProjection,
+            _result: &Utf16JsonProjection,
         ) {
         }
 
@@ -963,6 +963,7 @@ mod tests {
 
     fn request(name: Option<&str>) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            agent_spawn_token: None,
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
             parent_native_query_depth: None,
@@ -1180,9 +1181,14 @@ mod tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("rewrite", dir.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "rewrite",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::from_serde_value(&json!({})).unwrap(),
+        )
+        .await
+        .unwrap();
         let mut hooks = HookRegistry::new();
         hooks.set_mod_host(host.clone());
         let runtime: Arc<dyn RuntimeSpawner> = Arc::new(MockRuntimeSpawner::default());
@@ -1208,11 +1214,12 @@ mod tests {
         };
         let admission = spawner
             .begin_agent_spawn(
-                json!({
+                Utf16JsonProjection::from_serde_value(&json!({
                     "tool_use_id":"tool-1", "prompt":"read", "description":"read docs",
                     "subagentType":"Explore", "provider":{"plugin":"engine","tier":"core"},
                     "parentModel":"claude-sonnet", "background":false, "fork":false
-                }),
+                }))
+                .unwrap(),
                 provenance,
             )
             .await
@@ -1220,18 +1227,35 @@ mod tests {
         let AgentSpawnAdmission::Forwarded { input, start } = admission else {
             panic!("the loaded Mod must forward the Agent tool's spawn");
         };
-        assert_eq!(input["prompt"], "read origin-ok");
+        assert_eq!(
+            input
+                .get_property("prompt")
+                .and_then(|value| value.as_str()),
+            Some("read origin-ok")
+        );
         let child = AgentId::new();
         start.started(child, "claude-sonnet".into());
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let result = host
-                    .dispatch("tool.call", json!({"tool":"Read"}), |_| async {
-                        Ok(json!({"fallback":true}))
-                    })
+                    .dispatch(
+                        "tool.call",
+                        Utf16JsonProjection::from_serde_value(&json!({"tool":"Read"})).unwrap(),
+                        |_| async {
+                            Ok(Some(
+                                Utf16JsonProjection::from_serde_value(&json!({"fallback":true}))
+                                    .unwrap(),
+                            ))
+                        },
+                    )
                     .await
                     .unwrap();
-                if result["result"]["started"] == child.as_uuid().to_string() {
+                if result
+                    .get_property("result")
+                    .and_then(|value| value.get_property("started"))
+                    .and_then(|value| value.as_str())
+                    == Some(child.as_uuid().to_string().as_str())
+                {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -1264,9 +1288,14 @@ export function register(on) {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("worktree", root.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "worktree",
+            root.path(),
+            &module,
+            Utf16JsonProjection::from_serde_value(&json!({})).unwrap(),
+        )
+        .await
+        .unwrap();
         let session = Arc::new(WorktreeModSession {
             cwd: main_cwd,
             logs: StdMutex::new(Vec::new()),
@@ -1368,7 +1397,8 @@ export function register(on) {
         invoker
             .invoke_detailed(
                 "Read",
-                json!({"file_path":"original.txt"}),
+                Utf16JsonProjection::from_serde_value(&json!({"file_path":"original.txt"}))
+                    .unwrap(),
                 invocation,
                 None,
             )
@@ -1377,7 +1407,10 @@ export function register(on) {
 
         assert_eq!(
             core_inputs.lock().unwrap().as_slice(),
-            &[json!({"file_path":worktree_cwd.join("read.txt")})],
+            &[Utf16JsonProjection::from_serde_value(
+                &json!({"file_path":worktree_cwd.join("read.txt")}),
+            )
+            .unwrap()],
             "the teammate's Mod sees and rewrites against its inherited worktree"
         );
         let logs = session.logs.lock().unwrap();

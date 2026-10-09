@@ -1,0 +1,1 @@
+{"id":"msg_native_http404-nonstream-fallback_nonstream","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[{"type":"text","text":"NATIVE_404_NONSTREAM_FALLBACK_SUCCESS"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}

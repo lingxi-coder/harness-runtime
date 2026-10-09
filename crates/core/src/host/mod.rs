@@ -92,6 +92,7 @@ pub const CLAUDE_CODE_VERSION: &str = "2.1.267";
 
 pub mod agent_name_registry;
 pub mod agent_processes;
+pub mod agent_statistics;
 pub mod agent_view;
 pub mod android_ui;
 pub mod audio;
@@ -141,6 +142,7 @@ pub mod mobile_runtime_environment;
 pub mod mod_agent_list;
 pub mod model_attempt;
 pub mod model_capabilities;
+pub mod model_safety;
 pub mod notification;
 pub mod observer_pairing;
 pub mod orchestrator;

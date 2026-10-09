@@ -13,21 +13,21 @@
 //! 3. A `PostToolUseFailure` hook that itself returns an error outcome does NOT
 //!    break the turn (the loop still reaches `end_turn`).
 use async_trait::async_trait;
-use hooks::HookExecutorImpl;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType};
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookOutcome, HookResponse, HookResult};
+use hooks::HookExecutorImpl;
 use lingxi_core::host::{HttpError, HttpTransport, RuntimeError, RuntimeSpawner};
 use lingxi_core::types::{
-    ConversationMessage, HookId, HttpRequest, HttpResponse, ToolUseId,
-    utf16_json::Utf16JsonProjection,
+    utf16_json::Utf16JsonProjection, ConversationMessage, HookId, HttpRequest, HttpResponse,
+    ToolUseId,
 };
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-    mock_message_response,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, ConversationOutcome, OrchestratorConfig};
 use permission::result::PermissionMetadata;
@@ -40,9 +40,17 @@ use tokio::sync::RwLock;
 use tool_api::progress::ToolProgressSender;
 use tool_api::registry::ToolRegistry;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
-    ValidationError,
+    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
+
+fn generated_schema() -> &'static Utf16JsonProjection {
+    static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> = once_cell::sync::Lazy::new(|| {
+        Utf16JsonProjection::from_serde_value(&json!({ "type": "object" }))
+            .expect("generated tool schema is valid")
+    });
+    &SCHEMA
+}
 
 // ---- unused HTTP / Runtime stubs (Builtin hooks never touch them) ----
 struct UnusedHttp;
@@ -86,10 +94,15 @@ impl Tool for AlwaysOkTool {
     fn name(&self) -> &str {
         "AlwaysOk"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({"type": "object"}));
-        &SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        generated_schema()
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -97,22 +110,22 @@ impl Tool for AlwaysOkTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -124,7 +137,11 @@ impl Tool for AlwaysOkTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "ok".into()
     }
     async fn prompt(
@@ -135,18 +152,14 @@ impl Tool for AlwaysOkTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
-        Ok(ToolCallResult {
-            data: json!({ "content": "all good" }),
-            model_content: None,
-            new_messages: vec![],
-            context_modifier: None,
-            is_error: false,
-            mcp_meta: None,
-        })
+        Ok(ToolCallResult::from_data(
+            Utf16JsonProjection::from_serde_value(&json!({ "content": "all good" }))
+                .expect("generated tool result is valid"),
+        ))
     }
 }
 
@@ -157,10 +170,15 @@ impl Tool for AlwaysFailTool {
     fn name(&self) -> &str {
         "AlwaysFail"
     }
-    fn input_schema(&self) -> &serde_json::Value {
-        static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
-            once_cell::sync::Lazy::new(|| json!({"type": "object"}));
-        &SCHEMA
+    fn input_schema(&self) -> &Utf16JsonProjection {
+        generated_schema()
+    }
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -168,22 +186,22 @@ impl Tool for AlwaysFailTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -195,7 +213,11 @@ impl Tool for AlwaysFailTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         "fail".into()
     }
     async fn prompt(
@@ -206,7 +228,7 @@ impl Tool for AlwaysFailTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -225,7 +247,7 @@ enum Seen {
     },
     PostFailure {
         tool_name: String,
-        tool_input: serde_json::Value,
+        tool_input: Utf16JsonProjection,
         error: Utf16JsonProjection,
         tool_use_id: String,
     },
@@ -268,8 +290,8 @@ impl BuiltinHookHandler for RecordingHandler {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -287,7 +309,7 @@ impl BuiltinHookHandler for FailingFailureHook {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Error,
-            stdout: String::new(),
+            stdout: String::new().into(),
             stderr: "the failure hook itself blew up".into(),
             exit_code: Some(1),
             response: None,
@@ -313,8 +335,8 @@ impl BuiltinHookHandler for FailureContextHook {
             });
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response,
         }
@@ -339,6 +361,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -384,7 +407,7 @@ fn two_turn_api(tool_use_id: ToolUseId, tool_name: &str) -> Arc<MockApiClient> {
             vec![LlmContentBlock::ToolCall {
                 id: tool_use_id.to_string(),
                 name: tool_name.into(),
-                input: json!({}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
             }],
             Some("tool_use"),
         ),
@@ -430,7 +453,7 @@ async fn errored_tool_fires_post_tool_use_failure_not_post_tool_use() {
             // The dispatched tool input is now carried on the failure payload
             // (the same `effective_input` the success arm threads). The API
             // turn emitted `input: json!({})`, so the dispatched input is `{}`.
-            assert_eq!(tool_input, &json!({}));
+            assert_eq!(tool_input, &Utf16JsonProjection::parse("{}").unwrap());
             // The raw tool error string is carried verbatim (NOT the
             // "Error: "-prefixed model-facing content).
             assert_eq!(

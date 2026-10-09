@@ -1647,7 +1647,14 @@ mod tests {
         let seen = hosted.seen.lock().unwrap();
         assert_eq!(seen[0].model, "live-model");
         assert_eq!(seen[0].profile.as_deref(), Some("live-profile"));
-        assert_eq!(seen[0].allowed_domains, vec!["rust-lang.org"]);
+        assert_eq!(
+            seen[0]
+                .allowed_domains
+                .iter()
+                .map(source_text)
+                .collect::<Vec<_>>(),
+            vec!["rust-lang.org".to_string()]
+        );
         assert!(rx.try_recv().is_ok());
         assert!(source_text(&result.model_content.unwrap()).contains("https://rust-lang.org"));
         assert_eq!(result.data.number_at("/searchCount"), Some(1.0));

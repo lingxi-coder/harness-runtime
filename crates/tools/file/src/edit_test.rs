@@ -281,7 +281,11 @@ mod tests {
         assert_eq!(v.string_at("/file_path").as_deref(), Some("/p.txt"));
         assert_eq!(v.string_at("/old_string").as_deref(), Some("a"));
         assert_eq!(v.string_at("/new_string").as_deref(), Some("b"));
-        assert_eq!(v.bool_at("/replace_all"), Some(true));
+        assert_eq!(
+            v.at_pointer("/replace_all")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -294,7 +298,11 @@ mod tests {
         normalize_edit_aliases(&mut v);
         assert_eq!(v.string_at("/file_path").as_deref(), Some("/canon.txt")); // explicit canonical wins
         assert_eq!(v.string_at("/old_string").as_deref(), Some("x"));
-        assert_eq!(v.bool_at("/replace_all"), Some(true)); // replace_name: true → replace_all
+        assert_eq!(
+            v.at_pointer("/replace_all")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        ); // replace_name: true → replace_all
     }
 
     #[tokio::test]
@@ -1628,16 +1636,15 @@ that bypasses Perforce tracking."
         // first bullet). v2.1.183 dropped the trailing space the older builds
         // had after "reading the file." — the pre-read bullet now ends exactly
         // at the period with no trailing space (binary `wBp()`/`RBp()`).
-        let long = tool
+        let long_prompt = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
                 model_profile: None,
                 ..Default::default()
             })
-            .await
-            .string_at("")
-            .expect("prompt is a JSON string");
+            .await;
+        let long = long_prompt.string_at("").expect("prompt is a JSON string");
         assert!(long.starts_with(
             "Performs exact string replacements in files.\n\nUsage:\n- You must use your `Read` tool"
         ));
@@ -1665,16 +1672,15 @@ that bypasses Perforce tracking."
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileEditTool::new(ctx);
         // model:claude-opus-4-8 ⇒ Dh=true ⇒ SHORT prompt (byte-anchor).
-        let p = tool
+        let prompt = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
                 ..Default::default()
             })
-            .await
-            .string_at("")
-            .expect("prompt is a JSON string");
+            .await;
+        let p = prompt.string_at("").expect("prompt is a JSON string");
         assert_eq!(p, EDIT_PROMPT_SHORT);
         assert!(p.starts_with("Performs exact string replacement in a file.\n\n- You must Read the file in this conversation before editing, or the call will fail."));
         // Line-prefix slot resolves to "line number + tab" (N$e() default false).

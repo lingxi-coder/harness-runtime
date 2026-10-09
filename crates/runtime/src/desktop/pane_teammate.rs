@@ -848,7 +848,10 @@ mod tests {
             },
             WorkerToParent::SendMessage {
                 id: 7,
-                input: serde_json::json!({"to":"main","message":"early"}),
+                input: Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"to":"main","message":"early"}),
+                )
+                .unwrap(),
             },
             WorkerToParent::Output {
                 text: "first output".into(),
@@ -867,10 +870,10 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(early.pop_front(), Some(WorkerToParent::SendMessage { id:7, input }) if input["message"] == "early")
+            matches!(early.pop_front(), Some(WorkerToParent::SendMessage { id:7, input }) if input.get_property("message").and_then(|value| value.as_str()) == Some("early"))
         );
         assert!(
-            matches!(early.pop_front(), Some(WorkerToParent::Output { text }) if text == "first output")
+            matches!(early.pop_front(), Some(WorkerToParent::Output { text }) if text.string_at("") == Some("first output"))
         );
         assert!(early.is_empty());
         assert!(
@@ -893,7 +896,7 @@ mod tests {
         );
         writer.write_all(b"ial\"}\n").await.unwrap();
         assert!(
-            matches!(reader.next_frame().await.unwrap(), Some(WorkerToParent::Output { text }) if text == "partial")
+            matches!(reader.next_frame().await.unwrap(), Some(WorkerToParent::Output { text }) if text.string_at("") == Some("partial"))
         );
     }
 
@@ -946,15 +949,15 @@ mod tests {
             &self,
             _: &lingxi_core::types::ToolUseId,
             _: &str,
-            _: &serde_json::Value,
+            _: &Utf16JsonProjection,
         ) {
         }
         async fn emit_tool_result(
             &self,
             _: &lingxi_core::types::ToolUseId,
             _: &str,
-            _: &str,
-            _: &serde_json::Value,
+            _: &Utf16JsonProjection,
+            _: &Utf16JsonProjection,
         ) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
@@ -971,15 +974,15 @@ mod tests {
             &self,
             _: &lingxi_core::types::ToolUseId,
             _: &str,
-            _: &serde_json::Value,
+            _: &Utf16JsonProjection,
         ) {
         }
         async fn emit_tool_result(
             &self,
             _: &lingxi_core::types::ToolUseId,
             _: &str,
-            _: &str,
-            _: &serde_json::Value,
+            _: &Utf16JsonProjection,
+            _: &Utf16JsonProjection,
         ) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
@@ -1129,7 +1132,10 @@ mod tests {
                     },
                     WorkerToParent::SendMessage {
                         id: 7,
-                        input: serde_json::json!({"to":"main","message":"early RPC"}),
+                        input: Utf16JsonProjection::from_serde_value(
+                            &serde_json::json!({"to":"main","message":"early RPC"}),
+                        )
+                        .unwrap(),
                     },
                     WorkerToParent::Ready {
                         task_id: "child-task".into(),
@@ -1816,9 +1822,12 @@ mod tests {
         let (progress, _events) = tool_api::progress::progress_channel();
         let error = tool
             .call(
-                serde_json::json!({"to":"team-lead", "message":{
-                    "type":"shutdown_response", "request_id":"approved-stop", "approve":true
-                }}),
+                Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"to":"team-lead", "message":{
+                        "type":"shutdown_response", "request_id":"approved-stop", "approve":true
+                    }}),
+                )
+                .unwrap(),
                 context,
                 progress,
             )
@@ -1848,7 +1857,10 @@ mod tests {
         let approval = mailbox.drain();
         assert_eq!(approval.len(), 1);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&approval[0].content).unwrap()["type"],
+            serde_json::from_str::<serde_json::Value>(
+                &approval[0].content.to_json_string().unwrap()
+            )
+            .unwrap()["type"],
             "shutdown_approved"
         );
 
@@ -1893,7 +1905,10 @@ mod tests {
         let terminated = mailbox.drain();
         assert_eq!(terminated.len(), 1);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&terminated[0].content).unwrap()["type"],
+            serde_json::from_str::<serde_json::Value>(
+                &terminated[0].content.to_json_string().unwrap()
+            )
+            .unwrap()["type"],
             "teammate_terminated"
         );
 
@@ -1924,7 +1939,7 @@ mod tests {
         let error = PaneTeammateSpawner::write(
             &writer,
             ParentToWorker::Message {
-                text: "x".repeat(16 * 1024 * 1024),
+                text: "x".repeat(16 * 1024 * 1024).into(),
             },
         )
         .await
@@ -1965,7 +1980,7 @@ mod tests {
             PaneTeammateSpawner::write(
                 &writing,
                 ParentToWorker::Message {
-                    text: "x".repeat(16 * 1024 * 1024),
+                    text: "x".repeat(16 * 1024 * 1024).into(),
                 },
             )
             .await
@@ -2026,7 +2041,7 @@ mod tests {
                         spawn_request: None,
                         inheritance: None,
                     },
-                    String::new(),
+                    Utf16JsonProjection::from(""),
                 )
                 .await
                 .unwrap();

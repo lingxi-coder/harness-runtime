@@ -1,0 +1,66 @@
+{
+  "native-receipt.json": {
+    "bytes": 8851,
+    "sha256": "16e03b61539c5b75e1bbcc623240788f599c91d349fe90023bcbe9fe8704a3ff"
+  },
+  "native.stderr.raw": {
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "native.stdout.raw": {
+    "bytes": 1605,
+    "sha256": "f8a0a0d44fc992b5d96da9fe84f9e39c012262c9675f1ed38dbb0ffb4e6604a8"
+  },
+  "observations.md": {
+    "bytes": 1953,
+    "sha256": "71249e48660dfe2da0a87bfad50bc2a0921cd32e7caddd82443e862bd8f7b71a"
+  },
+  "request-01.messages.raw.json": {
+    "bytes": 13833,
+    "sha256": "89d235fb12fd3096c2c276ac3c582c9a4ec2fd6f0f00090e2532b16b08fbb028"
+  },
+  "request-01.raw.json": {
+    "bytes": 41368,
+    "sha256": "9d49de0662762f9fd278650d47dff681c9fa2e8401cf2114ee873f9a58087c38"
+  },
+  "request-01.system.raw.json": {
+    "bytes": 27099,
+    "sha256": "3de4adfb9f617262f67e1618dd3d07bf87b397f914a104366b2453573ac94925"
+  },
+  "request-02.messages.raw.json": {
+    "bytes": 1240,
+    "sha256": "e7a84d03364987a22d9640737733d1ab11b613020a8d16bbb3487e600122154f"
+  },
+  "request-02.raw.json": {
+    "bytes": 3573,
+    "sha256": "7bbf1d7d13f797b4881874f0945d4a24ecc65caa4841add08150094517f9a50a"
+  },
+  "request-02.system.raw.json": {
+    "bytes": 1599,
+    "sha256": "82c6d3c7a411e4e0f576ef37c95e7769cf2691d4b4af610f189d7a6c25897990"
+  },
+  "request-03.messages.raw.json": {
+    "bytes": 1479,
+    "sha256": "f3090bb6fe2e74a815bb32f9ecbcc6b1bcfa96c3c466002937b110bc3d34d8f1"
+  },
+  "request-03.raw.json": {
+    "bytes": 3812,
+    "sha256": "480c9cedf60194d4a449512a55ac772c4b599ac667c81db13722d170bf91e5ee"
+  },
+  "request-03.system.raw.json": {
+    "bytes": 1599,
+    "sha256": "82c6d3c7a411e4e0f576ef37c95e7769cf2691d4b4af610f189d7a6c25897990"
+  },
+  "response-01.sse.raw": {
+    "bytes": 797,
+    "sha256": "f8c527924bd1bd98a29f9b9660563116843d3a9a0877c5c31d17d8e817f6e4c6"
+  },
+  "response-02.sse.raw": {
+    "bytes": 770,
+    "sha256": "fb964021f4633d90c74e7f55502517d53d25f1c9d2598839aadc5110439e0895"
+  },
+  "response-03.sse.raw": {
+    "bytes": 770,
+    "sha256": "fb964021f4633d90c74e7f55502517d53d25f1c9d2598839aadc5110439e0895"
+  }
+}

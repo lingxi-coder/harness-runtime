@@ -1,8 +1,9 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
+use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 use lingxi_core::types::{ContentBlock, DocumentSource, ImageSource, MessageId, ToolUseId};
 use platform_posix::fs::PosixFileSystem;
 use session::jsonl::schema::JsonlMessage;
@@ -15,6 +16,10 @@ fn read_rows(path: &std::path::Path) -> Vec<JsonlMessage> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).expect("decode transcript row"))
         .collect()
+}
+
+fn generated_source(value: &serde_json::Value) -> Source {
+    Source::from_serde_value(value).expect("generated test JSON is valid")
 }
 
 async fn logged_inputs(output: &MockOutputStream) -> Vec<serde_json::Value> {
@@ -45,9 +50,14 @@ async fn build_orchestrator(
     let host = hooks::mods::ModHost::start(None)
         .await
         .expect("start Mod host");
-    host.load("session-append", root, &module, serde_json::json!({}))
-        .await
-        .expect("load session.append Mod");
+    host.load(
+        "session-append",
+        root,
+        &module,
+        generated_source(&serde_json::json!({})),
+    )
+    .await
+    .expect("load session.append Mod");
     assert!(host.has_event("session.append"));
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
@@ -142,7 +152,7 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
             ContentBlock::ToolUse {
                 id: tool_use_id.clone(),
                 name: "Read".into(),
-                input: serde_json::json!({"file_path":"source.txt"}),
+                input: generated_source(&serde_json::json!({"file_path":"source.txt"})),
                 provider_id: Some("toolu_source".into()),
             },
             ContentBlock::Text {
@@ -176,7 +186,7 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
     let expected_tool = ContentBlock::ToolUse {
         id: tool_use_id.clone(),
         name: "Read".into(),
-        input: serde_json::json!({"file_path":"source.txt"}),
+        input: generated_source(&serde_json::json!({"file_path":"source.txt"})),
         provider_id: Some("toolu_source".into()),
     };
     let expected = vec![
@@ -205,24 +215,40 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
     let rows = read_rows(&path);
     assert_eq!(rows.len(), 1);
     assert_eq!(inputs[0]["uuid"], rows[0].uuid);
-    let disk_content = rows[0].message["content"]
-        .as_array()
-        .expect("assistant content array");
-    assert_eq!(disk_content[0]["text"], "merged-edited");
-    assert_eq!(disk_content[1]["text"], "merged-added");
-    assert_eq!(disk_content[2], serde_json::to_value(image).unwrap());
-    assert_eq!(disk_content[3], serde_json::to_value(document).unwrap());
-    assert_eq!(disk_content[4]["id"], tool_use_id.to_string());
-    assert_eq!(disk_content[4]["provider_id"], "toolu_source");
-    assert_eq!(disk_content[4]["name"], "Read");
     assert_eq!(
-        disk_content[4]["input"],
-        serde_json::json!({"file_path":"source.txt"})
+        rows[0].message.string_at("/content/0/text"),
+        Some("merged-edited")
+    );
+    assert_eq!(
+        rows[0].message.string_at("/content/1/text"),
+        Some("merged-added")
+    );
+    assert_eq!(
+        rows[0].message.subprojection("/content/2").unwrap(),
+        generated_source(&serde_json::to_value(image).unwrap())
+    );
+    assert_eq!(
+        rows[0].message.subprojection("/content/3").unwrap(),
+        generated_source(&serde_json::to_value(document).unwrap())
+    );
+    assert_eq!(
+        rows[0].message.string_at("/content/4/id"),
+        Some(tool_use_id.as_str())
+    );
+    assert_eq!(
+        rows[0].message.string_at("/content/4/provider_id"),
+        Some("toolu_source")
+    );
+    assert_eq!(rows[0].message.string_at("/content/4/name"), Some("Read"));
+    assert_eq!(
+        rows[0].message.subprojection("/content/4/input").unwrap(),
+        generated_source(&serde_json::json!({"file_path":"source.txt"}))
     );
     assert!(
-        !disk_content
-            .iter()
-            .any(|block| block["text"] == "remove this text")
+        (0..rows[0].message.array_len("/content").unwrap()).all(|index| rows[0]
+            .message
+            .string_at(&format!("/content/{index}/text"))
+            != Some("remove this text"))
     );
 
     let result = ConversationMessage::User {
@@ -237,6 +263,10 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     orchestrator
         .session
@@ -254,12 +284,29 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
     assert_eq!(inputs[1]["origin"]["kind"], "tool");
     assert_eq!(inputs[1]["origin"]["tool"], "Read");
     assert_eq!(inputs[1]["uuid"], rows[1].uuid);
-    let persisted_result = &rows[1].message["content"][0];
-    assert_eq!(persisted_result["type"], "tool_result");
-    assert_eq!(persisted_result["tool_use_id"], tool_use_id.to_string());
-    assert_eq!(persisted_result["provider_tool_use_id"], "toolu_source");
-    assert_eq!(persisted_result["content"], "rewritten tool output");
-    assert_eq!(persisted_result["is_error"], true);
+    assert_eq!(
+        rows[1].message.string_at("/content/0/type"),
+        Some("tool_result")
+    );
+    assert_eq!(
+        rows[1].message.string_at("/content/0/tool_use_id"),
+        Some(tool_use_id.as_str())
+    );
+    assert_eq!(
+        rows[1].message.string_at("/content/0/provider_tool_use_id"),
+        Some("toolu_source")
+    );
+    assert_eq!(
+        rows[1].message.string_at("/content/0/content"),
+        Some("rewritten tool output")
+    );
+    assert_eq!(
+        rows[1]
+            .message
+            .at_pointer("/content/0/is_error")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
     let history = orchestrator.session.lock().await.history.clone();
     let ConversationMessage::User {
         content: history_result_content,
@@ -279,7 +326,7 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
         panic!("tool result row remains a tool result");
     };
     assert_eq!(history_tool_id, &tool_use_id);
-    assert_eq!(content, "rewritten tool output");
+    assert_eq!(content.string_at(""), Some("rewritten tool output"));
     assert_eq!(*is_error, Some(true));
     assert_eq!(provider_tool_use_id.as_deref(), Some("toolu_source"));
 
@@ -296,7 +343,10 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
     let inputs = logged_inputs(&output).await;
     assert_eq!(inputs.len(), 3);
     assert_eq!(inputs[2]["uuid"], rows[2].uuid);
-    assert_eq!(rows[2].message["content"][0]["text"], "throw-original");
+    assert_eq!(
+        rows[2].message.string_at("/content/0/text"),
+        Some("throw-original")
+    );
     let history = orchestrator.session.lock().await.history.clone();
     assert_eq!(history[2], throwing);
 }
@@ -317,7 +367,7 @@ async fn per_block_session_append_updates_merged_history_and_jsonl_rows() {
             ContentBlock::ToolUse {
                 id: tool_use_id.clone(),
                 name: "Bash".into(),
-                input: serde_json::json!({"command":"pwd"}),
+                input: generated_source(&serde_json::json!({"command":"pwd"})),
                 provider_id: Some("toolu_streamed".into()),
             },
         ],
@@ -351,7 +401,7 @@ async fn per_block_session_append_updates_merged_history_and_jsonl_rows() {
         ContentBlock::ToolUse {
             id: tool_use_id.clone(),
             name: "Bash".into(),
-            input: serde_json::json!({"command":"pwd"}),
+            input: generated_source(&serde_json::json!({"command":"pwd"})),
             provider_id: Some("toolu_streamed".into()),
         }
     );
@@ -362,16 +412,22 @@ async fn per_block_session_append_updates_merged_history_and_jsonl_rows() {
     assert_eq!(inputs.len(), 2);
     assert_eq!(inputs[0]["uuid"], rows[0].uuid);
     assert_eq!(inputs[1]["uuid"], rows[1].uuid);
-    assert_eq!(rows[0].message["content"][0]["text"], "streamed-edited");
-    assert_eq!(rows[1].message["content"][0]["id"], tool_use_id.to_string());
     assert_eq!(
-        rows[1].message["content"][0]["provider_id"],
-        "toolu_streamed"
+        rows[0].message.string_at("/content/0/text"),
+        Some("streamed-edited")
     );
-    assert_eq!(rows[1].message["content"][0]["name"], "Bash");
     assert_eq!(
-        rows[1].message["content"][0]["input"],
-        serde_json::json!({"command":"pwd"})
+        rows[1].message.string_at("/content/0/id"),
+        Some(tool_use_id.as_str())
+    );
+    assert_eq!(
+        rows[1].message.string_at("/content/0/provider_id"),
+        Some("toolu_streamed")
+    );
+    assert_eq!(rows[1].message.string_at("/content/0/name"), Some("Bash"));
+    assert_eq!(
+        rows[1].message.subprojection("/content/0/input").unwrap(),
+        generated_source(&serde_json::json!({"command":"pwd"}))
     );
 }
 
@@ -398,13 +454,13 @@ async fn duplicate_tool_use_anchors_replay_each_accepted_text_overlay() {
             ContentBlock::ToolUse {
                 id: duplicate_id.clone(),
                 name: "Bash".into(),
-                input: serde_json::json!({"command":"first"}),
+                input: generated_source(&serde_json::json!({"command":"first"})),
                 provider_id: None,
             },
             ContentBlock::ToolUse {
                 id: duplicate_id.clone(),
                 name: "Read".into(),
-                input: serde_json::json!({"file":"second"}),
+                input: generated_source(&serde_json::json!({"file":"second"})),
                 provider_id: None,
             },
         ],
@@ -429,7 +485,7 @@ async fn duplicate_tool_use_anchors_replay_each_accepted_text_overlay() {
         ContentBlock::ToolUse {
             id: duplicate_id.clone(),
             name: "Bash".into(),
-            input: serde_json::json!({"command":"first"}),
+            input: generated_source(&serde_json::json!({"command":"first"})),
             provider_id: None,
         },
         ContentBlock::Text {
@@ -439,7 +495,7 @@ async fn duplicate_tool_use_anchors_replay_each_accepted_text_overlay() {
         ContentBlock::ToolUse {
             id: duplicate_id,
             name: "Read".into(),
-            input: serde_json::json!({"file":"second"}),
+            input: generated_source(&serde_json::json!({"file":"second"})),
             provider_id: None,
         },
         ContentBlock::Text {
@@ -458,15 +514,12 @@ async fn duplicate_tool_use_anchors_replay_each_accepted_text_overlay() {
 
     let rows = read_rows(&path);
     assert_eq!(rows.len(), 1);
-    let stored = rows[0].message["content"]
-        .as_array()
-        .expect("persisted content array");
-    assert_eq!(stored.len(), 5);
-    assert_eq!(stored[0]["text"], "prefix");
-    assert_eq!(stored[1]["name"], "Bash");
-    assert_eq!(stored[2]["text"], "suffix");
-    assert_eq!(stored[3]["name"], "Read");
-    assert_eq!(stored[4]["text"], "suffix");
+    assert_eq!(rows[0].message.array_len("/content"), Some(5));
+    assert_eq!(rows[0].message.string_at("/content/0/text"), Some("prefix"));
+    assert_eq!(rows[0].message.string_at("/content/1/name"), Some("Bash"));
+    assert_eq!(rows[0].message.string_at("/content/2/text"), Some("suffix"));
+    assert_eq!(rows[0].message.string_at("/content/3/name"), Some("Read"));
+    assert_eq!(rows[0].message.string_at("/content/4/text"), Some("suffix"));
     assert_eq!(logged_inputs(&output).await.len(), 1);
 }
 
@@ -487,7 +540,7 @@ async fn compact_boundary_session_append_keeps_metadata_and_rewrites_disk_and_hi
     orchestrator
         .append_external_compact_boundary(
             marker,
-            serde_json::json!({"trigger":"manual","preTokens":128}),
+            generated_source(&serde_json::json!({"trigger":"manual","preTokens":128})),
         )
         .await;
 
@@ -501,7 +554,7 @@ async fn compact_boundary_session_append_keeps_metadata_and_rewrites_disk_and_hi
     else {
         panic!("compact boundary remains a system message");
     };
-    assert_eq!(content, "rewritten compact boundary");
+    assert_eq!(content.string_at(""), Some("rewritten compact boundary"));
     assert_eq!(subtype.as_deref(), Some("compact_boundary"));
     assert_eq!(compact_metadata.as_ref().unwrap().pre_tokens, 128);
 
@@ -512,8 +565,20 @@ async fn compact_boundary_session_append_keeps_metadata_and_rewrites_disk_and_hi
     assert_eq!(inputs[0]["message"]["name"], "compact_boundary");
     assert_eq!(inputs[0]["door"], "compaction");
     assert_eq!(inputs[0]["uuid"], rows[0].uuid);
-    assert_eq!(rows[0].extra["content"], "rewritten compact boundary");
-    assert_eq!(rows[0].extra["subtype"], "compact_boundary");
-    assert_eq!(rows[0].extra["compactMetadata"]["trigger"], "manual");
-    assert_eq!(rows[0].extra["compactMetadata"]["preTokens"], 128);
+    assert_eq!(
+        rows[0].extra.string_at("/content"),
+        Some("rewritten compact boundary")
+    );
+    assert_eq!(
+        rows[0].extra.string_at("/subtype"),
+        Some("compact_boundary")
+    );
+    assert_eq!(
+        rows[0].extra.string_at("/compactMetadata/trigger"),
+        Some("manual")
+    );
+    assert_eq!(
+        rows[0].extra.number_at("/compactMetadata/preTokens"),
+        Some(128.0)
+    );
 }

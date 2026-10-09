@@ -166,6 +166,21 @@ pub struct SlashCommand {
     pub source: CommandSource,
     /// Concrete dispatch shape — built-in handler, markdown template, etc.
     pub kind: SlashCommandKind,
+    /// Whether the native command object is hidden from command discovery.
+    /// This is internal registry metadata; client listing DTOs carry their own
+    /// display-specific `hidden` field.
+    #[serde(skip)]
+    pub is_hidden: bool,
+    /// Result of the native command's availability predicate in the current
+    /// host context. Disabled commands remain dispatchable by exact name when
+    /// the native implementation permits it, but do not appear in discovery.
+    #[serde(skip, default = "command_enabled_by_default")]
+    pub is_enabled: bool,
+    /// Native `type === "prompt"` classification. Dispatch shape alone is not
+    /// sufficient: some local builtins inject user messages without being
+    /// prompt commands in Native's headless preview.
+    #[serde(skip)]
+    pub is_prompt: bool,
     /// Whether the model is forbidden from invoking this command.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_model_invocation: bool,
@@ -224,6 +239,9 @@ impl Default for SlashCommand {
             description: String::new().into(),
             source: CommandSource::default(),
             kind: SlashCommandKind::default(),
+            is_hidden: false,
+            is_enabled: true,
+            is_prompt: false,
             disable_model_invocation: false,
             has_user_specified_description: false,
             loaded_from: None,
@@ -238,6 +256,72 @@ impl Default for SlashCommand {
             menu_description: None,
         }
     }
+}
+
+fn command_enabled_by_default() -> bool {
+    true
+}
+
+/// The Native headless command catalog used when an unknown slash command is
+/// treated as ordinary user input. `available_command_count` counts all
+/// available commands; `prompt_command_names` contains the ordered subset
+/// Native can invoke as prompt commands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeadlessCommandCatalog {
+    /// Native prompt command names, in registry/assembly order.
+    pub prompt_command_names: Vec<Utf16JsonProjection>,
+    /// All available slash commands before prompt-only/model-invocation gates.
+    pub available_command_count: usize,
+}
+
+/// Render Native's unknown-command system reminder without converting source
+/// command names through UTF-8 or changing their UTF-16 code units.
+#[must_use]
+pub fn render_unknown_command_reminder(
+    command_name: &Utf16JsonProjection,
+    catalog: &HeadlessCommandCatalog,
+) -> Utf16JsonProjection {
+    use PromptPart::{Source, Text};
+
+    const MAX_LISTED_COMMANDS: usize = 40;
+    let listed = catalog
+        .prompt_command_names
+        .iter()
+        .take(MAX_LISTED_COMMANDS)
+        .collect::<Vec<_>>();
+    let mut parts = vec![
+        Text("<system-reminder>\nThe user's message starts with the slash command /"),
+        Source(command_name),
+        Text(
+            ", but no command with that name is available in this session, so it did not run. Slash commands available in this session: ",
+        ),
+    ];
+    let mut names = Vec::new();
+    for name in listed {
+        let mut units = vec![b'/' as u16];
+        units.extend(name.string_units("").unwrap_or_default());
+        names.push(source_from_units(units));
+    }
+    for (index, name) in names.iter().enumerate() {
+        if index > 0 {
+            parts.push(Text(", "));
+        }
+        parts.push(Source(name));
+    }
+    let remaining = catalog.available_command_count.saturating_sub(names.len());
+    let remaining_count = remaining.to_string();
+    if remaining > 0 {
+        if !names.is_empty() {
+            parts.push(Text(", "));
+        }
+        parts.push(Text("and "));
+        parts.push(Text(&remaining_count));
+        parts.push(Text(" more"));
+    }
+    parts.push(Text(
+        ". Treat the message as a plain request and do the task with the tools you have. If the task needs that command, tell the user it is not installed in this session. The user can add it as an organization plugin or a project skill. Do not give installation steps you are not sure of. Do not say the command ran.\n</system-reminder>",
+    ));
+    source_concat(parts)
 }
 
 fn deserialize_prompt_template<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
@@ -510,6 +594,24 @@ pub trait BuiltinCommandHandler: Send + Sync {
     /// Optional hint text shown after the command name in slash listings.
     fn argument_hint(&self) -> Option<&str> {
         None
+    }
+    /// Native command object classification for headless unknown-command
+    /// previews. Most handler-backed commands are local; prompt handlers opt
+    /// in explicitly even when their Rust dispatch shape is `Builtin`.
+    fn is_prompt_command(&self) -> bool {
+        false
+    }
+    /// Native `isHidden` value for the current host context.
+    fn is_hidden(&self) -> bool {
+        false
+    }
+    /// Evaluated Native availability predicate for the current host context.
+    fn is_enabled(&self) -> bool {
+        true
+    }
+    /// Native `disableModelInvocation` control.
+    fn disable_model_invocation(&self) -> bool {
+        false
     }
     /// This command's declared allowed-tools (TS `command.allowedTools`), in the
     /// permission-rule syntax (e.g. `Bash(git add:*)`). Injected on top of the

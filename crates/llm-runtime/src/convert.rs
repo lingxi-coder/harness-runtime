@@ -32,10 +32,143 @@ use lingxi_core::host::SourceToolWireDefinition;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::{
     ContentBlock as ProtoBlock, ConversationMessage, DocumentSource, ImageSource, MediaAnalysis,
+    MessageId, ToolUseId,
 };
 use lingxi_llm_client::protocol::JsonPayload;
 use serde_json::Value;
 use std::collections::HashSet;
+
+/// One request-local Native token reminder that belongs at the end of an
+/// Anthropic tool result. Its message identity lets the API-bound clone remove
+/// the separate reminder only when the intended tool result was updated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnthropicToolResultReminderSuffix {
+    /// Exact tool-use identity of the result to decorate.
+    pub tool_use_id: ToolUseId,
+    /// Identity of the standalone reminder message in the request clone.
+    pub reminder_message_id: MessageId,
+    /// Exact reminder text as a root JSON string.
+    pub text: Utf16JsonProjection,
+}
+
+/// Append a request-local reminder to the identified tool result and remove
+/// its standalone message from this API-bound clone. Durable history remains
+/// untouched. Returns `false` without changing either message when the target
+/// or exact reminder source is absent, or when the result shape is unsupported.
+pub fn append_anthropic_tool_result_reminder(
+    messages: &mut Vec<ConversationMessage>,
+    suffix: &AnthropicToolResultReminderSuffix,
+) -> bool {
+    let Some(reminder_units) = suffix.text.string_units("") else {
+        return false;
+    };
+    let Some(reminder_index) = messages.iter().position(|message| {
+        message.id() == suffix.reminder_message_id
+            && single_text_message_units(message).as_deref() == Some(reminder_units.as_slice())
+    }) else {
+        return false;
+    };
+    let Some((message_index, block_index)) = messages
+        .iter()
+        .enumerate()
+        .find_map(|(message_index, message)| {
+            let ConversationMessage::User { content, .. } = message else {
+                return None;
+            };
+            content
+                .iter()
+                .position(|block| {
+                    matches!(block, ProtoBlock::ToolResult { tool_use_id, .. } if tool_use_id == &suffix.tool_use_id)
+                })
+                .map(|block_index| (message_index, block_index))
+        })
+    else {
+        return false;
+    };
+
+    let ConversationMessage::User { content, .. } = &mut messages[message_index] else {
+        return false;
+    };
+    let ProtoBlock::ToolResult {
+        content: result_text,
+        content_blocks,
+        ..
+    } = &mut content[block_index]
+    else {
+        unreachable!("the selected block is a tool result");
+    };
+
+    let appended = if let Some(blocks) = content_blocks {
+        append_text_block(blocks, &suffix.text)
+    } else {
+        append_to_root_string(result_text, &reminder_units)
+    };
+    if !appended {
+        return false;
+    }
+
+    messages.remove(reminder_index);
+    true
+}
+
+fn single_text_message_units(message: &ConversationMessage) -> Option<Vec<u16>> {
+    let ConversationMessage::User {
+        content, is_meta, ..
+    } = message
+    else {
+        return None;
+    };
+    if !*is_meta || content.len() != 1 {
+        return None;
+    }
+    match content.first()? {
+        ProtoBlock::Text { text, .. } => Some(text.encode_utf16().collect()),
+        ProtoBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } => Some(utf16_code_units.clone()),
+        _ => None,
+    }
+}
+
+fn append_to_root_string(target: &mut Utf16JsonProjection, suffix: &[u16]) -> bool {
+    let Some(mut units) = target.string_units("") else {
+        return false;
+    };
+    units.extend([b'\n' as u16, b'\n' as u16]);
+    units.extend_from_slice(suffix);
+    let display = String::from_utf16_lossy(&units);
+    let Ok(updated) = Utf16JsonProjection::root_string(display, units) else {
+        return false;
+    };
+    *target = updated;
+    true
+}
+
+fn append_text_block(target: &mut Utf16JsonProjection, text: &Utf16JsonProjection) -> bool {
+    let Some(length) = target.array_len("") else {
+        return false;
+    };
+    let mut blocks = Vec::with_capacity(length.saturating_add(1));
+    for index in 0..length {
+        let pointer = format!("/{index}");
+        let Ok(block) = target.subprojection(&pointer) else {
+            return false;
+        };
+        blocks.push(block);
+    }
+    let Ok(reminder_block) = Utf16JsonProjection::object(vec![
+        ("type".to_owned(), Utf16JsonProjection::from("text")),
+        ("text".to_owned(), text.clone()),
+    ]) else {
+        return false;
+    };
+    blocks.push(reminder_block);
+    let Ok(updated) = Utf16JsonProjection::array(blocks) else {
+        return false;
+    };
+    *target = updated;
+    true
+}
 
 /// API-bound conversation blocks retain the identities of the Host messages
 /// that contributed them. The sidecar is removed before provider conversion.
@@ -1043,6 +1176,10 @@ fn convert_source_tool_declaration(
 #[cfg(test)]
 #[path = "convert_test.rs"]
 mod convert_test;
+
+#[cfg(test)]
+#[path = "convert_tool_result_reminder_tests.rs"]
+mod tool_result_reminder_tests;
 
 /// Consume normalized durable history once into canonical SDK model input.
 /// Exact JavaScript UTF-16 strings are retained outside model input for sealing.

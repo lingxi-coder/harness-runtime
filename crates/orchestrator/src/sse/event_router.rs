@@ -656,6 +656,25 @@ mod tests {
         async fn emit_text(&self, text: &Utf16JsonProjection) {
             *self.text.lock().expect("captured output text") = Some(text.clone());
         }
+
+        async fn emit_tool_call(
+            &self,
+            _: &lingxi_core::types::ToolUseId,
+            _: &str,
+            _: &Utf16JsonProjection,
+        ) {
+        }
+
+        async fn emit_tool_result(
+            &self,
+            _: &lingxi_core::types::ToolUseId,
+            _: &str,
+            _: &Utf16JsonProjection,
+            _: &Utf16JsonProjection,
+        ) {
+        }
+
+        async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
     }
 
     #[test]
@@ -840,8 +859,11 @@ mod tests {
                 value,
             }) if protocol == "anthropic_messages"
                 && value.string_at("/text").as_deref() == Some("visible answer")
-                && value.raw_source_at("/citations").as_deref() == Some("null")
-                && value.bool_at("/future_annotation/keep") == Some(true)
+                && value.at_pointer("/citations").is_some_and(|value| value.is_null())
+                && value
+                    .at_pointer("/future_annotation/keep")
+                    .and_then(|value| value.as_bool())
+                    == Some(true)
         ));
     }
 
@@ -856,7 +878,6 @@ mod tests {
                     id: "toolu_utf16".into(),
                     name: "Read".into(),
                     input: JsonPayload::parse("{}").unwrap(),
-                    provider_id: None,
                 },
             },
             &mut acc,
@@ -958,7 +979,7 @@ mod tests {
             stop_details: None,
             usage: Usage::default(),
             cost: None,
-            provider_metadata: serde_json::Value::Null,
+            provider_metadata: JsonPayload::parse("null").expect("null is valid JSON"),
 
             resumable: None,
         };

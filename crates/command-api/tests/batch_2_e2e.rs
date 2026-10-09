@@ -91,9 +91,13 @@ fn builtin_command_aliases_resolve_to_targets() {
         ("stats", "usage"),
     ] {
         let cmd = reg
-            .resolve(alias)
+            .resolve(&alias.into())
             .unwrap_or_else(|| panic!("alias /{alias} must resolve"));
-        assert_eq!(cmd.name, target, "/{alias} should resolve to /{target}");
+        assert_eq!(
+            cmd.name,
+            target.into(),
+            "/{alias} should resolve to /{target}"
+        );
     }
 }
 
@@ -107,8 +111,10 @@ async fn cost_and_stats_dispatch_through_usage_alias() {
     let (d, _mock) = fresh();
     let expected = "/usage is available in interactive TUI mode only.";
     for raw in ["/cost", "/stats", "/usage"] {
-        match d.dispatch(raw).await {
-            SlashDispatchResult::Handled { display } => assert_eq!(display, expected, "{raw}"),
+        match d.dispatch(raw.into()).await {
+            SlashDispatchResult::Handled { display } => {
+                assert_eq!(display, expected.into(), "{raw}")
+            }
             other => panic!("{raw} expected Handled, got {other:?}"),
         }
     }
@@ -117,10 +123,10 @@ async fn cost_and_stats_dispatch_through_usage_alias() {
 #[tokio::test]
 async fn config_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/config").await;
+    let r = d.dispatch("/config".into()).await;
     assert!(matches!(
         r,
-        SlashDispatchResult::Handled { ref display } if display.starts_with("Edited ")
+        SlashDispatchResult::Handled { ref display } if display.string_at("").unwrap().starts_with("Edited ")
     ));
 }
 
@@ -133,11 +139,11 @@ async fn model_list_dispatch() {
         ..StatusSnapshot::default()
     };
     mock.set_status_snapshot(snap);
-    let r = d.dispatch("/model").await;
+    let r = d.dispatch("/model".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
         assert_eq!(
             display,
-            "Current model: claude-opus-4-7\nAvailable: claude-opus-4-7"
+            "Current model: claude-opus-4-7\nAvailable: claude-opus-4-7".into()
         );
     } else {
         panic!("{r:?}");
@@ -147,9 +153,9 @@ async fn model_list_dispatch() {
 #[tokio::test]
 async fn model_switch_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/model claude-sonnet-4-6").await;
+    let r = d.dispatch("/model claude-sonnet-4-6".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
-        assert_eq!(display, "Switched to model: claude-sonnet-4-6");
+        assert_eq!(display, "Switched to model: claude-sonnet-4-6".into());
     } else {
         panic!("{r:?}");
     }
@@ -158,10 +164,10 @@ async fn model_switch_dispatch() {
 #[tokio::test]
 async fn permissions_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/permissions").await;
+    let r = d.dispatch("/permissions".into()).await;
     assert!(matches!(
         r,
-        SlashDispatchResult::Handled { ref display } if display.starts_with("Edited ")
+        SlashDispatchResult::Handled { ref display } if display.string_at("").unwrap().starts_with("Edited ")
     ));
 }
 
@@ -173,9 +179,9 @@ async fn mcp_dispatch() {
         status: McpStatus::Connected,
         transport: "stdio".into(),
     }]);
-    let r = d.dispatch("/mcp").await;
+    let r = d.dispatch("/mcp".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
-        assert_eq!(display, "MCP servers (1):\n  m  connected  stdio\n");
+        assert_eq!(display, "MCP servers (1):\n  m  connected  stdio\n".into());
     } else {
         panic!("{r:?}");
     }
@@ -191,9 +197,9 @@ async fn hooks_dispatch() {
         timeout_ms: 60_000,
         ..HookInfo::default()
     }]);
-    let r = d.dispatch("/hooks").await;
+    let r = d.dispatch("/hooks".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
-        assert_eq!(display, "Hooks (1):\n  fmt  PostToolUse  60000ms\n");
+        assert_eq!(display, "Hooks (1):\n  fmt  PostToolUse  60000ms\n".into());
     } else {
         panic!("{r:?}");
     }
@@ -209,7 +215,7 @@ async fn agents_dispatch() {
         wildcard_tools: false,
         ..AgentInfo::default()
     }]);
-    let r = d.dispatch("/agents").await;
+    let r = d.dispatch("/agents".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
         // cc 2.1.198 removed the interactive /agents wizard (M4): the command
         // now emits static guidance regardless of registered agents. Byte-locked
@@ -217,7 +223,7 @@ async fn agents_dispatch() {
         // branding divergence).
         assert_eq!(
             display,
-            "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  \u{2022} .lingxi/agents/       (this project)\n  \u{2022} ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents"
+            "The /agents wizard has been removed.\n\nAsk Claude to create or update subagents for you (e.g. \"create a code-reviewer subagent that ...\"),\nor edit the files directly:\n  \u{2022} .lingxi/agents/       (this project)\n  \u{2022} ~/.lingxi/agents/     (all projects)\n\nDocs: https://code.claude.com/docs/en/sub-agents".into()
         );
     } else {
         panic!("{r:?}");
@@ -227,9 +233,9 @@ async fn agents_dispatch() {
 #[tokio::test]
 async fn login_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/login").await;
+    let r = d.dispatch("/login".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
-        assert_eq!(display, "Logged in as u@x.com (org: org).");
+        assert_eq!(display, "Logged in as u@x.com (org: org).".into());
     } else {
         panic!("{r:?}");
     }
@@ -238,9 +244,9 @@ async fn login_dispatch() {
 #[tokio::test]
 async fn logout_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/logout").await;
+    let r = d.dispatch("/logout".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
-        assert_eq!(display, "Logged out.");
+        assert_eq!(display, "Logged out.".into());
     } else {
         panic!("{r:?}");
     }
@@ -249,9 +255,9 @@ async fn logout_dispatch() {
 #[tokio::test]
 async fn version_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/version").await;
+    let r = d.dispatch("/version".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
-        assert!(display.starts_with("lingxi-cli "));
+        assert!(display.string_at("").unwrap().starts_with("lingxi-cli "));
     } else {
         panic!("{r:?}");
     }
@@ -260,10 +266,11 @@ async fn version_dispatch() {
 #[tokio::test]
 async fn status_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/status").await;
+    let r = d.dispatch("/status".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
-        assert!(display.starts_with("Status:\n"));
-        assert_eq!(display.matches('\n').count(), 11);
+        let text = display.string_at("").unwrap();
+        assert!(text.starts_with("Status:\n"));
+        assert_eq!(text.matches('\n').count(), 11);
     } else {
         panic!("{r:?}");
     }
@@ -272,10 +279,11 @@ async fn status_dispatch() {
 #[tokio::test]
 async fn doctor_dispatch() {
     let (d, _) = fresh();
-    let r = d.dispatch("/doctor").await;
+    let r = d.dispatch("/doctor".into()).await;
     if let SlashDispatchResult::Handled { display } = r {
-        assert!(display.starts_with("Doctor:\n"));
-        assert!(display.contains("Summary:"));
+        let text = display.string_at("").unwrap();
+        assert!(text.starts_with("Doctor:\n"));
+        assert!(text.contains("Summary:"));
     } else {
         panic!("{r:?}");
     }

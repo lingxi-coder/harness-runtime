@@ -175,15 +175,15 @@ mod tests {
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
-            _input: &serde_json::Value,
+            _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) {
         }
         async fn emit_tool_result(
             &self,
             _id: &lingxi_core::types::ToolUseId,
             _tool: &str,
-            _model_text: &str,
-            _result: &serde_json::Value,
+            _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         ) {
         }
         async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}

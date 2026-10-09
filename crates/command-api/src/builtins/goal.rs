@@ -375,14 +375,14 @@ mod tests {
         let h = handler();
         match h.handle(&args("")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "No goal set. Usage: `/goal <condition>`");
+                assert_eq!(s, "No goal set. Usage: `/goal <condition>`".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
         // Whitespace-only args trim to empty too.
         match h.handle(&args("   ")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "No goal set. Usage: `/goal <condition>`");
+                assert_eq!(s, "No goal set. Usage: `/goal <condition>`".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -393,7 +393,7 @@ mod tests {
         let h = handler();
         for token in ["clear", "STOP", "Off", "reset", "none", "cancel"] {
             match h.handle(&args(token)).await {
-                CommandResult::Done { display: Some(s) } => assert_eq!(s, "No goal set"),
+                CommandResult::Done { display: Some(s) } => assert_eq!(s, "No goal set".into()),
                 other => panic!("expected Done, got {other:?}"),
             }
         }
@@ -405,7 +405,10 @@ mod tests {
         let long = "x".repeat(4001);
         match h.handle(&args(&long)).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Goal condition is limited to 4000 characters (got 4001)");
+                assert_eq!(
+                    s,
+                    "Goal condition is limited to 4000 characters (got 4001)".into()
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -431,7 +434,7 @@ mod tests {
                 display: Some(text),
             } => assert_eq!(
                 text,
-                "Goal condition is limited to 4000 characters (got 4001)"
+                "Goal condition is limited to 4000 characters (got 4001)".into()
             ),
             other => panic!("expected rejection, got {other:?}"),
         }
@@ -491,7 +494,7 @@ mod tests {
 
         match h.handle(&args("ship it")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, TRUST_GATE_MESSAGE);
+                assert_eq!(s, TRUST_GATE_MESSAGE.into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -509,7 +512,7 @@ mod tests {
         match h.handle(&args("ship")).await {
             CommandResult::Done {
                 display: Some(text),
-            } => assert_eq!(text, HOOKS_RESTRICTED_MESSAGE),
+            } => assert_eq!(text, HOOKS_RESTRICTED_MESSAGE.into()),
             other => panic!("expected hook-policy rejection, got {other:?}"),
         }
         assert!(handle.get_active_goal().await.is_none());
@@ -522,7 +525,7 @@ mod tests {
 
         match h.handle(&args("ship it")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, HOOKS_RESTRICTED_MESSAGE);
+                assert_eq!(s, HOOKS_RESTRICTED_MESSAGE.into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -548,14 +551,17 @@ mod tests {
 
         match h.handle(&args("")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Goal active: finish the migration (not yet evaluated)");
+                assert_eq!(
+                    s,
+                    "Goal active: finish the migration (not yet evaluated)".into()
+                );
             }
             other => panic!("expected Done, got {other:?}"),
         }
 
         match h.handle(&args("clear")).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Goal cleared: finish the migration");
+                assert_eq!(s, "Goal cleared: finish the migration".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }

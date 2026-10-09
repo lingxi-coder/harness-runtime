@@ -4107,6 +4107,7 @@ impl Tool for TaskOutputTool {
 mod task_test;
 
 #[cfg(test)]
+#[derive(Debug)]
 struct TestTaskCallResult {
     data: Value,
     model_content: Option<String>,

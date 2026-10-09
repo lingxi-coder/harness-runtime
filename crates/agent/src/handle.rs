@@ -1664,6 +1664,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
             observer_events: observer_events.clone(),
             armed: true,
             startup_error: None,
+            agent_spawn_token: request.agent_spawn_token.clone(),
             // Ownership moves out of `mcp_guard` synchronously here — no
             // await separates the take from the guard that receives them.
             mcp_cleanups: mcp_guard.take(),
@@ -1681,7 +1682,11 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 .on_model_selected(&allocation_event, display_effort.as_deref())
                 .await;
         }
-        if start.send(()).is_ok() {
+        let started = match &request.agent_spawn_token {
+            Some(token) => token.release_start(|| start.send(()).is_ok()),
+            None => start.send(()).is_ok(),
+        };
+        if started {
             for observer in &observers {
                 observer.on_started(&allocation_event);
             }
@@ -1887,6 +1892,16 @@ impl SubagentSpawner for PoolSubagentSpawner {
                 }
             }
         };
+
+        if let Some(token) = &request.agent_spawn_token {
+            match &result {
+                SubagentResult::Completed { .. } => token.completed(),
+                SubagentResult::Failed { .. } => token.failed(),
+                SubagentResult::Killed { .. } => {
+                    token.killed(lingxi_core::host::agent_statistics::AgentKillReason::User)
+                }
+            }
+        }
 
         // Normal terminal path. The caller-visible terminal observation is
         // emitted FIRST, synchronously, with no `.await` between it and the
@@ -2338,6 +2353,7 @@ impl PoolSubagentSpawner {
             observer_events: crate::api::ObserverEventSink::new(observers.clone()),
             armed: true,
             startup_error: None,
+            agent_spawn_token: request.agent_spawn_token.clone(),
             mcp_cleanups: mcp_guard.take(),
             agent_type: resolved_agent_type.clone(),
         };
@@ -2362,7 +2378,11 @@ impl PoolSubagentSpawner {
         // From here the task handler owns stop/deallocation, including any
         // terminal events produced immediately when this gate opens.
         dealloc_guard.armed = false;
-        if start.send(()).is_ok() {
+        let started = match &request.agent_spawn_token {
+            Some(token) => token.release_start(|| start.send(()).is_ok()),
+            None => start.send(()).is_ok(),
+        };
+        if started {
             for observer in &observers {
                 observer.on_started(&allocation_event);
             }
@@ -2371,7 +2391,9 @@ impl PoolSubagentSpawner {
         // spawner, so wrap their channel to preserve the same global observer
         // contract as one-shot agents. The forwarded receiver retains the
         // original event shape for the task handler while this side reports
-        // real messages and terminal lifecycle transitions to Desktop.
+        // real messages and terminal lifecycle transitions to Desktop. The
+        // TaskRegistry owns the token's terminal receipt because it knows the
+        // authoritative killed_by reason; a per-rest Completed is not terminal.
         let usage_recorder = self.usage_recorder.clone();
         let query_source_label = request.query_source_label.clone();
         let should_record_usage = usage_recorder.is_some()

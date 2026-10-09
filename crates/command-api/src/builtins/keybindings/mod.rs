@@ -500,7 +500,7 @@ mod tests {
         let h = KeybindingsHandler::with_enabled(false);
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, KEYBINDINGS_PREVIEW_DISABLED);
+                assert_eq!(s, KEYBINDINGS_PREVIEW_DISABLED.into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -525,7 +525,7 @@ mod tests {
         // …and an enabled handler opens the file, never the preview string.
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_ne!(s, KEYBINDINGS_PREVIEW_DISABLED);
+                assert_ne!(s, KEYBINDINGS_PREVIEW_DISABLED.into());
                 assert!(opened.load(std::sync::atomic::Ordering::SeqCst));
             }
             other => panic!("expected Done, got {other:?}"),

@@ -132,11 +132,8 @@ impl HandbackReport {
     pub fn from_utf8_text(text: impl Into<String>, warning: Option<String>) -> Self {
         let text = text.into();
         Self {
-            text: Utf16JsonProjection::root_string(
-                text.clone(),
-                text.encode_utf16().collect(),
-            )
-            .expect("a Rust string is a valid source string"),
+            text: Utf16JsonProjection::root_string(text.clone(), text.encode_utf16().collect())
+                .expect("a Rust string is a valid source string"),
             warning,
         }
     }
@@ -332,9 +329,10 @@ impl HandbackEnvelope {
             .body
             .string_units("")
             .expect("handback envelope body is a root string");
-        String::from_utf16_lossy(
-            &crate::host::handback_wire::render_agent_message_utf16(&self.origin.from, &body),
-        )
+        String::from_utf16_lossy(&crate::host::handback_wire::render_agent_message_utf16(
+            &self.origin.from,
+            &body,
+        ))
     }
 
     /// Reconstruct the native model value from exact UTF-16 body units. All
@@ -345,7 +343,8 @@ impl HandbackEnvelope {
             .body
             .string_units("")
             .expect("handback envelope body is a root string");
-        let units = crate::host::handback_wire::render_agent_message_utf16(&self.origin.from, &body);
+        let units =
+            crate::host::handback_wire::render_agent_message_utf16(&self.origin.from, &body);
         ConversationMessage::user_meta_js_utf16(
             self.receipt.message_id,
             String::from_utf16_lossy(&units),
@@ -365,7 +364,8 @@ impl HandbackEnvelope {
         if String::from_utf16(&body).is_err() {
             overrides.insert("/attachment/envelope/body".into(), body.clone());
         }
-        let model = crate::host::handback_wire::render_agent_message_utf16(&self.origin.from, &body);
+        let model =
+            crate::host::handback_wire::render_agent_message_utf16(&self.origin.from, &body);
         if String::from_utf16(&model).is_err() {
             overrides.insert("/message/content/0/text".into(), model);
         }
@@ -379,10 +379,7 @@ impl HandbackEnvelope {
             && self.receipt.run.agent_id == self.origin.sender_agent_id
             && self.origin.sender_task_id == self.receipt.run.agent_id.to_string()
             && self.receipt.recipient.scope() == self.origin.scope
-            && self
-                .body
-                .string_at("")
-                .is_some()
+            && self.body.string_at("").is_some()
     }
 
     #[must_use]

@@ -49,11 +49,13 @@ fn fallback_info(
 }
 
 fn attach_fallback(response: &mut HistoryResponse, info: &HistoryServerFallback) {
-    response.provider_metadata = json!({
-        "llm_client": {
-            "server_fallback_events": [serde_json::to_value(info).unwrap()]
-        }
-    });
+    response.provider_metadata =
+        lingxi_llm_client::protocol::JsonPayload::from_generated_value(&json!({
+            "llm_client": {
+                "server_fallback_events": [serde_json::to_value(info).unwrap()]
+            }
+        }))
+        .unwrap();
 }
 
 fn orchestrator(
@@ -94,10 +96,12 @@ fn server_lane_policy(candidate: &str) -> Policy {
 fn message_contains_text(message: &ConversationMessage, expected: &str) -> bool {
     match message {
         ConversationMessage::Assistant { content, .. }
-        | ConversationMessage::User { content, .. } => content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text.contains(expected))),
-        ConversationMessage::System { content, .. } => content.contains(expected),
+        | ConversationMessage::User { content, .. } => content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text, .. } if text.contains(expected)),
+        ),
+        ConversationMessage::System { content, .. } => content
+            .string_at("")
+            .is_some_and(|text| text.contains(expected)),
     }
 }
 
@@ -236,7 +240,8 @@ async fn batched_cost_handoff_keeps_complete_and_incomplete_native_quotes_distin
         let mut response = mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "done".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         );
@@ -249,11 +254,15 @@ async fn batched_cost_handoff_keeps_complete_and_incomplete_native_quotes_distin
             }),
             ..Default::default()
         });
-        response.provider_metadata = json!({"llm_client": {"server_fallback_cost_quote": {
-            "kind": "anthropic_server_fallback_per_iteration",
-            "summaryModel": "served-model",
-            "completeness": if quoted_usd.is_some() { "complete" } else { "incomplete" }
-        }}});
+        response.provider_metadata =
+            lingxi_llm_client::protocol::JsonPayload::from_generated_value(&json!({
+                "llm_client": {"server_fallback_cost_quote": {
+                    "kind": "anthropic_server_fallback_per_iteration",
+                    "summaryModel": "served-model",
+                    "completeness": if quoted_usd.is_some() { "complete" } else { "incomplete" }
+                }}
+            }))
+            .unwrap();
         if let Some(amount) = quoted_usd {
             let mut estimate =
                 llm_runtime::CostEstimate::unestimated(llm_runtime::PricingModelRef {
@@ -909,7 +918,8 @@ async fn accepted_event_routes_next_request_and_clear_restores_model_and_profile
     let mut first = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "server response".into(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -917,7 +927,8 @@ async fn accepted_event_routes_next_request_and_clear_restores_model_and_profile
     let second = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "next request".into(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );
@@ -994,7 +1005,7 @@ async fn accepted_event_routes_next_request_and_clear_restores_model_and_profile
         .collect();
     assert_eq!(notices.len(), 1);
     assert!(!notices[0].1);
-    assert!(notices[0].0.contains("Switched to"));
+    assert!(notices[0].0.string_at("").unwrap().contains("Switched to"));
     {
         let selection = orch.model_runtime.refusal_selection.lock().unwrap();
         assert_eq!(selection.override_model, Some(Some(declared.into())));
@@ -1311,8 +1322,14 @@ async fn local_server_notice_is_visible_and_persisted_without_mutating_session_r
         })
         .collect();
     assert_eq!(notices.len(), 1);
-    assert!(notices[0].contains("This response was completed by"));
-    assert!(notices[0].contains("Your session model is unchanged."));
+    assert!(notices[0]
+        .string_at("")
+        .unwrap()
+        .contains("This response was completed by"));
+    assert!(notices[0]
+        .string_at("")
+        .unwrap()
+        .contains("Your session model is unchanged."));
 }
 
 #[tokio::test]
@@ -1658,12 +1675,16 @@ async fn declined_received_model_discards_text_and_tool_use() {
         vec![
             LlmContentBlock::Text {
                 text: "must not be shown".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             },
             LlmContentBlock::ToolCall {
                 id: "toolu_disallowed".into(),
                 name: "Bash".into(),
-                input: json!({"command":"touch should-not-run"}),
+                input: lingxi_llm_client::protocol::JsonPayload::from_generated_value(
+                    &json!({"command":"touch should-not-run"}),
+                )
+                .unwrap(),
             },
         ],
         Some("tool_use"),
@@ -1777,7 +1798,8 @@ async fn ordinary_response_without_an_admitted_event_keeps_the_selected_route() 
     let response = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "ordinary answer".into(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );

@@ -332,8 +332,16 @@ fn source_value_type(value: Option<JsonValueView<'_>>) -> &'static str {
         "null"
     } else if value.as_bool().is_some() {
         "boolean"
-    } else if value.as_number().is_some() {
-        "number"
+    } else if let Some(number) = value.as_number() {
+        if number.is_nan() {
+            "NaN"
+        } else if number == f64::NEG_INFINITY {
+            "-Infinity"
+        } else if number == f64::INFINITY {
+            "Infinity"
+        } else {
+            "number"
+        }
     } else if value.code_units().is_some() {
         "string"
     } else if value.array_len().is_some() {
@@ -348,9 +356,15 @@ fn type_issue(
     value: Option<JsonValueView<'_>>,
     path: Vec<Vec<u16>>,
 ) -> Utf16JsonProjection {
-    object(vec![
+    let received = source_value_type(value);
+    let mut fields = vec![
         ("expected".into(), source_string(expected)),
         ("code".into(), source_string("invalid_type")),
+    ];
+    if matches!(received, "NaN" | "Infinity" | "-Infinity") {
+        fields.push(("received".into(), source_string(received)));
+    }
+    fields.extend([
         (
             "path".into(),
             array(path.into_iter().map(source_string_units).collect()),
@@ -359,10 +373,11 @@ fn type_issue(
             "message".into(),
             source_string(&format!(
                 "Invalid input: expected {expected}, received {}",
-                source_value_type(value)
+                received
             )),
         ),
-    ])
+    ]);
+    object(fields)
 }
 
 fn js_array_index(key: &str) -> Option<u32> {

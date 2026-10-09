@@ -109,7 +109,7 @@ impl lingxi_core::host::ToolInvoker for TurnEndInvoker {
                 }),
             )
             .unwrap(),
-            model_content: Some(format!("{name} result")),
+            model_content: Some(format!("{name} result").into()),
             is_error: finishes && self.is_error,
             turn_end: match name {
                 "Finish" => self.marker,
@@ -493,7 +493,7 @@ async fn persistent_tool_turn_end_resets_on_a_later_real_message() {
             if let SubagentEvent::Completed { result, .. } =
                 out_rx.recv().await.expect("next turn-set completes")
             {
-                assert_eq!(result["text"], "after wake");
+                assert_eq!(result.string_at("/text"), Some("after wake"));
                 break;
             }
         }
@@ -584,11 +584,13 @@ async fn tool_turn_end_parks_owned_work_before_pending_notification_can_wake_it(
     .await
     .expect("terminal park and later background notification wake complete");
     assert_eq!(api.call_count(), 2);
-    assert!(api.histories.lock().unwrap()[1]
-        .iter()
-        .any(|message| matches!(message,
-        ConversationMessage::User { content, .. } if content.iter().any(|block| matches!(block,
-            ContentBlock::Text { text, .. } if text.contains("child finished"))))));
+    let wake_message_was_carried = api.histories.lock().unwrap()[1].iter().any(|message| {
+        matches!(message, ConversationMessage::User { content, .. }
+        if content.iter().any(|block| {
+            content_block_text_contains(block, "child finished")
+        }))
+    });
+    assert!(wake_message_was_carried);
     drop(event_tx);
     runner.await.unwrap();
 }

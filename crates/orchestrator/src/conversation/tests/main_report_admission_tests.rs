@@ -1,11 +1,11 @@
 use super::*;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-    StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
-    message_start, message_stop, noop_hook_executor, text_delta,
+    content_block_start_text, content_block_stop, message_delta_stop, message_start, message_stop,
+    noop_hook_executor, text_delta, MockApiClient, MockOutputStream, MockStreamingApiClient,
+    NoOpPermissionGate, StaticMemoryProvider,
 };
-use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::host::handback::{HandbackPeerOrigin, HandbackReceipt, HandbackRunKey};
+use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::AgentId;
 use platform_posix::fs::PosixFileSystem;
 
@@ -139,7 +139,6 @@ fn report(scope: HandbackSessionScope, body: &str) -> HandbackEnvelope {
             flagged: false,
         },
         body: body.into(),
-        body_utf16: None,
     }
 }
 
@@ -210,7 +209,11 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
     let scope = orch.main_scope().await.unwrap();
     let mut envelope = report(scope, &String::from_utf16_lossy(&body_units));
     envelope.origin.from = native["sender"].as_str().unwrap().into();
-    envelope.body_utf16 = Some(body_units.clone());
+    envelope.body = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&body_units),
+        body_units.clone(),
+    )
+    .unwrap();
     let expected_message = envelope.model_message();
     let message_id = envelope.receipt.message_id;
     orch.admit(envelope).await.unwrap();
@@ -267,11 +270,9 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
     );
     assert_eq!(row.utf16_overrides["/origin/body"], body_units);
     assert_eq!(row.value["message"]["content"][0]["type"], "text");
-    assert!(
-        row.value["message"]["content"][0]
-            .get("utf16_code_units")
-            .is_none()
-    );
+    assert!(row.value["message"]["content"][0]
+        .get("utf16_code_units")
+        .is_none());
     assert!(row.value.get("queuePriority").is_none());
     let native_row = jsonl
         .lines()
@@ -440,22 +441,45 @@ async fn admission_acks_under_parent_gate_and_ordinary_prepare_sends_one_peer_me
         .collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].message_type, "user");
-    assert_eq!(rows[0].extra["isMeta"], true);
-    assert_eq!(rows[0].extra["origin"]["kind"], "peer");
     assert_eq!(
-        rows[0].extra["origin"]["senderTaskId"],
-        envelope.origin.sender_task_id
+        rows[0]
+            .extra
+            .at_pointer("/isMeta")
+            .and_then(|value| value.as_bool()),
+        Some(true)
     );
-    assert_eq!(rows[0].extra["origin"]["handback"], true);
-    assert!(rows[0].extra.get("queuePriority").is_none());
-    assert_eq!(rows[0].extra["origin"]["body"], envelope.body);
-    assert_eq!(rows[0].message["content"][0]["text"], model_text);
+    assert_eq!(rows[0].extra.string_at("/origin/kind"), Some("peer"));
+    assert_eq!(
+        rows[0].extra.string_at("/origin/senderTaskId"),
+        Some(envelope.origin.sender_task_id.as_str())
+    );
+    assert_eq!(
+        rows[0]
+            .extra
+            .at_pointer("/origin/handback")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert!(rows[0].extra.at_pointer("/queuePriority").is_none());
+    assert_eq!(
+        rows[0].extra.subprojection("/origin/body").unwrap(),
+        envelope.body
+    );
+    assert_eq!(
+        rows[0].message.string_at("/content/0/text"),
+        Some(model_text.as_str())
+    );
     assert!(!orch.has_pending_main_reports(scope).await);
     // Recipient idempotency acknowledges the same admitted identity even after
     // consumption, while a conflicting payload cannot create a second message.
     orch.admit(envelope.clone()).await.unwrap();
     let mut conflicting = envelope;
-    conflicting.body.push_str(" changed");
+    let mut conflicting_units = conflicting.body.string_units("").unwrap();
+    conflicting_units.extend(" changed".encode_utf16());
+    conflicting
+        .body
+        .set_string_units("", &conflicting_units)
+        .unwrap();
     assert!(matches!(
         orch.admit(conflicting).await,
         Err(HandbackAdmissionError::Rejected { .. })
@@ -485,7 +509,7 @@ async fn failed_private_queue_write_consumes_no_admission_allowance_and_can_retr
 
 #[tokio::test]
 async fn main_admission_rejects_invalid_utf16_or_forged_sender_before_persisting_a_receipt() {
-    for malformed in ["utf16", "sender_task_id"] {
+    for malformed in ["body_root", "sender_task_id"] {
         let temp = tempfile::tempdir().unwrap();
         let session_id = SessionId::new();
         let (orch, _, _) = fixture(temp.path(), session_id, true);
@@ -493,7 +517,10 @@ async fn main_admission_rejects_invalid_utf16_or_forged_sender_before_persisting
         let valid = report(scope, "actual native body");
         let mut envelope = valid.clone();
         match malformed {
-            "utf16" => envelope.body_utf16 = Some(vec![0xd800]),
+            "body_root" => {
+                envelope.body =
+                    lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap();
+            }
             "sender_task_id" => envelope.origin.sender_task_id = "forged-task-id".into(),
             _ => unreachable!(),
         }
@@ -645,12 +672,10 @@ async fn restart_recovers_pending_only_for_its_originating_session() {
     same.run_main_report_turn(recovered_scope, CancellationToken::new())
         .await
         .unwrap();
-    assert!(
-        api.captured_calls().await[0]
-            .messages
-            .iter()
-            .any(|message| message.id() == report_id)
-    );
+    assert!(api.captured_calls().await[0]
+        .messages
+        .iter()
+        .any(|message| message.id() == report_id));
 }
 
 #[tokio::test]

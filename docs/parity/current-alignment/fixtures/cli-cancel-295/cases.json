@@ -1,0 +1,9 @@
+{
+  "native_version": "2.1.295",
+  "session_id": "00000000-0000-4000-8000-000000002940",
+  "model": "claude-sonnet-4-5",
+  "prompt": "Reply with the fixed cancellation probe result.",
+  "signal": "SIGINT",
+  "max_retries": 0,
+  "stub_behavior": "Accept one fixed Anthropic Messages request, withhold the response, then allow cleanup after SIGINT."
+}

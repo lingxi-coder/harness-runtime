@@ -621,6 +621,6 @@ mod tests {
         let tasks = cron::tasks_file::parse_tasks(&body).tasks;
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].cron, "0 9 * * *");
-        assert_eq!(tasks[0].prompt, "汇报武汉天气");
+        assert_eq!(tasks[0].prompt, "汇报武汉天气".into());
     }
 }

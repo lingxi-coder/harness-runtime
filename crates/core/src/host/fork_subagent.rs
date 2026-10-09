@@ -431,7 +431,10 @@ Guidelines (your directive may override any of these):
 </fork-boilerplate>
 Your directive: Fix the bug in foo.rs";
         assert_eq!(got.string_at(""), Some(expected));
-        assert_eq!(got.string_units(""), Some(expected.encode_utf16().collect()));
+        assert_eq!(
+            got.string_units(""),
+            Some(expected.encode_utf16().collect())
+        );
         // Two em-dashes: "history — inherited" and "Be concise — as short".
         assert_eq!(got.string_at("").unwrap().matches('\u{2014}').count(), 2);
     }

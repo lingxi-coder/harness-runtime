@@ -382,7 +382,20 @@ fn supervised_registry(
 async fn supervised_real_bash_source(directory: &Path) {
     use tool_api::Tool;
     let (registry, ctx) = supervised_registry(directory);
-    tool_shell::bash::BashTool::new(ctx).call(serde_json::json!({"command":"printf before; sleep 2; printf after", "run_in_background":true}),tool_api::test_support::fresh_ctx(),tool_api::test_support::fresh_tx()).await.unwrap();
+    tool_shell::bash::BashTool::new(ctx)
+        .call(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({
+                    "command":"printf before; sleep 2; printf after",
+                    "run_in_background":true
+                }),
+            )
+            .unwrap(),
+            tool_api::test_support::fresh_ctx(),
+            tool_api::test_support::fresh_tx(),
+        )
+        .await
+        .unwrap();
     let handoff = registry.export_shell_handoff().await.unwrap();
     assert_eq!(
         handoff.len(),

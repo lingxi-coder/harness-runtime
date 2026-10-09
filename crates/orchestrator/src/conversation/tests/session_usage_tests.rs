@@ -1,8 +1,8 @@
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tool_api::registry::ToolRegistry;
@@ -61,9 +61,14 @@ async fn session_usage_api_returns_live_snapshot_and_validates_native_arguments(
     }));
 
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("usage-mod", root.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "usage-mod",
+        root.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap(),
+    )
+    .await
+    .unwrap();
     let orchestrator = bare_orchestrator(api.clone(), root.path());
     orchestrator
         .compaction_runtime
@@ -73,13 +78,20 @@ async fn session_usage_api_returns_live_snapshot_and_validates_native_arguments(
     let result = host
         .dispatch_with_log_at_session(
             "tool.call",
-            serde_json::json!({"tool":"UsageProbe"}),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#"{"tool":"UsageProbe"}"#)
+                .unwrap(),
             &orchestrator,
             |_| async { panic!("Mod answers tool.call") },
             |_, _| async {},
         )
         .await
         .unwrap();
+    let result: serde_json::Value = serde_json::from_str(
+        &result
+            .to_json_string()
+            .expect("Mod result source is valid JSON"),
+    )
+    .expect("Mod result source decodes as JSON");
     let probe = &result["result"];
     let usage = &probe["noArgs"];
     let columns_only = &probe["columnsOnly"];
@@ -124,12 +136,10 @@ async fn session_usage_api_returns_live_snapshot_and_validates_native_arguments(
         probe["badColumns"],
         "usage-mod: $.session.usage takes columns, a positive whole number (got 0)"
     );
-    assert!(
-        probe["requestedBreakdown"]
-            .as_str()
-            .unwrap()
-            .contains("contextData builder")
-    );
+    assert!(probe["requestedBreakdown"]
+        .as_str()
+        .unwrap()
+        .contains("contextData builder"));
 }
 
 #[tokio::test]

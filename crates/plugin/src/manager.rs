@@ -3019,6 +3019,7 @@ mod user_config_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -3377,7 +3378,7 @@ mod unload_tests {
             &self,
             _c: &McpRawConnection,
             _t: &str,
-            _i: serde_json::Value,
+            _i: Utf16JsonProjection,
         ) -> Result<McpToolResultDto, McpError> {
             unreachable!("unused in unload test")
         }
@@ -3385,7 +3386,7 @@ mod unload_tests {
         async fn read_resource(
             &self,
             _c: &McpRawConnection,
-            _u: &str,
+            _u: &Utf16JsonProjection,
         ) -> Result<McpResourceContentDto, McpError> {
             unreachable!("unused in unload test")
         }
@@ -3514,8 +3515,10 @@ mod unload_tests {
                         prompts: false,
                         directory_read: false,
                         logging: false,
-                        experimental: HashMap::new(),
-                        extensions: HashMap::new(),
+                        experimental: Utf16JsonProjection::parse("{}")
+                            .expect("empty experimental source object"),
+                        extensions: Utf16JsonProjection::parse("{}")
+                            .expect("empty extension source object"),
                     },
                     negotiated: lingxi_core::host::McpNegotiatedProtocol {
                         era: lingxi_core::host::McpProtocolEra::Legacy,
@@ -3820,10 +3823,7 @@ mod telemetry_tests {
         let skill = skills
             .get("source-plugin:greeter")
             .expect("plugin skill is registered");
-        assert_eq!(
-            skill.content.string_units(""),
-            Some(public_units.as_slice())
-        );
+        assert_eq!(skill.content.string_units(""), Some(public_units.clone()));
         let commands = manager.command_registry.read().await;
         let command = commands
             .resolve(&"source-plugin:greeter".into())
@@ -3834,10 +3834,7 @@ mod telemetry_tests {
         else {
             panic!("expected a plugin command");
         };
-        assert_eq!(
-            prompt_template.string_units(""),
-            Some(public_units.as_slice())
-        );
+        assert_eq!(prompt_template.string_units(""), Some(public_units.clone()));
     }
 
     #[cfg(unix)]

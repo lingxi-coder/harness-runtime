@@ -23,22 +23,22 @@
 //! through the public entries, so they stay meaningful whether preparation lives
 //! in `turn_loop.rs` (today) or in a `BatchedRound` strategy (after PR 2).
 
-use lingxi_core::types::ConversationMessage;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::ConversationMessage;
 use llm_runtime::{
     ContentBlock as LlmContentBlock, ExecutionUsage as Usage, HistoryResponse, LlmError,
 };
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-    StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, MockStreamingApiClient,
+    NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, TurnOutcome,
 };
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
@@ -287,7 +287,7 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
                 text: format!("round-{i} assistant reply with filler text to give it weight"),
                 citations: None,
             }],
-            stop_reason: Some("end_turn".to_string()),
+            stop_reason: Some("end_turn".into()),
             resumable: None,
         });
     }
@@ -399,9 +399,17 @@ fn a_reactive_overflow_honors_session_compact_mod_skip() {
         )
         .expect("mod source");
         let host = hooks::mods::ModHost::start(None).await.expect("mod host");
-        host.load("skip-compact", dir.path(), &module, serde_json::json!({}))
-            .await
-            .expect("load mod");
+        host.load(
+            "skip-compact",
+            dir.path(),
+            &module,
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({}),
+            )
+            .expect("generated Mod options are representable"),
+        )
+        .await
+        .expect("load mod");
         let mut registry = hooks::HookRegistry::new();
         registry.set_mod_host(host);
         let api = Arc::new(ScriptedApi::new(

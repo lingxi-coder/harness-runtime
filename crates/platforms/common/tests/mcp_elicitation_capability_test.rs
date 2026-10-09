@@ -180,7 +180,7 @@ async fn direct_http_initialize_advertises_full_elicitation_bytes() {
             .server_metadata(raw.connection_id)
             .unwrap()
             .server_info,
-        Some(json!({"name": "elicitation-wire", "version": "1"})),
+        Some(source(&json!({"name": "elicitation-wire", "version": "1"}))),
     );
     assert_legacy_wire(
         &server,
@@ -220,7 +220,7 @@ async fn explicit_bare_http_initialize_advertises_empty_elicitation_bytes() {
             .server_metadata(result.connection.connection_id)
             .unwrap()
             .server_info,
-        Some(json!({"name": "elicitation-wire", "version": "1"})),
+        Some(source(&json!({"name": "elicitation-wire", "version": "1"}))),
     );
     assert_legacy_wire(
         &server,
@@ -243,6 +243,7 @@ impl jsonrpc::InboundHandler for CancelUrl {
         assert_eq!(request.method, "elicitation/create");
         assert_eq!(request.id, jsonrpc::Id::String(INPUT_KEY.into()));
         let params = request.params.as_ref().unwrap();
+        let params: Value = serde_json::from_str(params.as_json()).unwrap();
         assert_eq!(params["mode"], "url");
         assert_eq!(params["message"], INPUT_MESSAGE);
         assert_eq!(params["url"], INPUT_URL);

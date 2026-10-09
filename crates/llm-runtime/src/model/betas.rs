@@ -55,6 +55,9 @@ pub const THINKING_TOKEN_COUNT: &str = "thinking-token-count-2026-05-13";
 /// fable-5 / mythos-5 (and unknown first-party models); LingXi previously
 /// missed it.
 pub const MID_CONVERSATION_SYSTEM: &str = "mid-conversation-system-2026-04-07";
+/// Native main-turn system effort control, emitted after mid-conversation
+/// system support and before the general per-request effort beta.
+pub const PER_TURN_CONTROL: &str = "per-turn-control-2026-07-01";
 /// Connector-text summarization (`ewt`, `pewter_owl_header` flag — never emitted).
 pub const SUMMARIZE_CONNECTOR_TEXT: &str = "summarize-connector-text-2026-03-13";
 /// AFK transcript-classifier mode (`PH`).
@@ -129,6 +132,8 @@ pub struct BetaContext {
     /// Native YMe selects the automatic effort beta, including supported main defaults.
     /// Defaults to `false`.
     pub effort: bool,
+    /// Native per-turn system effort marker is present on this request.
+    pub per_turn_control: bool,
     /// Automatic format admitted before explicit extra-body merging.
     pub structured_output: bool,
     pub request_kind: lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind,
@@ -151,6 +156,7 @@ impl BetaContext {
             show_thinking_summaries: false,
             fast_mode: false,
             effort: false,
+            per_turn_control: false,
             structured_output: false,
             request_kind: Default::default(),
             tool_search: false,
@@ -183,6 +189,12 @@ impl BetaContext {
     #[must_use]
     pub fn with_effort(mut self, on: bool) -> Self {
         self.effort = on;
+        self
+    }
+
+    #[must_use]
+    pub fn with_per_turn_control(mut self, on: bool) -> Self {
+        self.per_turn_control = on;
         self
     }
 
@@ -447,6 +459,9 @@ fn model_betas_in(
     if side && ctx.structured_output {
         betas.push(STRUCTURED_OUTPUTS);
     }
+    if ctx.per_turn_control {
+        betas.push(PER_TURN_CONTROL);
+    }
     if ctx.effort {
         betas.push(EFFORT);
     }
@@ -676,7 +691,18 @@ mod tests {
         }
     }
 
-    /// The 17 live constants are byte-exact against the binary's `qS(...)` registry.
+    #[test]
+    fn per_turn_control_precedes_the_general_effort_beta() {
+        let context = BetaContext::for_model("claude-sonnet-5-5")
+            .with_per_turn_control(true)
+            .with_effort(true);
+        let header = assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate, &context);
+        let per_turn = header.find(PER_TURN_CONTROL).unwrap();
+        let effort = header.find(EFFORT).unwrap();
+        assert!(per_turn < effort, "{header}");
+    }
+
+    /// The current live constants are byte-exact against the Native registry.
     #[test]
     fn beta_constants_match_binary_byte_for_byte() {
         assert_eq!(CLAUDE_CODE_BETA, "claude-code-20250219");
@@ -698,6 +724,7 @@ mod tests {
             MID_CONVERSATION_SYSTEM,
             "mid-conversation-system-2026-04-07"
         );
+        assert_eq!(PER_TURN_CONTROL, "per-turn-control-2026-07-01");
         assert_eq!(ADVISOR_TOOL, "advisor-tool-2026-03-01");
         assert_eq!(OAUTH, "oauth-2025-04-20");
     }

@@ -1,0 +1,72 @@
+{
+  "native_version": "2.1.293 (Claude Code)",
+  "native_sha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "run_directory": "/private/tmp/claude-alignment-native-effort-293-64r4fila",
+  "runner_sha256": "83ee8ad5bd7e421a64a7bf08d440dcdfc539415ad6523d2dda220dbd1173b35a",
+  "session_id": "87788778-4321-4321-8321-123456789abc",
+  "scope": "Native-only public CLI initial request and cold resume; dummy loopback; exact source slices",
+  "runs": [
+    {
+      "index": 1,
+      "effort": "low",
+      "exit_code": 0,
+      "stdout_sha256": "f2301535ae9f60c4b63519ff13b2b4f5ca4074ad4832454450ed6314a4c94703",
+      "stderr_bytes": 447
+    },
+    {
+      "index": 2,
+      "effort": "high",
+      "exit_code": 0,
+      "stdout_sha256": "f841c460bfd2313fff0371cca708b8c0f694e02cb2cff10a376c26478b5dcc0f",
+      "stderr_bytes": 447
+    }
+  ],
+  "requests": [
+    {
+      "index": 1,
+      "accepted": true,
+      "sha256": "1824a46d07b7eeb201da5657ffda4faf9bccceb7da2bd1082aaf3bb08f5eca32",
+      "bytes": 7642
+    },
+    {
+      "index": 2,
+      "accepted": true,
+      "sha256": "28e84dd370b2f00c86f5b4d0131ba64edd2ca8bbc76fbc455297e8a29a69a03c",
+      "bytes": 7888
+    }
+  ],
+  "markers": [
+    {
+      "request": 1,
+      "markers": [
+        {
+          "message_index": 1,
+          "effort": "low",
+          "file": "request-01.message-01.raw.json",
+          "sha256": "6e5a4e87b18b811e7636d31c8f1ee59567a36a7f6b392e3bba62430a2387a610"
+        }
+      ]
+    },
+    {
+      "request": 2,
+      "markers": [
+        {
+          "message_index": 1,
+          "effort": "low",
+          "file": "request-02.message-01.raw.json",
+          "sha256": "bce62fc2936e3f5ace7ad3d65ba6632c95587bc92b15072d52f21842a6e2b958"
+        },
+        {
+          "message_index": 4,
+          "effort": "high",
+          "file": "request-02.message-04.raw.json",
+          "sha256": "668699c4548e020445dc5ab1ac51fca3d69dca6aa8ea17828cb84d1b466d8a38"
+        }
+      ]
+    }
+  ],
+  "assistant_efforts": [
+    "low",
+    "high"
+  ]
+}

@@ -24,25 +24,26 @@ fn build_dispatcher() -> RegistrySlashDispatcher {
 async fn dataviz_dispatches_bundled_body_and_optional_user_request() {
     let d = build_dispatcher();
     let outcome = d
-        .dispatch("/dataviz make the revenue chart keyboard accessible")
+        .dispatch("/dataviz make the revenue chart keyboard accessible".into())
         .await;
     let SlashDispatchResult::RunAsTurn { prompt } = outcome else {
         panic!("expected /dataviz to run as a prompt turn, got {outcome:?}");
     };
-    assert!(prompt.starts_with("# Data Visualization\n"));
-    assert!(prompt.contains("references/palette.md"));
-    assert!(prompt.contains("references/marks-and-anatomy.md"));
-    assert!(prompt.contains("references/interaction.md"));
-    assert!(prompt.ends_with("## User Request\n\nmake the revenue chart keyboard accessible"));
+    let text = prompt.string_at("").unwrap();
+    assert!(text.starts_with("# Data Visualization\n"));
+    assert!(text.contains("references/palette.md"));
+    assert!(text.contains("references/marks-and-anatomy.md"));
+    assert!(text.contains("references/interaction.md"));
+    assert!(text.ends_with("## User Request\n\nmake the revenue chart keyboard accessible"));
 }
 
 #[tokio::test]
 async fn happy_path_known_core_command() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("/help").await;
+    let outcome = d.dispatch("/help".into()).await;
     match outcome {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "help: not implemented in v0.6.0 (M5)");
+            assert_eq!(display, "help: not implemented in v0.6.0 (M5)".into());
         }
         other => panic!("expected Handled, got {other:?}"),
     }
@@ -53,10 +54,10 @@ async fn happy_path_known_unimplemented_command() {
     let d = build_dispatcher();
     // `x402` left the 105-name surface with the re-lock; `teleport` is a
     // still-registered stub.
-    let outcome = d.dispatch("/teleport").await;
+    let outcome = d.dispatch("/teleport".into()).await;
     match outcome {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "teleport: not implemented in v0.6.0 (M5)");
+            assert_eq!(display, "teleport: not implemented in v0.6.0 (M5)".into());
         }
         other => panic!("expected Handled, got {other:?}"),
     }
@@ -65,10 +66,10 @@ async fn happy_path_known_unimplemented_command() {
 #[tokio::test]
 async fn known_command_with_args_ignored_by_stub() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("/exit --force --soon=now").await;
+    let outcome = d.dispatch("/exit --force --soon=now".into()).await;
     match outcome {
         SlashDispatchResult::Handled { display } => {
-            assert_eq!(display, "exit: not implemented in v0.6.0 (M5)");
+            assert_eq!(display, "exit: not implemented in v0.6.0 (M5)".into());
         }
         other => panic!("expected Handled, got {other:?}"),
     }
@@ -77,11 +78,11 @@ async fn known_command_with_args_ignored_by_stub() {
 #[tokio::test]
 async fn unknown_command_path() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("/zzz-fake").await;
+    let outcome = d.dispatch("/zzz-fake".into()).await;
     match outcome {
         SlashDispatchResult::Unknown { name, display } => {
-            assert_eq!(name, "zzz-fake");
-            assert_eq!(display, "Unknown command: /zzz-fake");
+            assert_eq!(name, "zzz-fake".into());
+            assert_eq!(display, "Unknown command: /zzz-fake".into());
         }
         other => panic!("expected Unknown, got {other:?}"),
     }
@@ -90,7 +91,7 @@ async fn unknown_command_path() {
 #[tokio::test]
 async fn non_slash_input_path() {
     let d = build_dispatcher();
-    let outcome = d.dispatch("hello /clear world").await;
+    let outcome = d.dispatch("hello /clear world".into()).await;
     assert!(matches!(outcome, SlashDispatchResult::NotASlashCommand));
 }
 
@@ -99,10 +100,10 @@ async fn many_dispatches_against_one_registry() {
     let d = build_dispatcher();
     for name in ["clear", "compact", "teleport", "version", "help"] {
         let raw = format!("/{name}");
-        let outcome = d.dispatch(&raw).await;
+        let outcome = d.dispatch(raw.clone().into()).await;
         let expected = format!("{name}: not implemented in v0.6.0 (M5)");
         match outcome {
-            SlashDispatchResult::Handled { display } => assert_eq!(display, expected),
+            SlashDispatchResult::Handled { display } => assert_eq!(display, expected.into()),
             other => panic!("/{name} unexpected: {other:?}"),
         }
     }
@@ -117,9 +118,9 @@ async fn concurrent_dispatches_against_one_registry() {
         let raw = format!("/{name}");
         let expected = format!("{name}: not implemented in v0.6.0 (M5)");
         handles.push(tokio::spawn(async move {
-            let outcome = dispatcher.dispatch(&raw).await;
+            let outcome = dispatcher.dispatch(raw.clone().into()).await;
             match outcome {
-                SlashDispatchResult::Handled { display } => assert_eq!(display, expected),
+                SlashDispatchResult::Handled { display } => assert_eq!(display, expected.into()),
                 other => panic!("/{name} {other:?}"),
             }
         }));

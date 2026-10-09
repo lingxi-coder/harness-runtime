@@ -1442,6 +1442,7 @@ pub trait ModSessionContext: Send + Sync {
 
     async fn emit_mod_log(&self, _plugin: &str, _text: Utf16JsonProjection) {}
     async fn emit_mod_toast(&self, _plugin: &str, _text: Utf16JsonProjection, _timeout_ms: u64) {}
+    async fn emit_mod_notify(&self, _plugin: &str, _text: Utf16JsonProjection) {}
     async fn emit_mod_status(&self, _plugin: &str, _text: Option<Utf16JsonProjection>) {}
 }
 
@@ -1933,6 +1934,12 @@ impl ModSessionContext for WeakModSessionContext {
     async fn emit_mod_toast(&self, plugin: &str, text: Utf16JsonProjection, timeout_ms: u64) {
         if let Some(session) = self.0.upgrade() {
             session.emit_mod_toast(plugin, text, timeout_ms).await;
+        }
+    }
+
+    async fn emit_mod_notify(&self, plugin: &str, text: Utf16JsonProjection) {
+        if let Some(session) = self.0.upgrade() {
+            session.emit_mod_notify(plugin, text).await;
         }
     }
 
@@ -3687,6 +3694,20 @@ async fn background_api_loop(
                             }
                         }
                     }
+                    Some("notify") => {
+                        match background_output_context(&worker, &source_epoch, &message) {
+                            Ok((session, _generation_context_lease)) => {
+                                let plugin = projection_string(&message, "/plugin")
+                                    .unwrap_or_else(|| "engine".to_owned());
+                                if let Ok(text) = projection_root_string_member_or_empty(&message, "/text") {
+                                    session.emit_mod_notify(&plugin, text).await;
+                                }
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "discarded raw background Mod notify");
+                            }
+                        }
+                    }
                     Some("status") => {
                         match background_output_context(&worker, &source_epoch, &message) {
                             Ok((session, _generation_context_lease)) => {
@@ -4968,6 +4989,15 @@ impl ModHost {
                                     .unwrap_or_else(|_| root_string_projection("")),
                                 projection_u64(&message, "/timeoutMs").unwrap_or(4000),
                             )
+                            .await;
+                    }
+                }
+                Some("notify") => {
+                    if let (Some(session), Ok(text)) =
+                        (session.as_ref(), message.subprojection("/text"))
+                    {
+                        session
+                            .emit_mod_notify(message.string_at("/plugin").unwrap_or("engine"), text)
                             .await;
                     }
                 }
@@ -6520,6 +6550,11 @@ impl ModHost {
         Box::pin(async move {
             let mut input_projection = input_projection;
             let input = input_projection.as_ref();
+            if event == "ui.notify" && session.is_none() {
+                return Err(ModError::Unavailable(
+                    "ui.notify needs a session output stream".into(),
+                ));
+            }
             // These APIs are direct Host operations, not middleware events.
             // In particular, `agent.spawn` enters the canonical Agent launch
             // path through the session; dispatching an `agent.spawn` hook here
@@ -7058,6 +7093,7 @@ impl ModHost {
                                     "fs.write"
                                         | "ui.log"
                                         | "ui.toast"
+                                        | "ui.notify"
                                         | "ui.status"
                                         | "clock.sleep"
                                         | "clock.after"
@@ -7238,7 +7274,7 @@ impl ModHost {
                             {
                                 return Err(ModError::Hook("fs.write result must be void".into()));
                             }
-                            "ui.log" | "ui.toast" | "ui.status" | "telemetry.log"
+                            "ui.log" | "ui.toast" | "ui.notify" | "ui.status" | "telemetry.log"
                             | "telemetry.mark" | "clock.sleep" | "clock.after" | "clock.every"
                             | "store.set" | "store.delete"
                                 if value.at_pointer("").is_none_or(|root| !root.is_null()) =>
@@ -7474,6 +7510,7 @@ impl ModHost {
                                 | "prompt.context"
                                 | "ui.log"
                                 | "ui.toast"
+                                | "ui.notify"
                                 | "ui.status"
                                 | "ui.selection"
                                 | "telemetry.log"
@@ -9708,6 +9745,7 @@ impl ModHost {
                             | "prompt.context"
                             | "ui.log"
                             | "ui.toast"
+                            | "ui.notify"
                             | "ui.status"
                             | "ui.selection"
                             | "telemetry.log"
@@ -9901,6 +9939,14 @@ impl ModHost {
                         .unwrap_or_else(|_| root_string_projection(""));
                     let timeout_ms = projection_u64(&message, "/timeoutMs").unwrap_or(4000);
                     on_toast(plugin.to_owned(), text, timeout_ms).await;
+                }
+                Some("notify") => {
+                    let plugin = message.string_at("/plugin").unwrap_or("engine");
+                    if let Some(text) = message.subprojection("/text").ok() {
+                        if let Some(session) = session.as_ref() {
+                            session.emit_mod_notify(plugin, text).await;
+                        }
+                    }
                 }
                 Some("status") => {
                     let plugin = message.string_at("/plugin").unwrap_or("unknown");
@@ -10844,6 +10890,38 @@ mod tests {
             .await;
         assert!(refused.is_err());
         assert_eq!(host.agent_spawn_budget.running_for("agent-api-plugin"), 0);
+    }
+
+    struct NotifyTestSessionContext {
+        cwd: PathBuf,
+        notices: Arc<Mutex<Vec<(String, Utf16JsonProjection)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModSessionContext for NotifyTestSessionContext {
+        fn cwd(&self) -> PathBuf {
+            self.cwd.clone()
+        }
+
+        fn root(&self) -> PathBuf {
+            self.cwd.clone()
+        }
+
+        async fn model(&self) -> String {
+            "test-model".into()
+        }
+
+        async fn id(&self) -> String {
+            "notify-session".into()
+        }
+
+        async fn turns(&self) -> u64 {
+            1
+        }
+
+        async fn emit_mod_notify(&self, plugin: &str, text: Utf16JsonProjection) {
+            self.notices.lock().await.push((plugin.to_owned(), text));
+        }
     }
 
     struct TestSessionContext {
@@ -15743,6 +15821,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ui_notify_waits_for_host_acceptance_and_preserves_source_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("notify.js");
+        std::fs::write(
+            &module,
+            r#"
+          export function register(on) {
+            on('ui.notify', ($, e, next) => next({ ...e, text: e.text + '\uD800' }));
+            on('tool.call', async ($) => {
+              const result = await $.ui.notify('accepted');
+              return { result: { resolvedUndefined: result === undefined } };
+            });
+          }
+        "#,
+        )
+        .unwrap();
+        let notices = Arc::new(Mutex::new(Vec::<(String, Utf16JsonProjection)>::new()));
+        let session = NotifyTestSessionContext {
+            cwd: dir.path().to_path_buf(),
+            notices: notices.clone(),
+        };
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "notify-mod",
+            dir.path(),
+            &module,
+            test_mod_options(json!({})),
+        )
+        .await
+        .unwrap();
+
+        let outcome = host
+            .dispatch_with_ui_at_session(
+                "tool.call",
+                test_projection(json!({"tool":"Bash"})),
+                &session,
+                |_| async { panic!("Mod answers after the notify operation is accepted") },
+                |_, _| async {},
+                |_, _, _| async {},
+                |_, _| async {},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            mod_test_value(&outcome),
+            json!({"result":{"resolvedUndefined":true}})
+        );
+        let notices = notices.lock().await;
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].0, "notify-mod");
+        assert_eq!(
+            notices[0].1.string_units(""),
+            Some(vec![
+                'a' as u16, 'c' as u16, 'c' as u16, 'e' as u16, 'p' as u16, 't' as u16, 'e' as u16,
+                'd' as u16, 0xd800,
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn ui_status_rewrites_and_clears_without_tool_output() {
         let dir = tempfile::tempdir().unwrap();
         let module = dir.path().join("status.js");
@@ -19691,8 +19829,11 @@ mod tests {
                 const { Box, Button, Text } = $.ui.resolve(e);
                 return Box({ flexDirection: 'column', children: [
                   Text({ children: ['presses: ' + presses] }),
-                  Button({ key: 'refresh', label: 'Refresh', hotkey: '1',
+                  Button({ key: 'refresh', hotkey: '1', children: [
+                    'A', Text({ bold: true, children: ['B', 'C'] }),
+                  ],
                     onPress: () => { presses += 1; } }),
+                  Button({ key: 'folded', children: 'Folded', onPress: () => {} }),
                 ] });
               });
             }"#,
@@ -19793,6 +19934,20 @@ mod tests {
 
         let first = render(&host, &session, 1).await;
         assert_eq!(mod_test_value(&first)["children"][1]["press"]["handle"], 1);
+        let first_value = mod_test_value(&first);
+        assert_eq!(first_value["children"][1]["props"]["label"], "ABC");
+        assert_eq!(first_value["children"][1]["children"][0], "A");
+        assert_eq!(first_value["children"][1]["children"][1]["type"], "Text");
+        assert_eq!(
+            first_value["children"][1]["children"][1]["props"]["bold"],
+            true
+        );
+        assert_eq!(
+            first_value["children"][1]["children"][1]["children"],
+            json!(["B", "C"])
+        );
+        assert_eq!(first_value["children"][2]["props"]["label"], "Folded");
+        assert!(first_value["children"][2].get("children").is_none());
         let first_press = press_input(&first);
         assert_eq!(
             mod_test_value(

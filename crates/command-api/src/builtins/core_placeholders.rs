@@ -41,11 +41,11 @@ mod tests {
         crate::builtins::register_all_builtin_commands(&mut reg);
         for name in BUILTIN_CORE_NAMES {
             assert!(
-                reg.resolve(&name.into()).is_some(),
+                reg.resolve(&(*name).into()).is_some(),
                 "core /{name} disappeared"
             );
             assert!(
-                reg.get_handler(&name.into()).is_some(),
+                reg.get_handler(&(*name).into()).is_some(),
                 "core /{name} has no handler"
             );
         }
@@ -67,7 +67,7 @@ mod tests {
         };
         match h.handle(&args).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "clear: not implemented in v0.6.0 (M5)");
+                assert_eq!(s, "clear: not implemented in v0.6.0 (M5)".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -104,16 +104,16 @@ mod tests {
                 continue;
             }
             let h = reg
-                .get_handler(&name.into())
+                .get_handler(&(*name).into())
                 .unwrap_or_else(|| panic!("no handler /{name}"));
             let args = ParsedSlashCommand {
-                name: (*name).to_string(),
+                name: (*name).to_string().into(),
                 raw_args: String::new().into(),
                 positional_args: vec![],
             };
             match h.handle(&args).await {
                 CommandResult::Done { display: Some(s) } => {
-                    assert_eq!(s, format!("{name}: not implemented in v0.6.0 (M5)"));
+                    assert_eq!(s, format!("{name}: not implemented in v0.6.0 (M5)").into());
                 }
                 other => panic!("/{name} did not return Done, got {other:?}"),
             }

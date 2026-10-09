@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":6,"result":{"resources":[{"uri":"fixture://pagination/resource/01","name":"resource_page_01","description":"Resource marker from page 1.","mimeType":"text/plain"}],"nextCursor":"same-cursor"}}

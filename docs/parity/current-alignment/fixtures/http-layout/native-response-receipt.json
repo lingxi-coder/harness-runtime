@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "gate": "M2-HTTP-1",
+  "artifact": "crates/llm-runtime/tests/fixtures/http-layout-293/native-offered-response.raw",
+  "sourceArtifact": "fixtures/http-layout/run-output/native-2.1.293-print-text-20261008-rerun1/print-text/native-a/provider/000.offered-response.bin",
+  "sourceNativeBinarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "sourceBytes": 862,
+  "sourceSha256": "8e9582eda0a4500172c5ca9d692add80c01a11efbaf4b075d2247d8ef2a79389",
+  "artifactBytes": 862,
+  "artifactSha256": "8e9582eda0a4500172c5ca9d692add80c01a11efbaf4b075d2247d8ef2a79389",
+  "claim": "The complete Native HTTP/1 response status line, headers, CRLF framing, and response body are copied unchanged and offered by the loopback candidate fixture. The test asserts the decoded provider text; it does not claim final CLI output parity."
+}

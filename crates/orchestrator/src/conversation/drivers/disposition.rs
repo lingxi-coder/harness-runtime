@@ -131,7 +131,7 @@ impl ConversationOrchestrator {
             return TurnEndVerdict::Continue;
         }
         let cost = self.snapshot_cost_real().await;
-        self.output.emit_end_turn(stop_reason, &cost).await;
+        self.emit_turn_terminal(stop_reason, &cost).await;
         TurnEndVerdict::EndTurn(final_message_id)
     }
 }

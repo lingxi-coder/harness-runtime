@@ -1,12 +1,12 @@
-use crate::OrchestratorConfig;
 use crate::conversation::ConversationOrchestrator;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use permission::PermissionDecisionReason;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -18,7 +18,7 @@ use tool_api::tool_trait::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CapturedToolCall {
-    input: Value,
+    input: lingxi_core::types::utf16_json::Utf16JsonProjection,
     tool_use_id: Option<ToolUseId>,
     assistant_message_id: Option<MessageId>,
     messages: Vec<ConversationMessage>,
@@ -34,10 +34,24 @@ impl Tool for ContextCaptureTool {
         "ContextCapture"
     }
 
-    fn input_schema(&self) -> &Value {
-        static SCHEMA: once_cell::sync::Lazy<Value> =
-            once_cell::sync::Lazy::new(|| json!({"type":"object"}));
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
+        static SCHEMA: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+            once_cell::sync::Lazy::new(|| {
+                tool_api::tool_trait::generated_builtin_schema(&json!({"type":"object"}))
+            });
         &SCHEMA
+    }
+
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        use tool_api::tool_trait::{
+            ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance,
+        };
+
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
@@ -48,21 +62,25 @@ impl Tool for ContextCaptureTool {
         1024
     }
 
-    fn is_concurrency_safe(&self, _: &Value) -> bool {
+    fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
 
-    fn is_read_only(&self, _: &Value) -> bool {
+    fn is_read_only(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
 
-    async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> Result<(), ValidationError> {
+    async fn validate_input(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &ToolUseContext,
+    ) -> Result<(), ValidationError> {
         Ok(())
     }
 
     async fn check_permissions(
         &self,
-        _: &Value,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -75,7 +93,11 @@ impl Tool for ContextCaptureTool {
         }
     }
 
-    async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _: &DescriptionOptions,
+    ) -> String {
         "capture W1 facts".into()
     }
 
@@ -88,7 +110,7 @@ impl Tool for ContextCaptureTool {
 
     async fn call(
         &self,
-        input: Value,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         context: ToolUseContext,
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -100,7 +122,9 @@ impl Tool for ContextCaptureTool {
             assistant_message: context.assistant_message.clone(),
             same_turn_tool_uses: context.same_turn_tool_uses.clone(),
         });
-        Ok(ToolCallResult::from_data(json!({"content":"captured"})))
+        Ok(ToolCallResult::from_data(
+            tool_api::tool_trait::generated_builtin_result(&json!({"content":"captured"})),
+        ))
     }
 }
 
@@ -125,9 +149,15 @@ async fn accepted_assistant_row_is_w1_current_row_but_not_prequery_history() {
     let host = hooks::mods::ModHost::start(None)
         .await
         .expect("start Mod host");
-    host.load("accepted-row", root.path(), &module, json!({}))
-        .await
-        .expect("load session.append hook");
+    host.load(
+        "accepted-row",
+        root.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({}))
+            .expect("generated hook options are representable"),
+    )
+    .await
+    .expect("load session.append hook");
     let mut hook_registry = hooks::HookRegistry::new();
     hook_registry.set_mod_host(host);
 
@@ -150,7 +180,10 @@ async fn accepted_assistant_row_is_w1_current_row_but_not_prequery_history() {
     let source_tool_use = ContentBlock::ToolUse {
         id: tool_use_id.clone(),
         name: "ContextCapture".into(),
-        input: json!({"original":true}),
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &json!({"original":true}),
+        )
+        .expect("generated tool input is representable"),
         provider_id: Some("toolu_original".into()),
     };
     let source_row = ConversationMessage::Assistant {
@@ -199,7 +232,10 @@ async fn accepted_assistant_row_is_w1_current_row_but_not_prequery_history() {
         &(
             tool_use_id.clone(),
             "ContextCapture".into(),
-            json!({"original":true}),
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &json!({"original":true}),
+            )
+            .expect("generated tool input is representable"),
             Some("toolu_original".into()),
         ),
         None,
@@ -217,7 +253,10 @@ async fn accepted_assistant_row_is_w1_current_row_but_not_prequery_history() {
 
     let captured = calls.lock().unwrap();
     assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].input, json!({"original":true}));
+    assert_eq!(
+        captured[0].input.to_json_string().unwrap(),
+        r#"{"original":true}"#
+    );
     assert_eq!(captured[0].tool_use_id, Some(tool_use_id));
     assert_eq!(captured[0].assistant_message_id, Some(accepted_row.id()));
     assert_eq!(captured[0].messages, prequery);

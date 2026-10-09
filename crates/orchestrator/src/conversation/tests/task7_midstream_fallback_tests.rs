@@ -1,11 +1,11 @@
 use super::super::drivers_impl::is_env_truthy;
 use super::*;
-use crate::OrchestratorConfig;
 use crate::test_support::{
+    content_block_start_text, message_start, mock_message_response, noop_hook_executor, text_delta,
     MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-    StaticMemoryProvider, content_block_start_text, message_start, mock_message_response,
-    noop_hook_executor, text_delta,
+    StaticMemoryProvider,
 };
+use crate::OrchestratorConfig;
 use llm_runtime::ContentBlock as LlmContentBlock;
 use platform_posix::mcp::PosixMcpTransport;
 use std::sync::Arc;
@@ -266,7 +266,7 @@ for line in sys.stdin:
         })
         .collect();
     assert!(
-        texts.iter().any(|text| text == "fallback body"),
+        texts.iter().any(|text| *text == "fallback body"),
         "(d) output must contain the fallback body; texts={texts:?}"
     );
     // The turn must have ended with end_turn (not an error).

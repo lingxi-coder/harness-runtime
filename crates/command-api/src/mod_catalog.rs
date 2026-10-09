@@ -584,7 +584,7 @@ mod tests {
             .contains("demo registered it already"));
         let dispatcher = crate::RegistrySlashDispatcher::new(registry.clone());
         assert_eq!(
-            dispatcher.dispatch("/hello Ada").await,
+            dispatcher.dispatch("/hello Ada".into()).await,
             SlashDispatchResult::Handled {
                 display: "demo:hello:Ada".into()
             }
@@ -592,7 +592,7 @@ mod tests {
         catalog.unregister_plugin("demo").await;
         assert!(registry.read().await.resolve(&"hello".into()).is_none());
         assert!(matches!(
-            dispatcher.dispatch("/hello Ada").await,
+            dispatcher.dispatch("/hello Ada".into()).await,
             SlashDispatchResult::Unknown { .. }
         ));
     }
@@ -616,13 +616,13 @@ mod tests {
             columns: 123,
         };
         assert_eq!(
-            with_mod_command_context(context, dispatcher.dispatch("/hello Ada")).await,
+            with_mod_command_context(context, dispatcher.dispatch("/hello Ada".into())).await,
             SlashDispatchResult::Handled {
                 display: "plugin:true:123:Ada".into()
             }
         );
         assert_eq!(
-            dispatcher.dispatch("/hello Ada").await,
+            dispatcher.dispatch("/hello Ada".into()).await,
             SlashDispatchResult::Handled {
                 display: "unclassified:false:80:Ada".into()
             }

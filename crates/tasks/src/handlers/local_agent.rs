@@ -810,6 +810,7 @@ impl LocalAgentHandler {
             .and_then(|r| r.forked_skill_name.clone());
         let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
             agent_spawn_provenance: Default::default(),
+            agent_spawn_token: None,
             parent_native_query_depth: None,
             handback_opt_in: false,
             parent_permission_mode: None,
@@ -1814,6 +1815,7 @@ mod tests {
     fn request_with_worktree(prompt: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
             agent_spawn_provenance: Default::default(),
+            agent_spawn_token: None,
             parent_native_query_depth: None,
             handback_opt_in: false,
             parent_permission_mode: None,
@@ -2135,7 +2137,7 @@ mod tests {
         SubagentEvent::Completed {
             handback: None,
             agent_id: AgentId::new(),
-            result: json!({ "marker": marker }),
+            result: Utf16JsonProjection::from_serde_value(&json!({ "marker": marker })).unwrap(),
             usage: llm_runtime::ExecutionUsage::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,
@@ -2910,6 +2912,7 @@ mod tests {
                     citations: None,
                 }],
                 stop_reason: Some("end_turn".into()),
+                resumable: None,
             },
         ];
         tx.send(SubagentEvent::TranscriptSnapshot {
@@ -3979,7 +3982,8 @@ mod tests {
         tx.send(SubagentEvent::Completed {
             handback: None,
             agent_id: AgentId::new(),
-            result: json!({ "text": "rest answer" }),
+            result: Utf16JsonProjection::from_serde_value(&json!({ "text": "rest answer" }))
+                .unwrap(),
             usage: llm_runtime::ExecutionUsage::default(),
             total_tool_use_count: 3,
             total_duration_ms: 1500,
@@ -4325,6 +4329,7 @@ mod tests {
         let creator_agent_id = lingxi_core::types::AgentId::new();
         let expected = SubagentSpawnRequest {
             agent_spawn_provenance: Default::default(),
+            agent_spawn_token: None,
             parent_native_query_depth: None,
             handback_opt_in: false,
             parent_permission_mode: None,

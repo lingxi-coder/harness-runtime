@@ -1,0 +1,10 @@
+{
+  "native_version": "2.1.294",
+  "native_sha256": "def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53",
+  "model": "claude-sonnet-4-5",
+  "session_id": "00000000-0000-4000-8000-000000002f21",
+  "main_prompt": "Run the fixed agent hook evaluator fixture and finish.",
+  "main_response_text": "FIXED_MAIN_RESPONSE_AGENT_HOOK_EVALUATOR",
+  "hook_instruction": "FIXED_AGENT_HOOK_EVALUATOR_INSTRUCTION: Inspect the completed response and report the fixed fixture decision. Return only {\"ok\":true}.",
+  "hook_response_text": "{\"ok\":true}"
+}

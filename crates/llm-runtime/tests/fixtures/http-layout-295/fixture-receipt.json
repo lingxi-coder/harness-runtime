@@ -1,0 +1,22 @@
+{
+  "native_version": "2.1.295",
+  "native_binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "source_dir": "docs/parity/current-alignment/fixtures/http-layout-295/native-baseline/2.1.295/native-a",
+  "assets": {
+    "native-http1-request-headers.raw": {
+      "source": "request-headers.raw",
+      "sha256": "38dd23c5c6039f08c1ec8a0452ce70b3e749cab03548ea185633cbc461a533b5"
+    },
+    "native-request-body.raw.json": {
+      "source": "request-body.raw",
+      "sha256": "646bc0dc8dc166cbe2ceae32543f92193c1d55a0e580e8e15cb08d81009f2203"
+    },
+    "native-offered-response.raw": {
+      "source": "offered-response.raw",
+      "sha256": "8e9582eda0a4500172c5ca9d692add80c01a11efbaf4b075d2247d8ef2a79389"
+    }
+  },
+  "body_comparison_rule": "compare raw body after replacing only metadata.user_id.device_id at byte offset 628, length 64 with ASCII zeroes; no JSON parse/reserialization",
+  "native_port": 58855,
+  "dynamic_host_rule": "only Host may vary if the preferred loopback port is occupied; all other header bytes stay exact"
+}

@@ -1,0 +1,10 @@
+
+ui.test.ts:
+(pass) Button keeps Text and string children and derives its public label [22.97ms]
+(pass) Button keeps children when an explicit label is supplied [8.10ms]
+(pass) a lone string child becomes a label without a children field [7.64ms]
+(pass) ui.notify accepts text but plugin-test has no delivery implementation [8.73ms]
+
+ 4 pass
+ 0 fail
+Ran 4 tests across 1 file. [0.18s]

@@ -1,0 +1,116 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "discovery_mode": "modern complete server/discover result",
+  "source_run_relative_path": "run-output/native-mcp-pagination-295-modern-1wjc7tjk",
+  "artifacts": {
+    "mcp-config.json": {
+      "bytes": 811,
+      "sha256": "1e593713e119a06badd0eb7466f03bd39f39bcc58d82a95bd05f1319d683cb53"
+    },
+    "mcp-stdio-in.raw.jsonl": {
+      "bytes": 3670,
+      "sha256": "65f3dd3e275481ef1ae3681e1eb097a2424a21760187035bd984193abeb4141a"
+    },
+    "mcp-stdio-out.raw.jsonl": {
+      "bytes": 2342,
+      "sha256": "6d4a624c13114ae7d75a64f4eee803591a731c4a9d75ea10195db9e9e903fc29"
+    },
+    "model-response-01.raw": {
+      "bytes": 874,
+      "sha256": "9f7eea17b60ccce29d031a584c3ddb923f2eaa1cd07c06c146c746317fa5db32"
+    },
+    "model-response-02.raw.sse": {
+      "bytes": 802,
+      "sha256": "d427a51c47c6fb9131f85abe23a86a8fcbb2f760ec49a885c1a0463191167e73"
+    },
+    "model-tool-result.raw.json": {
+      "bytes": 250,
+      "sha256": "83b0f99ed3c3454887cafd508f1c8d0fbc570c3090f16ed3c0476c757e1cf3d3"
+    },
+    "model-tools.raw.json": {
+      "bytes": 76153,
+      "sha256": "e3e0034041960284087df1cfb0dc63e6f52ac990958abc91726964df342b47b7"
+    },
+    "native-mcp-debug.raw.jsonl": {
+      "bytes": 2892,
+      "sha256": "1ae7b089237fd3a68e8f73f2e60ab19f9a1aea5fbbe2bf90e9b634567f71cd64"
+    },
+    "native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native.stdout.raw.json": {
+      "bytes": 1598,
+      "sha256": "713435f52da1363af92bf5537d41a0e886d56879957285ebec6cfffe28549c81"
+    },
+    "prompts-list-request-01.raw.jsonrpc": {
+      "bytes": 431,
+      "sha256": "2e0d076167cbd61c673168ad89f2a0add8ef77d877b4e366ead6b781548a42fc"
+    },
+    "prompts-list-request-02.raw.jsonrpc": {
+      "bytes": 454,
+      "sha256": "aff5afb5c19c3acd85304157229229b61db5ff32d12c861cec454d5c60bf4fd0"
+    },
+    "prompts-list-response-01.raw.jsonrpc": {
+      "bytes": 215,
+      "sha256": "3d67b02e9cdc47587ae35daf727147aae97fcea77fc24147af6054bb770d9bb6"
+    },
+    "prompts-list-response-02.raw.jsonrpc": {
+      "bytes": 215,
+      "sha256": "b63a53f48ac0381f661cccc6121a0009ea545a1751c9617a95888d258f70b843"
+    },
+    "receipt.json": {
+      "bytes": 11299,
+      "sha256": "ce60056b3b73733981aab0d90b0b2e62d0b28501bb966936b032016a7c0cb233"
+    },
+    "resources-list-request-01.raw.jsonrpc": {
+      "bytes": 433,
+      "sha256": "9e32635a680a058f36b440dd52deab9a9c46631f3fd517cde2d54972d6b19f78"
+    },
+    "resources-list-request-02.raw.jsonrpc": {
+      "bytes": 456,
+      "sha256": "a5c44d700437eaa350896ddee0923942e4686d4e7468825a8d1524f8319a15a7"
+    },
+    "resources-list-response-01.raw.jsonrpc": {
+      "bytes": 271,
+      "sha256": "9e45b3f9d7ec7d4407c100156211d73774c87ac6d7cfadc7dd4e3c8212612fd5"
+    },
+    "resources-list-response-02.raw.jsonrpc": {
+      "bytes": 271,
+      "sha256": "cc997658771ba91bd8f8ef52fd568df023aa67611ade395bbf9bb573a1fbb31f"
+    },
+    "server-discover-request-01.raw.jsonrpc": {
+      "bytes": 458,
+      "sha256": "54472377ecba5a5db114e597580c3296de78712a872a258782ab6d42365d0e73"
+    },
+    "server-discover-response-01.raw.jsonrpc": {
+      "bytes": 476,
+      "sha256": "76edbf4c9bef8fb6bc98a95e5e146412f8f1b61ba66ebcf84d1b71489fe8c4b0"
+    },
+    "tools-call-request-01.raw.jsonrpc": {
+      "bytes": 549,
+      "sha256": "d633caf13d47f5bd096a8eb740721cc655318f1ed356f757603b1db9106cee1f"
+    },
+    "tools-call-response-01.raw.jsonrpc": {
+      "bytes": 220,
+      "sha256": "9d069469ea3bc7471eb55e1c4b34b167a91359daa1ed63cd77b217e54aa9ad40"
+    },
+    "tools-list-request-01.raw.jsonrpc": {
+      "bytes": 429,
+      "sha256": "2738a8a1514408353fe10461a340bf90c8fecdd0a0ad61e48ceeb2734ef7cecc"
+    },
+    "tools-list-request-02.raw.jsonrpc": {
+      "bytes": 452,
+      "sha256": "fad7ef7acfbf781263c7fb8509f0aaa86af4f341e2d63e46246cc3fb1cd6226e"
+    },
+    "tools-list-response-01.raw.jsonrpc": {
+      "bytes": 333,
+      "sha256": "03333aaa4b39ae8924900fbd7eb32e756a1184ce0dd3722d05aedd01c7fffaaa"
+    },
+    "tools-list-response-02.raw.jsonrpc": {
+      "bytes": 333,
+      "sha256": "177df54ca6c80ca35720e497ee8148c2e61ec39add13148b9f1787d26c20dd5b"
+    }
+  }
+}

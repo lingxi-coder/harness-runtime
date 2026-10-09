@@ -10,9 +10,14 @@ use super::{
     FusionCatalogRefreshingOAuthConnect, WorktreeSlashAction, QUERY_SOURCE_REPL_MAIN_THREAD,
     QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+fn generated_test_source(value: Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).expect("generated test JSON is valid")
+}
 
 #[test]
 fn host_workspace_trust_overrides_cli_records_and_preserves_cli_default() {
@@ -233,10 +238,14 @@ struct RecordingNetworkPermissionGate {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::PermissionGate for RecordingNetworkPermissionGate {
-    async fn check(&self, name: &str, input: &Value) -> lingxi_core::host::PermissionDecision {
+    async fn check(
+        &self,
+        name: &str,
+        input: &Utf16JsonProjection,
+    ) -> lingxi_core::host::PermissionDecision {
         assert_eq!(name, "SandboxNetworkAccess");
-        assert_eq!(input["host"], "api.example.test");
-        assert_eq!(input["port"], 8443);
+        assert_eq!(input.string_at("/host"), Some("api.example.test"));
+        assert_eq!(input.number_at("/port"), Some(8443.0));
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.allow {
             lingxi_core::host::PermissionDecision::Allow
@@ -510,7 +519,8 @@ fn workflow_session_enabled_defaults_true() {
 #[test]
 fn worktree_slash_parser_covers_lifecycle_and_safe_remove() {
     let parse = |raw: &str| {
-        let parsed = command_api::parse_slash_command(raw).expect("slash command");
+        let raw = Utf16JsonProjection::from(raw);
+        let parsed = command_api::parse_slash_command(&raw).expect("slash command");
         parse_worktree_slash_action(&parsed)
     };
 
@@ -631,7 +641,7 @@ async fn desktop_registry_exposes_connect() {
     )
     .await;
     assert!(
-        reg.get_handler("connect").is_some(),
+        reg.get_handler(&"connect".into()).is_some(),
         "/connect not wired into desktop registry"
     );
 }
@@ -739,12 +749,12 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
         )
         .await;
         assert_eq!(
-            reg.resolve("m3custom").is_some(),
+            reg.resolve(&"m3custom".into()).is_some(),
             want_custom,
             "{gates:?}: custom command discovery gate"
         );
         assert!(
-            reg.get_handler("connect").is_some(),
+            reg.get_handler(&"connect".into()).is_some(),
             "{gates:?}: builtins must stay registered"
         );
     }
@@ -850,7 +860,7 @@ async fn an_add_dir_root_contributes_its_skills() {
         )
         .await;
         assert_eq!(
-            reg.resolve("addskill").is_some(),
+            reg.resolve(&"addskill".into()).is_some(),
             want,
             "add-dir roots {roots:?}: the skill must be reachable only through the root"
         );
@@ -2705,8 +2715,8 @@ fn desktop_config_debug_redacts_secret_bearing_fields() {
             serde_json::json!({ "apiKey": SECRET_CANARY }),
         )])),
         routing: Some(serde_json::json!({ "credential": SECRET_CANARY })),
-        system_prompt_override: Some(SECRET_CANARY.to_string()),
-        append_system_prompt: Some(SECRET_CANARY.to_string()),
+        system_prompt_override: Some(SECRET_CANARY.to_string().into()),
+        append_system_prompt: Some(SECRET_CANARY.to_string().into()),
         cli_agents_json: Some(format!(r#"{{"prompt":"{SECRET_CANARY}"}}"#)),
         ..DesktopConfig::default()
     };
@@ -2754,7 +2764,8 @@ fn permission_mode_threads_into_context_and_policy() {
     //     sets `mode = cfg.permission_mode` (non-default), then builds the
     //     policy with no rules — an unmatched tool must be allow-all.
     let policy = PermissionPolicy::from_rules(cfg.permission_mode, std::iter::empty());
-    let input = serde_json::json!({});
+    let input = Utf16JsonProjection::from_serde_value(&serde_json::json!({}))
+        .expect("generated permission input is valid");
     assert!(
         matches!(
             policy.authorize("SomeUnmatchedTool", &input),
@@ -2803,9 +2814,9 @@ async fn desktop_workflow_script_path_is_read_gated_before_launcher_io() {
     let runtime = build(cfg, output, permission_sink)
         .await
         .expect("desktop build must succeed without reading scriptPath");
-    let input = serde_json::json!({
+    let input = generated_test_source(serde_json::json!({
         "scriptPath": script_path.to_string_lossy().into_owned()
-    });
+    }));
     let ctx = tool_api::test_support::fresh_ctx();
 
     runtime
@@ -3131,7 +3142,10 @@ fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
         rules,
     );
     assert!(matches!(
-        policy.authorize("mcp__remote_server__delete_data", &serde_json::json!({})),
+        policy.authorize(
+            "mcp__remote_server__delete_data",
+            &generated_test_source(serde_json::json!({})),
+        ),
         permission::PermissionResult::Deny {
             reason: permission::PermissionDecisionReason::MatchedRule { .. },
             ..
@@ -3160,7 +3174,10 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
         server_name: "srv".into(),
         tool_name: tool_name.into(),
         description: tool_name.into(),
-        input_schema: serde_json::json!({"type": "object"}),
+        input_schema: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"type": "object"}),
+        )
+        .unwrap(),
         output_schema: None,
         annotations: None,
         icons: Vec::new(),
@@ -3185,8 +3202,8 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
                 prompts: false,
                 logging: false,
                 directory_read: false,
-                experimental: std::collections::HashMap::new(),
-                extensions: std::collections::HashMap::new(),
+                experimental: generated_test_source(serde_json::json!({})),
+                extensions: generated_test_source(serde_json::json!({})),
             },
             negotiated: lingxi_core::host::McpNegotiatedProtocol {
                 era: lingxi_core::host::McpProtocolEra::Legacy,
@@ -3228,7 +3245,10 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
         .iter()
         .find(|tool| tool.name() == "mcp__srv__deny")
         .expect("agent-scoped deny tool is registered")
-        .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+        .check_permissions(
+            &generated_test_source(serde_json::json!({})),
+            &tool_api::test_support::fresh_ctx(),
+        )
         .await;
     assert!(matches!(deny, permission::PermissionResult::Deny { .. }));
 
@@ -3237,7 +3257,10 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
         .iter()
         .find(|tool| tool.name() == "mcp__srv__ask")
         .expect("agent-scoped ask tool is registered")
-        .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+        .check_permissions(
+            &generated_test_source(serde_json::json!({})),
+            &tool_api::test_support::fresh_ctx(),
+        )
         .await;
     assert!(matches!(ask, permission::PermissionResult::Ask { .. }));
 
@@ -3246,7 +3269,10 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
         .iter()
         .find(|tool| tool.name() == "mcp__srv__interactive")
         .expect("agent-scoped interactive tool is registered")
-        .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+        .check_permissions(
+            &generated_test_source(serde_json::json!({})),
+            &tool_api::test_support::fresh_ctx(),
+        )
         .await;
     assert!(matches!(
         interactive,
@@ -3434,6 +3460,7 @@ pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) 
         credential_storage_policy: lingxi_core::host::CredentialStoragePolicy::NativeOrMemory,
         injected_plugin_secrets: std::collections::BTreeMap::new(),
         api_base: "https://api.anthropic.com".to_string(),
+        anthropic_client_metadata: None,
         api_key: String::new(),
         api_key_helper: None,
         // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
@@ -4554,17 +4581,19 @@ async fn build_discovers_and_materialises_an_installed_plugin() {
     let reg = rt.dispatcher.registry();
     let reg = reg.read().await;
     let cmd = reg
-        .resolve("myplugin:hello")
+        .resolve(&"myplugin:hello".into())
         .expect("plugin command `myplugin:hello` should be discovered at bootstrap");
     assert_eq!(cmd.source, command_api::CommandSource::Plugin);
     // Verification fix #2: the command body must be loaded — an empty
     // prompt_template would expand to an inert prompt.
-    assert_eq!(cmd.description, "greets");
+    assert_eq!(cmd.description.string_at(""), Some("greets"));
     match &cmd.kind {
         command_api::SlashCommandKind::Plugin {
             prompt_template, ..
         } => assert!(
-            prompt_template.contains("Hello from the plugin."),
+            prompt_template
+                .string_at("")
+                .is_some_and(|body| body.contains("Hello from the plugin.")),
             "plugin command body must reach the live registry"
         ),
         other => panic!("expected Plugin kind, got {other:?}"),
@@ -4587,7 +4616,7 @@ impl command_api::BuiltinCommandHandler for CountedModCoreCommand {
             }
         } else {
             command_api::CommandResult::Done {
-                display: Some(format!("core {}", args.raw_args)),
+                display: Some(format!("core {}", args.raw_args.string_at("").unwrap_or("")).into()),
             }
         }
     }
@@ -4661,12 +4690,13 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         .orchestrator
         .assemble_default_system_prompt_preview()
         .await
-        .contains("MOD SURFACE desktop"));
+        .string_at("")
+        .is_some_and(|text| text.contains("MOD SURFACE desktop")));
     assert!(rt
         .shared_command_registry
         .read()
         .await
-        .resolve("hello")
+        .resolve(&"hello".into())
         .is_some());
     let (hello, hello_settlement) = command_api::with_mod_command_capture(
         command_api::ModCommandRunContext {
@@ -4674,12 +4704,14 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
             is_fullscreen: false,
             columns: 80,
         },
-        rt.dispatcher.dispatch("/hello Ada"),
+        rt.dispatcher.dispatch("/hello Ada".into()),
     )
     .await;
     assert_eq!(
-        hello_settlement,
-        Some(serde_json::json!({"text":"hello Ada"}))
+        hello_settlement
+            .as_ref()
+            .and_then(|value| value.string_at("/text")),
+        Some("hello Ada")
     );
     assert_eq!(
         hello,
@@ -4688,7 +4720,7 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         }
     );
     assert_eq!(
-        rt.dispatcher.dispatch("/unanswered").await,
+        rt.dispatcher.dispatch("/unanswered".into()).await,
         SlashDispatchResult::Handled {
             display: "moddemo registered /unanswered but no command.run hook answered it: add on(\"command.run\", { command: \"unanswered\" }, ($, e) => ({ text: ... })) to the plugin.".into()
         }
@@ -4700,7 +4732,7 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
                 is_fullscreen: true,
                 columns: 123,
             },
-            rt.dispatcher.dispatch("/origin"),
+            rt.dispatcher.dispatch("/origin".into()),
         )
         .await,
         SlashDispatchResult::Handled {
@@ -4708,7 +4740,7 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         }
     );
     assert_eq!(
-        rt.dispatcher.dispatch("/origin").await,
+        rt.dispatcher.dispatch("/origin".into()).await,
         SlashDispatchResult::Handled {
             display: "moddemo: unclassified:-:false:80".into()
         }
@@ -4738,12 +4770,14 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
             is_fullscreen: false,
             columns: 80,
         },
-        rt.dispatcher.dispatch("/echo Ada"),
+        rt.dispatcher.dispatch("/echo Ada".into()),
     )
     .await;
     assert_eq!(
-        echo_settlement,
-        Some(serde_json::json!({"text":"core Ada! served"}))
+        echo_settlement
+            .as_ref()
+            .and_then(|value| value.string_at("/text")),
+        Some("core Ada! served")
     );
     assert_eq!(
         echo,
@@ -4753,14 +4787,14 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
     );
     assert_eq!(echo_hits.load(Ordering::SeqCst), 1);
     assert_eq!(
-        rt.dispatcher.dispatch("/cut Ada").await,
+        rt.dispatcher.dispatch("/cut Ada".into()).await,
         SlashDispatchResult::Handled {
             display: "moddemo: blocked".into()
         }
     );
     assert_eq!(cut_hits.load(Ordering::SeqCst), 0);
     assert_eq!(
-        rt.dispatcher.dispatch("/plain Ada").await,
+        rt.dispatcher.dispatch("/plain Ada".into()).await,
         SlashDispatchResult::Handled {
             display: "core Ada".into()
         }
@@ -4770,7 +4804,7 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         rt.dispatcher
             .clone_shared()
             .with_injected_messages_as_turns()
-            .dispatch("/prompted")
+            .dispatch("/prompted".into())
             .await,
         SlashDispatchResult::RunAsTurn {
             prompt: "model prompt".into()
@@ -4780,7 +4814,7 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
     let host = rt.hook_registry.read().await.mod_host().expect("Mod host");
     host.unload("moddemo").await.unwrap();
     assert_eq!(
-        rt.dispatcher.dispatch("/echo Ada").await,
+        rt.dispatcher.dispatch("/echo Ada".into()).await,
         SlashDispatchResult::Handled {
             display: "core Ada".into()
         }
@@ -4790,10 +4824,10 @@ async fn mod_registered_slash_command_runs_and_unloads_in_desktop_session() {
         .shared_command_registry
         .read()
         .await
-        .resolve("hello")
+        .resolve(&"hello".into())
         .is_none());
     assert!(matches!(
-        rt.dispatcher.dispatch("/hello Ada").await,
+        rt.dispatcher.dispatch("/hello Ada".into()).await,
         SlashDispatchResult::Unknown { .. }
     ));
 }
@@ -4862,13 +4896,15 @@ async fn build_discovers_a_plugin_via_enabledplugins_cache_layout() {
     let reg = rt.dispatcher.registry();
     let reg = reg.read().await;
     let cmd = reg
-        .resolve("weather:forecast")
+        .resolve(&"weather:forecast".into())
         .expect("namespaced plugin command discovered via enabledPlugins cache layout");
     assert_eq!(cmd.source, command_api::CommandSource::Plugin);
     match &cmd.kind {
         command_api::SlashCommandKind::Plugin {
             prompt_template, ..
-        } => assert!(prompt_template.contains("The forecast is sunny.")),
+        } => assert!(prompt_template
+            .string_at("")
+            .is_some_and(|body| body.contains("The forecast is sunny."))),
         other => panic!("expected Plugin kind, got {other:?}"),
     }
 }
@@ -4886,7 +4922,7 @@ async fn build_with_no_plugins_dir_is_a_noop() {
     let rt = build(cfg, output, perm_sink).await.expect("build() failed");
     let reg = rt.dispatcher.registry();
     let reg = reg.read().await;
-    assert!(reg.resolve("hello").is_none());
+    assert!(reg.resolve(&"hello".into()).is_none());
 }
 
 #[tokio::test]
@@ -6751,7 +6787,12 @@ async fn build_default_uses_adapter_gate() {
     let g = gate.clone();
     let task = tokio::spawn(async move {
         use permission::gate::PermissionGate;
-        g.check("Bash", &serde_json::json!({"command": "ls"})).await
+        g.check(
+            "Bash",
+            &Utf16JsonProjection::from_serde_value(&serde_json::json!({"command": "ls"}))
+                .expect("generated permission input"),
+        )
+        .await
     });
 
     // The request must have reached the adapter sink — a `NoOpPermissionGate`
@@ -7483,16 +7524,18 @@ async fn session_persistence_flag_gates_jsonl_writer() {
                 .count();
             let dispatched = lingxi_core::host::SlashCommandDispatcher::dispatch(
                 &rt.dispatcher,
-                "/fusion compare these approaches",
+                "/fusion compare these approaches".into(),
             )
             .await;
             let lingxi_core::host::SlashDispatchResult::Handled { display } = dispatched else {
                 panic!("expected handled /fusion preflight, got {dispatched:?}");
             };
             assert!(
-                display.starts_with("fusion failed to start: ")
-                    && display.contains("requires session persistence"),
-                "ephemeral /fusion must fail before dispatch, got: {display}"
+                display.string_at("").is_some_and(|text| {
+                    text.starts_with("fusion failed to start: ")
+                        && text.contains("requires session persistence")
+                }),
+                "ephemeral /fusion must fail before dispatch, got: {display:?}"
             );
             let after = rt
                 .task_registry
@@ -7989,18 +8032,22 @@ async fn mailbox_router_is_wired_when_coordinator() {
         .expect("SendMessage must be registered");
     let result = send
         .call(
-            serde_json::json!({
+            generated_test_source(serde_json::json!({
                 "to": "alpha",
                 "summary": "kick off",
                 "message": "hello teammate",
-            }),
+            })),
             tool_api::test_support::fresh_ctx(),
             tool_api::test_support::fresh_tx(),
         )
         .await
         .expect("coordinator SendMessage must route to the registered worker mailbox");
     assert_eq!(
-        result.data["success"], true,
+        result
+            .data
+            .at_pointer("/success")
+            .and_then(|value| value.as_bool()),
+        Some(true),
         "a route to a registered worker returns success"
     );
 
@@ -8013,10 +8060,10 @@ async fn mailbox_router_is_wired_when_coordinator() {
         .expect("SendMessage builtin must be registered in the default set too");
     let err = default_send
         .call(
-            serde_json::json!({
+            generated_test_source(serde_json::json!({
                 "to": worker.as_uuid().to_string(),
                 "message": "hello teammate",
-            }),
+            })),
             tool_api::test_support::fresh_ctx(),
             tool_api::test_support::fresh_tx(),
         )
@@ -8957,7 +9004,10 @@ async fn managed_permission_deny_rule_binds_and_cites_policy_settings() {
     );
 
     let policy = permission::PermissionPolicy::from_rules(tiers.mode, tiers.rules);
-    let res = policy.authorize("Bash", &serde_json::json!({ "command": "rm -rf scratch" }));
+    let permission_input = generated_test_source(serde_json::json!({
+        "command": "rm -rf scratch"
+    }));
+    let res = policy.authorize("Bash", &permission_input);
     match res {
         permission::PermissionResult::Deny { reason, .. } => match reason {
             permission::PermissionDecisionReason::MatchedRule { rule } => assert_eq!(
@@ -9762,7 +9812,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
         command_registry
             .read()
             .await
-            .resolve("plugina:acmd")
+            .resolve(&"plugina:acmd".into())
             .is_some(),
         "A's command materialised"
     );
@@ -9777,7 +9827,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
         command_registry
             .read()
             .await
-            .resolve("plugina:acmd")
+            .resolve(&"plugina:acmd".into())
             .is_none(),
         "A's command unloaded on disable"
     );
@@ -9785,7 +9835,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
         command_registry
             .read()
             .await
-            .resolve("pluginb:bcmd")
+            .resolve(&"pluginb:bcmd".into())
             .is_some(),
         "B's command materialised on enable"
     );
@@ -9841,7 +9891,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
         command_registry
             .read()
             .await
-            .resolve("plugina:acmd")
+            .resolve(&"plugina:acmd".into())
             .is_some(),
         "first refresh must materialize the initially enabled plugin"
     );
@@ -9860,7 +9910,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
         command_registry
             .read()
             .await
-            .resolve("pluginb:bcmd")
+            .resolve(&"pluginb:bcmd".into())
             .is_none(),
         "fresh target must not be enabled while a prior unload failed"
     );
@@ -9868,7 +9918,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
         command_registry
             .read()
             .await
-            .resolve("plugina:acmd")
+            .resolve(&"plugina:acmd".into())
             .is_some(),
         "the failed disable keeps preexisting non-MCP surfaces intact"
     );
@@ -9886,7 +9936,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
         command_registry
             .read()
             .await
-            .resolve("plugina:acmd")
+            .resolve(&"plugina:acmd".into())
             .is_none(),
         "recovery must finish unloading the stale plugin"
     );
@@ -9894,7 +9944,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
         command_registry
             .read()
             .await
-            .resolve("pluginb:bcmd")
+            .resolve(&"pluginb:bcmd".into())
             .is_some(),
         "recovery then enables the fresh target"
     );
@@ -9982,7 +10032,7 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
         command_registry
             .read()
             .await
-            .resolve("plugina:acmd")
+            .resolve(&"plugina:acmd".into())
             .is_some(),
         "the plugin command must still be materialized after the serialized double refresh"
     );
@@ -9999,7 +10049,7 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
         command_registry
             .read()
             .await
-            .resolve("plugina:acmd")
+            .resolve(&"plugina:acmd".into())
             .is_none(),
         "the unload after the concurrent refresh must not leave a stale duplicate owner behind"
     );
@@ -10139,8 +10189,8 @@ impl lingxi_core::host::McpTransport for FailOnceReloadPluginTransport {
             prompts: false,
             directory_read: false,
             logging: false,
-            experimental: std::collections::HashMap::new(),
-            extensions: std::collections::HashMap::new(),
+            experimental: generated_test_source(serde_json::json!({})),
+            extensions: generated_test_source(serde_json::json!({})),
         })
     }
 
@@ -10176,7 +10226,7 @@ impl lingxi_core::host::McpTransport for FailOnceReloadPluginTransport {
         &self,
         _c: &lingxi_core::host::McpRawConnection,
         _t: &str,
-        _i: serde_json::Value,
+        _i: Utf16JsonProjection,
     ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
         unreachable!("unused in reload test")
     }
@@ -10184,7 +10234,7 @@ impl lingxi_core::host::McpTransport for FailOnceReloadPluginTransport {
     async fn read_resource(
         &self,
         _c: &lingxi_core::host::McpRawConnection,
-        _u: &str,
+        _u: &Utf16JsonProjection,
     ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
         unreachable!("unused in reload test")
     }
@@ -10266,8 +10316,8 @@ impl lingxi_core::host::McpTransport for BlockingReloadPluginTransport {
             prompts: false,
             directory_read: false,
             logging: false,
-            experimental: std::collections::HashMap::new(),
-            extensions: std::collections::HashMap::new(),
+            experimental: generated_test_source(serde_json::json!({})),
+            extensions: generated_test_source(serde_json::json!({})),
         })
     }
 
@@ -10303,7 +10353,7 @@ impl lingxi_core::host::McpTransport for BlockingReloadPluginTransport {
         &self,
         _c: &lingxi_core::host::McpRawConnection,
         _t: &str,
-        _i: serde_json::Value,
+        _i: Utf16JsonProjection,
     ) -> Result<lingxi_core::host::McpToolResultDto, lingxi_core::host::McpError> {
         unreachable!("unused in concurrent refresh test")
     }
@@ -10311,7 +10361,7 @@ impl lingxi_core::host::McpTransport for BlockingReloadPluginTransport {
     async fn read_resource(
         &self,
         _c: &lingxi_core::host::McpRawConnection,
-        _u: &str,
+        _u: &Utf16JsonProjection,
     ) -> Result<lingxi_core::host::McpResourceContentDto, lingxi_core::host::McpError> {
         unreachable!("unused in concurrent refresh test")
     }
@@ -10482,7 +10532,7 @@ async fn plugin_runtime_refresh_strips_agent_escalation_from_live_catalog() {
         command_registry
             .read()
             .await
-            .resolve("rogueplugin:ok")
+            .resolve(&"rogueplugin:ok".into())
             .is_some(),
         "the plugin's sibling command must still register — a stripped agent \
              field is not a reason to drop the rest of the plugin"
@@ -10937,7 +10987,7 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
     {
         let reg = command_registry.read().await;
         assert!(
-            reg.resolve("acmeplugin:hello").is_some(),
+            reg.resolve(&"acmeplugin:hello".into()).is_some(),
             "the plugin's command must reach the live command registry as \
                  `acmeplugin:hello`; registry holds {:?}",
             reg.list_all().iter().map(|c| &c.name).collect::<Vec<_>>()
@@ -11031,7 +11081,7 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
             )
         });
         assert!(
-            cond.match_tool_name && cond.pattern == "Write",
+            cond.match_tool_name && cond.pattern.string_at("") == Some("Write"),
             "the plugin hook's tool-name matcher must be the fixture's `Write`, got \
                  {cond:?}"
         );

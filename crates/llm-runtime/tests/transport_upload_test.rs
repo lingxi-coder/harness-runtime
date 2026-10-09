@@ -24,6 +24,7 @@ fn upload(polls: Arc<AtomicUsize>) -> HttpStreamRequest {
         .boxed(),
         content_length: 4,
         timeout: Some(Duration::from_secs(7)),
+        http1_header_layout: None,
     }
 }
 #[tokio::test]

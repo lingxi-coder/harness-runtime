@@ -1,0 +1,5 @@
+{
+  "type": "ui_notify",
+  "plugin": "review",
+  "text": "Background update is ready"
+}

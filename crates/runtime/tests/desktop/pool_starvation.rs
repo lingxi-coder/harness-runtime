@@ -28,7 +28,6 @@ use futures::StreamExt;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent::PoolSubagentSpawner;
 use agent::api::SubagentApiClient;
 use agent::context::SubagentContext;
 use agent::definition::{
@@ -36,6 +35,7 @@ use agent::definition::{
 };
 use agent::display::{AgentColor, AgentDisplay};
 use agent::pool::StateMachinePool;
+use agent::PoolSubagentSpawner;
 use async_trait::async_trait;
 use harness_runtime::desktop::TEAMMATE_POOL_CAP;
 use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
@@ -43,7 +43,9 @@ use lingxi_core::host::subagent_spawn::{
     SubagentInheritance, SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::AgentId;
+use lingxi_llm_client::protocol::JsonPayload;
 use test_harness::mocks::MockRuntimeSpawner;
 
 /// Scripted `SubagentApiClient`: one scripted stream per call, returning
@@ -87,7 +89,7 @@ impl SubagentApiClient for ScriptedApiClient {
                 stop_details: None,
                 usage: llm_runtime::ExecutionUsage::default(),
                 cost: None,
-                provider_metadata: llm_runtime::JsonPayload::default(),
+                provider_metadata: JsonPayload::default(),
                 resumable: None,
             })
         };
@@ -105,10 +107,10 @@ impl ToolInvoker for InertInvoker {
     async fn invoke(
         &self,
         _name: &str,
-        _input: serde_json::Value,
+        _input: Utf16JsonProjection,
         _ctx: SubagentInvocationContext,
-    ) -> Result<serde_json::Value, ToolInvokerError> {
-        Ok(serde_json::Value::Null)
+    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
+        Ok(Utf16JsonProjection::parse("null").expect("null is valid JSON"))
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -174,6 +176,7 @@ impl SubagentApiClient for PendingModel {
 /// A persistent teammate configured with the required model seam.
 fn pending_teammate_ctx(model: Arc<PendingModel>) -> SubagentContext {
     SubagentContext {
+        native_query_depth: 0,
         server_fallback_model_enforcement: None,
         handback: None,
         handback_restore_start: None,
@@ -254,6 +257,7 @@ fn pending_teammate_ctx(model: Arc<PendingModel>) -> SubagentContext {
         structured_output_parse_retries: 0,
         budget: None,
         hook_executor: None,
+        agent_spawn_token: None,
         strict_plugin_only_hooks: false,
         skill_loader: None,
         hook_session_id: lingxi_core::types::SessionId::nil(),
@@ -363,9 +367,11 @@ async fn fill_with_pending_teammates(pool: &StateMachinePool) -> FilledTeammates
 fn agent_tool_request() -> SubagentSpawnRequest {
     SubagentSpawnRequest {
         agent_spawn_provenance: Default::default(),
+        agent_spawn_token: None,
         teammate_color: None,
         subagent_type: "general-purpose".into(),
         prompt: "do one thing".into(),
+        parent_native_query_depth: None,
         observer: None,
         context_paths: vec![],
         // AgentTool spawn-surface parity params (additive optional).

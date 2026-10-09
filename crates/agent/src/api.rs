@@ -452,7 +452,8 @@ mod tests {
         };
         let completed = || SubagentObservation::Completed {
             agent_id,
-            content: serde_json::Value::Null,
+            content: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
+                .expect("null is valid JSON"),
             usage: Default::default(),
             total_tool_use_count: 0,
             total_duration_ms: 0,

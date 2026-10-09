@@ -5,14 +5,14 @@ use lingxi_core::host::panel_pool::PanelPoolDrain;
 use lingxi_core::host::subagent_spawn::SubagentInheritance;
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use lingxi_core::host::*;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
     StrictStructuredQueryRequest, StrictStructuredQueryResponse,
 };
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 use std::time::Duration;
 
@@ -22,10 +22,13 @@ impl ToolInvoker for Invoker {
     async fn invoke(
         &self,
         _: &str,
-        _: Value,
+        _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: SubagentInvocationContext,
-    ) -> Result<Value, ToolInvokerError> {
-        Ok(Value::Null)
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
+        Ok(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
+                .expect("null source"),
+        )
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -93,13 +96,16 @@ impl agent::SubagentApiClient for Api {
             content: vec![llm_runtime::ContentBlock::ToolCall {
                 id: "report".into(),
                 name: "StructuredOutput".into(),
-                input: json!({"schema_version":1,"summary":"summary","candidate_answer":"answer","claims":[],"evidence":[],"assumptions":[],"risks":[],"unresolved_questions":[]}),
+                input: lingxi_llm_client::protocol::JsonPayload::parse(
+                    &json!({"schema_version":1,"summary":"summary","candidate_answer":"answer","claims":[],"evidence":[],"assumptions":[],"risks":[],"unresolved_questions":[]}).to_string(),
+                )
+                .unwrap(),
             }],
             stop_reason: Some("tool_use".into()),
             stop_details: None,
             usage: Default::default(),
             cost: None,
-            provider_metadata: llm_runtime::JsonPayload::default(),
+            provider_metadata: lingxi_llm_client::protocol::JsonPayload::default(),
             resumable: None,
         };
         let events = llm_runtime::stream_accumulator::response_to_stream_events(response);

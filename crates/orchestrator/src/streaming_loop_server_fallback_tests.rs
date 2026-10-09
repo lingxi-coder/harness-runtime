@@ -47,6 +47,10 @@ fn server_fallback_reset_tombstones_all_query_tool_result_rows_and_keeps_other_j
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     let second_result = lingxi_core::types::ConversationMessage::User {
         id: second_result_id,
@@ -60,6 +64,10 @@ fn server_fallback_reset_tombstones_all_query_tool_result_rows_and_keeps_other_j
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
     };
     let unrelated = lingxi_core::types::ConversationMessage::user(other_id, "keep".into());
     let mut settlement = StreamToolSettlement {
@@ -105,7 +113,7 @@ fn server_fallback_reset_tombstones_all_query_tool_result_rows_and_keeps_other_j
     assert!(matches!(
         tombstones[0].content.as_slice(),
         [lingxi_core::types::ContentBlock::ToolResult { tool_use_id: id, content, .. }]
-            if id.as_str() == "old-tool-use" && content == "old result"
+            if id.as_str() == "old-tool-use" && content.string_at("") == Some("old result")
     ));
     assert_eq!(tombstones[1].uuid, second_result_id);
     assert_eq!(tombstones[1].timestamp, "2026-10-04T12:34:57.123Z");
@@ -244,7 +252,7 @@ async fn server_stitch_keeps_prefix_and_metadata_for_opaque_text() {
             index: 1,
             content_block: llm_runtime::ContentBlock::ProviderContent {
                 protocol: "anthropic_messages".into(),
-                value: raw,
+                value: sdk_source(&raw),
             },
         }),
         Ok(text_delta(1, " answer")),
@@ -261,7 +269,9 @@ async fn server_stitch_keeps_prefix_and_metadata_for_opaque_text() {
     assert_eq!(turn.assistant_blocks.len(), 1);
     assert!(
         matches!(turn.assistant_blocks.first(), Some(ContentBlock::ProviderContent { value, .. })
-        if value["text"] == "retained text answer" && value["citations"].is_null() && value["extra_native"]["keep"] == 289)
+        if value.string_at("/text").as_deref() == Some("retained text answer")
+            && value.at_pointer("/citations").is_some_and(|value| value.is_null())
+            && value.number_at("/extra_native/keep") == Some(289.0))
     );
     assert_eq!(turn.assistant_rows[0].content, turn.assistant_blocks);
 }
@@ -351,12 +361,21 @@ struct TombstoneSummary {
     provider_message_id: Option<String>,
     model: Option<String>,
     stop_reason: Option<String>,
-    stop_details: Option<serde_json::Value>,
-    usage: Option<serde_json::Value>,
+    stop_details: Option<Utf16JsonProjection>,
+    usage: Option<Utf16JsonProjection>,
     content_blocks: usize,
     tool_use_id: Option<ToolUseId>,
     is_api_error_message: Option<bool>,
     supersedes_uuids: Vec<MessageId>,
+}
+
+fn core_source(value: &serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("generated core fixture is representable")
+}
+
+fn sdk_source(value: &serde_json::Value) -> lingxi_llm_client::protocol::JsonPayload {
+    lingxi_llm_client::protocol::JsonPayload::from_generated_value(value)
+        .expect("generated SDK fixture is valid JSON")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1266,10 +1285,10 @@ async fn reused_block_index_does_not_relabel_an_older_pending_j_original() {
         output_tokens: 8,
         ..Default::default()
     });
-    prior_delta_usage.provider_metadata = serde_json::json!({
+    prior_delta_usage.provider_metadata = sdk_source(&serde_json::json!({
         "input_tokens": 27,
         "output_tokens": 8,
-    });
+    }));
     let events = vec![
         Ok(message_start("original-response", "requested-model")),
         Ok(content_block_start_text(0)),
@@ -1357,14 +1376,16 @@ async fn reused_block_index_does_not_relabel_an_older_pending_j_original() {
     assert_eq!(tombstone.stop_reason.as_deref(), Some("refusal"));
     assert_eq!(
         tombstone.stop_details,
-        Some(serde_json::json!({
+        Some(core_source(&serde_json::json!({
             "category": "cyber",
             "explanation": "prior refusal"
-        }))
+        })))
     );
     assert_eq!(
         tombstone.usage,
-        Some(serde_json::json!({"input_tokens": 27, "output_tokens": 8}))
+        Some(core_source(
+            &serde_json::json!({"input_tokens": 27, "output_tokens": 8})
+        ))
     );
     let candidate = turn
         .assistant_rows
@@ -1444,10 +1465,10 @@ async fn usage_only_delta_can_set_details_before_a_terminal_reason_exists() {
     assert_eq!(tombstone.stop_reason, None);
     assert_eq!(
         tombstone.stop_details,
-        Some(serde_json::json!({
+        Some(core_source(&serde_json::json!({
             "category": "bio",
             "explanation": "pre-terminal detail"
-        }))
+        })))
     );
 }
 
@@ -1880,7 +1901,7 @@ async fn declined_server_fallback_returns_event_and_paid_usage_without_partial_o
         input_tokens: 321,
         ..Default::default()
     });
-    start_usage.provider_metadata = serde_json::json!({"provider": "fixture"});
+    start_usage.provider_metadata = sdk_source(&serde_json::json!({"provider": "fixture"}));
     let events = vec![
         Ok(message_start_with_usage(
             "old-attempt",
@@ -1980,13 +2001,13 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
             ObservedToolUse {
                 id: kept_tool.clone(),
                 name: "Read".into(),
-                input: serde_json::json!({}),
+                input: core_source(&serde_json::json!({})),
                 provider_id: None,
             },
             ObservedToolUse {
                 id: discarded_tool.clone(),
                 name: "Read".into(),
-                input: serde_json::json!({}),
+                input: core_source(&serde_json::json!({})),
                 provider_id: None,
             },
         ],
@@ -2029,7 +2050,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 content: vec![ContentBlock::ToolUse {
                     id: kept_tool.clone(),
                     name: "Read".into(),
-                    input: serde_json::json!({}),
+                    input: core_source(&serde_json::json!({})),
                     provider_id: None,
                 }],
                 session_append_dispatched: false,
@@ -2073,7 +2094,7 @@ fn fallback_tombstones_use_completed_block_indices_not_vector_positions() {
                 content: vec![ContentBlock::ToolUse {
                     id: discarded_tool.clone(),
                     name: "Read".into(),
-                    input: serde_json::json!({}),
+                    input: core_source(&serde_json::json!({})),
                     provider_id: None,
                 }],
                 session_append_dispatched: false,
@@ -2131,9 +2152,9 @@ fn projected_response_usage(model: &str) -> llm_runtime::ExecutionUsage {
         output_tokens: 3,
         ..Default::default()
     });
-    usage.provider_metadata = serde_json::json!({
+    usage.provider_metadata = sdk_source(&serde_json::json!({
         "stream":{"llm_client":{"response_model":model}}
-    });
+    }));
     usage
 }
 
@@ -2170,10 +2191,10 @@ async fn suppressed_hop_updates_served_model_from_no_usage_observation_block() {
         index: u32::MAX,
         content_block: llm_runtime::ContentBlock::ProviderContent {
             protocol: "anthropic_messages".into(),
-            value: serde_json::json!({
+            value: sdk_source(&serde_json::json!({
                 "type":"lingxi_observation",
                 "metadata":{"llm_client":{"response_model":"second-served-model"}}
-            }),
+            })),
         },
     };
     let events = vec![
@@ -2198,9 +2219,9 @@ async fn suppressed_hop_updates_served_model_from_no_usage_observation_block() {
 #[tokio::test]
 async fn ordinary_turn_does_not_adopt_a_projected_model_without_a_fallback_event() {
     let mut spoofed_usage = projected_response_usage("spoofed-served-model");
-    spoofed_usage.provider_metadata = serde_json::json!({
+    spoofed_usage.provider_metadata = sdk_source(&serde_json::json!({
         "stream":{"llm_client":{"response_model":"spoofed-served-model"}}
-    });
+    }));
     let events = vec![
         Ok(message_start("ordinary", "provider-served-version")),
         Ok(content_block_start_text(0)),
@@ -2213,10 +2234,10 @@ async fn ordinary_turn_does_not_adopt_a_projected_model_without_a_fallback_event
             index: 1,
             content_block: llm_runtime::ContentBlock::ProviderContent {
                 protocol: "anthropic_messages".into(),
-                value: serde_json::json!({
+                value: sdk_source(&serde_json::json!({
                     "type":"lingxi_observation",
                     "metadata":{"llm_client":{"response_model":"spoofed-served-model"}}
-                }),
+                })),
             },
         }),
         Ok(content_block_stop(1)),
@@ -2232,7 +2253,7 @@ async fn ordinary_turn_does_not_adopt_a_projected_model_without_a_fallback_event
     ];
     let output: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
 
-    let turn = pump_stream_inner(boxed(events), &output, None)
+    let turn = pump_stream_inner(boxed(events), &output, None, None)
         .await
         .map(|(turn, _remaining)| turn)
         .expect("ordinary stream should complete");
@@ -2244,7 +2265,7 @@ async fn ordinary_turn_does_not_adopt_a_projected_model_without_a_fallback_event
         [
             ContentBlock::Text { text, .. },
             ContentBlock::ProviderContent { value, .. }
-        ] if text == "ordinary answer" && value["type"] == "lingxi_observation"
+        ] if text == "ordinary answer" && value.string_at("/type").as_deref() == Some("lingxi_observation")
     ));
 }
 
@@ -2254,6 +2275,7 @@ async fn provider_native_observation_type_does_not_override_a_fallback_model() {
         "type":"lingxi_observation",
         "metadata":{"llm_client":{"response_model":"spoofed-served-model"}}
     });
+    let expected_provider_block = core_source(&provider_block);
     let events = vec![
         Ok(message_start("primary", "requested-model")),
         Ok(fallback_event(vec![], "refusal")),
@@ -2261,7 +2283,7 @@ async fn provider_native_observation_type_does_not_override_a_fallback_model() {
             index: 7,
             content_block: llm_runtime::ContentBlock::ProviderContent {
                 protocol: "anthropic_messages".into(),
-                value: provider_block.clone(),
+                value: sdk_source(&provider_block),
             },
         }),
         Ok(content_block_stop(7)),
@@ -2275,6 +2297,6 @@ async fn provider_native_observation_type_does_not_override_a_fallback_model() {
     assert_eq!(turn.handled_server_fallback_events, 1);
     assert!(matches!(
         turn.assistant_blocks.as_slice(),
-        [ContentBlock::ProviderContent { value, .. }] if value == &provider_block
+        [ContentBlock::ProviderContent { value, .. }] if value == &expected_provider_block
     ));
 }

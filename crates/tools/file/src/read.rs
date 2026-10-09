@@ -1587,8 +1587,8 @@ impl FileReadTool {
             new_messages,
             context_modifier: None,
             is_error: false,
-            mcp_meta: None,
             subagent_hooks_fired: false,
+            mcp_meta: None,
         })
     }
 
@@ -1639,8 +1639,8 @@ impl FileReadTool {
             new_messages: vec![msg],
             context_modifier: None,
             is_error: false,
-            mcp_meta: None,
             subagent_hooks_fired: false,
+            mcp_meta: None,
         })
     }
 
@@ -1828,8 +1828,8 @@ impl FileReadTool {
             new_messages: vec![msg],
             context_modifier: None,
             is_error: false,
-            mcp_meta: None,
             subagent_hooks_fired: false,
+            mcp_meta: None,
         })
     }
 }
@@ -2226,8 +2226,8 @@ impl Tool for FileReadTool {
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
-                    mcp_meta: None,
                     subagent_hooks_fired: false,
+                    mcp_meta: None,
                 });
             }
             let is_full_view = entry.offset.is_none() && entry.limit.is_none();
@@ -2262,8 +2262,8 @@ impl Tool for FileReadTool {
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
-                    mcp_meta: None,
                     subagent_hooks_fired: false,
+                    mcp_meta: None,
                 });
             }
         }
@@ -2447,8 +2447,8 @@ impl Tool for FileReadTool {
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
-                mcp_meta: None,
                 subagent_hooks_fired: false,
+                mcp_meta: None,
             });
         }
 
@@ -2609,8 +2609,8 @@ impl Tool for FileReadTool {
                 new_messages: vec![],
                 context_modifier: None,
                 is_error: false,
-                mcp_meta: None,
                 subagent_hooks_fired: false,
+                mcp_meta: None,
             });
         }
 
@@ -2836,8 +2836,8 @@ impl Tool for FileReadTool {
             new_messages,
             context_modifier: None,
             is_error: false,
-            mcp_meta: None,
             subagent_hooks_fired: false,
+            mcp_meta: None,
         })
     }
 }
@@ -3706,14 +3706,15 @@ mod tests {
             )
             .await;
         assert_eq!(desc, "Read a file from the local filesystem.");
-        let prompt = tool
+        let prompt_source = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
                 model_profile: None,
                 ..Default::default()
             })
-            .await
+            .await;
+        let prompt = prompt_source
             .string_at("")
             .expect("prompt is a JSON string");
         // model:None ⇒ Dh(undefined)=false ⇒ LONG prompt.
@@ -3748,14 +3749,15 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileReadTool::new(ctx);
         // model:claude-opus-4-8 ⇒ Dh=true ⇒ SHORT prompt (byte-anchor).
-        let prompt = tool
+        let prompt_source = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
                 ..Default::default()
             })
-            .await
+            .await;
+        let prompt = prompt_source
             .string_at("")
             .expect("prompt is a JSON string");
         assert_eq!(prompt, READ_PROMPT_SHORT);

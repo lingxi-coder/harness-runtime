@@ -1,0 +1,45 @@
+{
+  "native_version": "2.1.295",
+  "artifacts": {
+    "native-baseline/2.1.295/README.md": {
+      "bytes": 1212,
+      "sha256": "e23d4f2a32393d0aedff7051b2dd0d586e2d00cdd9b8e3d063ea52875d862d66"
+    },
+    "native-baseline/2.1.295/interrupt-content.raw.json": {
+      "bytes": 56,
+      "sha256": "ad710d55159f0013958b33520d37ce6d14c6f3647d93c09d005c7e545bebe228"
+    },
+    "native-baseline/2.1.295/interrupt-row.raw.jsonl": {
+      "bytes": 519,
+      "sha256": "b15e9bfc925df78c0550a65e4707e4e482c95113be63737f76583bd1db74f99f"
+    },
+    "native-baseline/2.1.295/native-receipt.json": {
+      "bytes": 7029,
+      "sha256": "43b194650c95c91dcf61458300e4ecf428f5bc4e4ac137e038258c0ff8ed8e2d"
+    },
+    "native-baseline/2.1.295/prompt-content.raw.json": {
+      "bytes": 49,
+      "sha256": "63738af050e51a7c05269ea26e17169ada3ac1ba1d41fec1ff88be3a8fb9647b"
+    },
+    "native-baseline/2.1.295/prompt-row.raw.jsonl": {
+      "bytes": 592,
+      "sha256": "42ebe8c617e66fbeef1d7b0495d67af6f140e07bb046dc5b00fd0340b532f82b"
+    },
+    "native-baseline/2.1.295/stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native-baseline/2.1.295/stdout.raw": {
+      "bytes": 1241,
+      "sha256": "589d30e369a75200eef22c16e72fc068716736f988352f1748991f9a559525c2"
+    },
+    "run-native.py": {
+      "bytes": 11886,
+      "sha256": "e1601ca2a939ef5bd59bdffe960915e6b17c4552c7b8bebb824f4fcc3a79147a"
+    },
+    "cases.json": {
+      "bytes": 350,
+      "sha256": "cb19698a417c3209a18d17a56131830f738a0de04240751e34c3419f20cab44e"
+    }
+  }
+}

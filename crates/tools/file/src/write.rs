@@ -592,8 +592,8 @@ impl Tool for FileWriteTool {
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
-            mcp_meta: None,
             subagent_hooks_fired: false,
+            mcp_meta: None,
         })
     }
 }
@@ -781,30 +781,28 @@ mod tests {
         let (ctx, _sink) = make_ctx(&tmp);
         let tool = FileWriteTool::new(ctx);
         // model:None ⇒ Dh(undefined)=false ⇒ LONG (byte-anchor).
-        let long = tool
+        let long_prompt = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
                 model_profile: None,
                 ..Default::default()
             })
-            .await
-            .string_at("")
-            .expect("prompt is a JSON string");
+            .await;
+        let long = long_prompt.string_at("").expect("prompt is a JSON string");
         assert_eq!(long, WRITE_PROMPT_LONG);
         assert!(long.starts_with("Writes a file to the local filesystem.\n\nUsage:"));
         assert!(long.contains("you MUST use the Read tool first"));
         // model:claude-opus-4-8 ⇒ Dh=true ⇒ SHORT (byte-anchor).
-        let short = tool
+        let short_prompt = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,
                 ..Default::default()
             })
-            .await
-            .string_at("")
-            .expect("prompt is a JSON string");
+            .await;
+        let short = short_prompt.string_at("").expect("prompt is a JSON string");
         assert_eq!(short, WRITE_PROMPT_SHORT);
         assert!(
             short.starts_with("Writes a file to the local filesystem, overwriting if one exists.")

@@ -3376,8 +3376,8 @@ mod tests {
             )
             .await;
         assert_eq!(
-            desc.string_at(""),
-            Some("Exits a worktree session created by EnterWorktree and restores the original working directory")
+            desc,
+            "Exits a worktree session created by EnterWorktree and restores the original working directory"
         );
     }
 

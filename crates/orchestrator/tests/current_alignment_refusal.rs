@@ -36,16 +36,7 @@ struct FixedNativeRefusal {
 }
 
 fn request_shape(request: &lingxi_llm_client::HttpRequest) -> RequestShape {
-    let parsed = request
-        .body_bytes
-        .as_deref()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
-        .or_else(|| {
-            request
-                .body
-                .as_deref()
-                .and_then(|body| serde_json::from_str::<serde_json::Value>(body).ok())
-        });
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(request.body.as_ref()).ok();
     RequestShape {
         model: parsed
             .as_ref()
@@ -217,12 +208,19 @@ async fn native_refusal_results_and_source_stop_details_reach_real_host_output_a
         )
         .with_session_id(fixed_session_id(session_id))
         .with_jsonl_writer(writer);
+        let orchestrator = ConversationOrchestrator::into_shared(orchestrator);
 
         let outcome = orchestrator
             .run_turn_streaming("Return the fixed refusal stop-details fixture response.")
             .await
             .expect("fixed refusal reaches the terminal turn boundary");
         assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
+        let metrics = orchestrator
+            .completed_turn_metrics()
+            .expect("refusal publishes completed execution metrics");
+        assert_eq!(metrics.num_turns, 1);
+        assert_eq!(metrics.api_error_status, None);
+        assert_eq!(metrics.api_error_stop_reason.as_deref(), Some("refusal"));
 
         let request_shapes = transport
             .request_shapes
@@ -244,13 +242,18 @@ async fn native_refusal_results_and_source_stop_details_reach_real_host_output_a
                 OutputEvent::TerminalApiError {
                     api_error_status,
                     terminal_reason,
-                } => Some((*api_error_status, terminal_reason.as_str())),
+                    stop_reason,
+                } => Some((
+                    *api_error_status,
+                    terminal_reason.as_str(),
+                    stop_reason.as_str(),
+                )),
                 _ => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(
             terminal_api_errors,
-            vec![(None, "api_error")],
+            vec![(None, "api_error", "refusal")],
             "the Host terminal marker must match the Native refusal envelope: {case}"
         );
         let text_events = events

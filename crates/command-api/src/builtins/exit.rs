@@ -87,7 +87,7 @@ mod tests {
         let h = ExitHandler::new(mock.clone());
         match h.handle(&args()).await {
             CommandResult::Done { display: Some(s) } => {
-                assert_eq!(s, "Exiting.");
+                assert_eq!(s, "Exiting.".into());
             }
             other => panic!("expected Done, got {other:?}"),
         }

@@ -23,6 +23,10 @@ pub(crate) struct PreparedTurnStep {
     /// This step's full reminder suffix in request order, including the newly
     /// persisted MCP/total-token messages with their original identities.
     pub(crate) turn_reminders: Vec<ConversationMessage>,
+    /// Optional Anthropic-only request suffix tied to this step's current tool
+    /// result. It is applied to the API clone and never persisted in history.
+    pub(crate) tool_result_reminder_suffixes:
+        Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix>,
     /// Keep async-hook producer generations through PTL/fallback snapshot
     /// rebuilds so reset can remove an old completion at model admission.
     pub(crate) guarded_async_hook_reminders:
@@ -69,12 +73,15 @@ impl ConversationOrchestrator {
             &mut turn_reminders,
             &mut guarded_async_hook_reminders,
         );
+        let tool_result_reminder_suffixes =
+            self.tool_result_reminder_suffixes_for_snapshot(&snapshot);
         Ok(PreparedTurnStep {
             snapshot,
             model: call.model,
             model_profile: call.model_profile,
             outgoing_history_rewriter: call.outgoing_history_rewriter,
             turn_reminders,
+            tool_result_reminder_suffixes,
             guarded_async_hook_reminders,
             context_announcements: previous.context_announcements.clone(),
             wire_tools: previous.wire_tools.clone(),
@@ -275,7 +282,10 @@ impl ConversationOrchestrator {
         if let Some(reminder) = date_change_reminder.clone() {
             self.prepend_transient_leading_context(&mut snapshot, reminder);
         }
+        crate::request_context::attach(&mut snapshot);
         self.screen_mod_persisted_attachments(&mut snapshot).await;
+        let tool_result_reminder_suffixes =
+            self.tool_result_reminder_suffixes_for_snapshot(&snapshot);
         crate::prompt::async_hook_response::retain_current_async_hook_reminders(
             &mut snapshot,
             &mut turn_reminders,
@@ -288,6 +298,7 @@ impl ConversationOrchestrator {
             model_profile: prepared_call.model_profile,
             outgoing_history_rewriter: prepared_call.outgoing_history_rewriter,
             turn_reminders,
+            tool_result_reminder_suffixes,
             guarded_async_hook_reminders,
             context_announcements,
             wire_tools,
@@ -547,4 +558,105 @@ impl ConversationOrchestrator {
             }
         })
     }
+
+    pub(crate) fn tool_result_reminder_suffixes_for_snapshot(
+        &self,
+        snapshot: &[ConversationMessage],
+    ) -> Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix> {
+        let attachments = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        total_token_reminder_suffixes_from_history(snapshot, &attachments)
+    }
 }
+
+fn total_token_reminder_suffixes_from_history(
+    snapshot: &[ConversationMessage],
+    attachments: &std::collections::HashMap<
+        MessageId,
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+    >,
+) -> Vec<llm_runtime::convert::AnthropicToolResultReminderSuffix> {
+    use lingxi_core::types::ContentBlock;
+
+    let mut current_tool_result = None;
+    let mut suffixes = Vec::new();
+    for message in snapshot {
+        match message {
+            ConversationMessage::User {
+                id, is_meta: true, ..
+            } => {
+                let Some(attachment) = attachments.get(id) else {
+                    continue;
+                };
+                if attachment.string_at("/type") != Some("total_tokens_reminder") {
+                    continue;
+                }
+                let Some(tool_use_id) = current_tool_result.clone() else {
+                    continue;
+                };
+                if let Some(text) = total_token_reminder_source(message) {
+                    suffixes.push(llm_runtime::convert::AnthropicToolResultReminderSuffix {
+                        tool_use_id,
+                        reminder_message_id: *id,
+                        text,
+                    });
+                }
+            }
+            ConversationMessage::User {
+                content,
+                is_meta: false,
+                ..
+            } => {
+                current_tool_result = if !content.is_empty()
+                    && content
+                        .iter()
+                        .all(|block| matches!(block, ContentBlock::ToolResult { .. }))
+                {
+                    content.iter().rev().find_map(|block| match block {
+                        ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+            }
+            ConversationMessage::Assistant { .. } | ConversationMessage::System { .. } => {
+                current_tool_result = None;
+            }
+        }
+    }
+    suffixes
+}
+
+fn total_token_reminder_source(
+    message: &ConversationMessage,
+) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    let ConversationMessage::User { content, .. } = message else {
+        return None;
+    };
+    if content.len() != 1 {
+        return None;
+    }
+    match content.first()? {
+        lingxi_core::types::ContentBlock::Text { text, .. } => Some(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from(text.as_str()),
+        ),
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            text.clone(),
+            utf16_code_units.clone(),
+        )
+        .ok(),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "prepare_tool_result_reminder_tests.rs"]
+mod tool_result_reminder_tests;

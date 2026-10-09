@@ -1,0 +1,268 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "native_path_at_capture": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "public_entrypoint": "Native 2.1.295 --print --output-format json, strict isolated --mcp-config, local stdio MCP, loopback Messages stub, followed by public --resume of the captured session",
+  "run": {
+    "initial_exit_code": 0,
+    "initial_timed_out": false,
+    "resume_exit_code": 0,
+    "resume_timed_out": false,
+    "elapsed_seconds": 1.484,
+    "mcp_tools_call_count": 1,
+    "model_request_phases": [
+      "initial",
+      "initial",
+      "cold_resume"
+    ],
+    "native_result": {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false,
+      "result": "NATIVE_MCP_COMPLEX_ERROR_PERSISTENCE_FINISHED",
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "00000000-0000-4000-8000-000000002351"
+    },
+    "network_boundary": {
+      "model_endpoint": "127.0.0.1 loopback only",
+      "mcp_transport": "local stdio subprocess only",
+      "dummy_api_key_only": true,
+      "isolated_home_config": true,
+      "no_upstream_relay": true
+    }
+  },
+  "fixed_inputs": {
+    "native_version": "2.1.295",
+    "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "session_id": "00000000-0000-4000-8000-000000002351",
+    "model": "claude-sonnet-4-5",
+    "server_name": "fixture",
+    "prompt": "Call the fixture MCP tool once, then finish with the fixed response.",
+    "resume_prompt": "Restore the saved session and finish with the fixed response.",
+    "final_text": "NATIVE_MCP_COMPLEX_ERROR_PERSISTENCE_FINISHED",
+    "timeout_seconds": 45,
+    "tool_cases": [
+      {
+        "name": "error_complex",
+        "tool_use_id": "toolu_native_error_complex_295",
+        "marker": "MCP_COMPLEX_ERROR_MARKER",
+        "is_error": true,
+        "content": [
+          {
+            "type": "text",
+            "text": " \n\t "
+          },
+          {
+            "type": "text",
+            "text": "  mcp-error-\ud800-tail \n"
+          },
+          {
+            "type": "image",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jH0sAAAAASUVORK5CYII=",
+            "mimeType": "image/png"
+          }
+        ]
+      }
+    ]
+  },
+  "observations": {
+    "mcp_result": "isError:true; content contained two text blocks (whitespace-only first; second with surrounding whitespace and U+D800) plus an image block. Native accepted the response.",
+    "jsonl_tool_result_block": {
+      "path": "native-user-tool-result-block.raw.json",
+      "bytes": 119,
+      "sha256": "3ee3695ee6ec6ed28b931142710c36c8be369c99f33d35435ada222729ebabce",
+      "value": {
+        "type": "tool_result",
+        "content": "mcp-error-\ud800-tail",
+        "is_error": true,
+        "tool_use_id": "toolu_native_error_complex_295"
+      }
+    },
+    "toolUseResult": {
+      "path": "native-user-toolUseResult.raw.json",
+      "bytes": 30,
+      "sha256": "dbe1d837f7d1d5f2a2b829702319f2d4ae8b1b5ff261177346d1daf6a27b2ade",
+      "value": "Error: mcp-error-\ud800-tail"
+    },
+    "jsonl_row": {
+      "path": "native-user-tool-result-row.raw.jsonl",
+      "bytes": 779,
+      "sha256": "2127ebbbf18b695bb72b2ff5d20ac3915a963f1edc127f7f1af759239e083f38",
+      "top_level_key_order": [
+        "parentUuid",
+        "isSidechain",
+        "promptId",
+        "type",
+        "message",
+        "uuid",
+        "timestamp",
+        "toolUseResult",
+        "sourceToolAssistantUUID",
+        "permissionDecision",
+        "userType",
+        "entrypoint",
+        "cwd",
+        "sessionId",
+        "version",
+        "gitBranch"
+      ],
+      "message_key_order": [
+        "role",
+        "content"
+      ],
+      "content_block_key_order": [
+        "type",
+        "content",
+        "is_error",
+        "tool_use_id"
+      ]
+    },
+    "initial_sdk_tool_result": {
+      "path": "run-output/native-mcp-tool-result-presence-295-_bg21els/model-tool-result-error_complex.raw.json",
+      "bytes": 245,
+      "sha256": "58514c88f26495c1766f22b16d44501f0b57aca5ae44f1e0a90d6b74f642c05e",
+      "key_order": [
+        "type",
+        "content",
+        "is_error",
+        "tool_use_id",
+        "cache_control"
+      ],
+      "is_error_present": true,
+      "is_error_value": true,
+      "tool_use_id": "toolu_native_error_complex_295",
+      "content": "mcp-error-\ufffd-tail\n\n<system-reminder>\n<total_tokens>14999985 tokens left</total_tokens>\n</system-reminder>"
+    },
+    "cold_resume_sdk_tool_result": {
+      "path": "run-output/native-mcp-tool-result-presence-295-_bg21els/model-tool-result-error_complex.cold-resume.raw.json",
+      "bytes": 208,
+      "sha256": "71ad365b45c432fdc0235db5efa7499220ba1de30411d6c30221d6ec6ff693fc",
+      "key_order": [
+        "type",
+        "content",
+        "is_error",
+        "tool_use_id"
+      ],
+      "is_error_present": true,
+      "is_error_value": true,
+      "tool_use_id": "toolu_native_error_complex_295",
+      "content": "mcp-error-\ufffd-tail\n\n<system-reminder>\n<total_tokens>14999985 tokens left</total_tokens>\n</system-reminder>"
+    },
+    "interpretation": [
+      "Native omitted the whitespace-only text block, trimmed surrounding whitespace from the second text block, and ignored the nontext image block for the persisted/model-visible text.",
+      "The persisted JSONL tool_result content and toolUseResult both retain the escaped lone U+D800 in raw JSON source; toolUseResult has the literal Error: prefix.",
+      "The SDK request after the tool call projects that lone unit as U+FFFD, appends the total-token reminder to the same content string, and marks is_error:true.",
+      "The public --resume request reproduces the same tool_result text projection and error flag, without cache_control in the cold-resume subprojection."
+    ],
+    "dynamic_jsonl_fields": [
+      "parentUuid",
+      "promptId",
+      "uuid",
+      "timestamp",
+      "cwd"
+    ],
+    "fixed_references": [
+      "sessionId",
+      "tool_use_id"
+    ]
+  },
+  "artifacts": {
+    "cold-resume.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "cold-resume.stdout.raw.json": {
+      "bytes": 1611,
+      "sha256": "cf91abe993729401a2156823a5c4f7a401149def368137a93678a4f10ce8c6ef"
+    },
+    "mcp-stdio-in.raw.jsonl": {
+      "bytes": 4074,
+      "sha256": "d45dfb04f9e8559a40c6f5927cf51f7a51529f073764c2b56148a0055ae90eba"
+    },
+    "mcp-stdio-out.raw.jsonl": {
+      "bytes": 2224,
+      "sha256": "c75e97ff068042b89ecc88d8ca43bb5ba89e1dd5c0484d9533e7486f4b18388a"
+    },
+    "model-request-01.raw.json": {
+      "bytes": 114971,
+      "sha256": "c2b53914249b7e02b9822651635716c63b1f8a384700472addc49a8907a038aa"
+    },
+    "model-request-02.raw.json": {
+      "bytes": 115369,
+      "sha256": "518dc5934f3c9021293d0e23d75dc99239094571acf3946764a4a7ec65cb9248"
+    },
+    "model-request-03-cold-resume.raw.json": {
+      "bytes": 115704,
+      "sha256": "f5567e0db3a6d639b221797b6f2d1325224a67dbaab7b7649024a135bbfd8269"
+    },
+    "model-response-01.raw.sse": {
+      "bytes": 893,
+      "sha256": "b7c4f49db978d20fe49f2f5381b570b2c7f30b55a7e0cf840e80ba8d3c3b1181"
+    },
+    "model-response-02.raw.sse": {
+      "bytes": 820,
+      "sha256": "3b027122860b1f64c66edd15c7efe71a770a0850664ce345f20dd138830b4b78"
+    },
+    "model-response-03-cold-resume.raw.sse": {
+      "bytes": 820,
+      "sha256": "3b027122860b1f64c66edd15c7efe71a770a0850664ce345f20dd138830b4b78"
+    },
+    "model-tool-result-cold-resume-request.raw.json": {
+      "bytes": 208,
+      "sha256": "71ad365b45c432fdc0235db5efa7499220ba1de30411d6c30221d6ec6ff693fc"
+    },
+    "model-tool-result-initial-request.raw.json": {
+      "bytes": 245,
+      "sha256": "58514c88f26495c1766f22b16d44501f0b57aca5ae44f1e0a90d6b74f642c05e"
+    },
+    "native-run-receipt.json": {
+      "bytes": 8401,
+      "sha256": "e171cd89666f2fe333bf99baa40fda764f51e49256bdc50a9cbf6ad824f73e7c"
+    },
+    "native-user-tool-result-block.raw.json": {
+      "bytes": 119,
+      "sha256": "3ee3695ee6ec6ed28b931142710c36c8be369c99f33d35435ada222729ebabce"
+    },
+    "native-user-tool-result-row.raw.jsonl": {
+      "bytes": 779,
+      "sha256": "2127ebbbf18b695bb72b2ff5d20ac3915a963f1edc127f7f1af759239e083f38"
+    },
+    "native-user-toolUseResult.raw.json": {
+      "bytes": 30,
+      "sha256": "dbe1d837f7d1d5f2a2b829702319f2d4ae8b1b5ff261177346d1daf6a27b2ade"
+    },
+    "native.stderr.raw": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "native.stdout.raw.json": {
+      "bytes": 1610,
+      "sha256": "9621a0d7d1ecf9f58229b913f1aa69e9cd6c9be5c87811bad8725f3a477b4fa4"
+    },
+    "prompts-list-response.raw.jsonrpc": {
+      "bytes": 105,
+      "sha256": "16442dfff189fdbf79f7bbab3f9b15d3e581e96a92b0867ca6f86eedb8ac813f"
+    },
+    "resources-list-response.raw.jsonrpc": {
+      "bytes": 107,
+      "sha256": "54caee3bd030c4b00eee7c9e783e3a0a3d5533b23e6245cbfe1e4667d44b5c2a"
+    },
+    "server-discover-response.raw.jsonrpc": {
+      "bytes": 411,
+      "sha256": "d4f4e0408bf59cc1c392c2f16ca75d0924916a2e31f9257a24f7f0295a1a5b54"
+    },
+    "tools-call-request.raw.jsonrpc": {
+      "bytes": 563,
+      "sha256": "add908ca82c45d9b142f768cfeae294cc8a5bb1f37b56656e3a7b38060e2f8a7"
+    },
+    "tools-call-response.raw.jsonrpc": {
+      "bytes": 345,
+      "sha256": "141165adb9e3960ed0e2a3539846c5a458174d599346f6865b1ccb9d3efe0e08"
+    },
+    "tools-list-response.raw.jsonrpc": {
+      "bytes": 312,
+      "sha256": "165435c08cbc4d373b8c26d494277f2a366edfe9ce943fe1ef3e1095b354ccb3"
+    }
+  }
+}

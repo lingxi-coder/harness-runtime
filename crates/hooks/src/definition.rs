@@ -126,6 +126,33 @@ pub struct HookDefinition {
     /// agent. Empty values fall back to the normal async-hook response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewake_message: Option<String>,
+    /// How a settings hook failure affects the action. Missing means the
+    /// Native default (`continue`). The current consumers apply `block` to
+    /// `UserPromptSubmit` and `PreToolUse` failures.
+    #[serde(default, rename = "onFailure", skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<HookFailureBehavior>,
+}
+
+/// Native settings-hook policy for a failed hook invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookFailureBehavior {
+    /// Ignore the failed hook and continue the action.
+    Continue,
+    /// Treat the failed hook as blocking the action.
+    Block,
+}
+
+impl HookFailureBehavior {
+    /// Parse the exact wire spelling accepted by Native settings.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "continue" => Some(Self::Continue),
+            "block" => Some(Self::Block),
+            _ => None,
+        }
+    }
 }
 
 impl HookDefinition {

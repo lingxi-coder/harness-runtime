@@ -300,7 +300,10 @@ mod tests {
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
                 name: "Bash".into(),
-                input: json!({}),
+                input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &json!({}),
+                )
+                .expect("generated tool fixture is representable"),
                 provider_id: None,
             }],
             stop_reason: None,
@@ -333,6 +336,10 @@ mod tests {
             is_meta: false,
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
         }
     }
 
@@ -412,7 +419,10 @@ mod tests {
                 content: vec![ContentBlock::ToolUse {
                     id: ToolUseId::new(),
                     name: name.into(),
-                    input: json!({}),
+                    input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                        &json!({}),
+                    )
+                    .expect("generated tool fixture is representable"),
                     provider_id: None,
                 }],
                 stop_reason: None,

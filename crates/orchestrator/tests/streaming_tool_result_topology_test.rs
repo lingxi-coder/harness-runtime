@@ -47,10 +47,20 @@ impl Tool for EchoTool {
     fn name(&self) -> &str {
         self.name
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| json!({ "type": "object", "properties": {} }));
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
         true
@@ -58,22 +68,25 @@ impl Tool for EchoTool {
     fn max_result_size_chars(&self) -> usize {
         1024 * 1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> PermissionResult {
         PermissionResult::Allow {
@@ -85,7 +98,11 @@ impl Tool for EchoTool {
             metadata: PermissionMetadata::default(),
         }
     }
-    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+    async fn description(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
         self.name.into()
     }
     async fn prompt(
@@ -96,16 +113,19 @@ impl Tool for EchoTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
-            data: json!({ "content": format!("result-of-{}", self.name) }),
+            data: tool_api::tool_trait::generated_builtin_result(
+                &json!({ "content": format!("result-of-{}", self.name) }),
+            ),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
+            subagent_hooks_fired: false,
             mcp_meta: None,
         })
     }
@@ -248,12 +268,17 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
         .filter(|m| m.message_type == "assistant")
         .filter(|m| {
             m.message
-                .get("content")
-                .and_then(|c| c.as_array())
-                .is_some_and(|blocks| {
-                    blocks
-                        .iter()
-                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                .at_pointer("/content")
+                .and_then(|content| content.array_len())
+                .is_some_and(|len| {
+                    let content = m.message.at_pointer("/content").expect("content array");
+                    (0..len).any(|index| {
+                        content
+                            .get_index(index)
+                            .and_then(|block| block.get_property("type"))
+                            .and_then(|kind| kind.as_str())
+                            == Some("tool_use")
+                    })
                 })
         })
         .collect();
@@ -266,12 +291,7 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     // All share one inner message.id (distinct top-level uuids).
     let inner_ids: std::collections::HashSet<&str> = assistant_lines
         .iter()
-        .map(|m| {
-            m.message
-                .get("id")
-                .and_then(|v| v.as_str())
-                .expect("inner id")
-        })
+        .map(|m| m.message.string_at("/id").expect("inner id"))
         .collect();
     assert_eq!(inner_ids.len(), 1, "all blocks share one inner message.id");
     let top_uuids: std::collections::HashSet<&str> =
@@ -284,12 +304,15 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
     for m in &assistant_lines {
         let blocks = m
             .message
-            .get("content")
-            .and_then(|c| c.as_array())
+            .at_pointer("/content")
             .expect("assistant content array");
-        for b in blocks {
-            if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                let tid = b.get("id").and_then(|i| i.as_str()).expect("tool_use id");
+        for index in 0..blocks.array_len().expect("content array") {
+            let block = blocks.get_index(index).expect("content block");
+            if block.get_property("type").and_then(|kind| kind.as_str()) == Some("tool_use") {
+                let tid = block
+                    .get_property("id")
+                    .and_then(|id| id.as_str())
+                    .expect("tool_use id");
                 line_uuid_by_tool_use_id.insert(tid.to_string(), m.uuid.clone());
             }
         }
@@ -305,9 +328,9 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
         .iter()
         .filter(|m| {
             m.message_type == "user"
-                && serde_json::to_string(&m.message)
-                    .map(|s| s.contains("tool_result"))
-                    .unwrap_or(false)
+                && m.message
+                    .to_json_string()
+                    .is_ok_and(|source| source.contains("tool_result"))
         })
         .collect();
 
@@ -322,13 +345,15 @@ async fn streaming_tool_results_are_per_result_assistant_parented() {
         // tool_use's per-block assistant line.
         let blocks = line
             .message
-            .get("content")
-            .and_then(|c| c.as_array())
+            .at_pointer("/content")
             .expect("tool_result content array");
-        let tid = blocks
-            .iter()
-            .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-            .and_then(|b| b.get("tool_use_id").and_then(|i| i.as_str()))
+        let tid = (0..blocks.array_len().expect("content array"))
+            .filter_map(|index| blocks.get_index(index))
+            .find(|block| {
+                block.get_property("type").and_then(|kind| kind.as_str()) == Some("tool_result")
+            })
+            .and_then(|block| block.get_property("tool_use_id"))
+            .and_then(|id| id.as_str())
             .expect("tool_result tool_use_id");
         let expected = line_uuid_by_tool_use_id
             .get(tid)

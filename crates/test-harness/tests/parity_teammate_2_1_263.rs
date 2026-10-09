@@ -22,8 +22,9 @@ fn agent_schema_descriptions_match_2_1_263_oracle_bytes() {
         .as_object()
         .expect("oracle descriptions object")
     {
-        let actual = schema["properties"][field]["description"]
-            .as_str()
+        let pointer = format!("/properties/{field}/description");
+        let actual = schema
+            .string_at(&pointer)
             .expect("published schema description");
         assert_eq!(
             actual.as_bytes(),

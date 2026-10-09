@@ -1,0 +1,354 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "085143acb4fa21b3686d1eb7f9daffad034a34bb59c24e45e3762bb84d17e46e",
+  "stdio_server_sha256": "15783e4444f68c09418a14c3520e2f383b63280024a818999c0bc8bdd31b8fbe",
+  "fixture_sha256": "a1f53a38987e4eb950e8ac8d9ea099d0c1f4df1a851a339bf1172c94ed20fe85",
+  "native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "public_entrypoint": "Native 2.1.295 --print --output-format json, isolated --mcp-config, stdio MCP, local Messages stub, --tools default",
+  "discovery_mode_fixture": "modern",
+  "fixed_inputs": {
+    "session_id": "00000000-0000-4000-8000-000000002295",
+    "model": "claude-sonnet-4-5",
+    "prompt": "Use the most recently listed fixture MCP tool once, then finish with the fixed response.",
+    "server_name": "fixture",
+    "repeated_cursor": "same-cursor",
+    "cursor_page_responses": 2,
+    "error_after_repeated_cursor_requests": 3
+  },
+  "network_boundary": {
+    "model_endpoint": "127.0.0.1 loopback only",
+    "mcp_transport": "local stdio subprocess only",
+    "dummy_api_key_only": true,
+    "isolated_home_config": true,
+    "working_directory": "/private/tmp/native-mcp-pagination-295-cwd-6e5jqtw0",
+    "no_upstream_relay": true
+  },
+  "timeout_seconds": 45,
+  "elapsed_seconds": 1.192,
+  "native_exit_code": 0,
+  "timed_out": false,
+  "stdout": {
+    "path": "native.stdout.raw.json",
+    "bytes": 1598,
+    "sha256": "713435f52da1363af92bf5537d41a0e886d56879957285ebec6cfffe28549c81"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "mcp_debug_log": {
+    "path": "native-mcp-debug.raw.jsonl",
+    "bytes": 2892,
+    "sha256": "1ae7b089237fd3a68e8f73f2e60ab19f9a1aea5fbbe2bf90e9b634567f71cd64"
+  },
+  "native_result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "MCP pagination fixture completed.",
+    "num_turns": 2,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-4000-8000-000000002295"
+  },
+  "anthropic_messages_requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 115177,
+      "request_sha256": "4625ab816422e24358bca767d40631df6dc4df6915117acf1ca845e86776bf59",
+      "raw_request_path": "run-output/native-mcp-pagination-295-modern-1wjc7tjk/model-request-01.raw.json",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "mcp_tools": [
+        "mcp__fixture__page_tool_00",
+        "mcp__fixture__page_tool_01"
+      ],
+      "selected_tool": "mcp__fixture__page_tool_01",
+      "selected_page": 1
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "dummy_key_matched": true,
+      "request_bytes": 115566,
+      "request_sha256": "f5b7b1d5880d97d7503f439238fb52042f68a330b42be39c6394af86b95b17e3",
+      "raw_request_path": "run-output/native-mcp-pagination-295-modern-1wjc7tjk/model-request-02.raw.json",
+      "model": "claude-sonnet-4-5",
+      "stream": true,
+      "fixture_tool_result_present": true,
+      "tool_result_path": "run-output/native-mcp-pagination-295-modern-1wjc7tjk/model-tool-result.raw.json",
+      "tool_result_sha256": "83b0f99ed3c3454887cafd508f1c8d0fbc570c3090f16ed3c0476c757e1cf3d3"
+    }
+  ],
+  "mcp": {
+    "incoming": {
+      "bytes": 3670,
+      "sha256": "65f3dd3e275481ef1ae3681e1eb097a2424a21760187035bd984193abeb4141a",
+      "path": "mcp-trace/mcp-stdio-in.raw.jsonl"
+    },
+    "outgoing": {
+      "bytes": 2342,
+      "sha256": "6d4a624c13114ae7d75a64f4eee803591a731c4a9d75ea10195db9e9e903fc29",
+      "path": "mcp-trace/mcp-stdio-out.raw.jsonl"
+    },
+    "methods": [
+      "server/discover",
+      "prompts/list",
+      "resources/list",
+      "tools/list",
+      "prompts/list",
+      "resources/list",
+      "tools/list",
+      "tools/call"
+    ],
+    "list_requests_by_method": {
+      "tools/list": 2,
+      "prompts/list": 2,
+      "resources/list": 2
+    },
+    "list_observations": [
+      {
+        "method": "prompts/list",
+        "id": 0,
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.295",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              }
+            }
+          }
+        },
+        "cursor": null,
+        "response_error": null,
+        "entry_names": [
+          "prompt_page_00"
+        ],
+        "next_cursor": "same-cursor"
+      },
+      {
+        "method": "resources/list",
+        "id": 1,
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.295",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              }
+            }
+          }
+        },
+        "cursor": null,
+        "response_error": null,
+        "entry_names": [
+          "resource_page_00"
+        ],
+        "next_cursor": "same-cursor"
+      },
+      {
+        "method": "tools/list",
+        "id": 2,
+        "params": {
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.295",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              }
+            }
+          }
+        },
+        "cursor": null,
+        "response_error": null,
+        "entry_names": [
+          "page_tool_00"
+        ],
+        "next_cursor": "same-cursor"
+      },
+      {
+        "method": "prompts/list",
+        "id": 3,
+        "params": {
+          "cursor": "same-cursor",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.295",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              }
+            }
+          }
+        },
+        "cursor": "same-cursor",
+        "response_error": null,
+        "entry_names": [
+          "prompt_page_01"
+        ],
+        "next_cursor": "same-cursor"
+      },
+      {
+        "method": "resources/list",
+        "id": 4,
+        "params": {
+          "cursor": "same-cursor",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.295",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              }
+            }
+          }
+        },
+        "cursor": "same-cursor",
+        "response_error": null,
+        "entry_names": [
+          "resource_page_01"
+        ],
+        "next_cursor": "same-cursor"
+      },
+      {
+        "method": "tools/list",
+        "id": 5,
+        "params": {
+          "cursor": "same-cursor",
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.295",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              }
+            }
+          }
+        },
+        "cursor": "same-cursor",
+        "response_error": null,
+        "entry_names": [
+          "page_tool_01"
+        ],
+        "next_cursor": "same-cursor"
+      }
+    ],
+    "tools_call_requests": [
+      {
+        "params": {
+          "name": "page_tool_01",
+          "arguments": {
+            "page": 1
+          },
+          "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {
+              "name": "claude-code",
+              "title": "Claude Code",
+              "version": "2.1.295",
+              "description": "Anthropic's agentic coding tool",
+              "websiteUrl": "https://claude.com/claude-code"
+            },
+            "io.modelcontextprotocol/clientCapabilities": {
+              "roots": {
+                "listChanged": true
+              },
+              "elicitation": {
+                "form": {},
+                "url": {}
+              }
+            },
+            "claudecode/toolUseId": "toolu_native_mcp_pagination_295",
+            "progressToken": 6
+          }
+        },
+        "id": 6
+      }
+    ]
+  },
+  "selected_model_tool": "mcp__fixture__page_tool_01",
+  "selected_model_tool_page": 1,
+  "native_tool_call_observed": true,
+  "artifacts": [
+    "mcp-config.json",
+    "model-request-01.raw.json",
+    "model-request-02.raw.json",
+    "model-response-01.raw",
+    "model-response-02.raw.sse",
+    "model-tool-result.raw.json",
+    "model-tools.raw.json",
+    "native-mcp-debug.raw.jsonl",
+    "native.stderr.raw",
+    "native.stdout.raw.json"
+  ],
+  "raw_outputs_relative_path": "run-output/native-mcp-pagination-295-modern-1wjc7tjk"
+}

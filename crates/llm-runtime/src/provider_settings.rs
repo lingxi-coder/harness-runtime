@@ -84,9 +84,11 @@ impl ProviderKind {
             // `auth = Bearer` explicitly. See `foundry_claude` codec docs and
             // the `(ApiKey, FoundryClaude)` auth arm in `client.rs`.
             Self::FoundryClaude => AuthStrategy::ApiKey,
-            Self::OpenAi | Self::OpenAiResponses | Self::Anthropic | Self::Gemini | Self::GeminiInteractions => {
-                AuthStrategy::ApiKey
-            }
+            Self::OpenAi
+            | Self::OpenAiResponses
+            | Self::Anthropic
+            | Self::Gemini
+            | Self::GeminiInteractions => AuthStrategy::ApiKey,
         }
     }
 

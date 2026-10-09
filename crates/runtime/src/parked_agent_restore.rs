@@ -54,7 +54,7 @@ impl ParkedAgentStore for FileParkedAgentStore {
         let row = session::agent_rows::ParkedAgentRow {
             task_id: task_id.to_string(),
             agent_id,
-            description: description.string_at("").unwrap_or_default().to_owned(),
+            description: description.clone(),
             request: request.clone(),
             handback_opt_in: request.handback_opt_in,
             handback_state: handback.cloned(),
@@ -645,6 +645,9 @@ mod tests {
 
     fn request() -> SubagentSpawnRequest {
         SubagentSpawnRequest {
+            // Restoring an existing parked agent is not a fresh Agent-tool
+            // admission and must not create a second spawn-statistics receipt.
+            agent_spawn_token: None,
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
             subagent_type: "general-purpose".into(),
@@ -776,10 +779,13 @@ mod tests {
         async fn invoke(
             &self,
             _n: &str,
-            _i: serde_json::Value,
+            _i: lingxi_core::types::utf16_json::Utf16JsonProjection,
             _c: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
-            Ok(serde_json::Value::Null)
+        ) -> Result<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+            lingxi_core::host::tool_invoker::ToolInvokerError,
+        > {
+            Ok(lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap())
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -885,7 +891,7 @@ mod tests {
              re-run the preload and re-fire SubagentStart"
         );
         assert!(
-            req.prompt.is_empty(),
+            req.prompt.string_at("") == Some(""),
             "the original prompt is NOT re-sent: {:?}",
             req.prompt
         );
@@ -967,44 +973,70 @@ mod tests {
             String::from_utf16_lossy(&message_units),
             message_units.clone(),
         );
-        let mut attachment =
-            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({
-                "type":"hook_additional_context",
-                "content":["ctx�"],
-                "hookName":"tool.call",
-                "toolUseID":"toolu_cold-context",
-                "hookEvent":"PostToolUse",
-            }));
         let mut attachment_units = "ctx".encode_utf16().collect::<Vec<_>>();
         attachment_units.push(0xd800);
-        attachment
-            .strings
-            .push(lingxi_core::types::utf16_json::Utf16JsonString {
-                pointer: "/content/0".into(),
-                code_units: attachment_units.clone(),
-            });
-        let mut row =
-            lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({
-                "agent_id":agent_id,
-                "timestamp":{"secs_since_epoch":0,"nanos_since_epoch":0},
-                "message":message,
-                "source_attachment":attachment.value,
-            }));
-        row.value["message"]["content"][0]["type"] = serde_json::json!("text");
-        row.value["message"]["content"][0]
-            .as_object_mut()
+        let root_text = |units: Vec<u16>| {
+            lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                String::from_utf16_lossy(&units),
+                units,
+            )
             .unwrap()
-            .remove("utf16_code_units");
-        row.strings
-            .push(lingxi_core::types::utf16_json::Utf16JsonString {
-                pointer: "/message/content/0/text".into(),
-                code_units: message_units.clone(),
-            });
-        row.strings
-            .push(lingxi_core::types::utf16_json::Utf16JsonString {
-                pointer: "/source_attachment/content/0".into(),
-                code_units: attachment_units.clone(),
-            });
+        };
+        let attachment = lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+            (
+                "type".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                    "hook_additional_context",
+                ),
+            ),
+            (
+                "content".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::array(vec![root_text(
+                    attachment_units.clone(),
+                )])
+                .unwrap(),
+            ),
+            (
+                "hookName".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from("tool.call"),
+            ),
+            (
+                "toolUseID".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from("toolu_cold-context"),
+            ),
+            (
+                "hookEvent".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from("PostToolUse"),
+            ),
+        ])
+        .unwrap();
+        let mut wire_message = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            &serde_json::to_string(&lingxi_core::types::ConversationMessage::user_meta(
+                message.id(),
+                String::from_utf16_lossy(&message_units),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        wire_message
+            .replace_pointer_projection("/content/0/text", root_text(message_units.clone()))
+            .unwrap();
+        let row = lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+            (
+                "agent_id".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from(agent_id.to_string()),
+            ),
+            (
+                "timestamp".into(),
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    r#"{"secs_since_epoch":0,"nanos_since_epoch":0}"#,
+                )
+                .unwrap(),
+            ),
+            ("message".into(), wire_message),
+            ("source_attachment".into(), attachment),
+        ])
+        .unwrap();
         let transcript =
             session::forked_skill::agent_transcript_path(dir.path(), &agent_id.to_string());
         tokio::fs::write(transcript, format!("{}\n", row.to_json_string().unwrap()))
@@ -1107,7 +1139,14 @@ mod tests {
         assert_eq!(outcomes[0].1, RestoreOutcome::Restored(id));
         let seen = spawner.seen.lock().unwrap();
         let restored = seen[0].instruction_context.as_ref().unwrap();
-        assert_eq!(restored.announcement_history, announcements);
+        let expected_announcements = announcements
+            .iter()
+            .map(|attachment| {
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(attachment)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(restored.announcement_history, expected_announcements);
         assert!(restored.user_context.is_empty());
         assert!(restored.sent_paths.is_empty());
         assert!(!restored.managed_instructions_only);
@@ -1247,7 +1286,14 @@ mod tests {
             subagents_dir: dir.path().to_path_buf(),
         };
         store
-            .park("a00000001", id, "research", &request(), None, &[])
+            .park(
+                "a00000001",
+                id,
+                &source_string("research"),
+                &request(),
+                None,
+                &[],
+            )
             .await;
         assert!(session::agent_rows::read_row(dir.path(), &id.to_string())
             .await
@@ -1315,7 +1361,14 @@ mod tests {
             subagents_dir: dir.path().to_path_buf(),
         };
         store
-            .park("a00000001", id, "research", &launch, Some(&state), &[])
+            .park(
+                "a00000001",
+                id,
+                &source_string("research"),
+                &launch,
+                Some(&state),
+                &[],
+            )
             .await;
         let row = session::agent_rows::read_row(dir.path(), &id.to_string())
             .await
@@ -1381,7 +1434,14 @@ mod tests {
         );
         store.register_origin(id, &launch);
         store
-            .park("original-task", id, "research", &launch, None, &[])
+            .park(
+                "original-task",
+                id,
+                &source_string("research"),
+                &launch,
+                None,
+                &[],
+            )
             .await;
         assert!(session::agent_rows::read_row(&original, &id.to_string())
             .await
@@ -1422,7 +1482,14 @@ mod tests {
             FileParkedAgentStore {
                 subagents_dir: original.clone(),
             }
-            .park("cold-task", id, "cold retained row", &launch, None, &[])
+            .park(
+                "cold-task",
+                id,
+                &source_string("cold retained row"),
+                &launch,
+                None,
+                &[],
+            )
             .await;
 
             // This is the startup callback, without a new park in this process.
@@ -1435,7 +1502,7 @@ mod tests {
             .park(
                 "other-session-task",
                 id,
-                "leave current directory alone",
+                &source_string("leave current directory alone"),
                 &request(),
                 None,
                 &[],
@@ -1590,7 +1657,12 @@ mod tests {
                     .unwrap()
                     .announcement_history
                     .iter()
-                    .any(|attachment| attachment["type"] == "subagent_handback"));
+                    .any(|attachment| {
+                        attachment
+                            .get_property("type")
+                            .and_then(|value| value.as_str())
+                            == Some("subagent_handback")
+                    }));
             } else {
                 assert!(
                     matches!(outcomes[0].1, RestoreOutcome::Failed(_)),

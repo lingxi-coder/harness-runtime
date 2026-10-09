@@ -104,6 +104,9 @@ pub struct AgentSpawnProvenance {
 /// so the trait surface stays insulated from `lingxi-tools`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentSpawnRequest {
+    /// Agent-tool admission capability; absent for skills, workflows and internal agents.
+    #[serde(skip)]
+    pub agent_spawn_token: Option<crate::host::agent_statistics::AgentSpawnToken>,
     /// The subagent type to resolve (built-in or user/project catalog). NOT
     /// validated here — the spawner resolves it with claude-code precedence
     /// (catalog overrides built-ins; unknown → `general-purpose`).

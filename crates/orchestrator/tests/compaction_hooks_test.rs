@@ -22,18 +22,18 @@
 use llm_runtime::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
-use hooks::HookExecutorImpl;
 use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
 use hooks::events::{HookEvent, HookEventType, InstructionsLoadReason};
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
+use hooks::HookExecutorImpl;
 use lingxi_core::host::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 use lingxi_core::types::{ConversationMessage, HookId, HttpRequest, HttpResponse, MessageId};
 use orchestrator::prompt::MemoryFile;
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-    mock_message_response,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::pin::Pin;
@@ -105,7 +105,7 @@ struct Probe {
     /// The `reason` (= wire `trigger`) carried by the last `PreCompact` event.
     pre_trigger: Mutex<Option<String>>,
     /// The `summary` carried by the last `PostCompact` event.
-    post_summary: Mutex<Option<String>>,
+    post_summary: Mutex<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     /// The `trigger` (`manual`/`auto`) carried by the last `PostCompact` event.
     post_trigger: Mutex<Option<String>>,
     lifecycle_order: Mutex<Vec<String>>,
@@ -141,11 +141,11 @@ impl BuiltinHookHandler for RecordPreCompact {
             } else {
                 HookOutcome::Success
             },
-            stdout: String::new(),
+            stdout: String::new().into(),
             stderr: if self.fail {
                 "boom".into()
             } else {
-                String::new()
+                String::new().into()
             },
             exit_code: if self.fail { Some(1) } else { None },
             response: if self.block {
@@ -186,8 +186,8 @@ impl BuiltinHookHandler for RecordPostCompact {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -232,8 +232,8 @@ impl BuiltinHookHandler for RecordCompactSetup {
         };
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: Some(0),
             response,
         }
@@ -258,6 +258,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -322,7 +323,10 @@ async fn mod_host_registry(
         "session-compact-test",
         dir.path(),
         &module,
-        serde_json::json!({}),
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+            {}
+        ))
+        .expect("generated Mod options are representable"),
     )
     .await
     .expect("load session.compact mod");
@@ -572,7 +576,12 @@ async fn manual_compact_runs_reload_session_start_then_post_compact() {
         .expect("manual compaction");
 
     assert_eq!(
-        probe.post_summary.lock().unwrap().as_deref(),
+        probe
+            .post_summary
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|summary| summary.string_at("")),
         Some("<summary>hook lifecycle summary</summary>"),
         "PostCompact receives the original summary, before continuation formatting"
     );
@@ -608,7 +617,7 @@ impl BuiltinHookHandler for InstructionHook {
         HookResult {
             outcome: HookOutcome::Success,
             stdout: self.stdout.into(),
-            stderr: String::new(),
+            stderr: String::new().into(),
             exit_code: Some(0),
             response: None,
         }
@@ -729,7 +738,7 @@ async fn pre_compact_stdout_is_js_trimmed_and_joined_with_blank_lines() {
     .with_compaction(compactor);
     seed_history(&orch, 6).await;
     orch.force_compact_with_instructions_and_cancel(
-        Some("focus"),
+        Some(&"focus".into()),
         tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -771,7 +780,7 @@ async fn manual_session_compact_mod_rewrites_next_input_and_applies_replacement_
     seed_history(&orch, 6).await;
 
     orch.force_compact_with_instructions_and_cancel(
-        Some("original manual focus"),
+        Some(&"original manual focus".into()),
         tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -873,11 +882,9 @@ async fn proactive_auto_session_compact_next_rewrites_and_replaces_core_rows() {
         .find(|message| message.text_content() == "AUTO_REPLACEMENT_SENTINEL")
         .expect("the auto replacement row must be applied");
     assert_ne!(replacement.id().as_uuid().to_string(), core_handle);
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. }))
-    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
 }
 
 #[tokio::test]
@@ -907,18 +914,14 @@ async fn proactive_auto_session_compact_skip_avoids_core_and_boundary() {
         event,
         OutputEvent::ModLog { text, .. } if text.string_at("") == Some("auto-skip:auto")
     )));
-    assert!(
-        events
-            .iter()
-            .all(|event| !matches!(event, OutputEvent::CompactionCompleted { .. }))
-    );
-    assert!(
-        !output
-            .compaction_phase_snapshot()
-            .await
-            .iter()
-            .any(|phase| phase == "summarizing")
-    );
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, OutputEvent::CompactionCompleted { .. })));
+    assert!(!output
+        .compaction_phase_snapshot()
+        .await
+        .iter()
+        .any(|phase| phase == "summarizing"));
     let history = orch.session().lock().await.history.clone();
     assert!(history.iter().all(|message| {
         !matches!(message, ConversationMessage::System { subtype: Some(subtype), .. } if subtype == "compact_boundary")
@@ -965,32 +968,25 @@ async fn proactive_auto_direct_session_compact_replacement_applies_without_runni
         event,
         OutputEvent::ModLog { text, .. } if text.string_at("") == Some("auto-direct:auto")
     )));
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. }))
-    );
-    assert!(
-        !output
-            .compaction_phase_snapshot()
-            .await
-            .iter()
-            .any(|phase| phase == "summarizing")
-    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
+    assert!(!output
+        .compaction_phase_snapshot()
+        .await
+        .iter()
+        .any(|phase| phase == "summarizing"));
     let history = orch.session().lock().await.history.clone();
-    assert!(
-        history
-            .iter()
-            .any(|message| message.text_content() == "DIRECT_REPLACEMENT_SENTINEL")
-    );
+    assert!(history
+        .iter()
+        .any(|message| message.text_content() == "DIRECT_REPLACEMENT_SENTINEL"));
 
     orch.run_turn("second")
         .await
         .expect("a second turn proves direct replacement did not set compact tracking");
-    assert!(
-        sink.events()
-            .await
-            .iter()
-            .all(|event| event.name != telemetry::tengu::orchestrator::POST_AUTOCOMPACT_TURN)
-    );
+    assert!(sink
+        .events()
+        .await
+        .iter()
+        .all(|event| event.name != telemetry::tengu::orchestrator::POST_AUTOCOMPACT_TURN));
 }

@@ -1,0 +1,29 @@
+{
+  "case": "nonstring-alias",
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "session_id": "d29f700c-e40a-5c0c-a44a-e50f0ac0b4dd",
+  "run_directory": "/private/tmp/claude-alignment-native-bash-295-wyfm_mvf/nonstring-alias",
+  "exit_code": 0,
+  "requests": [
+    {
+      "index": 1,
+      "accepted": true,
+      "sha256": "0104269c68992cc3b5de6ce9d14908d393c00c60bfd9bd0b7b45e56112cc19cd"
+    },
+    {
+      "index": 2,
+      "accepted": true,
+      "sha256": "0712ce6c810b9691aaec28f0e44320abc8b27a2b9b07da1ca6d8c91cc174fd61"
+    }
+  ],
+  "tool_input": {
+    "command": "printf BASH_295_ALIAS > probe.ok",
+    "command_description": null
+  },
+  "hook_ran": true,
+  "marker_bytes": "BASH_295_ALIAS",
+  "observed_hook_tool_input": {
+    "command": "printf BASH_295_ALIAS > probe.ok"
+  }
+}

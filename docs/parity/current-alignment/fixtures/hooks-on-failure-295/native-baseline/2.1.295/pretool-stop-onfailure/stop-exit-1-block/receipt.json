@@ -1,0 +1,242 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "case": {
+    "id": "stop-exit-1-block",
+    "event": "Stop",
+    "on_failure": "block",
+    "session_id": "00000000-0000-4000-8000-000000002f44"
+  },
+  "settings": {
+    "hooks": {
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "/bin/sh",
+              "args": [
+                "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/run-output/stop-exit-1-block/hook-failure.sh"
+              ],
+              "timeout": 5,
+              "onFailure": "block"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "hook_script": {
+    "path": "hook-failure.sh",
+    "bytes": 1285,
+    "sha256": "ce8b38f7a73feca422f0e128e3ec6a8e761791ecb1594f1d7c393356d0ff7765"
+  },
+  "settings_sha256": "460ba13145091990868e1cb5bceaadfd820dca8e0e979a33f7265b21a8bbf17f",
+  "argv": [
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "--setting-sources",
+    "project",
+    "--settings",
+    "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/run-output/stop-exit-1-block/settings.json",
+    "--strict-mcp-config",
+    "--print",
+    "--output-format",
+    "json",
+    "--tools",
+    "",
+    "--max-turns",
+    "3",
+    "--max-budget-usd",
+    "1",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002f44",
+    "--debug",
+    "hooks",
+    "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
+    "Finish the fixed stop-hook fixture."
+  ],
+  "public_entrypoint": "Native 2.1.295 --print --output-format json with isolated classic PreToolUse or Stop command hook and local Messages stub",
+  "network_boundary": {
+    "provider": "loopback only",
+    "dummy_key_only": true,
+    "hook_process": "local /bin/sh",
+    "isolated_home_config_cwd": true,
+    "nonessential_traffic_disabled": true
+  },
+  "timeout_seconds": 45,
+  "max_turns": 3,
+  "native_exit_code": 0,
+  "timed_out": false,
+  "stdout": {
+    "path": "native.stdout.raw.json",
+    "bytes": 1593,
+    "sha256": "bd8564668b8e89168667b50247223e28a3112e811303e84388572753cae124b1"
+  },
+  "stdout_json_error": null,
+  "stdout_summary": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "FIXED_STOP_HOOK_FIRST_RESPONSE",
+    "session_id": "00000000-0000-4000-8000-000000002f44",
+    "num_turns": 1,
+    "stop_reason": "end_turn"
+  },
+  "stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "http_requests": [
+    {
+      "sequence": 1,
+      "route": "anthropic_messages",
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted_dummy_key_loopback": true,
+      "request_bytes": 41388,
+      "request_sha256": "5c83460720ba5166f154a8506e2b37373fa32465c9be924b5629652679f5bcda",
+      "request_path": "model-request-01.raw.json",
+      "headers_observed_in_order": [
+        [
+          "Accept",
+          "application/json"
+        ],
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "User-Agent",
+          "claude-cli/2.1.295 (external, sdk-cli)"
+        ],
+        [
+          "X-Claude-Code-Session-Id",
+          "00000000-0000-4000-8000-000000002f44"
+        ],
+        [
+          "X-Stainless-Arch",
+          "arm64"
+        ],
+        [
+          "X-Stainless-Lang",
+          "js"
+        ],
+        [
+          "X-Stainless-OS",
+          "MacOS"
+        ],
+        [
+          "X-Stainless-Package-Version",
+          "0.128.0"
+        ],
+        [
+          "X-Stainless-Retry-Count",
+          "0"
+        ],
+        [
+          "X-Stainless-Runtime",
+          "node"
+        ],
+        [
+          "X-Stainless-Runtime-Version",
+          "v26.3.0"
+        ],
+        [
+          "X-Stainless-Timeout",
+          "600"
+        ],
+        [
+          "anthropic-beta",
+          "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "native-hook-event-onfailure-295-dummy-key"
+        ],
+        [
+          "x-app",
+          "cli"
+        ],
+        [
+          "Connection",
+          "keep-alive"
+        ],
+        [
+          "Host",
+          "127.0.0.1:61860"
+        ],
+        [
+          "Accept-Encoding",
+          "gzip, deflate, br, zstd"
+        ],
+        [
+          "Content-Length",
+          "41388"
+        ]
+      ]
+    }
+  ],
+  "http_responses": [
+    {
+      "sequence": 1,
+      "path": "model-response-01.raw.sse",
+      "bytes": 812,
+      "sha256": "09f43ba18c906897cda9737a1cba0a9badf9c78631db9a7d17d8d0a959524134",
+      "kind": "text",
+      "tool_use_id": null,
+      "text": "FIXED_STOP_HOOK_FIRST_RESPONSE"
+    }
+  ],
+  "request_message_summaries": [
+    {
+      "sequence": 1,
+      "messages": [
+        {
+          "index": 0,
+          "role": "user",
+          "content": [
+            {
+              "kind": "text",
+              "text": "Finish the fixed stop-hook fixture."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "hook_inputs": [
+    {
+      "path": "stop-hook-input-1.raw.json",
+      "bytes": 900,
+      "sha256": "5f10658ad518c6e77c3aca1368daee4bf3521961c429370a745946e2c863849b"
+    }
+  ],
+  "hook_invocation_marker_count": 1,
+  "hook_invocation_markers": [
+    {
+      "path": "stop-hook-attempt-1.marker",
+      "bytes": 10,
+      "sha256": "4168ac456d70361429967d7457e0d5850cd014c0b0ea7b8e45e3183372ec766d"
+    }
+  ],
+  "bash_side_effect": null,
+  "session_jsonl": {
+    "path": "native-session.raw.jsonl",
+    "bytes": 89804,
+    "sha256": "8df2bf5480e2ee730bad0a24db4919809301693d3cee17087ade0958b93d24a2"
+  },
+  "scope": "Native classic hook failure policy for the named event and exit-1 command only; request/IDs/timestamps remain captured raw, not normalized."
+}

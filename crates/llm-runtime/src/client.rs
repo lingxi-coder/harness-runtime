@@ -42,6 +42,21 @@ fn credential_scope(entry: &RouteEntry, profile_name: &str) -> CredentialScope {
     }
 }
 
+fn native_message_effort(
+    value: &lingxi_llm_client::protocol::JsonPayload,
+) -> Option<lingxi_llm_client::providers::anthropic::types::AnthropicMessageEffort> {
+    use lingxi_llm_client::providers::anthropic::types::AnthropicMessageEffort as Effort;
+
+    match value.string_at("")?.as_str() {
+        "low" => Some(Effort::Low),
+        "medium" => Some(Effort::Medium),
+        "high" => Some(Effort::High),
+        "xhigh" => Some(Effort::XHigh),
+        "max" => Some(Effort::Max),
+        _ => None,
+    }
+}
+
 struct ServiceAuthenticator(ModelRuntime);
 
 #[async_trait::async_trait]
@@ -264,6 +279,7 @@ impl ModelRuntime {
             &route.provider_id,
             &entry.profile,
             &route.request_model,
+            false,
         ))
     }
 
@@ -509,6 +525,16 @@ impl ModelRuntime {
             .routes
             .get(&resolved_route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
+        let native_route_admitted = request
+            .execution
+            .native_anthropic_base_url_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| {
+                fingerprint
+                    == lingxi_llm_client::files::provider_file_endpoint_fingerprint(&entry.base_url)
+            })
+            && resolved_route.provider_id == ProviderId::AnthropicFirstParty
+            && effective_protocol == ProtocolFamily::AnthropicMessages;
         let host_failure = Arc::new(Mutex::new(None));
         let authenticator = Arc::new(crate::execution::HostAuthenticator::for_request(
             self.clone(),
@@ -560,12 +586,30 @@ impl ModelRuntime {
             &resolved_route.provider_id,
             &entry.profile,
             &resolved_route.request_model,
+            native_route_admitted,
         );
+        let native_per_turn_effort = (native_route_admitted
+            && request.execution.anthropic_request_kind
+                == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+            && resolved_route.provider_id == ProviderId::AnthropicFirstParty
+            && effective_protocol == ProtocolFamily::AnthropicMessages
+            && lingxi_llm_client::providers::anthropic::supports_per_message_effort(
+                &resolved_route.request_model,
+            ))
+        .then(|| {
+            effort_policy
+                .as_ref()
+                .filter(|policy| policy.supported)
+                .and_then(|policy| policy.value.as_ref())
+                .and_then(native_message_effort)
+        })
+        .flatten();
         let mut owned: Option<LlmRequest> = None;
         if needs_reasoning_degrade
             || needs_speed_degrade
             || suppress_schema
             || effort_policy.is_some()
+            || native_per_turn_effort.is_some()
         {
             let mut r = request.clone();
             if needs_reasoning_degrade {
@@ -759,6 +803,54 @@ impl ModelRuntime {
                 pending_overage: context.pending_overage.clone(),
             });
         }
+
+        // The default prompt-cache breakpoint targets the last eligible
+        // conversation block. Native's per-turn effort marker is a synthetic
+        // empty system row, so append it only after cache projection has
+        // selected and attached the user-message breakpoint.
+        if let Some(effort) = native_per_turn_effort {
+            let request_for_encoding = owned.get_or_insert_with(|| request.clone());
+            let has_unfinished_user_turn = request_for_encoding
+                .input
+                .messages
+                .iter()
+                .rposition(|message| message.role == lingxi_llm_client::protocol::MessageRole::User)
+                .is_some_and(|user_index| {
+                    !request_for_encoding.input.messages[user_index + 1..]
+                        .iter()
+                        .any(|message| {
+                            message.role == lingxi_llm_client::protocol::MessageRole::Assistant
+                        })
+                });
+            let has_existing_per_turn_effort = request_for_encoding
+                .input
+                .messages
+                .iter()
+                .rposition(|message| message.role == lingxi_llm_client::protocol::MessageRole::User)
+                .is_some_and(|user_index| {
+                    request_for_encoding.input.messages[user_index + 1..]
+                        .iter()
+                        .any(|message| {
+                            message
+                                .anthropic_options()
+                                .is_some_and(|options| options.effort.is_some())
+                        })
+                });
+            if has_unfinished_user_turn && !has_existing_per_turn_effort {
+                use lingxi_llm_client::providers::anthropic::types::AnthropicMessageOptions;
+                request_for_encoding.input.messages.push(
+                    lingxi_llm_client::protocol::ConversationMessage {
+                        role: lingxi_llm_client::protocol::MessageRole::System,
+                        content: Vec::new(),
+                        native_options: Vec::new(),
+                    }
+                    .with_anthropic_options(AnthropicMessageOptions {
+                        effort: Some(effort),
+                        ..AnthropicMessageOptions::default()
+                    }),
+                );
+            }
+        }
         let request = owned.as_ref().unwrap_or(request);
 
         validate_capabilities(request, resolved_route.capabilities)?;
@@ -835,6 +927,7 @@ impl ModelRuntime {
         }
 
         Ok(PreparedLlmCall {
+            request_session_id: request.execution.request_session_id.clone(),
             computer_binding,
             computer_submission: request.execution.computer_submission.clone(),
             server_fallback_lane: None,
@@ -1355,6 +1448,7 @@ impl ModelRuntime {
                 .collect(),
             body: request.wire_body_bytes()?.into(),
             timeout: None,
+            http1_header_layout: None,
         };
         authenticator
             .authenticate_at(profile_name, &mut wire, now)
@@ -1461,6 +1555,7 @@ fn validate_provider_profile(provider: &crate::ProviderProfile) -> Result<(), Ll
 }
 
 pub struct PreparedLlmCall {
+    pub(crate) request_session_id: Option<String>,
     pub(crate) computer_binding: Option<lingxi_core::host::NativeContinuationBinding>,
     pub(crate) computer_submission: Option<Arc<crate::computer::ComputerReceiptSubmission>>,
     pub(crate) server_fallback_lane:

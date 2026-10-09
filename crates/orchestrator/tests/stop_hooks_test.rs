@@ -9,7 +9,9 @@
 use llm_runtime::ContentBlock as LlmContentBlock;
 
 use async_trait::async_trait;
-use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
+use hooks::definition::{
+    HookDefinition, HookExecutor as DefHookExecutor, HookFailureBehavior, HookSource,
+};
 use hooks::events::{HookEvent, HookEventType};
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::{HookContext, HookRegistry};
@@ -84,7 +86,7 @@ impl BuiltinHookHandler for StopBlockHandler {
     async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
         let response = matches!(event, HookEvent::Stop { .. }).then(|| HookResponse {
             decision: Some(HookDecision::Block),
-            reason: Some("do X first".to_string()),
+            reason: Some("do X first".into()),
             // A transcript-only systemMessage that must NOT reach the model — the
             // continuation must come from `reason` (blockingError), never this.
             system_message: Some("[stop-hook] please continue".into()),
@@ -92,8 +94,8 @@ impl BuiltinHookHandler for StopBlockHandler {
         });
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response,
         }
@@ -114,8 +116,8 @@ impl BuiltinHookHandler for StopPreventHandler {
         });
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response,
         }
@@ -132,15 +134,44 @@ impl BuiltinHookHandler for PromptBlockHandler {
     async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
         let response = matches!(event, HookEvent::UserPromptSubmit { .. }).then(|| HookResponse {
             decision: Some(HookDecision::Block),
-            reason: Some("prompt denied".to_string()),
+            reason: Some("prompt denied".into()),
             ..Default::default()
         });
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response,
+        }
+    }
+}
+
+/// A prompt hook failure whose stderr is surfaced by Native's `onFailure:block`
+/// policy before the orchestrator admits any model request.
+struct PromptFailureHandler;
+#[async_trait]
+impl BuiltinHookHandler for PromptFailureHandler {
+    fn id(&self) -> &str {
+        "prompt-failure"
+    }
+    async fn handle(&self, event: &HookEvent, _ctx: &HookContext) -> HookResult {
+        if matches!(event, HookEvent::UserPromptSubmit { .. }) {
+            HookResult {
+                outcome: HookOutcome::Error,
+                stdout: String::new().into(),
+                stderr: "FIXED_COMMAND_HOOK_STDERR".into(),
+                exit_code: Some(1),
+                response: None,
+            }
+        } else {
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: String::new().into(),
+                stderr: String::new().into(),
+                exit_code: None,
+                response: None,
+            }
         }
     }
 }
@@ -163,6 +194,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -270,7 +302,7 @@ fn end_turn_with_usage(text: &str, input: u64, output: u64) -> llm_runtime::Hist
             cache_control: None,
             citations: None,
         }],
-        stop_reason: Some("end_turn".to_string()),
+        stop_reason: Some("end_turn".into()),
         stop_details: None,
         usage: llm_runtime::ExecutionUsage {
             report: llm_runtime::UsageReport::measured(
@@ -620,6 +652,31 @@ async fn user_prompt_submit_block_aborts_before_api() {
 }
 
 #[tokio::test]
+async fn user_prompt_submit_on_failure_block_is_successful_zero_turn_without_api() {
+    let api = Arc::new(MockApiClient::new(vec![]));
+    let mut hook = builtin_hook("prompt-failure", HookEventType::UserPromptSubmit);
+    hook.on_failure = Some(HookFailureBehavior::Block);
+    let hooks = exec_with(Arc::new(PromptFailureHandler), hook).await;
+    let output = Arc::new(MockOutputStream::new());
+    let o = orch_with_output(api.clone(), hooks, output.clone());
+
+    let outcome = o.run_turn("fixed prompt").await.expect("turn is blocked");
+    assert!(matches!(
+        outcome,
+        ConversationOutcome::StopHookPrevented { turn_count: 0, .. }
+    ));
+    assert!(
+        api.captured_msgs().await.is_empty(),
+        "onFailure:block must prevent every model request"
+    );
+    assert_eq!(
+        output.text_events().await,
+        ["UserPromptSubmit operation blocked by hook:\n[prompt-failure]: failed; blocking because onFailure is \"block\"\nFIXED_COMMAND_HOOK_STDERR"],
+        "the block diagnostic is shown without an Original prompt suffix"
+    );
+}
+
+#[tokio::test]
 async fn stop_hook_pass_ends_normally() {
     // A Stop hook that returns no decision (the handler only acts on a
     // DIFFERENT event type) must NOT interfere: normal single-turn end.
@@ -652,7 +709,7 @@ async fn stop_goal_registers_named_prompt_hook_and_clears_when_met() {
     let hooks = exec_with_prompt_runner(runner.clone()).await;
     let o = orch(api.clone(), hooks.clone());
 
-    o.set_active_goal("ship it").await;
+    o.set_active_goal(&"ship it".into()).await;
     let current_session = o.current_session_id().await;
     assert!(
         hooks
@@ -730,7 +787,7 @@ async fn goal_status_transcript_records_set_progress_and_one_terminal_achievemen
         .with_jsonl_writer(writer),
     );
 
-    orchestrator.set_active_goal("ship it").await;
+    orchestrator.set_active_goal(&"ship it".into()).await;
     orchestrator.run_turn("hi").await.expect("turn ok");
 
     let statuses = goal_status_rows(&path);
@@ -788,7 +845,7 @@ async fn goal_status_transcript_records_impossible_as_failed() {
         .with_jsonl_writer(writer),
     );
 
-    orchestrator.set_active_goal("ship it").await;
+    orchestrator.set_active_goal(&"ship it".into()).await;
     orchestrator.run_turn("hi").await.expect("turn ok");
     assert!(orchestrator.get_active_goal().await.is_none());
 
@@ -858,7 +915,7 @@ async fn stop_goal_shares_the_stop_hook_block_limit() {
     let hooks = exec_with_prompt_runner(runner).await;
     let output = Arc::new(MockOutputStream::new());
     let o = orch_with_output(api.clone(), hooks, output.clone());
-    o.set_active_goal("ship it").await;
+    o.set_active_goal(&"ship it".into()).await;
 
     let outcome = o.run_turn("hi").await.expect("turn ok");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
@@ -896,7 +953,7 @@ async fn stop_goal_timeout_pauses_without_counting_a_verdict() {
     });
     let hooks = exec_with_prompt_runner(runner).await;
     let o = orch(api.clone(), hooks);
-    o.set_active_goal("ship it").await;
+    o.set_active_goal(&"ship it".into()).await;
 
     let outcome = o.run_turn("hi").await.expect("turn ok");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
@@ -929,7 +986,7 @@ async fn stop_goal_query_error_does_not_spin_or_count_a_verdict() {
     });
     let hooks = exec_with_prompt_runner(runner).await;
     let o = orch(api.clone(), hooks);
-    o.set_active_goal("ship it").await;
+    o.set_active_goal(&"ship it".into()).await;
 
     let outcome = o.run_turn("hi").await.expect("turn ok");
     assert!(matches!(outcome, ConversationOutcome::EndTurn { .. }));
@@ -963,7 +1020,7 @@ async fn stop_goal_explicit_cancel_escapes_before_second_goal_check() {
     });
     let hooks = exec_with_prompt_runner(runner.clone()).await;
     let o = orch(api.clone(), hooks);
-    o.set_active_goal("ship it").await;
+    o.set_active_goal(&"ship it".into()).await;
 
     let outcome = o
         .run_turn_with_cancel("hi", cancel)
@@ -1015,7 +1072,7 @@ async fn stop_goal_hard_budget_escape_stops_before_second_goal_check() {
         )
         .with_cost_tracker(tracker),
     );
-    o.set_active_goal("ship it").await;
+    o.set_active_goal(&"ship it".into()).await;
 
     let err = o
         .run_turn("hi")
@@ -1081,7 +1138,7 @@ async fn deferred_goal_never_calls_evaluator_or_leaks_blocking_feedback() {
         std::env::temp_dir(),
     )
     .with_stop_hook_snapshot(Arc::new(RunningGoalBackgroundTask));
-    o.set_active_goal("ship it").await;
+    o.set_active_goal(&"ship it".into()).await;
     o.run_turn("hi").await.unwrap();
     assert_eq!(api.captured_msgs().await.len(), 1);
     assert!(
@@ -1107,10 +1164,15 @@ async fn goal_reason_keeps_bracket_sequences_inside_the_condition_out_of_status(
         on_call: None,
     });
     let o = orch(api, exec_with_prompt_runner(runner).await);
-    o.set_active_goal("verify ]: details").await;
+    o.set_active_goal(&"verify ]: details".into()).await;
     o.run_turn("hi").await.unwrap();
     let goal = o.get_active_goal().await.unwrap();
-    assert_eq!(goal.last_reason.as_deref(), Some("tests pending"));
+    assert_eq!(
+        goal.last_reason
+            .as_ref()
+            .and_then(|reason| reason.string_at("")),
+        Some("tests pending")
+    );
     assert_eq!(goal.iterations, 1);
 }
 
@@ -1263,10 +1325,20 @@ impl tool_api::tool_trait::Tool for EndsTurnTool {
     fn name(&self) -> &str {
         "EndsTurn"
     }
-    fn input_schema(&self) -> &serde_json::Value {
+    fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
         static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
             once_cell::sync::Lazy::new(|| serde_json::json!({ "type": "object" }));
-        &SCHEMA
+        static SCHEMA_SOURCE: once_cell::sync::Lazy<
+            lingxi_core::types::utf16_json::Utf16JsonProjection,
+        > = once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+        &SCHEMA_SOURCE
+    }
+    fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+        tool_api::tool_trait::ToolInputRepairMetadata::Known {
+            schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+            schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
     fn is_enabled(&self, _ctx: &tool_api::tool_trait::ToolStaticContext) -> bool {
         true
@@ -1274,22 +1346,25 @@ impl tool_api::tool_trait::Tool for EndsTurnTool {
     fn max_result_size_chars(&self) -> usize {
         1024
     }
-    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+    fn is_concurrency_safe(
+        &self,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> bool {
         true
     }
-    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+    fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         true
     }
     async fn validate_input(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> Result<(), tool_api::tool_trait::ValidationError> {
         Ok(())
     }
     async fn check_permissions(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: &tool_api::context::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -1303,7 +1378,7 @@ impl tool_api::tool_trait::Tool for EndsTurnTool {
     }
     async fn description(
         &self,
-        _input: &serde_json::Value,
+        _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _opts: &tool_api::tool_trait::DescriptionOptions,
     ) -> String {
         String::new()
@@ -1316,17 +1391,25 @@ impl tool_api::tool_trait::Tool for EndsTurnTool {
     }
     async fn call(
         &self,
-        _input: serde_json::Value,
+        _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         _ctx: tool_api::context::ToolUseContext,
         _tx: tool_api::progress::ToolProgressSender,
     ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
         Ok(tool_api::tool_trait::ToolCallResult {
-            data: serde_json::json!({ "content": "done" }),
+            data: tool_api::tool_trait::generated_builtin_result(
+                &serde_json::json!({ "content": "done" }),
+            ),
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
-            mcp_meta: Some(serde_json::json!({"_meta": {"claude/endTurn": true}})),
+            subagent_hooks_fired: false,
+            mcp_meta: Some(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                    &serde_json::json!({"_meta": {"claude/endTurn": true}}),
+                )
+                .expect("generated MCP metadata is representable"),
+            ),
         })
     }
 }

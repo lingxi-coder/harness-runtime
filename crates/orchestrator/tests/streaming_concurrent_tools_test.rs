@@ -36,10 +36,19 @@ macro_rules! impl_test_tool {
             fn name(&self) -> &str {
                 $name
             }
-            fn input_schema(&self) -> &serde_json::Value {
+            fn input_schema(&self) -> &lingxi_core::types::utf16_json::Utf16JsonProjection {
                 static SCHEMA: once_cell::sync::Lazy<serde_json::Value> =
                     once_cell::sync::Lazy::new(|| json!({"type": "object"}));
-                &SCHEMA
+                static SCHEMA_SOURCE: once_cell::sync::Lazy<lingxi_core::types::utf16_json::Utf16JsonProjection> =
+                    once_cell::sync::Lazy::new(|| tool_api::tool_trait::generated_builtin_schema(&SCHEMA));
+                &SCHEMA_SOURCE
+            }
+            fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+                tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                    schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                    schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                    exempt_top_level_keys: None,
+                }
             }
             fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
                 true
@@ -47,22 +56,22 @@ macro_rules! impl_test_tool {
             fn max_result_size_chars(&self) -> usize {
                 1024
             }
-            fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            fn is_concurrency_safe(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
                 true
             }
-            fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            fn is_read_only(&self, _input: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
                 true
             }
             async fn validate_input(
                 &self,
-                _input: &serde_json::Value,
+                _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
                 _ctx: &tool_api::context::ToolUseContext,
             ) -> Result<(), ValidationError> {
                 Ok(())
             }
             async fn check_permissions(
                 &self,
-                _input: &serde_json::Value,
+                _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
                 _ctx: &tool_api::context::ToolUseContext,
             ) -> PermissionResult {
                 PermissionResult::Allow {
@@ -76,7 +85,7 @@ macro_rules! impl_test_tool {
             }
             async fn description(
                 &self,
-                _input: &serde_json::Value,
+                _input: &lingxi_core::types::utf16_json::Utf16JsonProjection,
                 _opts: &DescriptionOptions,
             ) -> String {
                 $name.into()
@@ -89,7 +98,7 @@ macro_rules! impl_test_tool {
             }
             async fn call(
                 &self,
-                _input: serde_json::Value,
+                _input: lingxi_core::types::utf16_json::Utf16JsonProjection,
                 _ctx: tool_api::context::ToolUseContext,
                 _tx: ToolProgressSender,
             ) -> Result<ToolCallResult, ToolError> {
@@ -98,11 +107,12 @@ macro_rules! impl_test_tool {
                     tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                 }
                 Ok(ToolCallResult {
-                    data: json!({"tool": $name}),
+                    data: tool_api::tool_trait::generated_builtin_result(&json!({"tool": $name})),
                     model_content: None,
                     new_messages: vec![],
                     context_modifier: None,
                     is_error: false,
+                    subagent_hooks_fired: false,
                     mcp_meta: None,
                 })
             }
@@ -171,7 +181,7 @@ async fn two_tools_dispatched_concurrently_results_ordered() {
     let first_tools: Vec<&str> = calls[0]
         .tools
         .iter()
-        .map(|t| t["name"].as_str().expect("wire tool name"))
+        .map(|tool| tool.name.as_str())
         .collect();
     assert_eq!(
         first_tools,

@@ -598,6 +598,15 @@ pub async fn build_with_credential_stack(
     .with_retry_reporter(std::sync::Arc::new(OutputRetryReporter {
         output: output.clone(),
     }));
+    let service_built = if let Some(metadata) = &cfg.anthropic_client_metadata {
+        let mut metadata = metadata.clone();
+        metadata.session_id = Some(main_session_uuid.clone());
+        service_built
+            .with_anthropic_client_metadata(metadata)
+            .with_native_anthropic_endpoint(cfg.api_base.clone())
+    } else {
+        service_built
+    };
     // M2 (2.1.198): attach the AWS auth-refresh driver (`ZBd`/`t2d`) when an
     // `awsAuthRefresh` / `awsCredentialExport` command is configured. Resolves
     // the merged settings value + its Project provenance (binary `mqe`: a
@@ -4478,6 +4487,9 @@ pub async fn build_with_credential_stack(
     // hooks because managed `disableAutoMode` is a safety policy, not an
     // optional notification hook.
     let settings_permission_gate = perms.clone();
+    // The model-safety observer is installed after the orchestrator exists,
+    // while the builder consumes the original hook executor below.
+    let model_safety_hooks = hooks.clone();
     let instruction_identity = crate::instruction_identity::InstructionIdentity::new(auth.clone());
     let mod_surface_roster =
         Arc::new(orchestrator::mod_surface_roster::ModSurfaceRoster::default());
@@ -4743,6 +4755,26 @@ pub async fn build_with_credential_stack(
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
     let orch = orchestrator::ConversationOrchestrator::into_shared(orch_builder);
+    if cfg.anthropic_client_metadata.is_some() {
+        let session_owner = Arc::downgrade(&orch);
+        api_service.set_request_session_id_source(Arc::new(move || {
+            let owner = session_owner.clone();
+            Box::pin(async move {
+                let owner = owner.upgrade()?;
+                Some(owner.current_session_id().await.as_uuid().to_string())
+            })
+        }));
+    }
+    let safety_owner = Arc::downgrade(&orch);
+    model_safety_hooks.set_model_safety_provider(Arc::new(move || {
+        let owner = safety_owner.clone();
+        Box::pin(async move {
+            match owner.upgrade() {
+                Some(owner) => owner.model_safety_observer().await,
+                None => None,
+            }
+        })
+    }));
     instruction_identity.bind_root(&orch);
     instruction_provider
         .bind(&orch)

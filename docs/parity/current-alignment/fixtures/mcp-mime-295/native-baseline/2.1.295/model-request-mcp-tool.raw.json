@@ -1,0 +1,1 @@
+{"name":"mcp__fixture__return_blob_matrix","description":"Return a fixed batch of MIME-tagged embedded resource blobs.","input_schema":{"type":"object","properties":{},"additionalProperties":false}}

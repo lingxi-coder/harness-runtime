@@ -1188,7 +1188,9 @@ mod fold_tests {
         rt.mark_noop_reported(true);
         rt.settle_tick(at(1_001), quiet_span());
         assert_eq!(
-            rt.take_in_flight_prompt().as_ref().map(source_display),
+            rt.take_in_flight_prompt().as_ref().map(|prompt| {
+                String::from_utf16_lossy(&prompt.string_units("").unwrap_or_default())
+            }),
             Some("tick".to_string())
         );
     }

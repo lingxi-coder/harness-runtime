@@ -37,6 +37,9 @@ pub struct HookModelSelection {
 /// having to populate everything.
 #[derive(Clone, Default)]
 pub struct HookContext {
+    /// Captured originating cost authority for model work initiated by this
+    /// hook. It is host-only and never serialized into hook input.
+    pub model_safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
     /// Current logical route of the immediate agent.
     pub model_selection: Option<HookModelSelection>,
     /// Optional lease for visible side effects produced by this hook dispatch.
@@ -986,6 +989,7 @@ mod all_hooks_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -1630,6 +1634,7 @@ mod match_event_matcher_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 
@@ -1683,6 +1688,7 @@ mod match_event_matcher_tests {
             async_rewake: false,
             async_timeout: None,
             rewake_message: None,
+            on_failure: None,
         }
     }
 

@@ -790,31 +790,47 @@ mod tests {
             .expect("test fixture is a generated JSON value")
     }
 
-    // The existing gate tests are bounded JSON fixtures. Keep their Value
-    // ingress test-only while production receives the original UJP.
+    trait TestPermissionInput {
+        fn source_projection(&self) -> Utf16JsonProjection;
+    }
+
+    impl TestPermissionInput for Utf16JsonProjection {
+        fn source_projection(&self) -> Utf16JsonProjection {
+            self.clone()
+        }
+    }
+
+    impl TestPermissionInput for serde_json::Value {
+        fn source_projection(&self) -> Utf16JsonProjection {
+            source_fixture(self)
+        }
+    }
+
+    // Keep the test convenience methods source-typed so assertions exercise the
+    // same carrier as the production PermissionGate boundary.
     impl AdapterPermissionGate {
-        async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
-            let source = source_fixture(input);
+        async fn check(&self, name: &str, input: &impl TestPermissionInput) -> PermissionDecision {
+            let source = input.source_projection();
             <Self as PermissionGate>::check(self, name, &source).await
         }
 
         async fn check_with_worker(
             &self,
             name: &str,
-            input: &serde_json::Value,
+            input: &impl TestPermissionInput,
             worker: Option<PromptWorker>,
         ) -> PermissionDecision {
-            let source = source_fixture(input);
+            let source = input.source_projection();
             <Self as PermissionGate>::check_with_worker(self, name, &source, worker).await
         }
 
         async fn check_with_context(
             &self,
             name: &str,
-            input: &serde_json::Value,
+            input: &impl TestPermissionInput,
             context: &PermissionCheckContext,
         ) -> PermissionOutcome {
-            let source = source_fixture(input);
+            let source = input.source_projection();
             <Self as PermissionGate>::check_with_context(self, name, &source, context).await
         }
     }
@@ -1101,7 +1117,11 @@ mod tests {
             let stored = stored.lock().await;
             assert_eq!(stored.len(), 1);
             assert_eq!(
-                stored[0].value.rule_content.as_deref(),
+                stored[0]
+                    .value
+                    .rule_content
+                    .as_ref()
+                    .and_then(|content| content.string_at("")),
                 // `PermissionRule` keeps the shell matcher in its canonical
                 // internal space-star form. The settings serializer is the
                 // boundary that renders this as `Bash(git commit:*)`.
@@ -1152,7 +1172,8 @@ mod tests {
         ));
 
         let g = gate.clone();
-        let task = tokio::spawn(async move { g.check("Bash", &json!({})).await });
+        let input = source_fixture(&json!({}));
+        let task = tokio::spawn(async move { g.check("Bash", &input).await });
         wait_for_pending(&gate, 1).await;
         let req = sink.last().await;
         assert!(
@@ -1188,7 +1209,8 @@ mod tests {
 
         match task.await.unwrap() {
             PermissionDecision::Deny { reason } => {
-                assert!(reason.contains("user denied"), "got: {reason}");
+                let text = reason.string_at("").expect("reason source string");
+                assert!(text.contains("user denied"), "got: {text}");
             }
             PermissionDecision::Allow => panic!("expected Deny"),
         }
@@ -1471,7 +1493,8 @@ mod tests {
 
         match task.await.unwrap() {
             PermissionDecision::Deny { reason } => {
-                assert!(reason.contains("dropped"), "got: {reason}");
+                let text = reason.string_at("").expect("reason source string");
+                assert!(text.contains("dropped"), "got: {text}");
             }
             PermissionDecision::Allow => panic!("expected Deny after drain"),
         }
@@ -1545,7 +1568,8 @@ mod tests {
             41,
             ParkedRequest {
                 sender,
-                input: json!({"command": "dangerous"}),
+                input: Utf16JsonProjection::from_serde_value(&json!({"command": "dangerous"}))
+                    .unwrap(),
                 tool_name: "Bash".to_string(),
                 owner: None,
                 suppress_always_allow_rule: false,
@@ -1582,7 +1606,8 @@ mod tests {
             77,
             ParkedRequest {
                 sender,
-                input: json!({"command": "dangerous"}),
+                input: Utf16JsonProjection::from_serde_value(&json!({"command": "dangerous"}))
+                    .unwrap(),
                 tool_name: "Bash".to_string(),
                 owner: None,
                 suppress_always_allow_rule: false,
@@ -1621,10 +1646,12 @@ mod tests {
             .with_event_sink(events.clone())
             .with_timeout(Duration::from_millis(20));
 
-        let decision = gate.check("Bash", &json!({})).await;
+        let input = source_fixture(&json!({}));
+        let decision = gate.check("Bash", &input).await;
         match decision {
             PermissionDecision::Deny { reason } => {
-                assert!(reason.contains("timed out"), "got: {reason}");
+                let text = reason.string_at("").expect("reason source string");
+                assert!(text.contains("timed out"), "got: {text}");
             }
             PermissionDecision::Allow => panic!("expected Deny on timeout"),
         }

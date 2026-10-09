@@ -168,7 +168,7 @@ pub(crate) mod tests {
         }));
         let h = LoginHandler::new(m);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Logged in as u@x.com (org: org_42).");
+            assert_eq!(s, "Logged in as u@x.com (org: org_42).".into());
         } else {
             panic!();
         }
@@ -179,7 +179,7 @@ pub(crate) mod tests {
         let m = Arc::new(MockAuth::err(AuthError::Timeout));
         let h = LoginHandler::new(m);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Could not log in: login flow timed out");
+            assert_eq!(s, "Could not log in: login flow timed out".into());
         } else {
             panic!();
         }
@@ -190,7 +190,7 @@ pub(crate) mod tests {
         let m = Arc::new(MockAuth::err(AuthError::Network("dns failure".into())));
         let h = LoginHandler::new(m);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Could not log in: network error: dns failure");
+            assert_eq!(s, "Could not log in: network error: dns failure".into());
         } else {
             panic!();
         }
@@ -283,6 +283,7 @@ Please log in with a permitted organization: lingxi-cli auth login",
                 "Your authentication token belongs to organization org_bad,\n\
 but this machine requires organization org_ok.\n\n\
 Please log in with a permitted organization: lingxi-cli auth login"
+                    .into()
             );
         } else {
             panic!("expected a Done display");
@@ -301,7 +302,7 @@ Please log in with a permitted organization: lingxi-cli auth login"
         let auth = Arc::new(RollbackAuth::new("org_ok"));
         let h = LoginHandler::new(auth.clone()).with_org_policy(Arc::new(FixedPolicy::permit()));
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Logged in as me@example.com (org: org_ok).");
+            assert_eq!(s, "Logged in as me@example.com (org: org_ok).".into());
         } else {
             panic!("expected a Done display");
         }
@@ -318,7 +319,7 @@ Please log in with a permitted organization: lingxi-cli auth login"
         let auth = Arc::new(RollbackAuth::new("any_org"));
         let h = LoginHandler::new(auth.clone());
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert_eq!(s, "Logged in as me@example.com (org: any_org).");
+            assert_eq!(s, "Logged in as me@example.com (org: any_org).".into());
         } else {
             panic!("expected a Done display");
         }

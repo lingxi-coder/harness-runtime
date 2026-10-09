@@ -156,9 +156,17 @@ mod mod_session_turn_resume_tests {
         )
         .unwrap();
         let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("omit-restored", dir.path(), &module, serde_json::json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "omit-restored",
+            dir.path(),
+            &module,
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({}),
+            )
+            .expect("generated Mod options are representable"),
+        )
+        .await
+        .unwrap();
         let mut registry = hooks::HookRegistry::new();
         registry.set_mod_host(host);
         let orch = ConversationOrchestrator::new(
@@ -2436,95 +2444,6 @@ impl ConversationOrchestrator {
             .map_err(|error| ResumeError::DeferredReplay(error.to_string()))?;
         }
         Ok(orch)
-    }
-}
-
-#[cfg(test)]
-mod mod_session_turn_resume_tests {
-
-    #[tokio::test]
-    async fn restored_hook_attachment_keeps_origin_and_can_be_omitted_from_model_copy() {
-        use crate::test_support::{
-            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-            StaticMemoryProvider,
-        };
-
-        let session_id = Uuid::new_v4();
-        let attachment_id = Uuid::new_v4();
-        let rows = vec![hook_attachment_row(
-            session_id,
-            attachment_id,
-            serde_json::json!({
-                "type":"hook_additional_context",
-                "hookName":"SessionStart",
-                "hookEvent":"SessionStart",
-                "content":["RESTORED SECRET"]
-            }),
-        )];
-        let state = state_from_messages(session_id, &rows);
-        assert_eq!(state.history.len(), 1);
-        assert_eq!(state.history[0].id(), MessageId::from_uuid(attachment_id));
-        let descriptors = mod_attachment_descriptors_from_messages(&rows);
-        assert_eq!(
-            descriptors.get(&MessageId::from_uuid(attachment_id)),
-            Some(&(
-                "hook_additional_context".into(),
-                serde_json::json!({"kind":"hook","event":"SessionStart"})
-            ))
-        );
-
-        let dir = tempfile::tempdir().unwrap();
-        let module = dir.path().join("omit-restored.js");
-        std::fs::write(
-            &module,
-            r#"export function register(on) {
-              on('prompt.attachment', { type: 'hook_additional_context' }, ($, e, next) =>
-                e.origin.kind === 'hook' && e.origin.event === 'SessionStart'
-                  ? { text: null } : next(e));
-            }"#,
-        )
-        .unwrap();
-        let host = hooks::mods::ModHost::start(None).await.unwrap();
-        host.load("omit-restored", dir.path(), &module, serde_json::json!({}))
-            .await
-            .unwrap();
-        let mut registry = hooks::HookRegistry::new();
-        registry.set_mod_host(host);
-        let orch = ConversationOrchestrator::new(
-            OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(vec![])),
-            Arc::new(ToolRegistry::new()),
-            noop_hook_executor(),
-            Arc::new(NoOpPermissionGate),
-            Arc::new(MockOutputStream::new()),
-            Arc::new(StaticMemoryProvider::empty()),
-            dir.path().to_path_buf(),
-        )
-        .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
-        *orch.session.lock().await = state;
-        orch.restore_resume_prompt_metadata(&rows).await;
-        let is_regular_user_prompt = orch.regular_user_prompt_for_model_step().await;
-        let prepared = orch
-            .prepare_turn_step(
-                crate::conversation::ModelCallPath::Batched,
-                None,
-                true,
-                is_regular_user_prompt,
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(prepared
-            .snapshot
-            .iter()
-            .all(|message| !message.text_content().contains("RESTORED SECRET")));
-        assert!(orch
-            .session
-            .lock()
-            .await
-            .history
-            .iter()
-            .any(|message| message.text_content().contains("RESTORED SECRET")));
     }
 }
 

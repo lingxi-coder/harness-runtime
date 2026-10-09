@@ -1080,7 +1080,7 @@ mod tests {
                 .unwrap_or_else(|| Ok(String::new()))
                 .map_err(SideQueryError::Api)?;
             Ok(SideQueryResponse {
-                text: Some(text),
+                text: Some(text.into()),
                 structured: None,
                 tool_calls: Vec::new(),
                 usage: Usage::default(),

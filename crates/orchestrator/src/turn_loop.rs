@@ -621,6 +621,8 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                     &mut turn_reminders,
                     &mut guarded_async_hook_reminders,
                 );
+                let tool_result_reminder_suffixes =
+                    orch.tool_result_reminder_suffixes_for_snapshot(&history_snapshot);
                 lingxi_core::host::refusal_driver::scope_fallback_target(
                     fallback_context,
                     call_api_with_ptl_recovery(
@@ -636,6 +638,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                         deferred_tools_reminder,
                         date_change_reminder,
                         turn_reminders,
+                        tool_result_reminder_suffixes,
                         &mut guarded_async_hook_reminders,
                         &context_announcements,
                         cost_scope.as_ref(),

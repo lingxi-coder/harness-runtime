@@ -12,6 +12,7 @@ async fn configured_provider_transport_supports_responses_without_a_host_bridge(
             headers: vec![],
             body: Default::default(),
             timeout: None,
+            http1_header_layout: None,
         })
         .await
         .err()

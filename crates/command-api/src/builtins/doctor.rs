@@ -114,6 +114,7 @@ Doctor:
   [OK] api-key: ok
   Summary: 2 passed, 0 warnings, 0 failed
 "
+                .into()
             );
         } else {
             panic!();
@@ -160,6 +161,7 @@ Doctor:
       ping timed out
   Summary: 1 passed, 1 warnings, 1 failed
 "
+                .into()
             );
         } else {
             panic!();

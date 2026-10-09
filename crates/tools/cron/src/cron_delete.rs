@@ -594,7 +594,8 @@ mod tests {
             source_text_projection_units(&[0xD800]),
         )])
         .expect("CronDelete input is valid JSON");
-        let tool = tool();
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = CronDeleteTool::new(shell_test_ctx_in(dummy_out(), tmp.path().to_path_buf()));
         let expected = source_text_with_value(
             "No scheduled job with id '",
             &input.subprojection("/id").unwrap(),

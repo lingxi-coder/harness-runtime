@@ -408,10 +408,9 @@ impl tool_api::tool_trait::Tool for ModRegisteredTool {
         _: ToolUseContext,
         _: tool_api::progress::ToolProgressSender,
     ) -> Result<tool_api::tool_trait::ToolCallResult, tool_api::tool_trait::ToolError> {
-        Err(tool_api::tool_trait::ToolError::Internal(format!(
-            "{}: registered Mod tool call was not answered",
-            self.name
-        )))
+        Err(tool_api::tool_trait::ToolError::Internal(
+            format!("{}: registered Mod tool call was not answered", self.name).into(),
+        ))
     }
 }
 
@@ -457,7 +456,7 @@ mod mod_registered_tool_tests {
             r#"{"type":"object","properties":{"value":{"type":"string"}}}"#
         );
         assert_eq!(
-            tool.input_repair_metadata(),
+            tool_api::tool_trait::Tool::input_repair_metadata(&tool),
             tool_api::tool_trait::ToolInputRepairMetadata::Known {
                 schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
                 schema_provenance: tool_api::tool_trait::ToolInputSchemaProvenance::SourceNative,
@@ -2186,6 +2185,10 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
         self.output.emit_mod_toast(plugin, &text, timeout_ms).await;
     }
 
+    async fn emit_mod_notify(&self, plugin: &str, text: Utf16JsonProjection) {
+        self.output.emit_mod_notify(plugin, &text).await;
+    }
+
     async fn emit_mod_status(&self, plugin: &str, text: Option<Utf16JsonProjection>) {
         self.output.emit_mod_status(plugin, text.as_ref()).await;
     }
@@ -2809,6 +2812,12 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
     async fn emit_mod_toast(&self, plugin: &str, text: Utf16JsonProjection, timeout_ms: u64) {
         self.publication_guard
             .publish_if_current(self.inner.output.emit_mod_toast(plugin, &text, timeout_ms))
+            .await;
+    }
+
+    async fn emit_mod_notify(&self, plugin: &str, text: Utf16JsonProjection) {
+        self.publication_guard
+            .publish_if_current(self.inner.output.emit_mod_notify(plugin, &text))
             .await;
     }
 
@@ -3964,7 +3973,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                 let _ = args.remove_field(field);
                             }
                             let single = vec![(id, name, args, provider_id)];
-                            let (dispatched, stage) = with_mod_result_stage(
+                            let (dispatched, mut stage) = with_mod_result_stage(
                                 &single[0].0,
                                 dispatch_tool_uses_tracked_deferred_core(
                                     orch,
@@ -3989,6 +3998,25 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                                     return Err(hooks::mods::ModError::Hook(message));
                                 }
                             };
+                            // A fenced dispatch carries the raw tool result in
+                            // its deferred publication. The publication is
+                            // committed only after `with_mod_result_stage`
+                            // exits, so `record_tool_use_result` can no longer
+                            // populate this task-local stage. Preserve the
+                            // executor result for `next().result` and for the
+                            // outer result/reuse decision before draining the
+                            // publication below.
+                            if let Some(raw_result) = dispatched
+                                .publications
+                                .iter()
+                                .find(|publication| {
+                                    publication.tool_use_id.as_str() == single[0].0.as_str()
+                                })
+                                .and_then(|publication| publication.tool_use_result.clone())
+                                .or_else(|| stage.tool_use_result.clone())
+                            {
+                                stage.tool_use_result = Some(raw_result);
+                            }
                             for publication in std::mem::take(&mut dispatched.publications) {
                                 // The active ModResultStage captures these local
                                 // sidecars; the outer wrapper decides whether Tn
@@ -4184,8 +4212,12 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 None
             };
             if let Some(message) = schema_error {
-                let content =
-                    source_text_with(Some(&message), "<tool_use_error>", "</tool_use_error>");
+                // A Mod-rewritten output that fails the tool's output schema
+                // is surfaced as the parser's validation message. The
+                // `<tool_use_error>` wrapper belongs to pre-execution input
+                // validation/unknown-tool paths, not this post-execution hook
+                // result path.
+                let content = message.clone();
                 if completed.lock().await.is_empty() {
                     orch.output.emit_tool_call(id, name, input).await;
                 }
@@ -4264,12 +4296,11 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                             let (new_text, mapped_blocks, mapped_error) =
                                 map_mod_result_for_model(orch, name, &raw, prepared_tool.as_ref());
                             *content = new_text.clone();
-                            *is_error = Some(mapped_error.unwrap_or_else(|| {
+                            *is_error = mapped_error.or_else(|| {
                                 answer_value
                                     .at_pointer("/isError")
                                     .and_then(JsonValueView::as_bool)
-                                    .unwrap_or(false)
-                            }));
+                            });
                             *content_blocks = mapped_blocks;
                             for call in &mut core.dispatched.post_tool_batch_calls {
                                 if call.tool_use_id == *id {
@@ -4321,20 +4352,14 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 (
                     content.clone(),
                     None,
-                    true,
+                    Some(true),
                     content.clone(),
                     source_error_payload(reason),
                 )
             } else if let Ok(result) = answer_value.subprojection("/result") {
                 let (text, blocks, mapped_error) =
                     map_mod_result_for_model(orch, name, &result, prepared_tool.as_ref());
-                (
-                    text,
-                    blocks,
-                    mapped_error.unwrap_or(false),
-                    result.clone(),
-                    result,
-                )
+                (text, blocks, mapped_error, result.clone(), result)
             } else {
                 tracing::warn!(tool = %name, "mod tool.call returned an invalid result; executing original call");
                 let completed_core = completed.lock().await.pop();
@@ -4400,7 +4425,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             all.results.push(ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
                 content,
-                is_error: Some(is_error),
+                is_error,
                 provider_tool_use_id: provider_id.clone(),
                 content_blocks,
             });
@@ -7450,10 +7475,18 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         } else {
             (persistence.content, content_blocks)
         };
+        // The tool mapper owns field presence. Glob and most successful
+        // builtins omit is_error; Bash explicitly carries interrupted:false.
+        // Keep execution failure classification separate from the wire shape.
+        let model_is_error = if is_error {
+            Some(true)
+        } else {
+            tool_handle.map_result_is_error(&emit_payload)
+        };
         results.push(ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
             content: final_content,
-            is_error: Some(is_error),
+            is_error: model_is_error,
             provider_tool_use_id: provider_id.clone(),
             content_blocks,
         });
@@ -7581,7 +7614,10 @@ mod final_input_validation_tests {
         DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
     };
 
-    struct InputSpy(Arc<Mutex<Vec<Value>>>, Option<CooperativeCleanup>);
+    struct InputSpy(
+        Arc<Mutex<Vec<Utf16JsonProjection>>>,
+        Option<CooperativeCleanup>,
+    );
 
     struct CooperativeCleanup {
         started: Arc<tokio::sync::Notify>,
@@ -7593,16 +7629,26 @@ mod final_input_validation_tests {
         fn name(&self) -> &str {
             "input_spy"
         }
-        fn input_schema(&self) -> &Value {
-            static SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
-                json!({
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            static SCHEMA: std::sync::LazyLock<Utf16JsonProjection> =
+                std::sync::LazyLock::new(|| {
+                    Utf16JsonProjection::from_serde_value(&json!({
                     "type":"object",
                     "properties":{"action":{"type":"string"}},
                     "required":["action"],
                     "additionalProperties":false
-                })
-            });
+                    }))
+                    .expect("test schema is valid source JSON")
+                });
             &SCHEMA
+        }
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
         }
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
@@ -7610,18 +7656,22 @@ mod final_input_validation_tests {
         fn max_result_size_chars(&self) -> usize {
             1024
         }
-        fn is_concurrency_safe(&self, _: &Value) -> bool {
+        fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
             false
         }
-        fn is_read_only(&self, _: &Value) -> bool {
+        fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
             false
         }
         async fn validate_input(
             &self,
-            input: &Value,
+            input: &Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> Result<(), tool_api::ValidationError> {
-            if input["action"] == "forbidden" {
+            if input
+                .get_property("action")
+                .and_then(|value| value.as_str())
+                == Some("forbidden")
+            {
                 Err(tool_api::ValidationError("forbidden action".into()))
             } else {
                 Ok(())
@@ -7629,7 +7679,7 @@ mod final_input_validation_tests {
         }
         async fn check_permissions(
             &self,
-            _: &Value,
+            _: &Utf16JsonProjection,
             _: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -7641,15 +7691,15 @@ mod final_input_validation_tests {
                 metadata: Default::default(),
             }
         }
-        async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
+        async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
             "test".into()
         }
-        async fn prompt(&self, _: &PromptOptions) -> String {
-            "test".into()
+        async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
+            Utf16JsonProjection::from("test")
         }
         async fn call(
             &self,
-            input: Value,
+            input: Utf16JsonProjection,
             ctx: ToolUseContext,
             _: tool_api::progress::ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -7672,7 +7722,7 @@ mod final_input_validation_tests {
         }
     }
 
-    struct RewriteInput(Value);
+    struct RewriteInput(Utf16JsonProjection);
 
     #[async_trait::async_trait]
     impl hooks::BuiltinHookHandler for RewriteInput {
@@ -7682,8 +7732,8 @@ mod final_input_validation_tests {
         async fn handle(&self, _: &HookEvent, _: &HookContext) -> hooks::HookResult {
             hooks::HookResult {
                 outcome: hooks::HookOutcome::Success,
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: String::new().into(),
+                stderr: String::new().into(),
                 exit_code: Some(0),
                 response: Some(hooks::HookResponse {
                     updated_input: Some(self.0.clone()),
@@ -7693,13 +7743,15 @@ mod final_input_validation_tests {
         }
     }
 
-    async fn dispatch_rewritten_input(updated: Value) -> (Vec<ContentBlock>, Vec<Value>) {
+    async fn dispatch_rewritten_input(
+        updated: Value,
+    ) -> (Vec<ContentBlock>, Vec<Utf16JsonProjection>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let mut registry = tool_api::registry::ToolRegistry::new();
         registry.register_builtin(Arc::new(InputSpy(seen.clone(), None)));
         let mut executor = Arc::try_unwrap(noop_hook_executor())
             .unwrap_or_else(|_| panic!("test hook executor is uniquely owned"));
-        executor.register_builtin(Arc::new(RewriteInput(updated)));
+        executor.register_builtin(Arc::new(RewriteInput(source_from_value(&updated))));
         let executor = Arc::new(executor);
         let orch = ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),
@@ -7733,6 +7785,7 @@ mod final_input_validation_tests {
                     async_rewake: false,
                     async_timeout: None,
                     rewake_message: None,
+                    on_failure: None,
                 },
             )
             .await;
@@ -7741,7 +7794,7 @@ mod final_input_validation_tests {
             &[(
                 ToolUseId::new(),
                 "input_spy".into(),
-                json!({"action":"original"}),
+                source_from_value(&json!({"action":"original"})),
                 None,
             )],
         )
@@ -7788,7 +7841,7 @@ mod final_input_validation_tests {
     async fn pretool_hook_executes_final_valid_input() {
         let final_input = json!({"action":"updated"});
         let (results, inputs) = dispatch_rewritten_input(final_input.clone()).await;
-        assert_eq!(inputs, [final_input]);
+        assert_eq!(inputs, [source_from_value(&final_input)]);
         assert!(matches!(
             &results[0],
             ContentBlock::ToolResult {
@@ -7817,7 +7870,10 @@ mod final_input_validation_tests {
             vec![llm_runtime::ContentBlock::ToolCall {
                 id: "toolu_cooperative".into(),
                 name: "input_spy".into(),
-                input: json!({"action":"wait"}),
+                input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
+                    &json!({"action":"wait"}),
+                )
+                .unwrap(),
             }],
             Some("tool_use"),
         );
@@ -7871,36 +7927,36 @@ mod native_tool_check_metadata_tests {
         let tool_use_id = ToolUseId::new();
         let event = mod_tool_check_event(
             "mcp__srv__tool",
-            &serde_json::json!({"x":1}),
+            &source_from_value(&serde_json::json!({"x":1})),
             &tool_use_id,
             Some("agent-trusted-7"),
             Some(lingxi_core::host::McpPermissionCeiling::Ask),
         );
         assert_eq!(
             event,
-            serde_json::json!({
+            source_from_value(&serde_json::json!({
                 "tool":"mcp__srv__tool",
                 "input":{"x":1},
                 "tool_use_id":tool_use_id.as_str(),
                 "agentId":"agent-trusted-7",
                 "ceiling":"ask"
-            })
+            }))
         );
 
         let ordinary = mod_tool_check_event(
             "Read",
-            &serde_json::json!({}),
+            &source_from_value(&serde_json::json!({})),
             &tool_use_id,
             None,
             Some(lingxi_core::host::McpPermissionCeiling::Allow),
         );
         assert_eq!(
             ordinary,
-            serde_json::json!({
+            source_from_value(&serde_json::json!({
                 "tool":"Read",
                 "input":{},
                 "tool_use_id":tool_use_id.as_str()
-            }),
+            })),
             "Native omits agentId when absent and only exposes the ask ceiling"
         );
     }
@@ -7943,7 +7999,7 @@ mod native_tool_check_metadata_tests {
             "captured-preflight",
             dir.path(),
             &module,
-            serde_json::json!({}),
+            source_from_value(&serde_json::json!({})),
         )
         .await
         .unwrap();
@@ -7981,7 +8037,7 @@ mod native_tool_check_metadata_tests {
             dir.path().to_path_buf(),
         )
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hook_registry)));
-        let input = serde_json::json!({"subagent_type":"general-purpose"});
+        let input = source_from_value(&serde_json::json!({"subagent_type":"general-purpose"}));
         let ctx = PermissionCheckContext::default();
         let preflight: HookAllowModCoreEvaluation = gate
             .resolve_after_hook_allow_mod_core("Agent", &input, &ctx)
@@ -7995,7 +8051,8 @@ mod native_tool_check_metadata_tests {
                 .unwrap()
                 .verdict
                 .rule
-                .as_deref(),
+                .as_ref()
+                .and_then(|rule| rule.string_at("")),
             Some("Agent(general-purpose)")
         );
 
@@ -8014,7 +8071,14 @@ mod native_tool_check_metadata_tests {
             .check_mod_query("Agent", &input, &ctx)
             .await
             .expect("the real live overlay is queryable after replacement");
-        assert_eq!(fresh.verdict.rule.as_deref(), Some("Agent"));
+        assert_eq!(
+            fresh
+                .verdict
+                .rule
+                .as_ref()
+                .and_then(|rule| rule.string_at("")),
+            Some("Agent")
+        );
 
         let checked = apply_mod_tool_check(
             &orch,

@@ -88,8 +88,8 @@ impl BuiltinHookHandler for RecordingHandler {
         }
         HookResult {
             outcome: HookOutcome::Success,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout: String::new().into(),
+            stderr: String::new().into(),
             exit_code: None,
             response: None,
         }
@@ -107,7 +107,7 @@ impl BuiltinHookHandler for FailingHandler {
     async fn handle(&self, _event: &HookEvent, _ctx: &HookContext) -> HookResult {
         HookResult {
             outcome: HookOutcome::Error,
-            stdout: String::new(),
+            stdout: String::new().into(),
             stderr: "the session-end hook itself blew up".into(),
             exit_code: Some(1),
             response: None,
@@ -133,6 +133,7 @@ fn builtin_hook(handler_id: &str, event_type: HookEventType) -> HookDefinition {
         async_rewake: false,
         async_timeout: None,
         rewake_message: None,
+        on_failure: None,
     }
 }
 
@@ -193,9 +194,17 @@ async fn mod_session_end_receives_resume_identity_at_teardown() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("end-mod", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "end-mod",
+        dir.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+            {}
+        ))
+        .expect("generated Mod options are representable"),
+    )
+    .await
+    .unwrap();
     let mut registry = HookRegistry::new();
     registry.set_mod_host(host);
     let registry = Arc::new(RwLock::new(registry));
@@ -264,9 +273,17 @@ async fn mod_state_resets_on_session_end_and_clear_with_monotonic_versions() {
     )
     .unwrap();
     let host = hooks::mods::ModHost::start(None).await.unwrap();
-    host.load("state-end", dir.path(), &module, serde_json::json!({}))
-        .await
-        .unwrap();
+    host.load(
+        "state-end",
+        dir.path(),
+        &module,
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&serde_json::json!(
+            {}
+        ))
+        .expect("generated Mod options are representable"),
+    )
+    .await
+    .unwrap();
     let mut registry = HookRegistry::new();
     registry.set_mod_host(host.clone());
     let registry = Arc::new(RwLock::new(registry));
@@ -286,16 +303,27 @@ async fn mod_state_resets_on_session_end_and_clear_with_monotonic_versions() {
         dir.path().to_path_buf(),
     )
     .with_hook_registry(registry);
-    let set = |value| serde_json::json!({"tool":"Set","value":value});
-    let read = serde_json::json!({"tool":"Read"});
+    let set = |value| {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"tool":"Set","value":value}),
+        )
+        .expect("generated Mod input is representable")
+    };
+    let read = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+        &serde_json::json!({"tool":"Read"}),
+    )
+    .expect("generated Mod input is representable");
     let first = host
         .dispatch("tool.call", set(1), |_| async { panic!("Mod answers") })
         .await
         .unwrap();
     assert_eq!(
-        first["result"],
-        serde_json::json!({"isSet":true,"version":1})
+        first
+            .at_pointer("/result/isSet")
+            .and_then(|value| value.as_bool()),
+        Some(true)
     );
+    assert_eq!(first.number_at("/result/version"), Some(1.0));
     orch.fire_session_end("other").await;
     let after_end = host
         .dispatch("tool.call", read.clone(), |_| async {
@@ -303,29 +331,49 @@ async fn mod_state_resets_on_session_end_and_clear_with_monotonic_versions() {
         })
         .await
         .unwrap();
-    assert_eq!(after_end["result"], serde_json::json!({"version":0}));
+    assert_eq!(
+        after_end
+            .subprojection("/result")
+            .unwrap()
+            .to_json_string()
+            .unwrap(),
+        r#"{"version":0}"#
+    );
     let second = host
         .dispatch("tool.call", set(2), |_| async { panic!("Mod answers") })
         .await
         .unwrap();
     assert_eq!(
-        second["result"],
-        serde_json::json!({"isSet":true,"version":2})
+        second
+            .at_pointer("/result/isSet")
+            .and_then(|value| value.as_bool()),
+        Some(true)
     );
+    assert_eq!(second.number_at("/result/version"), Some(2.0));
     orch.clear_session().await.unwrap();
     let after_clear = host
         .dispatch("tool.call", read, |_| async { panic!("Mod answers") })
         .await
         .unwrap();
-    assert_eq!(after_clear["result"], serde_json::json!({"version":0}));
+    assert_eq!(
+        after_clear
+            .subprojection("/result")
+            .unwrap()
+            .to_json_string()
+            .unwrap(),
+        r#"{"version":0}"#
+    );
     let third = host
         .dispatch("tool.call", set(3), |_| async { panic!("Mod answers") })
         .await
         .unwrap();
     assert_eq!(
-        third["result"],
-        serde_json::json!({"isSet":true,"version":3})
+        third
+            .at_pointer("/result/isSet")
+            .and_then(|value| value.as_bool()),
+        Some(true)
     );
+    assert_eq!(third.number_at("/result/version"), Some(3.0));
 }
 
 #[tokio::test]

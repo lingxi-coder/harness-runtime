@@ -22,7 +22,7 @@
 //! still runs, just in this context.
 
 use lingxi_core::host::task_registry::TaskRecord;
-use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use session::forked_skill::ForkedSkillScoping;
 
 /// Whether a forking skill should run in the BACKGROUND (claude `KCo`).
@@ -427,7 +427,7 @@ mod tests {
         let mut units = "skill_".encode_utf16().collect::<Vec<_>>();
         units.push(0xd800);
         units.extend("_probe".encode_utf16());
-        let exact = Utf16JsonProjection::root_string("skill_�_probe", units).unwrap();
+        let exact = Utf16JsonProjection::root_string("skill_�_probe".into(), units).unwrap();
         let lossy_lookalike = Utf16JsonProjection::from("skill_�_probe");
         let task = TaskRecord {
             task_id: "a00000001".into(),
@@ -639,7 +639,7 @@ Do the skill's work directly in this context instead of invoking further skills.
         let mut units = "skill_".encode_utf16().collect::<Vec<_>>();
         units.push(0xd800);
         units.extend("_probe".encode_utf16());
-        let unpaired = Utf16JsonProjection::root_string("skill_�_probe", units).unwrap();
+        let unpaired = Utf16JsonProjection::root_string("skill_�_probe".into(), units).unwrap();
         assert!(is_forkable_skill_name(&unpaired));
     }
 }

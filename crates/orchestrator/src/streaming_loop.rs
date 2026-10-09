@@ -270,6 +270,22 @@ pub struct PumpedTurn {
     /// `message_delta` — drives the terminal refusal message's cyber/bio
     /// variant. `None` for non-refusal turns.
     pub stop_details: Option<llm_runtime::HistoryStopDetails>,
+    /// Capture owned by the external turn that initiated this stream.
+    pub(crate) timing_capture: Option<Arc<crate::conversation::TurnTimingCapture>>,
+}
+
+impl PumpedTurn {
+    pub(crate) fn note_accepted_assistant_row(&self) {
+        if let Some(capture) = self.timing_capture.as_ref() {
+            capture.observe_first_accepted_assistant_row();
+        }
+    }
+
+    pub(crate) fn commit_accepted_assistant_timing(&self) {
+        if !self.assistant_blocks.is_empty() || !self.assistant_rows.is_empty() {
+            self.note_accepted_assistant_row();
+        }
+    }
 }
 
 /// Query-local result collection for Native's post-event `Tn()` poll.
@@ -1288,7 +1304,7 @@ pub async fn pump_stream(
     stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
 ) -> Result<PumpedTurn, OrchestratorError> {
-    pump_stream_inner(stream, output, None)
+    pump_stream_inner(stream, output, None, None)
         .await
         .map(|(turn, _remaining)| turn)
         .map_err(|f| f.error)
@@ -1399,13 +1415,15 @@ pub(crate) async fn pump_stream_with_executor_tracked_remaining(
     ),
     PumpFailure,
 > {
-    pump_stream_inner(stream, output, Some(pump)).await
+    let timing_capture = pump.executor.orchestrator().active_turn_timing_capture();
+    pump_stream_inner(stream, output, Some(pump), timing_capture).await
 }
 
 async fn pump_stream_inner(
     mut stream: BoxStream<'static, Result<HistoryEvent, LlmError>>,
     output: &Arc<dyn OutputStream>,
     mut pump: Option<ExecutorPump<'_, '_>>,
+    timing_capture: Option<Arc<crate::conversation::TurnTimingCapture>>,
 ) -> Result<
     (
         PumpedTurn,
@@ -1422,7 +1440,10 @@ async fn pump_stream_inner(
         .as_ref()
         .map(|p| p.suppress_live_thinking)
         .unwrap_or(false);
-    let mut turn = PumpedTurn::default();
+    let mut turn = PumpedTurn {
+        timing_capture: timing_capture.clone(),
+        ..PumpedTurn::default()
+    };
     let mut assistant_block_indices: Vec<(u32, bool)> = Vec::new();
     let mut assistant_block_row_ids: Vec<MessageId> = Vec::new();
     let mut tool_use_row_ids: Vec<MessageId> = Vec::new();
@@ -1455,8 +1476,8 @@ async fn pump_stream_inner(
             poll_ready_stream_tool_results(&mut pump).await;
             break;
         };
-        let mut event = match item {
-            Ok(ev) => ev,
+        let (mut event, event_received_at) = match item {
+            Ok(ev) => (ev, std::time::Instant::now()),
             Err(e) => {
                 poll_ready_stream_tool_results(&mut pump).await;
                 if completion.message_started
@@ -1491,6 +1512,14 @@ async fn pump_stream_inner(
             }
         };
         any_event = true;
+        if matches!(
+            &event,
+            HistoryEvent::ContentBlockStart { .. } | HistoryEvent::ContentBlockDelta { .. }
+        ) {
+            if let Some(capture) = &timing_capture {
+                capture.observe_first_content_frame_at(event_received_at);
+            }
+        }
         if let Some((index, value)) = observation_block(&event) {
             observation_block_indices.insert(index);
             if let Some(metadata) = value.payload_at("/metadata") {
@@ -1847,6 +1876,9 @@ async fn pump_stream_inner(
             turn.server_fallback_events.push(observation);
         }
         if let HistoryEvent::MessageStart { response } = &event {
+            if let Some(capture) = &timing_capture {
+                capture.observe_first_stream_start_at(event_received_at);
+            }
             provider_message_id.clone_from(&response.id);
             turn.response_message_id = Some(response.id.clone());
             assistant_row_model.clone_from(&response.model);
@@ -2009,11 +2041,14 @@ async fn pump_stream_inner(
                         .find(|row| row.row_id == row_id)
                     {
                         p.executor.append_assistant_row(row).await;
-                        Some(row.content.clone())
+                        Some((row.session_append_dispatched, row.content.clone()))
                     } else {
                         None
                     };
-                    if let Some(content) = accepted_content {
+                    if let Some((accepted, content)) = accepted_content {
+                        if accepted {
+                            turn.note_accepted_assistant_row();
+                        }
                         update_accepted_stream_blocks_for_row(
                             &mut turn,
                             &mut assistant_block_indices,
@@ -2068,6 +2103,9 @@ async fn pump_stream_inner(
                 // identity/input while accepted Text is shared with query K.
                 if let Some(p) = pump.as_mut() {
                     p.executor.append_assistant_row(&mut row).await;
+                    if row.session_append_dispatched {
+                        turn.note_accepted_assistant_row();
+                    }
                     update_accepted_stream_blocks_for_row(
                         &mut turn,
                         &mut assistant_block_indices,
@@ -2333,6 +2371,53 @@ mod tests {
 
     fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
+    }
+
+    #[tokio::test]
+    async fn timing_observations_use_event_receipt_and_wait_for_row_acceptance() {
+        let capture = Arc::new(crate::conversation::TurnTimingCapture::new());
+        // Model Native's external-turn pre-dispatch work; the request mark
+        // starts after this gap rather than at process startup.
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        capture.observe_first_request_dispatch();
+
+        let events = vec![
+            message_start("m1", "model"),
+            content_block_start_thinking(0),
+            thinking_delta(0, "reasoning"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ];
+        let stream = stream::iter(events.into_iter().map(Ok))
+            .then(|event| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                event
+            })
+            .boxed();
+        let output: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let (turn, _remaining) =
+            pump_stream_inner(stream, &output, None, Some(Arc::clone(&capture)))
+                .await
+                .expect("stream completes");
+
+        let before_acceptance = capture.snapshot();
+        assert!(before_acceptance.time_to_request_ms.is_some());
+        assert!(before_acceptance.ttft_stream_ms.is_some());
+        assert!(before_acceptance.first_content_frame_ms.is_some());
+        assert_eq!(before_acceptance.ttft_ms, None);
+
+        // Session append may be delayed after the first frame; TTFT reflects
+        // accepted-row visibility, not the earlier ContentBlockStop receipt.
+        tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+        turn.commit_accepted_assistant_timing();
+        let after_acceptance = capture.snapshot();
+        let request = after_acceptance.time_to_request_ms.unwrap();
+        let stream_start = after_acceptance.ttft_stream_ms.unwrap();
+        let first_frame = after_acceptance.first_content_frame_ms.unwrap();
+        let ttft = after_acceptance.ttft_ms.unwrap();
+        assert!(request < stream_start && stream_start < first_frame && first_frame < ttft);
+        assert!(ttft.saturating_sub(first_frame) >= 8);
     }
 
     #[test]
@@ -2858,13 +2943,13 @@ mod tests {
             message_delta_stop("end_turn"),
             message_stop(),
         ];
-        let (first, rest) = pump_stream_inner(boxed(events), &out, None)
+        let (first, rest) = pump_stream_inner(boxed(events), &out, None, None)
             .await
             .expect("first response");
         assert!(
             matches!(&first.assistant_blocks[0], ContentBlock::Text { text, .. } if text == "first")
         );
-        let (second, mut rest) = pump_stream_inner(rest, &out, None)
+        let (second, mut rest) = pump_stream_inner(rest, &out, None, None)
             .await
             .expect("second response");
         assert!(

@@ -481,6 +481,7 @@ mod tests {
     /// A current runner whose model request remains pending until cancellation.
     fn make_ctx() -> SubagentContext {
         SubagentContext {
+            native_query_depth: 0,
             task_registry: None,
             agent_id: AgentId::new(),
             parent_agent_id: None,
@@ -556,6 +557,7 @@ mod tests {
             structured_output_parse_retries: 0,
             budget: None,
             hook_executor: None,
+            agent_spawn_token: None,
             strict_plugin_only_hooks: false,
             skill_loader: None,
             hook_session_id: lingxi_core::types::SessionId::nil(),
@@ -747,8 +749,7 @@ mod tests {
                 text: "report".into(),
                 warning: None,
             },
-            body: handback_frame("report"),
-            body_utf16: None,
+            body: handback_frame("report").into(),
             sender_name: "child".into(),
             sender_id: "child".into(),
             sender_task_id: sender_id.to_string(),

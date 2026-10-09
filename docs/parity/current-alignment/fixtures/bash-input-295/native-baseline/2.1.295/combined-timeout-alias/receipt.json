@@ -1,0 +1,32 @@
+{
+  "case": "combined-timeout-alias",
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "session_id": "cc3cc666-1072-5cf2-9205-562977abebd3",
+  "run_directory": "/private/tmp/claude-alignment-native-bash-295-wyfm_mvf/combined-timeout-alias",
+  "exit_code": 0,
+  "requests": [
+    {
+      "index": 1,
+      "accepted": true,
+      "sha256": "9742b4b507df16836da25fcd463bcd41fda9f9ba2441fab4262ee382a6ee61f4"
+    },
+    {
+      "index": 2,
+      "accepted": true,
+      "sha256": "2df1b86c4d18e82d71ecbfc4bca9b8444bb14307860be65346520671c0ea4b64"
+    }
+  ],
+  "tool_input": {
+    "command": "printf BASH_295_ALIAS > probe.ok",
+    "timeout_ms": "5000",
+    "command_description": "Combined aliases"
+  },
+  "hook_ran": true,
+  "marker_bytes": "BASH_295_ALIAS",
+  "observed_hook_tool_input": {
+    "command": "printf BASH_295_ALIAS > probe.ok",
+    "timeout": 5000,
+    "description": "Combined aliases"
+  }
+}

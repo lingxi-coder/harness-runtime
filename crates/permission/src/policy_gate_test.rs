@@ -134,10 +134,7 @@ mod tests {
         });
         let gate = PolicyPermissionGate::new(policy, inner.clone());
         assert!(!inner.enabled.load(Ordering::SeqCst));
-        gate.persist_permission_updates(&[Utf16JsonProjection::from_serde_value(
-            &json!({"type": "addRules"}),
-        )
-        .expect("test permission update is valid JSON")])
+        gate.persist_permission_updates(&[json!({"type": "addRules"})])
             .await;
         assert_eq!(inner.persisted.load(Ordering::SeqCst), 0);
     }

@@ -154,6 +154,7 @@ fn percentage(used: u64, max: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SourceTextTestExt;
     use orchestrator::test_support::MockOrchestratorHandle;
 
     fn args() -> ParsedSlashCommand {
@@ -255,7 +256,9 @@ mod tests {
         let mock = Arc::new(MockOrchestratorHandle::new());
         let h = ContextHandler::new(mock);
         if let CommandResult::Done { display: Some(s) } = h.handle(&args()).await {
-            assert!(s.starts_with("## Context Usage\n\n**Model:** "));
+            assert!(s
+                .string_at("")
+                .is_some_and(|text| text.starts_with("## Context Usage\n\n**Model:** ")));
             assert!(s.contains("**Tokens:** 0 / 0 (0%)"));
         } else {
             panic!();

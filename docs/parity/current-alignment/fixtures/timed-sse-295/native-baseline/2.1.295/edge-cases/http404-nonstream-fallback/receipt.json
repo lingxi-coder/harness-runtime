@@ -1,0 +1,345 @@
+{
+  "native_version": "2.1.295 (Claude Code)",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "runner_sha256": "7a2ac335807ee1b72b7a7657d4d83b768ad6607d7722ddc307d1c269ecfb2a9b",
+  "fixture_sha256": "be65bab0f469418a9b8cd05baa772f0995b4091b9f3b8117b6bd668036a33f8a",
+  "native_path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "case": {
+    "id": "http404-nonstream-fallback",
+    "mode": "http404-fallback",
+    "session_id": "00000000-0000-4000-8000-000000002361",
+    "prompt": "Return the fixed fallback timing result.",
+    "max_retries": 0,
+    "first_response_delay_ms": 200,
+    "fallback_response_delay_ms": 400,
+    "success_text": "NATIVE_404_NONSTREAM_FALLBACK_SUCCESS"
+  },
+  "argv": [
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "--bare",
+    "--print",
+    "--output-format",
+    "json",
+    "--tools",
+    "",
+    "--permission-mode",
+    "dontAsk",
+    "--permission-prompts",
+    "none",
+    "--max-turns",
+    "1",
+    "--max-budget-usd",
+    "1",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002361",
+    "--system-prompt",
+    "Fixed timing edge-case fixture.",
+    "Return the fixed fallback timing result."
+  ],
+  "public_entrypoint": "Native 2.1.295 --bare --print --output-format json against loopback Anthropic stub",
+  "network_boundary": {
+    "model_endpoint": "127.0.0.1 loopback only",
+    "dummy_key_only": true,
+    "isolated_home_config": true,
+    "upstream_requests": 0
+  },
+  "retry_budget": 0,
+  "timeout_seconds": 45,
+  "elapsed_seconds": 1.172,
+  "native_exit_code": 0,
+  "timed_out": false,
+  "native_stdout": {
+    "path": "native.stdout.raw.json",
+    "bytes": 1533,
+    "sha256": "872f514a96c8dd26380e48467a0d6778c63a88255b2a939e83ab245917335cce"
+  },
+  "native_stdout_top_level_key_order": [
+    "duration_api_ms",
+    "stop_reason",
+    "session_id",
+    "total_cost_usd",
+    "usage",
+    "modelUsage",
+    "permission_denials",
+    "terminal_reason",
+    "fast_mode_state",
+    "fast_mode_disabled_reason",
+    "subagent_stats",
+    "safety_stops",
+    "is_error",
+    "num_turns",
+    "subtype",
+    "api_error_status",
+    "result",
+    "ttft_ms",
+    "type",
+    "duration_ms",
+    "uuid",
+    "queued_turn_count",
+    "result_index"
+  ],
+  "native_result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "result": "NATIVE_404_NONSTREAM_FALLBACK_SUCCESS",
+    "num_turns": 1,
+    "stop_reason": "end_turn",
+    "session_id": "00000000-0000-4000-8000-000000002361"
+  },
+  "native_timing_fields_ms": {
+    "ttft_ms": 638,
+    "duration_api_ms": 621,
+    "duration_ms": 642
+  },
+  "native_stderr": {
+    "path": "native.stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "requests": [
+    {
+      "sequence": 1,
+      "accepted_loopback_dummy_key": true,
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "stream": true,
+      "model": "claude-sonnet-4-5",
+      "request_bytes": 888,
+      "request_sha256": "08efbc81915aac63428cb9ba4a15b897e8f74e662cde6c2f2e0c513048e9ab7b",
+      "request_path": "model-request-01.raw.json",
+      "headers_in_order": [
+        [
+          "Accept",
+          "application/json"
+        ],
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "User-Agent",
+          "claude-cli/2.1.295 (external, sdk-cli)"
+        ],
+        [
+          "X-Claude-Code-Session-Id",
+          "00000000-0000-4000-8000-000000002361"
+        ],
+        [
+          "X-Stainless-Arch",
+          "arm64"
+        ],
+        [
+          "X-Stainless-Lang",
+          "js"
+        ],
+        [
+          "X-Stainless-OS",
+          "MacOS"
+        ],
+        [
+          "X-Stainless-Package-Version",
+          "0.128.0"
+        ],
+        [
+          "X-Stainless-Retry-Count",
+          "0"
+        ],
+        [
+          "X-Stainless-Runtime",
+          "node"
+        ],
+        [
+          "X-Stainless-Runtime-Version",
+          "v26.3.0"
+        ],
+        [
+          "X-Stainless-Timeout",
+          "600"
+        ],
+        [
+          "anthropic-beta",
+          "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "native-timed-sse-edge-295-dummy-key"
+        ],
+        [
+          "x-app",
+          "cli"
+        ],
+        [
+          "Connection",
+          "keep-alive"
+        ],
+        [
+          "Host",
+          "127.0.0.1:63640"
+        ],
+        [
+          "Accept-Encoding",
+          "gzip, deflate, br, zstd"
+        ],
+        [
+          "Content-Length",
+          "888"
+        ]
+      ],
+      "request_received_since_native_spawn_ms": 394.466
+    },
+    {
+      "sequence": 2,
+      "accepted_loopback_dummy_key": true,
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "stream": false,
+      "model": "claude-sonnet-4-5",
+      "request_bytes": 889,
+      "request_sha256": "de2aa8d688271714e10acce17f14256bdb9a1973da747dfd7006e0a7a9fe5d30",
+      "request_path": "model-request-02.raw.json",
+      "headers_in_order": [
+        [
+          "Accept",
+          "application/json"
+        ],
+        [
+          "Content-Type",
+          "application/json"
+        ],
+        [
+          "User-Agent",
+          "claude-cli/2.1.295 (external, sdk-cli)"
+        ],
+        [
+          "X-Claude-Code-Session-Id",
+          "00000000-0000-4000-8000-000000002361"
+        ],
+        [
+          "X-Stainless-Arch",
+          "arm64"
+        ],
+        [
+          "X-Stainless-Lang",
+          "js"
+        ],
+        [
+          "X-Stainless-OS",
+          "MacOS"
+        ],
+        [
+          "X-Stainless-Package-Version",
+          "0.128.0"
+        ],
+        [
+          "X-Stainless-Retry-Count",
+          "0"
+        ],
+        [
+          "X-Stainless-Runtime",
+          "node"
+        ],
+        [
+          "X-Stainless-Runtime-Version",
+          "v26.3.0"
+        ],
+        [
+          "X-Stainless-Timeout",
+          "300"
+        ],
+        [
+          "anthropic-beta",
+          "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+        ],
+        [
+          "anthropic-dangerous-direct-browser-access",
+          "true"
+        ],
+        [
+          "anthropic-version",
+          "2023-06-01"
+        ],
+        [
+          "x-api-key",
+          "native-timed-sse-edge-295-dummy-key"
+        ],
+        [
+          "x-app",
+          "cli"
+        ],
+        [
+          "Connection",
+          "keep-alive"
+        ],
+        [
+          "Host",
+          "127.0.0.1:63640"
+        ],
+        [
+          "Accept-Encoding",
+          "gzip, deflate, br, zstd"
+        ],
+        [
+          "Content-Length",
+          "889"
+        ]
+      ],
+      "request_received_since_native_spawn_ms": 603.254
+    }
+  ],
+  "responses": [
+    {
+      "sequence": 1,
+      "status": 404,
+      "kind": "error",
+      "delay_before_response_ms": 200,
+      "path": "http-response-01.raw.json",
+      "bytes": 104,
+      "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510",
+      "headers": [
+        [
+          "Content-Type",
+          "application/json"
+        ]
+      ]
+    },
+    {
+      "sequence": 2,
+      "status": 200,
+      "kind": "nonstream_anthropic_message",
+      "delay_before_response_ms": 400,
+      "path": "http-response-02.raw.json",
+      "bytes": 356,
+      "sha256": "c1389e8bd21dc6f2c9c33a7ec5c61187633f44d15cd62cfd180ed97b8e895c5f",
+      "headers": [
+        [
+          "Content-Type",
+          "application/json"
+        ]
+      ]
+    }
+  ],
+  "response_event_trace": [],
+  "success_nonstream_body": {
+    "path": "planned-nonstream-message.raw.json",
+    "bytes": 356,
+    "sha256": "c1389e8bd21dc6f2c9c33a7ec5c61187633f44d15cd62cfd180ed97b8e895c5f"
+  },
+  "input_error_body": {
+    "path": "http-404-error.raw.json",
+    "bytes": 104,
+    "sha256": "5fb674e621eb37fd5bb18311100efecb0dcba18f05b236e2190123a0e3046510"
+  },
+  "sse_schedule": [],
+  "scope": "This receipt records one bounded 404 nonstream-fallback case or one 500 retry-then-SSE case; it does not claim timing behavior for other status/error families."
+}

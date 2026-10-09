@@ -2759,6 +2759,7 @@ mod panels_dispatched_emission_tests {
     use lingxi_core::host::tool_invoker::{
         SubagentInvocationContext, ToolInvoker, ToolInvokerError,
     };
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use tokio_util::sync::CancellationToken;
 
     struct InertInvoker;
@@ -3575,6 +3576,7 @@ mod cancel_drain_settlement_tests {
     use lingxi_core::host::tool_invoker::{
         SubagentInvocationContext, ToolInvoker, ToolInvokerError,
     };
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use tokio_util::sync::CancellationToken;
 
     struct QuorumSpawner {

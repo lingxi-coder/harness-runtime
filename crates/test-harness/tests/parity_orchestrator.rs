@@ -9,8 +9,8 @@
 
 use llm_runtime::ContentBlock as LlmContentBlock;
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-    mock_message_response,
+    mock_message_response, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
 use orchestrator::{
     ConversationOrchestrator, ConversationOutcome, OrchestratorConfig, OrchestratorError,
@@ -209,7 +209,8 @@ async fn single_turn_no_tools_completes_with_end_turn() {
     );
     assert!(
         matches!(&sent[1], ConversationMessage::System { content, subtype, compact_metadata: None, refusal_fallback: None, .. }
-        if content.is_empty() && subtype.as_deref() == Some("model_reminder_attachment"))
+        if content.string_at("").is_some_and(str::is_empty)
+            && subtype.as_deref() == Some("model_reminder_attachment"))
     );
     assert!(
         matches!(&sent[2], ConversationMessage::User { content, is_meta: true, .. }
@@ -373,8 +374,8 @@ fn fixture_scenarios_names_unique_and_outcomes_valid() {
 
 #[tokio::test]
 async fn parity_cost_after_one_turn() {
-    use cost::CostTracker;
     use cost::pricing::PricingCatalog;
+    use cost::CostTracker;
     use lingxi_core::host::OrchestratorHandle;
     use lingxi_core::types::SessionId;
     use tokio::sync::mpsc;
@@ -573,8 +574,10 @@ async fn parity_force_compact_50_messages() {
     match first {
         ConversationMessage::System { content, .. } => {
             assert!(
-                content.starts_with(&marker_prefix),
-                "marker prefix {marker_prefix:?} missing; got: {content}"
+                content
+                    .string_at("")
+                    .is_some_and(|text| text.starts_with(&marker_prefix)),
+                "marker prefix {marker_prefix:?} missing; got: {content:?}"
             );
         }
         other => panic!("expected System marker; got {other:?}"),

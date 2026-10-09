@@ -1,12 +1,17 @@
 use super::*;
 use crate::prompt::MemoryFile;
 use crate::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-    mock_message_response, noop_hook_executor,
+    mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+    StaticMemoryProvider,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 use lingxi_core::types::ContentBlock;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tool_api::registry::ToolRegistry;
+
+fn source(value: &Value) -> Source {
+    Source::from_serde_value(value).expect("generated fixture JSON is valid")
+}
 
 #[tokio::test]
 async fn second_turn_releases_snapshot_lock_before_context_routing() {
@@ -52,34 +57,30 @@ async fn second_turn_releases_snapshot_lock_before_context_routing() {
 #[tokio::test]
 async fn cold_valid_session_context_freezes_missing_git_but_invalid_latest_uses_host_probe() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(
-        std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap()
-            .success()
-    );
-    assert!(
-        std::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=Context Fixture",
-                "-c",
-                "user.email=context@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "--allow-empty",
-                "-q",
-                "-m",
-                "fixture"
-            ])
-            .current_dir(dir.path())
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Context Fixture",
+            "-c",
+            "user.email=context@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "fixture"
+        ])
+        .current_dir(dir.path())
+        .status()
+        .unwrap()
+        .success());
     let fixture = oracle();
     for name in [
         "valid-empty-session-context-freezes-missing-git",
@@ -102,9 +103,12 @@ async fn cold_valid_session_context_freezes_missing_git_but_invalid_latest_uses_
             .as_array()
             .unwrap()
             .iter()
-            .map(|row| row["attachment"].clone())
+            .map(|row| source(&row["attachment"]))
             .collect::<Vec<_>>();
-        payloads.push(json!({"type":"date","date":crate::prompt::env_meta::current_date_string()}));
+        payloads.push(source(&json!({
+            "type":"date",
+            "date":crate::prompt::env_meta::current_date_string()
+        })));
         let rows = payloads
             .into_iter()
             .map(|attachment| {
@@ -122,9 +126,8 @@ async fn cold_valid_session_context_freezes_missing_git_but_invalid_latest_uses_
                     None,
                 );
                 row.message_type = "attachment".into();
-                row.message = Value::Null;
-                row.extra.clear();
-                row.extra.insert("attachment".into(), attachment);
+                row.message = Source::parse("null").unwrap();
+                row.extra = Source::object(vec![("attachment".into(), attachment)]).unwrap();
                 row
             })
             .collect::<Vec<_>>();
@@ -146,21 +149,19 @@ async fn cold_valid_session_context_freezes_missing_git_but_invalid_latest_uses_
                 1,
                 "invalid latest context has no older valid fallback"
             );
-            assert_eq!(new_rows[0]["type"], "session_context");
-            assert!(new_rows[0]["context"]["gitStatus"].is_string());
-            assert_ne!(new_rows[0]["context"]["gitStatus"], json!("old git"));
+            assert_eq!(new_rows[0].string_at("/type"), Some("session_context"));
+            assert!(new_rows[0].string_at("/context/gitStatus").is_some());
+            assert_ne!(new_rows[0].string_at("/context/gitStatus"), Some("old git"));
         } else {
             assert!(
                 new_rows.is_empty(),
                 "valid prior empty context freezes absent gitStatus"
             );
             let request = llm_runtime::convert::normalize_messages_for_api(prepared.snapshot);
-            assert!(
-                !request
-                    .iter()
-                    .filter_map(body)
-                    .any(|body| body.contains("# gitStatus\n"))
-            );
+            assert!(!request
+                .iter()
+                .filter_map(body)
+                .any(|body| body.contains("# gitStatus\n")));
         }
     }
 }
@@ -272,13 +273,20 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
                 expected_attachment["date"] = json!(today);
             }
             assert_eq!(row.message_type, "attachment");
-            assert!(row.message.is_null());
-            assert_eq!(row.extra["attachment"], expected_attachment);
+            assert!(row
+                .message
+                .at_pointer("")
+                .is_some_and(|value| value.is_null()));
+            assert_eq!(
+                row.extra.subprojection("/attachment").unwrap(),
+                source(&expected_attachment)
+            );
             assert_eq!(row.uuid, message.id().as_uuid().to_string());
             if expected_bodies.is_empty() {
                 assert!(
                     matches!(message, ConversationMessage::System { content, subtype, .. }
-                    if content.is_empty() && subtype.as_deref() == Some("model_reminder_attachment"))
+                    if content.string_at("").is_some_and(str::is_empty)
+                        && subtype.as_deref() == Some("model_reminder_attachment"))
                 );
                 assert_eq!(
                     compaction::grouping::estimate_tokens_for_range(std::slice::from_ref(message)),
@@ -322,8 +330,8 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
             None,
         );
         assert_eq!(
-            total_row.extra["attachment"]["type"],
-            "total_tokens_reminder"
+            total_row.extra.string_at("/attachment/type"),
+            Some("total_tokens_reminder")
         );
         rows.push(total_row);
         let cold = orchestrator(fixture_files(case), dir.path());
@@ -343,8 +351,8 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
         let captured = cold.instruction_context_snapshot().await;
         assert_eq!(captured.announcement_history.len(), 4);
         assert_eq!(
-            captured.announcement_history[3]["type"],
-            "total_tokens_reminder"
+            captured.announcement_history[3].string_at("/type"),
+            Some("total_tokens_reminder")
         );
     }
 }
@@ -368,12 +376,10 @@ async fn successful_empty_provider_and_compaction_use_actual_durable_baseline() 
     )];
     let reannounced = orch.context_announcement_messages().await;
     assert_eq!(reannounced.len(), 2);
-    assert!(
-        reannounced
-            .iter()
-            .zip(initial.iter())
-            .all(|(new, old)| new.id() != old.id())
-    );
+    assert!(reannounced
+        .iter()
+        .zip(initial.iter())
+        .all(|(new, old)| new.id() != old.id()));
 }
 
 #[tokio::test]
@@ -430,21 +436,20 @@ async fn ptl_history_replacement_reannounces_frozen_files_without_resurrecting_o
         .iter()
         .filter(|attachment| {
             matches!(
-                attachment["type"].as_str(),
+                attachment.string_at("/type"),
                 Some("instructions" | "session_context" | "date")
             )
         })
         .collect::<Vec<_>>();
     assert_eq!(payloads.len(), 3);
     assert_eq!(
-        payloads[0]["files"],
-        case["expected"][0]["attachment"]["files"]
+        payloads[0].subprojection("/files").unwrap(),
+        source(&case["expected"][0]["attachment"]["files"])
     );
-    assert!(
-        orch.context_announcements_from_frozen_snapshot()
-            .await
-            .is_empty()
-    );
+    assert!(orch
+        .context_announcements_from_frozen_snapshot()
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -478,10 +483,10 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
                     None,
                 );
                 row.message_type = "attachment".into();
-                row.message = Value::Null;
-                row.extra.clear();
-                row.extra
-                    .insert("attachment".into(), prior["attachment"].clone());
+                row.message = Source::parse("null").unwrap();
+                row.extra =
+                    Source::object(vec![("attachment".into(), source(&prior["attachment"]))])
+                        .unwrap();
                 row
             })
             .collect::<Vec<_>>();
@@ -500,16 +505,14 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
             .unwrap();
         if expected_inline {
             assert!(prepared.context_announcements.messages.is_empty());
-            assert!(
-                body(&prepared.snapshot[0])
-                    .unwrap()
-                    .contains("# currentDate\n")
-            );
+            assert!(body(&prepared.snapshot[0])
+                .unwrap()
+                .contains("# currentDate\n"));
             assert_eq!(prepared.snapshot[1], original);
             assert_eq!(prepared.turn_reminders.len(), 1);
             assert_eq!(
-                orch.context_attachment_history(&prepared.turn_reminders)[0]["type"],
-                "total_tokens_reminder"
+                orch.context_attachment_history(&prepared.turn_reminders)[0].string_at("/type"),
+                Some("total_tokens_reminder")
             );
             assert_eq!(
                 orch.session.lock().await.history,
@@ -530,12 +533,10 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
                     .as_ref()
                     .unwrap()
                     .system_prompt,
-                vec![
-                    case["prior"][0]["attachment"]["systemPrompt"][0]
-                        .as_str()
-                        .unwrap()
-                        .to_owned()
-                ],
+                vec![case["prior"][0]["attachment"]["systemPrompt"][0]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()],
                 "static prefix restoration keeps its independent last-valid behavior"
             );
         }
@@ -543,8 +544,8 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
 }
 
 #[tokio::test]
-async fn auto_kept_tail_places_missing_native_announcements_before_summary_and_skips_empty_api_projection()
- {
+async fn auto_kept_tail_places_missing_native_announcements_before_summary_and_skips_empty_api_projection(
+) {
     let fixture = oracle();
     let case = fixture["cases"]
         .as_array()
@@ -613,34 +614,27 @@ async fn auto_kept_tail_places_missing_native_announcements_before_summary_and_s
             assert_eq!(
                 attachments
                     .iter()
-                    .map(|attachment| attachment["type"].as_str().unwrap())
+                    .map(|attachment| attachment.string_at("/type").unwrap())
                     .collect::<Vec<_>>(),
                 vec!["instructions", "session_context", "date"]
             );
-            assert_eq!(attachments[0], case["expected"][0]["attachment"]);
-            assert!(
-                history[1..4]
-                    .iter()
-                    .zip(announced.iter())
-                    .all(|(new, old)| new.id() != old.id())
-            );
+            assert_eq!(attachments[0], source(&case["expected"][0]["attachment"]));
+            assert!(history[1..4]
+                .iter()
+                .zip(announced.iter())
+                .all(|(new, old)| new.id() != old.id()));
         }
         assert_eq!(history.last(), Some(&tail));
         let normalized = llm_runtime::convert::normalize_messages_for_api(history);
-        assert!(
-            !normalized
-                .iter()
-                .any(|message| matches!(message, ConversationMessage::System { .. }))
-        );
-        assert!(
-            normalized
-                .iter()
-                .any(|message| body(message).is_some_and(|body| body.contains("managed policy")))
-        );
-        assert!(
-            orch.context_announcements_from_frozen_snapshot()
-                .await
-                .is_empty()
-        );
+        assert!(!normalized
+            .iter()
+            .any(|message| matches!(message, ConversationMessage::System { .. })));
+        assert!(normalized
+            .iter()
+            .any(|message| body(message).is_some_and(|body| body.contains("managed policy"))));
+        assert!(orch
+            .context_announcements_from_frozen_snapshot()
+            .await
+            .is_empty());
     }
 }

@@ -74,7 +74,7 @@ impl SessionCronDelivery for RegistryTestDelivery {
                     ),
                     max_iterations: None,
                 },
-                format!("cron: {}", fire.id),
+                format!("cron: {}", fire.id).into(),
             )
             .await
             .map(|_| ())
@@ -2633,6 +2633,7 @@ mod scheduler_tick_tests {
     use lingxi_core::host::{
         BackgroundTaskHandle, Clock, FileSystem, RuntimeError, RuntimeSpawner,
     };
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use std::collections::HashMap;
     use std::future::Future;
     use std::path::{Path, PathBuf};
@@ -3616,7 +3617,7 @@ mod scheduler_tick_tests {
                 .await
                 .get("dsession_edit")
                 .map(|task| super::source_display(&task.prompt)),
-            Some("edited while spawn was pending")
+            Some("edited while spawn was pending".to_string())
         );
     }
 

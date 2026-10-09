@@ -257,9 +257,14 @@ mod tests {
         )
         .unwrap();
         let host = ModHost::start(None).await.unwrap();
-        host.load("plugin-offer", directory.path(), &module, json!({}))
-            .await
-            .unwrap();
+        host.load(
+            "plugin-offer",
+            directory.path(),
+            &module,
+            source(&json!({})),
+        )
+        .await
+        .unwrap();
 
         let visible =
             filter_agent_offer_candidates(candidates, Some(host), AgentOfferContext::default())
@@ -283,7 +288,7 @@ mod tests {
         )
         .unwrap();
         let host = ModHost::start(None).await.unwrap();
-        host.load("agent-offer", directory.path(), &module, json!({}))
+        host.load("agent-offer", directory.path(), &module, source(&json!({})))
             .await
             .unwrap();
 

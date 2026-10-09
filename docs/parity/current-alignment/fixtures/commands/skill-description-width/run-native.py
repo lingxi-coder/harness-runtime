@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Observe Native Skill-description truncation using one fixed lone-surrogate input."""
+"""Observe Native Skill-description visibility with fixed public-CLI inputs."""
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import argparse
 import hashlib
 import json
 import os
@@ -13,9 +14,28 @@ import threading
 
 
 ROOT = Path(__file__).resolve().parent
-OUTPUT = ROOT / "run-output"
 FIXTURE = json.loads((ROOT / "cases.json").read_text(encoding="utf-8"))
 DUMMY_KEY = "native-skill-width-fixture-dummy-key"
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument(
+    "--description-mode",
+    choices=("lone-surrogate-escape", "ascii", "unicode"),
+    default="lone-surrogate-escape",
+)
+parser.add_argument("--output-name", default="run-output")
+parser.add_argument("--ascii-tail-length", type=int)
+args = parser.parse_args()
+if args.output_name in ("", ".", "..") or "/" in args.output_name or "\\" in args.output_name:
+    raise SystemExit("--output-name must be a single path component")
+ASCII_TAIL_LENGTH = (
+    FIXTURE["ascii_tail_length"]
+    if args.ascii_tail_length is None
+    else args.ascii_tail_length
+)
+if not 1 <= ASCII_TAIL_LENGTH <= 5000:
+    raise SystemExit("--ascii-tail-length must be between 1 and 5000")
+OUTPUT = ROOT / "run-output" if args.output_name == "run-output" else ROOT / "run-output" / args.output_name
 
 
 def sha256(data: bytes) -> str:
@@ -109,7 +129,14 @@ for name in ("home", "config", "tmp", "cwd"):
     (OUTPUT / name).mkdir(parents=True, exist_ok=True)
 skill_dir = OUTPUT / "cwd" / ".claude" / "skills" / FIXTURE["skill_name"]
 skill_dir.mkdir(parents=True)
-description = "\\uD800" + "a" * FIXTURE["ascii_tail_length"]
+if args.description_mode == "lone-surrogate-escape":
+    description = "\\uD800" + "a" * ASCII_TAIL_LENGTH
+elif args.description_mode == "ascii":
+    description = "a" * ASCII_TAIL_LENGTH
+else:
+    # These are valid Unicode scalars: a standalone combining mark, an emoji
+    # ZWJ sequence, U+FFFD, then the same fixed ASCII tail.
+    description = "\u0301👩\u200d💻\ufffd" + "a" * ASCII_TAIL_LENGTH
 skill_source = (
     "---\n"
     f"name: {FIXTURE['skill_name']}\n"
@@ -117,7 +144,7 @@ skill_source = (
     "---\n"
     "Return the fixed skill-width response.\n"
 )
-(skill_dir / "SKILL.md").write_bytes(skill_source.encode("ascii"))
+(skill_dir / "SKILL.md").write_bytes(skill_source.encode("utf-8"))
 request_records: list[dict] = []
 response_body = response_sse()
 
@@ -205,7 +232,7 @@ name_index = system_joined.find(FIXTURE["skill_name"])
 matches = []
 request_strings = list(string_leaves(request_obj))
 source_description_present = any(description in value for _path, value in request_strings)
-description_tail_present = any(("a" * FIXTURE["ascii_tail_length"]) in value
+description_tail_present = any(("a" * ASCII_TAIL_LENGTH) in value
                                for _path, value in request_strings)
 for path, value in request_strings:
     index = value.find(FIXTURE["skill_name"])
@@ -231,7 +258,7 @@ listing = {
     "request_occurrences": len(matches),
     "string_matches": matches,
     "source_description_literal_present_in_request": source_description_present,
-    "250_ascii_tail_present_in_request": description_tail_present,
+    "ascii_tail_present_in_request": description_tail_present,
     "system_blocks": len(system_texts),
 }
 (OUTPUT / "skill-bearing-request.raw-excerpt.bin").write_bytes(
@@ -249,8 +276,10 @@ receipt = {
     "skill_source_sha256": sha256((skill_dir / "SKILL.md").read_bytes()),
     "skill_source_bytes": (skill_dir / "SKILL.md").stat().st_size,
     "fixed_input": {"skill_name": FIXTURE["skill_name"],
-                    "description_yaml_escape": "\\uD800",
-                    "description_ascii_a_count": FIXTURE["ascii_tail_length"],
+                    "description_mode": args.description_mode,
+                    "description_utf16_units": len(description.encode("utf-16-le")) // 2,
+                    "description_utf8_sha256": sha256(description.encode("utf-8")),
+                    "description_ascii_a_count": ASCII_TAIL_LENGTH,
                     "cwd_isolated": True, "home_config_isolated": True,
                     "model": FIXTURE["model"], "prompt": FIXTURE["prompt"]},
     "argv": ["$CLAUDE_NATIVE_BINARY", "--setting-sources", "project", "--strict-mcp-config",
@@ -268,7 +297,7 @@ receipt = {
                          if request_raw else None,
     "listing_observation": listing,
     "source_description_literal_present_in_request": source_description_present,
-    "ascii_description_tail_present_in_request": description_tail_present,
+    "ascii_tail_present_in_request": description_tail_present,
     "skill_bearing_request_excerpt": {
         "path": "skill-bearing-request.raw-excerpt.bin",
         "bytes": (OUTPUT / "skill-bearing-request.raw-excerpt.bin").stat().st_size,

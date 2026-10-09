@@ -3772,6 +3772,11 @@ impl ConversationOrchestrator {
 mod session_compact_mod_tests {
     use super::*;
 
+    fn source(value: &serde_json::Value) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+        lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(value)
+            .expect("generated compact fixture is representable")
+    }
+
     fn empty_compaction_result() -> compaction::IterationCompactionResult {
         compaction::IterationCompactionResult {
             messages: Vec::new(),
@@ -3794,44 +3799,49 @@ mod session_compact_mod_tests {
     fn native_token_counts_allow_fractional_optional_values_but_reject_negative() {
         assert_eq!(
             parse_native_session_compact_number(
-                &serde_json::json!({"tokensBefore": 1.5}),
+                &source(&serde_json::json!({"tokensBefore": 1.5})),
                 "tokensBefore"
             )
             .unwrap(),
             Some(1.5)
         );
         assert_eq!(
-            parse_native_session_compact_number(&serde_json::json!({}), "tokensBefore").unwrap(),
+            parse_native_session_compact_number(&source(&serde_json::json!({})), "tokensBefore")
+                .unwrap(),
             None
         );
         assert!(parse_native_session_compact_number(
-            &serde_json::json!({"tokensBefore": -0.5}),
+            &source(&serde_json::json!({"tokensBefore": -0.5}),),
             "tokensBefore"
         )
         .is_err());
-        assert!(parse_native_session_compact_usage(&serde_json::json!({
-            "usage": {
-                "input_tokens": 0.5,
-                "output_tokens": 1,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 0,
-            }
-        }))
-        .is_ok());
-        assert!(parse_native_session_compact_usage(&serde_json::json!({
-            "usage": {
-                "input_tokens": -0.5,
-                "output_tokens": 1,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 0,
-            }
-        }))
-        .is_err());
+        assert!(
+            parse_native_session_compact_usage(&source(&serde_json::json!({
+                "usage": {
+                    "input_tokens": 0.5,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                }
+            })))
+            .is_ok()
+        );
+        assert!(
+            parse_native_session_compact_usage(&source(&serde_json::json!({
+                "usage": {
+                    "input_tokens": -0.5,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                }
+            })))
+            .is_err()
+        );
     }
 
     #[test]
     fn replacement_freed_tokens_use_source_and_replacement_estimates() {
-        let source = vec![ConversationMessage::user(
+        let source_messages = vec![ConversationMessage::user(
             lingxi_core::types::MessageId::new(),
             "a long original conversation row".into(),
         )];
@@ -3839,9 +3849,10 @@ mod session_compact_mod_tests {
             lingxi_core::types::MessageId::new(),
             "short".into(),
         )];
-        let expected = compaction::grouping::estimate_tokens_for_range(&source).saturating_sub(
-            compaction::grouping::estimate_tokens_for_range(&replacement),
-        );
+        let expected = compaction::grouping::estimate_tokens_for_range(&source_messages)
+            .saturating_sub(compaction::grouping::estimate_tokens_for_range(
+                &replacement,
+            ));
         let mut result = empty_compaction_result();
 
         apply_session_compact_result(
@@ -3852,7 +3863,7 @@ mod session_compact_mod_tests {
                 tokens_after: Some(0.25),
                 usage: None,
             },
-            &source,
+            &source_messages,
         );
 
         assert_eq!(result.total_tokens_freed, expected);
@@ -3860,7 +3871,7 @@ mod session_compact_mod_tests {
 
     #[test]
     fn replacement_keeps_core_usage_and_direct_replacement_does_not_charge_mod_usage() {
-        let source = vec![ConversationMessage::user(
+        let source_messages = vec![ConversationMessage::user(
             lingxi_core::types::MessageId::new(),
             "original message".into(),
         )];
@@ -3880,12 +3891,12 @@ mod session_compact_mod_tests {
             server_tool_use: None,
             speed: None,
         };
-        let hook_usage = serde_json::json!({
+        let hook_usage = source(&serde_json::json!({
             "input_tokens": 100,
             "output_tokens": 50,
             "cache_read_input_tokens": 20,
             "cache_creation_input_tokens": 10,
-        });
+        }));
         let event_result = SessionCompactEventResult {
             messages: replacement,
             tokens_before: Some(900.0),
@@ -3895,11 +3906,11 @@ mod session_compact_mod_tests {
 
         let mut core_ran = empty_compaction_result();
         core_ran.compaction_usage = Some(core_usage);
-        apply_session_compact_result(&mut core_ran, &event_result, &source);
+        apply_session_compact_result(&mut core_ran, &event_result, &source_messages);
         assert_eq!(core_ran.compaction_usage, Some(core_usage));
 
         let mut direct = empty_compaction_result();
-        apply_session_compact_result(&mut direct, &event_result, &source);
+        apply_session_compact_result(&mut direct, &event_result, &source_messages);
         assert_eq!(direct.compaction_usage, None);
     }
 
@@ -3917,7 +3928,7 @@ mod session_compact_mod_tests {
                     lingxi_core::types::ContentBlock::ToolUse {
                         id: tool_use_id.clone(),
                         name: "Read".into(),
-                        input: serde_json::json!({"file_path":"/tmp/example"}),
+                        input: source(&serde_json::json!({"file_path":"/tmp/example"})),
                         provider_id: Some(tool_use_id.to_string()),
                     },
                 ],
@@ -3946,9 +3957,19 @@ mod session_compact_mod_tests {
         let mut codec = SessionCompactRowCodec::default();
 
         let rows = codec.rows_for_messages(&messages);
-        assert_eq!(rows[0]["toolUses"][0]["text"], "file contents");
-        assert_eq!(rows[0]["toolUses"][0]["isError"], true);
-        assert_eq!(rows[1]["toolResults"][0]["isError"], true);
+        assert_eq!(rows[0].string_at("/toolUses/0/text"), Some("file contents"));
+        assert_eq!(
+            rows[0]
+                .at_pointer("/toolUses/0/isError")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            rows[1]
+                .at_pointer("/toolResults/0/isError")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
         assert_eq!(codec.messages_of_rows(&rows).unwrap(), messages);
     }
 }

@@ -670,8 +670,8 @@ impl Tool for GlobTool {
             new_messages: vec![],
             context_modifier: None,
             is_error: false,
-            mcp_meta: None,
             subagent_hooks_fired: false,
+            mcp_meta: None,
         })
     }
 }
@@ -1853,16 +1853,15 @@ mod tests {
         assert!(d.contains("- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\""));
         assert!(d.ends_with("use the Agent tool instead (if available)"));
         // prompt() equals DESCRIPTION for Glob.
-        let p = tool
+        let prompt = tool
             .prompt(&PromptOptions {
                 include_examples: false,
                 model: None,
                 model_profile: None,
                 ..Default::default()
             })
-            .await
-            .string_at("")
-            .expect("prompt is a JSON string");
+            .await;
+        let p = prompt.string_at("").expect("prompt is a JSON string");
         assert_eq!(p, d);
     }
 
