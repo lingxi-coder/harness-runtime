@@ -29,6 +29,7 @@ engine = [
 ]
 desktop = [
     "engine",
+    "dep:base64",
     "dep:msgqueue",
     "tokio/io-util",
     "dep:uuid",

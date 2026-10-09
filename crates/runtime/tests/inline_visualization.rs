@@ -124,3 +124,115 @@ async fn stores_are_shared_per_config_home_and_follow_ups_snapshot_state() {
         "a bare session uuid resolves too"
     );
 }
+
+#[tokio::test]
+async fn desktop_requests_mount_serve_and_write_by_op() {
+    use harness_runtime::desktop_visualization::DesktopVisualizationHost;
+    use serde_json::{json, Value};
+
+    let home = tempfile::tempdir().unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
+        home.path().to_path_buf(),
+    ));
+    let session = lingxi_core::types::SessionId::new();
+    let reference = shared_store(fs.clone(), home.path())
+        .publish(
+            &visualization::Publisher {
+                root_session: session.as_uuid(),
+                agent_id: None,
+            },
+            None,
+            "Sales",
+            "<p>x</p>",
+            0,
+        )
+        .await
+        .unwrap()
+        .reference;
+    let host = DesktopVisualizationHost::for_config_home(fs, home.path());
+    let mount = |session_id: String, id: &str| {
+        json!({
+            "op": "mount", "session_id": session_id, "id": id, "revision": reference.revision,
+            "theme": { "dark": true, "tokens": {} }, "locale": "en", "expanded": false,
+        })
+    };
+
+    let ticket = host
+        .handle(mount(session.as_uuid().to_string(), reference.id.as_str()))
+        .await
+        .unwrap();
+    assert_eq!(ticket["title"], "Sales");
+    let token = ticket["token"].as_str().unwrap().to_string();
+    let doc_url = ticket["doc_url"].as_str().unwrap();
+    let path = doc_url.strip_prefix("lingxi-viz://visualization").unwrap();
+    assert_eq!(
+        host.handle(mount(
+            lingxi_core::types::SessionId::new().to_string(),
+            reference.id.as_str()
+        ))
+        .await
+        .unwrap(),
+        Value::Null,
+        "another conversation cannot mount this revision"
+    );
+
+    let served = host
+        .handle(json!({ "op": "serve", "path": path }))
+        .await
+        .unwrap();
+    assert_eq!(served["status"], 200);
+    assert!(served["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|header| header[0] == "Content-Security-Policy"));
+    let again = host
+        .handle(json!({ "op": "serve", "path": path }))
+        .await
+        .unwrap();
+    assert_eq!(again["status"], 404, "documents are single use");
+
+    let write = |base: u64| {
+        json!({
+            "op": "write_state", "token": token, "generation": ticket["generation"], "base_version": base,
+            "model_content": "{\"k\":1}", "private_content": "null",
+        })
+    };
+    assert_eq!(
+        host.handle(write(0)).await.unwrap(),
+        json!({ "saved": true, "version": 1 })
+    );
+    let conflict = host.handle(write(0)).await.unwrap();
+    assert_eq!(
+        (conflict["reason"].as_str(), conflict["version"].as_u64()),
+        (Some("conflict"), Some(1))
+    );
+    assert_eq!(conflict["current_state"]["modelContent"], json!({ "k": 1 }));
+
+    let listed = host
+        .handle(json!({ "op": "list", "session_id": session.to_string() }))
+        .await
+        .unwrap();
+    assert_eq!(listed[0]["title"], "Sales");
+    assert!(host
+        .handle(json!({ "op": "notices" }))
+        .await
+        .unwrap()
+        .is_string());
+
+    host.handle(json!({ "op": "unmount", "token": token }))
+        .await
+        .unwrap();
+    assert_eq!(
+        host.handle(write(1)).await.unwrap()["reason"],
+        "stale_mount"
+    );
+    assert!(host
+        .handle(json!({ "op": "delete_everything" }))
+        .await
+        .is_err());
+    assert!(host
+        .handle(json!({ "op": "unmount", "token": "t", "extra": 1 }))
+        .await
+        .is_err());
+}

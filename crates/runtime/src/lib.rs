@@ -35,6 +35,9 @@ mod skill_prompt;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 pub mod inline_visualization;
 
+#[cfg(feature = "desktop")]
+pub mod desktop_visualization;
+
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod parked_agent_restore;
 
