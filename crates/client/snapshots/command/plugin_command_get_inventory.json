@@ -1,7 +1,0 @@
-{
-  "type": "plugin_command",
-  "command": {
-    "type": "get_inventory",
-    "plugin_id": "lingxi-local-app"
-  }
-}

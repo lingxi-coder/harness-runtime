@@ -1,8 +1,0 @@
-{
-  "type": "plugin_command",
-  "command": {
-    "type": "resolve_create_confirmation",
-    "request_id": "create-0001",
-    "approved": true
-  }
-}

@@ -1,6 +1,0 @@
-{
-  "type": "plugin_command",
-  "command": {
-    "type": "get_managed_mcp_inventory"
-  }
-}
