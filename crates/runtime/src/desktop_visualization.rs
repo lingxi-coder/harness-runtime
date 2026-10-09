@@ -80,6 +80,16 @@ impl DesktopVisualizationHost {
         let store = crate::inline_visualization::shared_store(fs, config_home);
         let service = VisualizationService::new(store, DESKTOP_ORIGIN)
             .expect("the desktop visualization origin is a valid scheme://host");
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let home = config_home.to_path_buf();
+            runtime.spawn_blocking(move || {
+                crate::inline_visualization::sweep_orphans(
+                    &home,
+                    crate::inline_visualization::ORPHAN_RETENTION,
+                    std::time::SystemTime::now(),
+                )
+            });
+        }
         Self { service }
     }
 

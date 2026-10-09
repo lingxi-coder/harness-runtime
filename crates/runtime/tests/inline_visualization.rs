@@ -236,3 +236,47 @@ async fn desktop_requests_mount_serve_and_write_by_op() {
         .await
         .is_err());
 }
+
+#[test]
+fn the_sweep_removes_only_old_directories_no_transcript_names() {
+    use harness_runtime::inline_visualization::{
+        catalog_sessions, sweep_orphans, ORPHAN_RETENTION,
+    };
+    let home = tempfile::tempdir().unwrap();
+    let (live, archived, orphan) = (
+        uuid::Uuid::from_u128(0x0001),
+        uuid::Uuid::from_u128(0x0002),
+        uuid::Uuid::from_u128(0x0003),
+    );
+    for session in [live, archived, orphan] {
+        let dir = home.path().join("visualizations").join(session.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.json"), "{}").unwrap();
+    }
+    let catalog = home.path().join("projects").join("-work");
+    std::fs::create_dir_all(&catalog).unwrap();
+    std::fs::write(catalog.join(format!("{live}.jsonl")), "").unwrap();
+    std::fs::write(catalog.join("notes.txt"), "").unwrap();
+    let rollouts = home.path().join("archived_sessions");
+    std::fs::create_dir_all(&rollouts).unwrap();
+    std::fs::write(
+        rollouts.join(format!("rollout-2026-01-01T00-00-00-{archived}.jsonl")),
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(catalog_sessions(&catalog), vec![live]);
+
+    let now = std::time::SystemTime::now();
+    assert_eq!(
+        sweep_orphans(home.path(), ORPHAN_RETENTION, now),
+        0,
+        "fresh orphans are kept"
+    );
+    let later = now + ORPHAN_RETENTION + std::time::Duration::from_secs(60);
+    assert_eq!(sweep_orphans(home.path(), ORPHAN_RETENTION, later), 1);
+    let root = home.path().join("visualizations");
+    assert!(root.join(live.to_string()).exists());
+    assert!(root.join(archived.to_string()).exists());
+    assert!(!root.join(orphan.to_string()).exists());
+}

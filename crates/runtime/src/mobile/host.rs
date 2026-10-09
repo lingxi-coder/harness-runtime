@@ -5003,11 +5003,22 @@ impl MobileEngineHandle {
                 None
             }
         };
+        // The catalog's sessions own visualization directories outside it;
+        // read them before the catalog goes.
+        let app_sessions = session_dir
+            .as_deref()
+            .map(crate::inline_visualization::catalog_sessions)
+            .unwrap_or_default();
         // Success needs no extra emit: `delete_app` announces the shrunken
         // record set via its own `AppsChanged` domain event.
         if let Err(error) = service.delete_app(&app_id).await {
             self.emit_app_failure(Some(app_id), &error).await;
             return;
+        }
+        if !app_sessions.is_empty() {
+            let store =
+                crate::inline_visualization::shared_store(self.fs.clone(), &self.lingxi_home);
+            crate::inline_visualization::delete_sessions(&store, &app_sessions).await;
         }
         if let Some(session_dir) = session_dir {
             // Best effort by design: the record is already gone, so a catalog

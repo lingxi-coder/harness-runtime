@@ -114,12 +114,23 @@ impl VisualizationHost {
     ) -> Option<Self> {
         let store = crate::inline_visualization::shared_store(fs, config_home);
         let service = VisualizationService::new(store, origin).ok()?;
+        let home = config_home.to_path_buf();
+        runtime.spawn_blocking(move || {
+            crate::inline_visualization::sweep_orphans(
+                &home,
+                crate::inline_visualization::ORPHAN_RETENTION,
+                std::time::SystemTime::now(),
+            )
+        });
         Some(Self { service, runtime })
     }
 }
 
+/// A session id as the native clients send it: bare or prefixed UUID.
 fn session_uuid(session_id: &str) -> Option<uuid::Uuid> {
-    lingxi_core::types::SessionId::parse_prefixed(session_id).map(|id| id.as_uuid())
+    lingxi_core::types::SessionId::parse_prefixed(session_id)
+        .map(|id| id.as_uuid())
+        .or_else(|| uuid::Uuid::parse_str(session_id).ok())
 }
 
 fn theme(theme: VisualizationThemeDto) -> Theme {
