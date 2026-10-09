@@ -45,19 +45,12 @@ pub enum AudioOwnerDto {
         /// Stable session identifier.
         session_id: String,
     },
-    /// Local App runtime instance.
-    LocalApp {
-        /// Validated app identifier.
-        app_id: String,
-        /// Runtime generation that prevents stale requests stopping a new run.
-        runtime_generation: u64,
-    },
     /// UI app instance.
     Ui {
         /// Stable UI instance identifier.
         instance_id: String,
     },
-    /// Host-owned operation not tied to a chat or app runtime.
+    /// Host-owned operation not tied to a chat.
     System {
         /// Stable host instance identifier.
         instance_id: String,

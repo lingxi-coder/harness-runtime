@@ -164,10 +164,10 @@ branding = { path = "crates/branding" }
 # Shared library crates published from the local-app-builder repository. They are generic libraries (device API,
 # JSON projection, MCP wire types, rooted filesystem); the engine carries no Local App feature code. One revision for
 # every crate of it, here and in the product.
-device-api = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
-json-projection = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
-mcp-wire = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
-rooted-fs = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8" }
+device-api = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "a8f505caf74e4cb5392ab57330ebc1dcf2a5f306" }
+json-projection = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "a8f505caf74e4cb5392ab57330ebc1dcf2a5f306" }
+mcp-wire = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "a8f505caf74e4cb5392ab57330ebc1dcf2a5f306" }
+rooted-fs = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "a8f505caf74e4cb5392ab57330ebc1dcf2a5f306" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps `serde_json::Map` keys in insertion order across
 # Value round-trips. Required for claude-code wire-byte fidelity: outbound

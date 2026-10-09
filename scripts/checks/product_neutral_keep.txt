@@ -1,9 +1,2 @@
 # Hits that stay under crates/, one per line: <path>\t<needle>\t<reason>
 # (see check_product_neutral.py). A line that matches nothing fails the gate.
-crates/client/src/protocol/audio.rs	localapp	`AudioOwnerDto::LocalApp` mirrors device-api's `AudioOwner::LocalApp` (local-app-builder repo); both go together when device-api drops the variant (tracked follow-up)
-crates/client/snapshots/contract_index.json	localapp	same variant in the blessed contract index
-crates/client/snapshots/contract_index.json	local_app	same variant's wire tag
-crates/client/tests/version_guard_test.rs	localapp	same variant in the structural guard table
-crates/client/tests/version_guard_test.rs	local_app	same variant's wire tag
-crates/runtime/src/mobile/audio_service.rs	localapp	maps device-api's `AudioOwner::LocalApp` onto the client DTO
-crates/client/src/protocol/audio.rs	local app	doc comment of that same variant

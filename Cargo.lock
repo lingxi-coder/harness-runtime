@@ -1590,7 +1590,7 @@ dependencies = [
 [[package]]
 name = "device-api"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8#fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=a8f505caf74e4cb5392ab57330ebc1dcf2a5f306#a8f505caf74e4cb5392ab57330ebc1dcf2a5f306"
 dependencies = [
  "async-trait",
  "serde",
@@ -3053,7 +3053,7 @@ dependencies = [
 [[package]]
 name = "json-projection"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8#fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=a8f505caf74e4cb5392ab57330ebc1dcf2a5f306#a8f505caf74e4cb5392ab57330ebc1dcf2a5f306"
 dependencies = [
  "ryu-js",
  "serde",
@@ -3613,7 +3613,7 @@ dependencies = [
 [[package]]
 name = "mcp-wire"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8#fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=a8f505caf74e4cb5392ab57330ebc1dcf2a5f306#a8f505caf74e4cb5392ab57330ebc1dcf2a5f306"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -5675,7 +5675,7 @@ dependencies = [
 [[package]]
 name = "rooted-fs"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8#fe78362b43cbd4aecdfdbdde3bdd8d40fec14fd8"
+source = "git+https://github.com/lingxi-coder/local-app-builder?rev=a8f505caf74e4cb5392ab57330ebc1dcf2a5f306#a8f505caf74e4cb5392ab57330ebc1dcf2a5f306"
 dependencies = [
  "fs2",
  "rustix 0.38.44",

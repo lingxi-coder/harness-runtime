@@ -738,9 +738,6 @@ fn current_contract_index() -> ContractIndex {
     put("AudioOperationIdDto.service_epoch", "u64");
     put("AudioOwnerDto::Session", "session");
     put("AudioOwnerDto::Session.session_id", "String");
-    put("AudioOwnerDto::LocalApp", "local_app");
-    put("AudioOwnerDto::LocalApp.app_id", "String");
-    put("AudioOwnerDto::LocalApp.runtime_generation", "u64");
     put("AudioOwnerDto::Ui", "ui");
     put("AudioOwnerDto::Ui.instance_id", "String");
     put("AudioOwnerDto::System", "system");
@@ -2470,10 +2467,6 @@ fn contract_index_covers_every_dto() {
     let _audio_owners = [
         AudioOwnerDto::Session {
             session_id: String::new(),
-        },
-        AudioOwnerDto::LocalApp {
-            app_id: String::new(),
-            runtime_generation: 0,
         },
         AudioOwnerDto::Ui {
             instance_id: String::new(),
