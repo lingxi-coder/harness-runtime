@@ -740,6 +740,13 @@ pub enum ClientEvent {
         uuid: String,
         session_id: String,
     },
+    // Inline visualization slot in the live assistant text. Appended to
+    // preserve existing UniFFI variant ordinals.
+    VisualizationBlock {
+        status: crate::protocol::message::VisualizationBlockStatusDto,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<crate::protocol::message::VisualizationRefDto>,
+    },
 }
 /// The provider-message portion of a fallback tombstone row. `content_json`
 /// retains every provider block without imposing the narrower display-block
@@ -982,6 +989,7 @@ mod session_agent_identity_contract_tests {
                 }],
                 images: vec![],
                 loop_wakeup: None,
+                visualization_context: None,
             },
             api_error_json: Some(
                 "{\"isApiErrorMessage\":true,\"requestId\":\"event-request\"}".into(),

@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "note": "Every file in this directory is stored byte-identical to its source. build.rs rewrites the CDN script URLs in codex/visualize.html into the local asset base; that derived file is generated into OUT_DIR, never written here. tests/vendor_manifest_test.rs recomputes every input digest.",
+  "sources": [
+    {
+      "path": "codex/visualize.css",
+      "origin": "https://github.com/openai/codex/blob/ea27864f99f0b086cec2f9f0251b7190fb9844f1/codex-rs/tui/assets/inline_visualization/visualize.css",
+      "license": "Apache-2.0",
+      "sha256": "4b1d492f1e67394f80dc83fe7e9d3a508648dbeffe7a5152b27a567da972c50f",
+      "transform": "none"
+    },
+    {
+      "path": "codex/visualize.html",
+      "origin": "https://github.com/openai/codex/blob/ea27864f99f0b086cec2f9f0251b7190fb9844f1/codex-rs/tui/assets/inline_visualization/visualize.html",
+      "license": "Apache-2.0",
+      "sha256": "2773518b67cc453a66faa17c5cec37811d968d244a10fdaf81bdca953865f9db",
+      "transform": "build.rs replaces the three unpkg.com script URLs with {{ASSET_BASE}} paths to the files below and prepends an Apache-2.0 section 4(b) modification notice"
+    },
+    {
+      "path": "codex/LICENSE",
+      "origin": "https://github.com/openai/codex/blob/ea27864f99f0b086cec2f9f0251b7190fb9844f1/LICENSE",
+      "license": "Apache-2.0",
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+      "transform": "none"
+    },
+    {
+      "path": "codex/NOTICE",
+      "origin": "https://github.com/openai/codex/blob/ea27864f99f0b086cec2f9f0251b7190fb9844f1/NOTICE",
+      "license": "Apache-2.0",
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+      "transform": "none"
+    },
+    {
+      "path": "floating-ui-core/floating-ui.core.umd.min.js",
+      "origin": "npm:@floating-ui/core@1.7.3 dist/floating-ui.core.umd.min.js",
+      "integrity": "sha512-sGnvb5dmrJaKEZ+LDIpguvdX3bDlEllmv4/ClQ9awcmCZrlx5jQyyMWFM5kBI+EyNOCDDiKk8il0zeuX3Zlg/w==",
+      "license": "MIT",
+      "sha256": "6985ce661153c01d97f6be9babb6a9566f923c716c2b7fbead48fbb09f419ba8",
+      "transform": "none"
+    },
+    {
+      "path": "floating-ui-core/LICENSE",
+      "origin": "npm:@floating-ui/core@1.7.3 LICENSE",
+      "license": "MIT",
+      "sha256": "0e4c9a9b6c71019cbbea3bdc20b01223110a9035700f9c960c8fcbf78c2325ce",
+      "transform": "none"
+    },
+    {
+      "path": "floating-ui-dom/floating-ui.dom.umd.min.js",
+      "origin": "npm:@floating-ui/dom@1.7.4 dist/floating-ui.dom.umd.min.js",
+      "integrity": "sha512-OOchDgh4F2CchOX94cRVqhvy7b3AFb+/rQXyswmzmGakRfkMgoWVjfnLWkRirfLEfuD4ysVW16eXzwt3jHIzKA==",
+      "license": "MIT",
+      "sha256": "b8199f76adccb9b17b3ab57124c42585dc19197127d1a5d19307d1983f80bd89",
+      "transform": "none"
+    },
+    {
+      "path": "floating-ui-dom/LICENSE",
+      "origin": "npm:@floating-ui/dom@1.7.4 LICENSE",
+      "license": "MIT",
+      "sha256": "0e4c9a9b6c71019cbbea3bdc20b01223110a9035700f9c960c8fcbf78c2325ce",
+      "transform": "none"
+    },
+    {
+      "path": "lucide/lucide.min.js",
+      "origin": "npm:lucide@1.17.0 dist/umd/lucide.min.js (upstream loads the unminified dist/umd/lucide.js of the same release)",
+      "integrity": "sha512-icbHK+hG15rWoacjNi3aw+UXHRmZ9Ee1fJ6ZSu7lbC4GOig7evVEXYCfK77FvjQHusPgi0D/QN7zTO+5wZ8PwQ==",
+      "license": "ISC (Feather-derived icons: MIT)",
+      "sha256": "5e943127343691a9b640d959bbfbdeb742f4a99e0ebc17a4fa77e94654e5318b",
+      "transform": "none"
+    },
+    {
+      "path": "lucide/LICENSE",
+      "origin": "npm:lucide@1.17.0 LICENSE",
+      "license": "ISC (Feather-derived icons: MIT)",
+      "sha256": "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57",
+      "transform": "none"
+    },
+    {
+      "path": "d3/d3.min.js",
+      "origin": "npm:d3@7.9.0 dist/d3.min.js (added for this runtime; upstream does not ship D3)",
+      "integrity": "sha512-e1U46jVP+w7Iut8Jt8ri1YsPOvFpg46k+K8TpCb0P+zjCkjkPnV7WzfDJzMHy1LnA+wj5pLT1wjO901gLXeEhA==",
+      "license": "ISC",
+      "sha256": "f2094bbf6141b359722c4fe454eb6c4b0f0e42cc10cc7af921fc158fceb86539",
+      "transform": "none"
+    },
+    {
+      "path": "d3/LICENSE",
+      "origin": "npm:d3@7.9.0 LICENSE",
+      "license": "ISC",
+      "sha256": "3e6849627f74ff73c257a3ae1efb574015d94fc1035c05ec3c15805165efcbc4",
+      "transform": "none"
+    }
+  ]
+}

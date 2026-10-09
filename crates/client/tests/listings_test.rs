@@ -94,6 +94,7 @@ fn session_lifecycle_events_round_trip() {
         mode: SessionModeDto::Chat,
         messages: vec![MessageDto {
             loop_wakeup: None,
+            visualization_context: None,
             role: "user".to_string(),
             blocks: vec![MessageBlockDto::Text {
                 text: "prior turn".to_string(),

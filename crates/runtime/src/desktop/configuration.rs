@@ -297,6 +297,10 @@ pub struct DesktopConfig {
     pub host_workspace_trusted: Option<bool>,
     /// The live client surface attached to this session, if one is known.
     pub mod_render_surface: Option<orchestrator::config::ModRenderSurface>,
+    /// The attached client renders inline visualizations (Electron through
+    /// bridge-server). Registers the `Visualization` tool and the `visualize`
+    /// skill; CLI and headless hosts leave it off.
+    pub inline_visualization: bool,
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
@@ -925,6 +929,7 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("host_workspace_trusted", &self.host_workspace_trusted)
             .field("mod_render_surface", &self.mod_render_surface)
+            .field("inline_visualization", &self.inline_visualization)
             .field(
                 "api_base",
                 &if self.api_base.is_empty() {
@@ -1094,6 +1099,7 @@ impl Default for DesktopConfig {
             defer_session_start: false,
             host_workspace_trusted: None,
             mod_render_surface: None,
+            inline_visualization: false,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_source: llm_runtime::CredentialSource::Configured,

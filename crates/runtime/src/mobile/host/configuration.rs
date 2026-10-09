@@ -50,6 +50,9 @@ pub struct MobileConfig {
     /// Defaults false so `/goal` and other hook-backed persistent behaviors fail
     /// closed until the Android/iOS host explicitly records trust.
     pub workspace_trusted: bool,
+    /// The native host renders inline visualizations. Registers the
+    /// `Visualization` tool and the `visualize` skill.
+    pub inline_visualization: bool,
     /// Settings-declared `providers` block as raw JSON, fed verbatim to
     /// `llm_runtime::ClientConfig` via `build()`. `None` ⟶ built-in profiles only.
     pub provider_profiles: Option<std::collections::BTreeMap<String, serde_json::Value>>,
@@ -118,6 +121,7 @@ impl std::fmt::Debug for MobileConfig {
             .field("session_mode", &self.session_mode.as_str())
             .field("session_skill_allowlist", &self.session_skill_allowlist)
             .field("workspace_trusted", &self.workspace_trusted)
+            .field("inline_visualization", &self.inline_visualization)
             .field("provider_profiles", &self.provider_profiles)
             .field("routing", &self.routing)
             .field("android_shell", &self.android_shell)
@@ -151,6 +155,7 @@ impl Default for MobileConfig {
             session_mode: session::jsonl::SessionMode::Code,
             session_skill_allowlist: None,
             workspace_trusted: false,
+            inline_visualization: false,
             provider_profiles: None,
             routing: None,
             android_shell: None,
