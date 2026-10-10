@@ -77,6 +77,7 @@ fn config_with_settings(settings_json: &str) -> (tempfile::TempDir, DesktopConfi
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
         mod_render_surface: None,
+        inline_visualization: false,
         // Sandboxed boot: inherit no machine credentials, so the
         // assertions do not depend on the developer's env/keychain.
         isolated_credential_storage: true,

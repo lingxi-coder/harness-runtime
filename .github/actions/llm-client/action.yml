@@ -1,0 +1,25 @@
+name: Check out llm-client
+description: >-
+  Check out the llm-client revision pinned in the root Cargo.toml next to the
+  repository, at ../llm-client, where the root [patch] points.
+inputs:
+  token:
+    description: Token with read access to lingxi-coder/llm-client.
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - name: Fetch the pinned llm-client
+      shell: bash
+      env:
+        LLM_CLIENT_TOKEN: ${{ inputs.token }}
+      run: |
+        rev=$(sed -n 's/^lingxi-llm-client = { git = "[^"]*", rev = "\([0-9a-f]\{40\}\)".*/\1/p' Cargo.toml)
+        test -n "$rev" || { echo "no pinned lingxi-llm-client rev in Cargo.toml" >&2; exit 1; }
+        dest="$GITHUB_WORKSPACE/../llm-client"
+        rm -rf "$dest"
+        git init -q "$dest"
+        auth=$(printf 'x-access-token:%s' "$LLM_CLIENT_TOKEN" | base64 -w0)
+        git -C "$dest" -c http.extraheader="AUTHORIZATION: basic $auth" \
+          fetch -q --depth 1 https://github.com/lingxi-coder/llm-client.git "$rev"
+        git -C "$dest" checkout -q FETCH_HEAD

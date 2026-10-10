@@ -40,6 +40,7 @@ fn send_prompt_round_trips() {
             base64: "iVBORw0KGgo=".to_string(),
         }],
         turn_id: Some(7),
+        visualization_context: None,
     };
     let json = serde_json::to_value(&cmd).expect("serialize SendPrompt");
     assert_eq!(json["type"], "send_prompt");
@@ -61,6 +62,7 @@ fn send_prompt_optional_fields_skip_when_none() {
         prompt_mode: None,
         images: vec![],
         turn_id: None,
+        visualization_context: None,
     };
     let json = serde_json::to_value(&cmd).expect("serialize minimal SendPrompt");
     assert!(
@@ -1044,6 +1046,7 @@ fn no_live_command_carries_session_id() {
                 base64: "AA==".to_string(),
             }],
             turn_id: Some(1),
+            visualization_context: None,
         },
         ClientCommand::Cancel { turn_id: Some(1) },
         ClientCommand::ApprovePermission {

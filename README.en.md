@@ -8,15 +8,16 @@ The main Cargo package is `harness-runtime` in [`crates/runtime`](crates/runtime
 
 ## Quick start
 
-The repository pins Rust 1.94. Clone its `llm-client` submodule on the first checkout:
+The repository pins Rust 1.94. Clone `llm-client` next to it on the first checkout:
 
 ```sh
-git clone --recurse-submodules https://github.com/lingxi-coder/harness-runtime.git
+git clone https://github.com/lingxi-coder/llm-client.git
+git clone https://github.com/lingxi-coder/harness-runtime.git
 cd harness-runtime
 cargo check --locked -p harness-runtime
 ```
 
-For an existing checkout or after switching commits, run `git submodule update --init --recursive`. Run Cargo from the repository root: its `[patch]` redirects the pinned `lingxi-llm-client` Git dependency to the local `deps/llm-client` source.
+Keep the two checkouts side by side. Run Cargo from the repository root: its `[patch]` redirects the pinned `lingxi-llm-client` Git dependency to the sibling `../llm-client` source.
 
 ## Integrate with a host
 
@@ -64,7 +65,7 @@ Model requests use `harness_runtime::models::llm` and the independent `llm-clien
 | [`crates/core`](crates/core), [`crates/agent`](crates/agent), [`crates/orchestrator`](crates/orchestrator) | State and agent execution components. |
 | [`crates/client`](crates/client), [`crates/protocol`](crates/protocol) | Client protocol, presentation, and runtime adapters. |
 | [`crates/tools`](crates/tools), [`crates/platforms`](crates/platforms) | Tool implementations and platform capabilities. |
-| [`deps/llm-client`](deps/llm-client), [`third_party`](third_party) | Independent SDK submodule and vendored sources with their own patches and licenses. |
+| [`third_party`](third_party) | Vendored sources with their own patches and licenses. |
 | [`scripts`](scripts), [`docs`](docs) | Build/boundary checks and design/migration documents. |
 
 `scripts/check-deps.sh` enforces dependency direction. `llm-client` owns model provider communication; the host retains credentials, sessions, permissions, tool execution, and persistence. The [runtime source contract](docs/mobile-linux/RUNTIME-SOURCE-CONTRACT.md) covers mobile Linux resources and host integration.
@@ -81,10 +82,10 @@ cargo test --locked --workspace --all-features --no-fail-fast
 
 These commands cover minimal, desktop, mobile-binding, workspace-test, and repository-gate configurations. Native devices, complete product packaging, and signing require separate host validation. See the [validation record](docs/migration/validation.md) for completed migration checks and known limitations.
 
-Changes in `deps/llm-client` participate immediately in root-workspace builds. Run the SDK's own tests separately:
+Changes in `../llm-client` participate immediately in root-workspace builds. Run the SDK's own tests separately:
 
 ```sh
-cargo test --manifest-path deps/llm-client/Cargo.toml --locked
+cargo test --manifest-path ../llm-client/Cargo.toml --locked
 ```
 
-For a joint release, validate, commit, and push the SDK first; then update this repository's submodule commit, pinned revision in root `[workspace.dependencies]`, and `Cargo.lock`. See the [joint development workflow](docs/llm-client-upgrade.md#子模块联合开发). The [source manifest](docs/migration/source-manifest.json) records extraction provenance.
+For a joint release, validate, commit, and push the SDK first; then update the pinned revision in root `[workspace.dependencies]` and `Cargo.lock`. See the [joint development workflow](docs/llm-client-upgrade.md#联合开发). The [source manifest](docs/migration/source-manifest.json) records extraction provenance.

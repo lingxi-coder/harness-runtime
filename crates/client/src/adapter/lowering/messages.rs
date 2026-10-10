@@ -1,6 +1,7 @@
 //! Message and transcript conversion.
 use super::value_to_json_string;
 use crate::protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
+use crate::protocol::message::{VisualizationContextDto, VisualizationRefDto};
 use crate::protocol::text::ClientTextDto;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ConversationMessage};
 
@@ -35,6 +36,7 @@ pub fn lower_conversation_message_with(
 ) -> MessageDto {
     match message {
         ConversationMessage::User { content, .. } => {
+            let mut visualization_context = None;
             let blocks = legacy_cron_slash_line(content).map_or_else(
                 || {
                     content
@@ -42,26 +44,61 @@ pub fn lower_conversation_message_with(
                         .filter_map(|block| {
                             crate::adapter::turn::lower_content_block_with(block, index)
                         })
+                        .filter_map(|block| {
+                            // A follow-up from a widget starts with the
+                            // runtime-written context block; replay shows it
+                            // as an attachment chip and keeps the typed text.
+                            let MessageBlockDto::Text { text } = &block else {
+                                return Some(block);
+                            };
+                            if visualization_context.is_some() {
+                                return Some(block);
+                            }
+                            let display = text.display();
+                            let split = visualization::context::split_context(&display).map(
+                                |(attachment, typed)| (attachment, typed.encode_utf16().count()),
+                            );
+                            let Some((attachment, typed_units)) = split else {
+                                return Some(block);
+                            };
+                            visualization_context = Some(VisualizationContextDto {
+                                id: attachment.reference.id.as_str().to_string(),
+                                revision: attachment.reference.revision,
+                                title: attachment.title,
+                            });
+                            (typed_units > 0).then(|| {
+                                debug_assert!(typed_units <= text.code_units.len());
+                                let start = text.code_units.len() - typed_units;
+                                MessageBlockDto::Text {
+                                    text: ClientTextDto::from_code_units(
+                                        text.code_units[start..].to_vec(),
+                                    ),
+                                }
+                            })
+                        })
                         .collect()
                 },
                 |text| vec![MessageBlockDto::Text { text: text.into() }],
             );
             MessageDto {
                 loop_wakeup: None,
+                visualization_context,
                 role: "user".to_string(),
                 blocks,
                 images: content.iter().filter_map(lower_message_image).collect(),
             }
         }
-        ConversationMessage::Assistant { content, .. } => MessageDto {
-            loop_wakeup: None,
-            role: "assistant".to_string(),
-            blocks: content
-                .iter()
-                .filter_map(|block| crate::adapter::turn::lower_content_block_with(block, index))
-                .collect(),
-            images: Vec::new(),
-        },
+        ConversationMessage::Assistant { content, .. } => {
+            MessageDto {
+                loop_wakeup: None,
+                visualization_context: None,
+                role: "assistant".to_string(),
+                blocks: project_visualizations(content.iter().filter_map(|block| {
+                    crate::adapter::turn::lower_content_block_with(block, index)
+                })),
+                images: Vec::new(),
+            }
+        }
         ConversationMessage::System {
             content, subtype, ..
         } if subtype.as_deref() == Some("scheduled_task_fire") => {
@@ -83,6 +120,7 @@ pub fn lower_conversation_message_with(
                     role: "system".into(),
                     images: Vec::new(),
                     loop_wakeup: None,
+                    visualization_context: None,
                     blocks: vec![MessageBlockDto::Text { text }],
                 }
             } else {
@@ -98,6 +136,7 @@ pub fn lower_conversation_message_with(
                     blocks: Vec::new(),
                     images: Vec::new(),
                     loop_wakeup,
+                    visualization_context: None,
                 }
             }
         }
@@ -107,6 +146,7 @@ pub fn lower_conversation_message_with(
             ..
         } if subtype.as_deref() == Some("compact_boundary") => MessageDto {
             loop_wakeup: None,
+            visualization_context: None,
             role: "system".to_string(),
             blocks: vec![MessageBlockDto::CompactBoundary {
                 messages_before: compact_metadata
@@ -120,6 +160,7 @@ pub fn lower_conversation_message_with(
         },
         ConversationMessage::System { content, .. } => MessageDto {
             loop_wakeup: None,
+            visualization_context: None,
             role: "system".to_string(),
             blocks: vec![MessageBlockDto::Text {
                 text: ClientTextDto::from_projection(content)
@@ -127,6 +168,81 @@ pub fn lower_conversation_message_with(
             }],
             images: Vec::new(),
         },
+    }
+}
+
+/// Expand inline-visualization reference lines inside assistant text blocks.
+///
+/// Each text block is split by the same [`visualization::ReferenceSplitter`]
+/// the live stream uses, so a resumed message reproduces exactly the
+/// `Text` / `Visualization` sequence its live `MessageComplete` carried.
+pub fn project_visualizations(
+    blocks: impl IntoIterator<Item = MessageBlockDto>,
+) -> Vec<MessageBlockDto> {
+    let mut projected = Vec::new();
+    for block in blocks {
+        let MessageBlockDto::Text { text } = block else {
+            projected.push(block);
+            continue;
+        };
+        let display = text.display();
+        let mut splitter = visualization::ReferenceSplitter::new();
+        let mut events = splitter.push(&display);
+        events.extend(splitter.finish());
+        let mut source_units = std::collections::VecDeque::from(text.code_units);
+        for event in events {
+            match event {
+                visualization::SplitEvent::Text(display) => {
+                    let count = display.encode_utf16().count();
+                    let available = count.min(source_units.len());
+                    let units = source_units.drain(..available).collect::<Vec<_>>();
+                    debug_assert_eq!(available, count);
+                    projected.push(MessageBlockDto::Text {
+                        text: ClientTextDto::from_code_units(units),
+                    });
+                }
+                visualization::SplitEvent::Pending => {}
+                visualization::SplitEvent::Ready(reference) => {
+                    discard_reference_source_line(&mut source_units);
+                    projected.push(MessageBlockDto::Visualization {
+                        reference: Some(visualization_ref_dto(&reference)),
+                    });
+                }
+                visualization::SplitEvent::Unavailable => {
+                    discard_reference_source_line(&mut source_units);
+                    projected.push(MessageBlockDto::Visualization { reference: None });
+                }
+                visualization::SplitEvent::Discarded => {
+                    discard_reference_source_line(&mut source_units);
+                }
+            }
+        }
+        if !source_units.is_empty() {
+            let remaining = ClientTextDto::from_code_units(source_units.into_iter().collect());
+            if let Some(MessageBlockDto::Text { text }) = projected.last_mut() {
+                text.code_units.extend(remaining.code_units);
+            } else {
+                projected.push(MessageBlockDto::Text { text: remaining });
+            }
+        }
+    }
+    projected
+}
+
+fn discard_reference_source_line(source_units: &mut std::collections::VecDeque<u16>) {
+    while let Some(unit) = source_units.pop_front() {
+        if unit == u16::from(b'\n') {
+            break;
+        }
+    }
+}
+
+/// Lower an engine reference to its DTO.
+#[must_use]
+pub fn visualization_ref_dto(reference: &visualization::VisualizationRef) -> VisualizationRefDto {
+    VisualizationRefDto {
+        id: reference.id.as_str().to_string(),
+        revision: reference.revision,
     }
 }
 
@@ -351,6 +467,7 @@ fn lower_transcript_inner(
                             blocks,
                             images: Vec::new(),
                             loop_wakeup: None,
+                            visualization_context: None,
                         },
                     ));
                 }
@@ -367,6 +484,42 @@ fn lower_transcript_inner(
 #[cfg(test)]
 mod identity_projection_tests {
     use super::*;
+
+    #[test]
+    fn follow_up_context_block_replays_as_an_attachment_chip() {
+        let reference = visualization::VisualizationRef {
+            id: visualization::VisualizationId::parse("chart").unwrap(),
+            revision: 2,
+        };
+        let block = visualization::context::context_block(
+            &reference,
+            "Sales",
+            &serde_json::json!({"region": "EU"}),
+        );
+        let mut message =
+            ConversationMessage::user(lingxi_core::types::MessageId::new(), String::new());
+        if let ConversationMessage::User { content, .. } = &mut message {
+            *content = vec![lingxi_core::types::ContentBlock::Text {
+                text: format!("{block}\n\nWhy is EU flat?"),
+                citations: None,
+            }];
+        }
+        let dto = lower_conversation_message(&message);
+        assert_eq!(
+            dto.visualization_context,
+            Some(VisualizationContextDto {
+                id: "chart".into(),
+                revision: 2,
+                title: "Sales".into(),
+            })
+        );
+        assert_eq!(
+            dto.blocks,
+            vec![MessageBlockDto::Text {
+                text: "Why is EU flat?".into()
+            }]
+        );
+    }
     #[test]
     fn filtered_meta_rows_do_not_shift_retained_transcript_identities() {
         let first = lingxi_core::types::MessageId::new();

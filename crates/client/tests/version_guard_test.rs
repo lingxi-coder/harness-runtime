@@ -323,6 +323,15 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::UiNotify", "ui_notify");
     put("ClientEvent::UiNotify.plugin", "String");
     put("ClientEvent::UiNotify.text", "ClientTextDto");
+    put("ClientEvent::VisualizationBlock", "visualization_block");
+    put(
+        "ClientEvent::VisualizationBlock.status",
+        "VisualizationBlockStatusDto",
+    );
+    put(
+        "ClientEvent::VisualizationBlock.reference",
+        "Option<VisualizationRefDto>",
+    );
 
     put("ClientEvent::TextDelta", "text_delta");
     put("ClientEvent::TextDelta.text", "ClientTextDto");
@@ -917,6 +926,10 @@ fn current_contract_index() -> ContractIndex {
     );
     put("ClientCommand::SendPrompt.images", "Vec<ImageRefDto>");
     put("ClientCommand::SendPrompt.turn_id", "Option<u64>");
+    put(
+        "ClientCommand::SendPrompt.visualization_context",
+        "Option<VisualizationRefDto>",
+    );
 
     put("ClientCommand::Cancel", "cancel");
     put("ClientCommand::Cancel.turn_id", "Option<u64>");
@@ -1450,6 +1463,19 @@ fn current_contract_index() -> ContractIndex {
     put("LoopWakeupDto.companion", "Option<String>");
     put("LoopWakeupDto.streak", "u32");
     put("LoopWakeupDto.since_ms", "u64");
+    put(
+        "MessageDto.visualization_context",
+        "Option<VisualizationContextDto>",
+    );
+    put("VisualizationContextDto.id", "String");
+    put("VisualizationContextDto.revision", "u32");
+    put("VisualizationContextDto.title", "String");
+    put("VisualizationRefDto.id", "String");
+    put("VisualizationRefDto.revision", "u32");
+    put("VisualizationBlockStatusDto::Pending", "pending");
+    put("VisualizationBlockStatusDto::Ready", "ready");
+    put("VisualizationBlockStatusDto::Unavailable", "unavailable");
+    put("VisualizationBlockStatusDto::Discarded", "discarded");
     put("MessageDto.blocks", "Vec<MessageBlockDto>");
 
     put("MessageBlockDto::Text", "text");
@@ -1484,6 +1510,11 @@ fn current_contract_index() -> ContractIndex {
     put(
         "MessageBlockDto::ToolResult.display",
         "Option<ToolResultDisplayDto>",
+    );
+    put("MessageBlockDto::Visualization", "visualization");
+    put(
+        "MessageBlockDto::Visualization.reference",
+        "Option<VisualizationRefDto>",
     );
 
     put("ClientEvent::PlanUpdated", "plan_updated");
@@ -3238,6 +3269,13 @@ fn contract_index_covers_every_dto() {
             plugin: String::new(),
             text: ClientTextDto::default(),
         },
+        ClientEvent::VisualizationBlock {
+            status: client::protocol::message::VisualizationBlockStatusDto::Pending,
+            reference: Some(client::protocol::message::VisualizationRefDto {
+                id: String::new(),
+                revision: 1,
+            }),
+        },
         ClientEvent::ProviderCredentialStatus {
             operation_id: 0,
             configured_provider_ids: Vec::new(),
@@ -3699,12 +3737,26 @@ fn contract_index_covers_every_dto() {
     };
     let _msg = MessageDto {
         loop_wakeup: None,
+        visualization_context: Some(client::protocol::message::VisualizationContextDto {
+            id: String::new(),
+            revision: 1,
+            title: String::new(),
+        }),
         role: String::new(),
-        blocks: vec![MessageBlockDto::Text {
-            text: String::new().into(),
-        }],
+        blocks: vec![
+            MessageBlockDto::Text {
+                text: String::new().into(),
+            },
+            MessageBlockDto::Visualization { reference: None },
+        ],
         images: Vec::new(),
     };
+    let _statuses = [
+        client::protocol::message::VisualizationBlockStatusDto::Pending,
+        client::protocol::message::VisualizationBlockStatusDto::Ready,
+        client::protocol::message::VisualizationBlockStatusDto::Unavailable,
+        client::protocol::message::VisualizationBlockStatusDto::Discarded,
+    ];
     let _req = PermissionRequest {
         request_id: 0,
         kind: PermissionKindDto::BypassPermissionsMode,
@@ -3793,6 +3845,7 @@ fn contract_index_covers_every_dto() {
                 blocks: vec![],
                 images: vec![],
                 loop_wakeup: None,
+                visualization_context: None,
             },
             api_error_json: None,
         },

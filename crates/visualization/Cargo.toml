@@ -1,0 +1,27 @@
+[package]
+name = "visualization"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Inline chat visualizations: reference grammar, live/replay projection, sandboxed document wrapper, embedded assets and the per-session store."
+build = "build.rs"
+
+[dependencies]
+core = { path = "../core" }
+branding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+uuid = { version = "1.10", features = ["v4"] }
+
+[dev-dependencies]
+proptest = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+platform-posix = { path = "../platforms/posix" }
+
+[lints]
+workspace = true

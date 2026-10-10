@@ -487,6 +487,7 @@ mod regressions {
         let history = vec![
             ConversationMessage::user(MessageId::new(), "resume me".to_string()),
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![
                     ContentBlock::Text {
@@ -494,7 +495,6 @@ mod regressions {
                         citations: None,
                     },
                     ContentBlock::ToolUse {
-                        input_projection: None,
                         id: tu.clone(),
                         name: "Read".to_string(),
                         input: generated_source(&serde_json::json!({"file_path": "/tmp/x"})),
@@ -589,7 +589,6 @@ mod regressions {
                 per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
-                    input_projection: None,
                     id: tu.clone(),
                     name: "Edit".to_string(),
                     input: generated_source(&input),
@@ -602,7 +601,6 @@ mod regressions {
                 api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
-                    content_projection: None,
                     tool_use_id: tu.clone(),
                     content: "edited".into(),
                     is_error: Some(false),
@@ -666,7 +664,6 @@ mod regressions {
             per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolUse {
-                input_projection: None,
                 id: tu.clone(),
                 name: tool.to_string(),
                 input: generated_source(&serde_json::json!({ "description": "review" })),
@@ -679,7 +676,6 @@ mod regressions {
             api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                content_projection: None,
                 tool_use_id: tu.clone(),
                 content: content.to_string().into(),
                 is_error: Some(false),
@@ -780,7 +776,6 @@ mod regressions {
                 per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
-                    input_projection: None,
                     id: tu.clone(),
                     name: tool.to_string(),
                     input: generated_source(&input),
@@ -793,7 +788,6 @@ mod regressions {
             api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                content_projection: None,
                 tool_use_id: tu.clone(),
                 content: content.to_string().into(),
                 is_error: Some(false),
@@ -855,7 +849,6 @@ mod regressions {
             api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
-                content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "orphaned".into(),
                 is_error: Some(false),
@@ -912,7 +905,6 @@ mod regressions {
                 per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
-                    input_projection: None,
                     id: tool_id.clone(),
                     name: "Bash".to_string(),
                     input: generated_source(&serde_json::json!({"command": "pwd"})),
@@ -927,7 +919,6 @@ mod regressions {
                     citations: None,
                 },
                 ContentBlock::ToolResult {
-                    content_projection: None,
                     tool_use_id: tool_id,
                     content: "/tmp".into(),
                     is_error: Some(false),
@@ -1010,6 +1001,7 @@ mod regressions {
         use lingxi_core::types::{utf16_json::Utf16JsonProjection, MessageId};
 
         let message = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: Utf16JsonProjection::parse(r#""before\ud800after""#).unwrap(),
             subtype: None,

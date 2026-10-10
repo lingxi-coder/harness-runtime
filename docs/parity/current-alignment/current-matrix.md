@@ -12,13 +12,12 @@ are explicitly out of scope.
 ## Resume checkpoint — 2026-10-09
 
 The user explicitly resumed the remaining task. Target remains frozen at
-2.1.295. SDK HEAD is unchanged and clean. Harness and Product are still in
-the pending merges recorded below. Local main has subsequently advanced to
+2.1.295. SDK HEAD is unchanged and clean. At resumption, Harness and Product
+were in the pending merges recorded below. Local main had advanced to
 Harness `2d20d75cd8be030bb043461fe90a10264800d778` and Product
-`20c7801275dfbf468c61b4708f52cfe5997b227d`; these additional changes have not
-yet been integrated or tested. Finish the current merge, integrate that
-bounded main delta, and validate the resulting candidate before claiming
-acceptance. The seven Tasks diagnostics and five Skill/Mock MCP diagnostics were repaired,
+`20c7801275dfbf468c61b4708f52cfe5997b227d`; these were frozen as this round’s
+integration targets. See the frozen-main progress section below for the current
+state; final acceptance still requires the resulting complete candidate. The seven Tasks diagnostics and five Skill/Mock MCP diagnostics were repaired,
 then the 162 Orchestrator diagnostics were closed. The complete production
 workspace check passed (exit 0, zero compiler errors) against the current
 pending merge, reaching runtime, client, configuration-admin and bridge:
@@ -35,6 +34,22 @@ and `acceptance/orchestrator-repair-owners-20261009.json` in the integration par
 Authoritative resume inventory: `acceptance/resume-state-20261009.json` in
 the integration parent directory. Historical test receipts below remain
 scoped to their recorded source and environment.
+
+## Frozen main delta integration — 2026-10-09
+
+First Harness main integration is committed as
+`efa1d8f3ef5f17c328d99fc7d61aa3690c2faf19`. Its subsequent merge of frozen
+local main `2d20d75cd8be030bb043461fe90a10264800d778` resolved seven
+conflict files, preserved the current Source APIs, and integrated the new
+visualization runtime/client/mobile behavior. The new VisualizationTool was
+adapted to the current Tool interface. Production workspace compilation passed
+again with exit 0 and zero compiler errors:
+`/private/tmp/claude-alignment-harness-production-check-visualization-errors-fixed20261009.jsonl`.
+Client adapter empty-delta/UTF-16 live-replay regressions passed 2/2 with
+`--features adapter --lib empty_delta`; 401 other tests were filtered out.
+Log: `/private/tmp/claude-alignment-harness-client-empty-delta-adapter-tests-repaired20261009.stdout.log`.
+The initial default-feature run selected zero tests and is not acceptance.
+Product pins and its frozen main delta remain outstanding.
 
 ## Main-merge pause snapshot — 2026-10-08
 

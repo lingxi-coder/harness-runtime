@@ -835,7 +835,13 @@ define_client_event! {
         plugin: String,
         text: ClientTextDto,
     },
-
+    // Inline visualization slot in the live assistant text. Appended to
+    // preserve existing UniFFI variant ordinals.
+    VisualizationBlock {
+        status: crate::protocol::message::VisualizationBlockStatusDto,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<crate::protocol::message::VisualizationRefDto>,
+    },
 }
 
 impl From<ClientEventWire> for ClientEvent {
@@ -1395,6 +1401,9 @@ impl From<ClientEventWire> for ClientEvent {
                 session_id,
             },
             ClientEventWire::UiNotify { plugin, text } => Self::UiNotify { plugin, text },
+            ClientEventWire::VisualizationBlock { status, reference } => {
+                Self::VisualizationBlock { status, reference }
+            }
         }
     }
 }
@@ -1757,6 +1766,7 @@ mod session_agent_identity_contract_tests {
                 }],
                 images: vec![],
                 loop_wakeup: None,
+                visualization_context: None,
             },
             api_error_json: Some(
                 "{\"isApiErrorMessage\":true,\"requestId\":\"event-request\"}".into(),

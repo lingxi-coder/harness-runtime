@@ -239,12 +239,11 @@ pub fn lower_content_block_with(
 pub fn synthesize_message(turn: &PumpedTurn) -> MessageDto {
     MessageDto {
         loop_wakeup: None,
+        visualization_context: None,
         role: ASSISTANT_ROLE.to_string(),
-        blocks: turn
-            .assistant_blocks
-            .iter()
-            .filter_map(lower_content_block)
-            .collect(),
+        blocks: crate::adapter::lowering::project_visualizations(
+            turn.assistant_blocks.iter().filter_map(lower_content_block),
+        ),
         images: Vec::new(),
     }
 }
@@ -684,7 +683,6 @@ mod tests {
     fn tool_use_block_lowers_input_to_json_string() {
         let id = ToolUseId::new();
         let block = ContentBlock::ToolUse {
-            input_projection: None,
             id: id.clone(),
             name: "Read".into(),
             input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(

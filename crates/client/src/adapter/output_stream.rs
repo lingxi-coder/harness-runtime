@@ -108,6 +108,12 @@ struct MessageBuffer {
     active_block_key: Option<u64>,
     last_completed_row_id: Option<String>,
     pending_continuation: Option<PendingContinuation>,
+    /// Splits the current text block into narration and visualization
+    /// slots; the same splitter replay uses, so live and resumed blocks agree.
+    references: visualization::ReferenceSplitter,
+    /// Exact source units for text the splitter is holding back. The splitter
+    /// classifies a display projection; these units keep ordinary text exact.
+    pending_source_units: std::collections::VecDeque<u16>,
 }
 
 struct BufferedMessageBlock {
@@ -217,6 +223,84 @@ impl MessageBuffer {
     }
 }
 
+impl MessageBuffer {
+    /// Record splitter output in the message and return the live events, in
+    /// order, for the caller to emit after releasing the buffer lock.
+    fn absorb(&mut self, events: Vec<visualization::SplitEvent>) -> Vec<ClientEvent> {
+        use crate::protocol::message::VisualizationBlockStatusDto as Status;
+        let mut out = Vec::with_capacity(events.len());
+        for event in events {
+            match event {
+                visualization::SplitEvent::Text(display) => {
+                    let count = display.encode_utf16().count();
+                    let available = count.min(self.pending_source_units.len());
+                    let source = self.pending_source_units.drain(..available).collect();
+                    debug_assert_eq!(available, count);
+                    let text = ClientTextDto::from_code_units(source);
+                    self.append(MessageBlockDto::Text { text: text.clone() });
+                    out.push(ClientEvent::TextDelta { text });
+                }
+                visualization::SplitEvent::Pending => out.push(ClientEvent::VisualizationBlock {
+                    status: Status::Pending,
+                    reference: None,
+                }),
+                visualization::SplitEvent::Ready(reference) => {
+                    discard_reference_source_line(&mut self.pending_source_units);
+                    let reference = crate::adapter::lowering::visualization_ref_dto(&reference);
+                    self.append(MessageBlockDto::Visualization {
+                        reference: Some(reference.clone()),
+                    });
+                    out.push(ClientEvent::VisualizationBlock {
+                        status: Status::Ready,
+                        reference: Some(reference),
+                    });
+                }
+                visualization::SplitEvent::Unavailable => {
+                    discard_reference_source_line(&mut self.pending_source_units);
+                    self.append(MessageBlockDto::Visualization { reference: None });
+                    out.push(ClientEvent::VisualizationBlock {
+                        status: Status::Unavailable,
+                        reference: None,
+                    });
+                }
+                visualization::SplitEvent::Discarded => {
+                    discard_reference_source_line(&mut self.pending_source_units);
+                    out.push(ClientEvent::VisualizationBlock {
+                        status: Status::Discarded,
+                        reference: None,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// The current text block ended: settle a held reference line.
+    fn finish_text(&mut self) -> Vec<ClientEvent> {
+        let events = self.references.finish();
+        let emitted = self.absorb(events);
+        debug_assert!(self.pending_source_units.is_empty());
+        self.pending_source_units.clear();
+        emitted
+    }
+
+    /// The stream was cut: drop a held partial line.
+    fn abort_text(&mut self) -> Vec<ClientEvent> {
+        let events = self.references.abort();
+        let emitted = self.absorb(events);
+        self.pending_source_units.clear();
+        emitted
+    }
+}
+
+fn discard_reference_source_line(source_units: &mut std::collections::VecDeque<u16>) {
+    while let Some(unit) = source_units.pop_front() {
+        if unit == u16::from(b'\n') {
+            break;
+        }
+    }
+}
+
 fn has_non_whitespace_js(text: &ClientTextDto) -> bool {
     text.display()
         .chars()
@@ -237,6 +321,24 @@ impl AdapterOutputStream {
             message_blocks: Arc::new(tokio::sync::Mutex::new(MessageBuffer::default())),
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
+    }
+
+    async fn emit_all(&self, events: Vec<ClientEvent>) {
+        for event in events {
+            self.sink.emit(event).await;
+        }
+    }
+
+    /// End the current assistant text block before a non-text event.
+    async fn finish_text_block(&self) {
+        let events = self.message_blocks.lock().await.finish_text();
+        self.emit_all(events).await;
+    }
+
+    /// Drop a held partial reference line after a retraction or refusal.
+    async fn abort_text_block(&self) {
+        let events = self.message_blocks.lock().await.abort_text();
+        self.emit_all(events).await;
     }
 
     /// Clear an unfinished response before a host starts a new turn or after a
@@ -347,6 +449,7 @@ impl AdapterOutputStream {
     }
 
     async fn emit_buffered_message(&self, stop_reason: Option<&str>, include_empty: bool) {
+        self.finish_text_block().await;
         let blocks = {
             let mut buffer = self.message_blocks.lock().await;
             buffer.active_block_key = None;
@@ -365,6 +468,7 @@ impl AdapterOutputStream {
                 stop_reason: stop_reason.map(str::to_string),
                 message: Some(MessageDto {
                     loop_wakeup: None,
+                    visualization_context: None,
                     role: "assistant".to_string(),
                     blocks,
                     images: Vec::new(),
@@ -410,13 +514,28 @@ impl OutputStream for AdapterOutputStream {
     }
 
     async fn emit_text(&self, text: &Utf16JsonProjection) {
-        let text = ClientTextDto::from_projection(text)
+        let source = ClientTextDto::from_projection(text)
             .expect("OutputStream text is a root-string source projection");
-        self.message_blocks
-            .lock()
-            .await
-            .append(MessageBlockDto::Text { text: text.clone() });
-        self.sink.emit(ClientEvent::TextDelta { text }).await;
+        let events = {
+            let mut buffer = self.message_blocks.lock().await;
+            buffer
+                .pending_source_units
+                .extend(source.code_units.iter().copied());
+            if source.code_units.is_empty() {
+                if buffer.references.is_holding() {
+                    Vec::new()
+                } else {
+                    buffer.append(MessageBlockDto::Text {
+                        text: source.clone(),
+                    });
+                    vec![ClientEvent::TextDelta { text: source }]
+                }
+            } else {
+                let split = buffer.references.push(&source.display());
+                buffer.absorb(split)
+            }
+        };
+        self.emit_all(events).await;
     }
 
     async fn emit_assistant_message_identity(&self, message_id: &lingxi_core::types::MessageId) {
@@ -450,6 +569,7 @@ impl OutputStream for AdapterOutputStream {
     }
 
     async fn emit_message_retracted(&self, message_id: &lingxi_core::types::MessageId) {
+        self.abort_text_block().await;
         *self.message_blocks.lock().await = MessageBuffer::default();
         self.sink
             .emit(ClientEvent::MessageRetracted {
@@ -467,6 +587,7 @@ impl OutputStream for AdapterOutputStream {
     }
 
     async fn emit_assistant_block_start(&self, block_key: u64) {
+        self.finish_text_block().await;
         self.message_blocks.lock().await.active_block_key = Some(block_key);
         self.sink
             .emit(ClientEvent::AssistantBlockStart { block_key })
@@ -479,6 +600,7 @@ impl OutputStream for AdapterOutputStream {
         row_id: &lingxi_core::types::MessageId,
     ) {
         let message_uuid = row_id.as_uuid().to_string();
+        self.finish_text_block().await;
         self.message_blocks
             .lock()
             .await
@@ -496,6 +618,7 @@ impl OutputStream for AdapterOutputStream {
         message: &ServerFallbackTombstoneMessage,
         display_only: bool,
     ) {
+        self.abort_text_block().await;
         let row_id = message.uuid.as_uuid().to_string();
         let discarded_tool_ids: std::collections::HashSet<String> = message
             .content
@@ -574,6 +697,7 @@ impl OutputStream for AdapterOutputStream {
         replaces_uuids: &[lingxi_core::types::MessageId],
         display_salvage_text: bool,
     ) {
+        self.abort_text_block().await;
         self.message_blocks.lock().await.pending_continuation = Some(PendingContinuation {
             salvage_text: ClientTextDto::from_utf8(salvage_text),
             display_salvage_text,
@@ -679,6 +803,7 @@ impl OutputStream for AdapterOutputStream {
         tool: &str,
         input: &Utf16JsonProjection,
     ) {
+        self.finish_text_block().await;
         self.remember_call(id, tool, input);
         let display_input = Self::display_value(input);
         let input_json = input
@@ -858,6 +983,7 @@ impl OutputStream for AdapterOutputStream {
     /// (the cryptographic signature only arrives on the completed thinking
     /// block, not per-delta) — see `lingxi_core::host::OutputStream::emit_thinking`.
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
+        self.finish_text_block().await;
         self.message_blocks
             .lock()
             .await
@@ -874,6 +1000,7 @@ impl OutputStream for AdapterOutputStream {
     }
 
     async fn emit_redacted_thinking(&self, data: &str) {
+        self.finish_text_block().await;
         self.message_blocks
             .lock()
             .await
@@ -986,6 +1113,12 @@ mod tests {
     fn projection(text: &str) -> Utf16JsonProjection {
         Utf16JsonProjection::root_string(text.to_string(), text.encode_utf16().collect())
             .expect("scalar text is a valid root string")
+    }
+
+    fn exact_projection(code_units: Vec<u16>) -> Utf16JsonProjection {
+        let display = String::from_utf16_lossy(&code_units);
+        Utf16JsonProjection::root_string(display, code_units)
+            .expect("display is derived from the exact UTF-16 units")
     }
 
     fn json_projection(value: &serde_json::Value) -> Utf16JsonProjection {
@@ -1732,6 +1865,7 @@ mod tests {
                 &projection("interrupted"),
                 &result_source,
                 "interrupted",
+                None,
             )
             .await;
 
@@ -2150,7 +2284,6 @@ mod tests {
                 per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
-                    input_projection: None,
                     id: id.clone(),
                     name: tool.to_string(),
                     input: input_source.clone(),
@@ -2163,7 +2296,6 @@ mod tests {
                 api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
-                    content_projection: None,
                     tool_use_id: id.clone(),
                     content: content.to_string().into(),
                     is_error: Some(false),
@@ -2232,5 +2364,291 @@ mod tests {
                 "an overflow must not wipe the other in-flight calls"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod visualization_stream_tests {
+    use super::*;
+    use crate::adapter::test_support::MockSink;
+    use crate::protocol::message::{VisualizationBlockStatusDto, VisualizationRefDto};
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
+
+    const LINE: &str = "::lingxi-visualization{id=\"chart\" rev=\"2\"}";
+
+    fn projection(text: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(text.to_string(), text.encode_utf16().collect())
+            .expect("scalar text is a valid root string")
+    }
+
+    fn exact_projection(code_units: Vec<u16>) -> Utf16JsonProjection {
+        let display = String::from_utf16_lossy(&code_units);
+        Utf16JsonProjection::root_string(display, code_units)
+            .expect("display is derived from the exact UTF-16 units")
+    }
+
+    fn chart() -> VisualizationRefDto {
+        VisualizationRefDto {
+            id: "chart".into(),
+            revision: 2,
+        }
+    }
+
+    fn completed_blocks(events: &[ClientEvent]) -> Vec<MessageBlockDto> {
+        events
+            .iter()
+            .find_map(|event| match event {
+                ClientEvent::MessageComplete {
+                    message: Some(message),
+                    ..
+                } => Some(message.blocks.clone()),
+                _ => None,
+            })
+            .expect("message complete")
+    }
+
+    fn replayed(text: &str) -> Vec<MessageBlockDto> {
+        crate::adapter::lowering::lower_conversation_message(&ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            resumable: None,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+        })
+        .blocks
+    }
+
+    fn replayed_exact(code_units: Vec<u16>) -> Vec<MessageBlockDto> {
+        let display = String::from_utf16_lossy(&code_units);
+        crate::adapter::lowering::lower_conversation_message(&ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            resumable: None,
+            content: vec![ContentBlock::TextJsUtf16 {
+                text: display,
+                utf16_code_units: code_units,
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+        })
+        .blocks
+    }
+
+    #[tokio::test]
+    async fn reference_lines_stream_as_slots_and_complete_like_replay() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let text = format!("Here it is:\n{LINE}\nDrag the slider.");
+        for chunk in [
+            "Here it is:\n::lingxi-vis",
+            "ualization{id=\"chart\" ",
+            "rev=\"2\"}\nDrag the slider.",
+        ] {
+            stream.emit_text(&projection(chunk)).await;
+        }
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let events = sink.events().await;
+        let live: Vec<_> = events
+            .iter()
+            .filter(|event| !matches!(event, ClientEvent::MessageComplete { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            live,
+            vec![
+                ClientEvent::TextDelta {
+                    text: "Here it is:\n".into()
+                },
+                ClientEvent::VisualizationBlock {
+                    status: VisualizationBlockStatusDto::Pending,
+                    reference: None
+                },
+                ClientEvent::VisualizationBlock {
+                    status: VisualizationBlockStatusDto::Ready,
+                    reference: Some(chart())
+                },
+                ClientEvent::TextDelta {
+                    text: "Drag the slider.".into()
+                },
+            ]
+        );
+        let blocks = completed_blocks(&events);
+        assert_eq!(
+            blocks,
+            vec![
+                MessageBlockDto::Text {
+                    text: "Here it is:\n".into()
+                },
+                MessageBlockDto::Visualization {
+                    reference: Some(chart())
+                },
+                MessageBlockDto::Text {
+                    text: "Drag the slider.".into()
+                },
+            ]
+        );
+        assert_eq!(
+            blocks,
+            replayed(&text),
+            "live and resumed block sequences agree"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reference_only_message_keeps_its_slot_and_settles_at_the_boundary() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        stream.emit_text(&projection(LINE)).await;
+        let before = sink.events().await;
+        assert_eq!(
+            before,
+            vec![ClientEvent::VisualizationBlock {
+                status: VisualizationBlockStatusDto::Pending,
+                reference: None
+            }],
+            "an unterminated line is held, not shown as text"
+        );
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let blocks = completed_blocks(&sink.events().await);
+        assert_eq!(
+            blocks,
+            vec![MessageBlockDto::Visualization {
+                reference: Some(chart())
+            }]
+        );
+        assert_eq!(blocks, replayed(LINE));
+    }
+
+    #[tokio::test]
+    async fn standalone_empty_delta_remains_visible_to_native_clients() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        stream.emit_text(&projection("")).await;
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::TextDelta {
+                text: ClientTextDto::default(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_delta_while_holding_split_reference_preserves_exact_live_replay_blocks() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let prefix = vec![u16::from(b'A'), 0xd800, u16::from(b'\n')];
+        let mut first = prefix.clone();
+        first.extend("::lingxi-vis".encode_utf16());
+        stream.emit_text(&exact_projection(first)).await;
+
+        // The reference is still a possible directive, so this empty native
+        // delta must not create a text block ahead of the eventual slot.
+        stream.emit_text(&projection("")).await;
+        let remainder = "ualization{id=\"chart\" rev=\"2\"}"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        stream.emit_text(&exact_projection(remainder)).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+
+        let events = sink.events().await;
+        let live: Vec<_> = events
+            .iter()
+            .filter(|event| !matches!(event, ClientEvent::MessageComplete { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(
+            live,
+            vec![
+                ClientEvent::TextDelta {
+                    text: ClientTextDto::from_code_units(prefix.clone()),
+                },
+                ClientEvent::VisualizationBlock {
+                    status: VisualizationBlockStatusDto::Pending,
+                    reference: None,
+                },
+                ClientEvent::VisualizationBlock {
+                    status: VisualizationBlockStatusDto::Ready,
+                    reference: Some(chart()),
+                },
+            ]
+        );
+
+        let mut complete_source = prefix.clone();
+        complete_source.extend(LINE.encode_utf16());
+        assert_eq!(completed_blocks(&events), replayed_exact(complete_source));
+        assert_eq!(
+            completed_blocks(&events),
+            vec![
+                MessageBlockDto::Text {
+                    text: ClientTextDto::from_code_units(prefix),
+                },
+                MessageBlockDto::Visualization {
+                    reference: Some(chart()),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_ends_the_text_block_and_settles_the_held_line() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        stream
+            .emit_text(&projection("::lingxi-visualization{id=\"chart\""))
+            .await;
+        let input = Utf16JsonProjection::from_serde_value(&serde_json::json!({"file_path": "/x"}))
+            .expect("tool input is a valid JSON projection");
+        stream
+            .emit_tool_call(&lingxi_core::types::ToolUseId::new(), "Read", &input)
+            .await;
+        let events = sink.events().await;
+        assert!(matches!(
+            events[1],
+            ClientEvent::VisualizationBlock {
+                status: VisualizationBlockStatusDto::Discarded,
+                ..
+            }
+        ));
+        assert!(matches!(events[2], ClientEvent::ToolUseStarted { .. }));
+    }
+
+    #[tokio::test]
+    async fn retraction_drops_the_held_line() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        stream
+            .emit_text(&projection("::lingxi-visualization{"))
+            .await;
+        stream.emit_message_retracted(&MessageId::new()).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let events = sink.events().await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::VisualizationBlock {
+                status: VisualizationBlockStatusDto::Discarded,
+                ..
+            }
+        )));
+        assert!(completed_blocks(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn code_fences_and_ordinary_text_pass_through_unchanged() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let text = format!("```\n{LINE}\n```\nplain");
+        stream.emit_text(&projection(&text)).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        let blocks = completed_blocks(&sink.events().await);
+        assert_eq!(
+            blocks,
+            vec![MessageBlockDto::Text {
+                text: text.clone().into(),
+            }]
+        );
+        assert_eq!(blocks, replayed(&text));
     }
 }
