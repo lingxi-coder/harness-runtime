@@ -1349,7 +1349,34 @@ async fn pump_stream_inner(
         // Owned dispatches continue independently while the provider waits.
         // Completion advances the scheduler immediately; results become
         // query-visible only at the post-event Tn poll below.
-        let Some(item) = stream.next().await else {
+        let next = match pump.as_ref().and_then(|p| p.user_cancel) {
+            Some(cancel) => tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    // A user interrupt aborts the response, as Claude Code's
+                    // request AbortSignal and Codex's turn cancellation do.
+                    // Dropping the stream ends the request; only completed
+                    // blocks are kept, and the caller's abort checkpoint ends
+                    // the turn.
+                    finish_pending_server_stitch(
+                        &mut turn,
+                        output,
+                        &mut assistant_block_indices,
+                        &mut assistant_block_row_ids,
+                        &mut current_row_by_api_index,
+                        &mut pending_server_stitch,
+                        &mut pump,
+                    )
+                    .await;
+                    partial_close.close(output.as_ref()).await;
+                    poll_ready_stream_tool_results(&mut pump).await;
+                    return Ok((turn, futures::stream::empty().boxed()));
+                }
+                next = stream.next() => next,
+            },
+            None => stream.next().await,
+        };
+        let Some(item) = next else {
             poll_ready_stream_tool_results(&mut pump).await;
             break;
         };

@@ -2759,10 +2759,12 @@ impl ConversationOrchestrator {
         // FINISHES gracefully — mirroring claude-code's `StreamingToolExecutor`
         // user_interrupted path where the interrupted results become part of the
         // transcript. We then map the outcome to `Cancelled` for the TUI when the
-        // token fired (so it still renders "interrupted"), else `EndTurn`. A turn
-        // running only Block-behavior tools (or no tools) runs to its natural end
+        // token fired (so it still renders "interrupted"), else `EndTurn`. The
+        // pump aborts the provider stream when the token fires, keeping only
+        // completed blocks (claude-code hands the request its AbortSignal). A
+        // turn running only Block-behavior tools runs them to their natural end
         // and is still reported `Cancelled` here — faithful: claude-code only
-        // aborts Cancel-behavior tools; Block tools / the stream finish.
+        // aborts Cancel-behavior tools; Block tools finish.
         let r = telemetry::otel::with_turn_span(
             "lingxi.orchestrator.turn.streaming.cancelable",
             async {
