@@ -299,6 +299,7 @@ mod tests {
 
     fn user(text: &str) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
@@ -316,6 +317,7 @@ mod tests {
 
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
@@ -514,6 +516,7 @@ mod tests {
             fallback_model: "claude-sonnet-5".into(),
         };
         let fallback_message = ConversationMessage::System {
+            api_system: None,
             id: fallback_id,
             content: fallback_content.into(),
             subtype: Some("model_fallback".into()),
@@ -590,6 +593,7 @@ mod tests {
         assert!(matches!(
             resumed_fallback,
             ConversationMessage::System {
+            api_system: None,
                 id,
                 content,
                 subtype: Some(subtype),
@@ -607,6 +611,7 @@ mod tests {
         use lingxi_core::types::{MessageId, ModelFallbackMetadata};
 
         let message = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: "ordinary system notice".into(),
             subtype: Some("other_notice".into()),

@@ -71,7 +71,7 @@ pub trait MemoryHierarchyProvider: Send + Sync {
     ) -> Vec<MemoryFile>;
 
     fn instruction_files_mode(&self) -> InstructionFilesMode {
-        InstructionFilesMode::ClaudeMd
+        InstructionFilesMode::LingxiMd
     }
 
     fn filesystem_discovery(&self) -> bool {
@@ -82,7 +82,7 @@ pub trait MemoryHierarchyProvider: Send + Sync {
         dirs::home_dir().map(|home| (home, Some(memory::lingxi_md::hierarchy::managed_path())))
     }
 
-    /// Compiled `claudeMdExcludes` matcher shared with lazy/nested loaders.
+    /// Compiled `lingxiMdExcludes` matcher shared with lazy/nested loaders.
     /// Static and custom providers default to no exclusions.
     fn excluder(&self) -> Option<memory::lingxi_md::LingxiMdExcluder> {
         None
@@ -219,7 +219,7 @@ fn load_memory_files_at_with_user_config_dir(
     }
     if matches!(
         mode,
-        InstructionFilesMode::ClaudeMdOrAgentsMd | InstructionFilesMode::ClaudeMdAndAgentsMd
+        InstructionFilesMode::LingxiMdOrAgentsMd | InstructionFilesMode::LingxiMdAndAgentsMd
     ) {
         let branded = memory::lingxi_md::agents::ancestors(
             cwd,
@@ -229,7 +229,7 @@ fn load_memory_files_at_with_user_config_dir(
             external_includes_approved,
             excluder,
         );
-        if mode == InstructionFilesMode::ClaudeMdAndAgentsMd || branded.is_empty() {
+        if mode == InstructionFilesMode::LingxiMdAndAgentsMd || branded.is_empty() {
             let groups = memory::lingxi_md::agents::ancestors(
                 cwd,
                 None,
@@ -395,7 +395,7 @@ pub fn real_provider() -> Arc<dyn MemoryHierarchyProvider> {
 }
 
 /// Like [`real_provider`] but DROPS the `LINGXI.md` files whose path matches the
-/// `claudeMdExcludes` settings patterns (claude-code `isLingxiMdExcluded` runs
+/// `lingxiMdExcludes` settings patterns (claude-code `isLingxiMdExcluded` runs
 /// inside `processMemoryFile`, so excluded User/Project/Local files never reach
 /// the system prompt; Managed is never excludable). Returns the unfiltered
 /// [`real_provider`] when no patterns are configured (byte-identical to before).
@@ -409,7 +409,7 @@ pub fn real_provider_with_excludes(excludes: Vec<String>) -> Arc<dyn MemoryHiera
 }
 
 /// Wraps a [`MemoryHierarchyProvider`] and filters its result through the
-/// `claudeMdExcludes` gate (see [`real_provider_with_excludes`]).
+/// `lingxiMdExcludes` gate (see [`real_provider_with_excludes`]).
 struct ExcludeFilterProvider {
     excluder: memory::lingxi_md::LingxiMdExcluder,
 }
@@ -554,8 +554,8 @@ fn context_from_instruction_files(
     };
     context
         .user_context
-        .insert("claudeMd".into(), format(files));
-    context.user_context_order.push("claudeMd".into());
+        .insert("instructions".into(), format(files));
+    context.user_context_order.push("instructions".into());
     for file in files.iter().filter(|file| is_rendered_into_context(file)) {
         context
             .sent_paths
@@ -640,10 +640,12 @@ impl lingxi_core::host::instructions::InstructionContextProvider
         });
         context.managed_instructions_only = !body.is_empty();
         if body.is_empty() {
-            context.user_context.remove("claudeMd");
-            context.user_context_order.retain(|name| name != "claudeMd");
+            context.user_context.remove("instructions");
+            context
+                .user_context_order
+                .retain(|name| name != "instructions");
         } else {
-            context.user_context.insert("claudeMd".into(), body);
+            context.user_context.insert("instructions".into(), body);
         }
         Ok(context)
     }
@@ -1195,7 +1197,7 @@ mod exclude_filter_tests {
 /// Build a memdir-backed memory prefetcher for the composition root — the P0.1
 /// activation of the `relevant_memories` surfacing channel.
 ///
-/// Wires the LLM memory selector (`side_query_client`, Haiku-class) over the
+/// Wires the LLM memory selector through the session's provider service over the
 /// user memdir (`<home>/.lingxi/memdir`) so that, each turn,
 /// [`MemoryPrefetch::start`](memory::prefetch::MemoryPrefetch::start) scans the
 /// memdir, asks the selector which entries are relevant to the turn query, and
@@ -1208,10 +1210,9 @@ mod exclude_filter_tests {
 /// mobile build the prefetch identically and the engine apps need no direct
 /// dependency on the `memory` crate's internals.
 ///
-/// GATING: the composition root decides whether to call this — claude-code keeps
-/// the feature behind `tengu_moth_copse` (default OFF); the LingXi equivalent is
-/// "is a prefetch wired at all". `team_memory.enabled` is left `false` here (the
-/// user memdir only), matching the inert default until team memory is configured.
+/// The composition root applies the auto-memory feature gate before building
+/// this handle. The orchestrator supplies the live model and profile for each
+/// prefetch. Team memory is disabled here until the host configures it.
 #[must_use]
 pub fn build_memdir_prefetch(
     side_query_client: Arc<dyn sidequery::SideQueryClient>,
@@ -1232,35 +1233,25 @@ pub fn build_memdir_prefetch(
 /// composition root — the §6.5 standalone session-memory extractor + its forked
 /// runner. Hand to [`ConversationOrchestrator::with_session_memory`](crate::ConversationOrchestrator);
 /// the composition root gates the call (default OFF). `config_home` is the
-/// resolved `$LINGXI_CONFIG_DIR ?? ~/.claude` dir (the write base — pass
+/// resolved `$LINGXI_CONFIG_DIR ?? ~/.lingxi` dir (the write base — pass
 /// [`user_config_dir`](memory::lingxi_md::user_config_dir)`(dirs::home_dir())`).
+/// The runner inherits the live parent route from its cache-safe snapshot;
+/// `default_model` is the configured session model used if that snapshot is cold.
+/// `config` supplies the current token-growth and activity gates.
 #[must_use]
 pub fn build_session_memory_handle(
     side_query_client: Arc<dyn sidequery::SideQueryClient>,
-    extraction_model: String,
-    initialization_threshold: u32,
-    update_threshold: u32,
+    default_model: String,
+    config: memory::session_memory::SessionMemoryConfig,
     home: &std::path::Path,
     runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
 ) -> Arc<crate::SessionMemoryHandle> {
-    // Called only when the composition root is enabling the feature, so
-    // `enabled = true`. The `$LINGXI_CONFIG_DIR`-aware config-home is the SAME
+    // The `$LINGXI_CONFIG_DIR`-aware config-home is the SAME
     // base the Session-tier memdir scan reads, so writes re-load next session.
-    let config = memory::session_memory::SessionMemoryConfig {
-        enabled: true,
-        initialization_threshold,
-        update_threshold,
-        // The legacy threshold parameters are retained for compatibility,
-        // while new composition roots use Claude's token/activity gates.
-        minimum_message_tokens_to_init: 10_000,
-        minimum_tokens_between_update: 5_000,
-        tool_calls_between_updates: 3,
-        extraction_model,
-    };
     let config_home = memory::lingxi_md::user_config_dir(home);
     let runner = Arc::new(
         sidequery::ForkedAgentRunner::new()
-            .with_side_query_client(side_query_client, config.extraction_model.clone()),
+            .with_side_query_client(side_query_client, default_model),
     );
     Arc::new(crate::SessionMemoryHandle {
         extractor: tokio::sync::Mutex::new(memory::session_memory::SessionMemoryExtractor::new(
@@ -1272,34 +1263,6 @@ pub fn build_session_memory_handle(
         in_flight: std::sync::atomic::AtomicBool::new(false),
         generation: std::sync::atomic::AtomicU64::new(0),
     })
-}
-
-/// [`build_memdir_prefetch`] for a composition root that has raw Anthropic
-/// credentials + an HTTP transport but no pre-built [`sidequery::SideQueryClient`]
-/// (e.g. the mobile host, which assembles a multi-provider `llm_runtime` rather
-/// than the desktop's side-query client). Constructs a
-/// [`sidequery::ProviderSideQueryClient`] over `(api_key, api_base, http)` —
-/// the same Anthropic-first-party side-query path the desktop build uses — so
-/// the engine app needs no direct `sidequery` dependency.
-///
-/// NOTE: the side query routes through the Anthropic first-party path with the
-/// supplied `api_key`, independent of any multi-provider routing the host's main
-/// turn client uses. With no usable `api_key` the side query fails and the
-/// prefetch resolves to empty (inert) — never breaking a turn. Gating is the
-/// caller's — see `memory::auto_memory_enabled` (default ON).
-#[must_use]
-pub fn build_memdir_prefetch_from_anthropic(
-    api_key: impl Into<String>,
-    api_base: Option<String>,
-    http: Arc<dyn llm_runtime::Transport>,
-    runtime: Arc<dyn lingxi_core::host::RuntimeSpawner>,
-    home: &std::path::Path,
-    cwd: &std::path::Path,
-) -> Arc<memory::prefetch::MemoryPrefetch> {
-    let client: Arc<dyn sidequery::SideQueryClient> = Arc::new(
-        sidequery::ProviderSideQueryClient::new(api_key, api_base, http),
-    );
-    build_memdir_prefetch(client, runtime, home, cwd)
 }
 
 /// Verbatim preamble that precedes the memory blocks.
@@ -1432,7 +1395,7 @@ mod native_eager_origin_tests {
                     &root.join("home").join(branding::DOT_DIR),
                     &root.join("managed"),
                     None,
-                    InstructionFilesMode::ClaudeMd,
+                    InstructionFilesMode::LingxiMd,
                     false,
                 )
             };
@@ -1502,7 +1465,7 @@ mod native_eager_origin_tests {
             &home.join(branding::DOT_DIR),
             &root.join("managed"),
             None,
-            InstructionFilesMode::ClaudeMd,
+            InstructionFilesMode::LingxiMd,
             false,
         );
         assert_eq!(files.len(), 2);
@@ -1531,7 +1494,7 @@ mod native_eager_origin_tests {
             &home.join(branding::DOT_DIR),
             &root.join("managed"),
             None,
-            InstructionFilesMode::ClaudeMd,
+            InstructionFilesMode::LingxiMd,
             false,
         );
         assert_eq!(files.len(), 2);

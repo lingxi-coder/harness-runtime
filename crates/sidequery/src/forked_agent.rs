@@ -503,6 +503,7 @@ mod tests {
         });
         let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "test".into());
         let placeholder = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: String::new().into(),
             subtype: Some("model_reminder_attachment".into()),
@@ -511,6 +512,7 @@ mod tests {
             refusal_fallback: None,
         };
         let boundary = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: String::new().into(),
             subtype: Some("compact_boundary".into()),

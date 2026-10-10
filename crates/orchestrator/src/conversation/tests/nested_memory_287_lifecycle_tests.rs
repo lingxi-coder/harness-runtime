@@ -343,6 +343,7 @@ async fn filesystem_imports_persist_per_file_bytes_and_dedup_after_cold_and_hot_
             Some(false)
         );
         assert!(attachment.at_pointer("/content/rawContent").is_none());
+
         assert_eq!(
             message.text_content(),
             format!(
@@ -442,6 +443,7 @@ async fn changed_body_after_cold_or_hot_resume_emits_new_raw_body_once() {
             rows[1].extra.string_at("/attachment/content/content"),
             Some(changed)
         );
+
         assert_eq!(
             resumed.nested_memory_history().await.nested[&fixture.memory],
             "changed guidance"
@@ -514,6 +516,7 @@ async fn retained_raw_nested_memory_survives_real_compaction_and_cold_or_hot_res
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].uuid, original.id().as_uuid().to_string());
         assert_eq!(attachment_source(raw[0]), original_payload);
+
         let resumed = if cold_resume {
             fixture.cold().await
         } else {
@@ -586,6 +589,7 @@ async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold
         let restored = assert_restored_file_row(&replayed_after_compact.messages, &fixture, body);
         let restored_id = MessageId::from_uuid(uuid::Uuid::parse_str(&restored.uuid).unwrap());
         let restored_payload = attachment_source(restored);
+
         assert!(
             nested_rows(&replayed_after_compact.messages).is_empty(),
             "the resumable chain excludes the discarded row"
@@ -636,6 +640,7 @@ async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold
             raw[0].extra.string_at("/attachment/content/content"),
             Some(body)
         );
+
         assert_eq!(nested_rows(&fixture.rows().await).len(), 2);
     }
 }
@@ -653,6 +658,7 @@ async fn discarded_body_restores_as_file_after_real_compaction_without_resume() 
         root.nested_memory_reminder_messages().await.is_empty(),
         "the full compact ReadState snapshot restores a file instead of attaching nested memory twice"
     );
+
     assert_restored_read_state(&root, &fixture.memory, body);
     assert!(root.nested_memory_reminder_messages().await.is_empty());
     persist_user(&root, "continue with restored file instructions").await;

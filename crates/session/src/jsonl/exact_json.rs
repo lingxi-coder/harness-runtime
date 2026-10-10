@@ -95,21 +95,37 @@ pub fn set_message_utf16_overrides(
 pub fn native_message_bytes(
     message: &super::schema::JsonlMessage,
 ) -> Result<Vec<u8>, ExactJsonError> {
-    let overrides = message_utf16_overrides(message);
-    // Both arbitrary Native payload members (`message` and `attachment`) are
-    // emitted as raw JSON by JsonlMessage's serializer. Reparse the complete
-    // row into the flat arena before applying exact string overrides so no
-    // deep message or attachment subtree is materialized as `Value`.
+    let output = native_message_projection(message)?
+        .to_json_string()
+        .map_err(projection_error)?;
+    Ok(output.into_bytes())
+}
+
+/// Serialize a typed transcript message to one flat source row, preserving
+/// its exact string units without a recursive `Value` or whole-row shadow.
+pub fn native_message_projection(
+    message: &super::schema::JsonlMessage,
+) -> Result<Utf16JsonProjection, ExactJsonError> {
     let encoded = serde_json::to_vec(message)?;
     let json = std::str::from_utf8(&encoded).expect("serde_json emits UTF-8");
     let mut projection = Utf16JsonProjection::parse(json).map_err(projection_error)?;
-    for (pointer, code_units) in &overrides {
+    for (pointer, code_units) in message_utf16_overrides(message) {
         projection
-            .set_string_units(pointer, code_units)
+            .set_string_units(&pointer, &code_units)
             .map_err(projection_error)?;
     }
-    let output = projection.to_json_string().map_err(projection_error)?;
-    Ok(output.into_bytes())
+    Ok(projection)
+}
+
+/// Remove the private delivery identity before comparing a durable source row
+/// with its existing JSONL copy.
+pub(crate) fn payload_without_delivery_id(
+    mut payload: Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, ExactJsonError> {
+    payload
+        .remove_field("deliveryId")
+        .map_err(projection_error)?;
+    Ok(payload)
 }
 
 pub(crate) fn projection_error(error: impl Display) -> ExactJsonError {

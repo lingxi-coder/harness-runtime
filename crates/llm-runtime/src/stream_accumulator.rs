@@ -36,6 +36,7 @@ fn projected_response_model(metadata: &JsonPayload) -> Option<String> {
 enum BlockKind {
     Text,
     ToolCall {
+        initial_input: Option<JsonPayload>,
         id: String,
         name: String,
         server: Option<lingxi_llm_client::protocol::JsonPayload>,
@@ -250,7 +251,12 @@ impl BlockAccumulator {
                 }),
                 _ => None,
             },
-            BlockKind::ToolCall { id, name, server } => match content {
+            BlockKind::ToolCall {
+                id,
+                name,
+                server,
+                initial_input,
+            } => match content {
                 Some(SdkBlock::ToolUse { input, .. }) => Some(if let Some(initial) = server {
                     ContentBlock::ServerToolUse {
                         id,
@@ -263,9 +269,13 @@ impl BlockAccumulator {
                     }
                 } else {
                     ContentBlock::ToolCall {
+                        input: if self.tool_deltas.contains(&index) {
+                            input.clone()
+                        } else {
+                            initial_input.unwrap_or_else(|| input.clone())
+                        },
                         id,
                         name,
-                        input: input.clone(),
                     }
                 }),
                 _ if server.is_some() => Some(ContentBlock::ServerToolUse {
@@ -314,12 +324,16 @@ fn type_mismatch(index: u32, expected: &str, got: &str) -> LlmError {
 fn block_kind_of(block: &ContentBlock) -> BlockKind {
     match block {
         ContentBlock::Text { .. } | ContentBlock::TextJsUtf16 { .. } => BlockKind::Text,
-        ContentBlock::ToolCall { id, name, .. } => BlockKind::ToolCall {
+        ContentBlock::ToolCall {
+            id, name, input, ..
+        } => BlockKind::ToolCall {
+            initial_input: Some(input.clone()),
             id: id.clone(),
             name: name.clone(),
             server: None,
         },
         ContentBlock::ServerToolUse { id, name, input } => BlockKind::ToolCall {
+            initial_input: None,
             id: id.clone(),
             name: name.clone(),
             server: Some(input.clone()),
@@ -928,7 +942,9 @@ pub fn response_to_stream_events(resp: HistoryResponse) -> Vec<HistoryEvent> {
                     });
                 }
             }
-            ContentBlock::ToolCall { id, name, input } => {
+            ContentBlock::ToolCall {
+                id, name, input, ..
+            } => {
                 events.push(HistoryEvent::ContentBlockStart {
                     index,
                     content_block: ContentBlock::ToolCall {
@@ -1346,7 +1362,9 @@ mod tests {
         assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
         assert_eq!(resp.content.len(), 1);
         match &resp.content[0] {
-            ContentBlock::ToolCall { id, name, input } => {
+            ContentBlock::ToolCall {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "tc-1");
                 assert_eq!(name, "Read");
                 assert_eq!(input.string_at("/file_path").as_deref(), Some("foo.rs"));

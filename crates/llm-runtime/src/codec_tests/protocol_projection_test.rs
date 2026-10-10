@@ -26,6 +26,7 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
         .unwrap();
     let mut request = HistoryFixture::new("chat-model");
     request.messages.push(Message {
+        api_output_config: None,
         role: "assistant".into(),
         content: response.content,
     });
@@ -69,7 +70,7 @@ fn switching_from_responses_to_chat_keeps_answer_and_original_replay_state() {
 #[test]
 fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
     let mut request = HistoryFixture::new("chat-model");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "assistant".into(),
         content: vec![
             ContentBlock::ServerToolUse {
@@ -96,6 +97,7 @@ fn switching_away_from_anthropic_keeps_native_text_without_hosted_tool_state() {
 
 fn exact_tool_result(cache_control: Option<CacheControl>) -> ContentBlock {
     ContentBlock::ToolResult {
+        output_projection: None,
         tool_call_id: "call-1".into(),
         output: lingxi_llm_client::protocol::JsonPayload::string_from_utf16_code_units(&[
             65, 0xd83d, 10,
@@ -121,6 +123,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
         for control in [None, Some(CacheControl::Ephemeral)] {
             let mut request = HistoryFixture::new("claude-sonnet-4-6");
             request.messages.push(Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![
                     ContentBlock::ProviderContent {
@@ -136,6 +139,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
                 ],
             });
             request.messages.push(Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![
                     ContentBlock::ProviderContent {
@@ -176,6 +180,7 @@ fn tool_result_sidecars_use_exact_sdk_strings_after_replay_filtering() {
 fn tool_result_sidecars_become_display_text_on_chat_wire() {
     let mut request = HistoryFixture::new("chat-model");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".into(),
         content: vec![exact_tool_result(None)],
     });

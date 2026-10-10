@@ -208,3 +208,85 @@ test('direct agent list and spawn use the Native wrapper and current host API co
   const [exitCode] = await once(worker, 'exit');
   assert.equal(exitCode, 0);
 });
+
+test('agent.spawn hooks can clear the model and profile before reaching host core', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mods-agent-clear-route-'));
+  const modulePath = join(root, 'hooks.mjs');
+  await writeFile(modulePath, `
+    export function register(on) {
+      on('agent.spawn', ($, e, next) => {
+        const cleared = { ...e, model: null, model_profile: null };
+        return e.name === 'with-tier' ? next.to(cleared, 'core') : next(cleared);
+      });
+    }
+  `);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const workerPath = fileURLToPath(new URL('./mods_worker.mjs', import.meta.url));
+  const worker = spawn(process.execPath, ['--experimental-vm-modules', workerPath], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  t.after(() => { if (!worker.killed) worker.kill(); });
+
+  const coreInputs = [];
+  const pending = new Map();
+  const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
+  lines.on('line', line => {
+    const frame = decodeModsIpcFrame(line);
+    if (frame.kind === 'api.callers') {
+      worker.stdin.write(`${encodeModsIpcFrame({
+        id: frame.id, kind: 'api.callers.result', callId: frame.callId,
+      })}\n`);
+      return;
+    }
+    if (frame.kind === 'next') {
+      coreInputs.push(frame.input);
+      worker.stdin.write(`${encodeModsIpcFrame({
+        id: frame.id, kind: 'next.result', callId: frame.callId,
+        result: { model: 'inherited-model', agentId: 'child-id' },
+      })}\n`);
+      return;
+    }
+    if (frame.kind !== 'progress' && pending.has(frame.id)) {
+      pending.get(frame.id)(frame);
+      pending.delete(frame.id);
+    }
+  });
+  worker.once('exit', () => {
+    for (const resolve of pending.values()) resolve({ kind: 'worker.exit' });
+    pending.clear();
+  });
+  const request = (id, message) => new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`worker request ${id} timed out`));
+    }, 3_000);
+    pending.set(id, frame => { clearTimeout(timeout); resolve(frame); });
+    worker.stdin.write(`${encodeModsIpcFrame({ id, ...message })}\n`);
+  });
+
+  const loaded = await loadPrepared(request, 1, {
+    plugin: 'clear-route-plugin', storageId: 'clear-route-plugin@prepend', tier: 'prepend',
+    root, module: modulePath,
+  });
+  assert.equal(loaded.kind, 'loaded', JSON.stringify(loaded));
+
+  for (const [index, name] of ['plain', 'with-tier'].entries()) {
+    const input = {
+      tool_use_id: `tool-${index}`, prompt: 'inspect', description: 'inspect',
+      subagentType: 'general-purpose', provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'parent-model', permissionMode: 'default', background: true, fork: false,
+      name, model: 'explicit-model', model_profile: 'explicit-profile',
+    };
+    const dispatched = await request(index + 2, { kind: 'dispatch', event: 'agent.spawn', input });
+    assert.equal(dispatched.kind, 'result', JSON.stringify(dispatched));
+    assert.deepEqual(dispatched.result, { model: 'inherited-model', agentId: 'child-id' });
+    assert.equal(coreInputs.length, index + 1, 'the host core runs once per dispatch');
+    assert.deepEqual(coreInputs[index], { ...input, model: null, model_profile: null },
+      'the worker must forward the cleared route instead of falling back to the original route');
+  }
+
+  worker.stdin.end();
+  const [exitCode] = await once(worker, 'exit');
+  assert.equal(exitCode, 0);
+});

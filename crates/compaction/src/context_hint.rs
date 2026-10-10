@@ -558,6 +558,7 @@ mod tests {
         for i in 0..n {
             let id = ToolUseId::from(format!("t{i}"));
             out.push(ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
                     id: id.clone(),
@@ -572,6 +573,7 @@ mod tests {
                 resumable: None,
             });
             out.push(ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: id,

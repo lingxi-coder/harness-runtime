@@ -20,7 +20,10 @@ fn command(name: &str, origin: &str) -> SlashCommand {
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project)
         },
         kind: SlashCommandKind::Markdown {
-            file_path: PathBuf::from(format!("/repo/.lingxi/skills/{name}/SKILL.md")),
+            file_path: PathBuf::from(format!(
+                "/repo/{}/skills/{name}/SKILL.md",
+                branding::DOT_DIR
+            )),
             frontmatter: CommandFrontmatter::default(),
             prompt_template: format!("Run the {name} workflow.").into(),
         },
@@ -294,9 +297,9 @@ fn code_review_suggestion_uses_live_owned_settings_and_session_cwd() {
     assert!(provider());
 
     let next_cwd = cfg.cwd.join("next-project");
-    std::fs::create_dir_all(next_cwd.join(".lingxi")).unwrap();
+    std::fs::create_dir_all(next_cwd.join(branding::DOT_DIR)).unwrap();
     std::fs::write(
-        next_cwd.join(".lingxi/settings.json"),
+        next_cwd.join(branding::DOT_DIR).join("settings.json"),
         r#"{"includeCodeReviewSuggestion":false}"#,
     )
     .unwrap();

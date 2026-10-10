@@ -2417,7 +2417,7 @@ pub const TRANSCRIPT_OVERSIZE_BYTES: u64 = 26_214_400;
 pub const DENIAL_REASON_LIMIT: usize = 10;
 
 /// `tay` — the line marker that identifies an auto-mode denial.
-pub const DENIAL_MARKER: &str = "denied by the Claude Code auto mode classifier";
+pub const DENIAL_MARKER: &str = "denied by the auto mode classifier";
 /// `Y1d` — the line marker that identifies a Bash tool use.
 pub const BASH_TOOL_MARKER: &str = "\"Bash\"";
 
@@ -2436,7 +2436,10 @@ pub const STANDARD_CLIS: [&str; 94] = [
 /// `ray` — the denial reason inside a tool result.
 #[must_use]
 pub fn denial_reason_regex() -> regex::Regex {
-    re(r"denied by the Claude Code auto mode classifier\. Reason: ([\w][\w ,'-]{0,59})")
+    re(&format!(
+        r"{}\. Reason: ([\w][\w ,'-]{{0,59}})",
+        regex::escape(DENIAL_MARKER)
+    ))
 }
 /// URLs inside a command line.
 #[must_use]
@@ -4958,7 +4961,7 @@ mod tests {
         serde_json::json!({
             "message": { "content": [
                 { "type": "tool_result",
-                  "content": format!("denied by the Claude Code auto mode classifier. Reason: {reason}") }
+                  "content": format!("denied by the auto mode classifier. Reason: {reason}") }
             ]}
         })
         .to_string()

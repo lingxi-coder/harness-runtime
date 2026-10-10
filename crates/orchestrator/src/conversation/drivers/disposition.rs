@@ -69,6 +69,19 @@ impl ConversationOrchestrator {
         allow_budget_continuation: bool,
         tool_requested_end: bool,
     ) -> TurnEndVerdict {
+        if !tool_requested_end && stop_reason == "end_turn" {
+            {
+                let session = self.session.lock().await;
+                state.structured_output_retry.observe(&session.history);
+            }
+            if state.structured_output_retry.take_missing_tool_reminder() {
+                self.inject_meta_user_message(
+                    crate::structured_output::STRUCTURED_OUTPUT_ENFORCE_REMINDER,
+                )
+                .await;
+                return TurnEndVerdict::Continue;
+            }
+        }
         // hooks B4: fire Stop hooks BEFORE the token-budget check
         // (order: recovery → stop-hooks → token-budget).
         if tool_requested_end {

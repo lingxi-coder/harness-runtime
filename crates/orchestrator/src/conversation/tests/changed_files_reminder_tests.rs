@@ -20,6 +20,7 @@ fn orch() -> ConversationOrchestrator {
             lingxi_home: cwd.join(".lingxi"),
         },
     );
+
     orch_with_gate(
         cwd,
         Arc::new(permission::PolicyPermissionGate::new(
@@ -170,6 +171,7 @@ async fn registered_read_suppresses_token_truncated_text_and_refreshes_state() {
     let entry = state
         .peek(&key)
         .expect("actual Read updates token-capped state");
+
     assert!(entry.is_partial_view);
     assert!(entry.content.len() < fresh.len());
 }
@@ -206,6 +208,7 @@ async fn registered_read_suppresses_notebook_result_after_native_read_side_effec
     let entry = state
         .peek(&key)
         .expect("Notebook Read refreshes shared state");
+
     assert_ne!(entry.content, "old notebook content");
     assert!(entry.content.contains("2+2"));
 }
@@ -224,6 +227,7 @@ async fn cancelled_actual_read_aborts_before_state_refresh_and_reminder_output()
         .tools
         .find_registered("Read")
         .expect("registered built-in Read");
+
     let mut call_context = crate::turn_loop::streaming_tool_context_base(&orch, vec![]).await;
     call_context.cancel = Some(cancel.clone());
     let (progress_tx, _progress_rx) = tool_api::progress_channel();
@@ -240,6 +244,7 @@ async fn cancelled_actual_read_aborts_before_state_refresh_and_reminder_output()
         .changed_files_reminder_messages(Some(&cancel))
         .await
         .is_empty());
+
     let state = orch.prompt_runtime.read_state_map.lock().unwrap();
     assert_eq!(state.peek(&path).unwrap().content, "old content\n");
 }
@@ -268,6 +273,7 @@ async fn actual_read_image_result_is_carried_typed_but_default_native_renderer_i
         .tools
         .find_registered("Read")
         .expect("registered built-in Read");
+
     let call_context = crate::turn_loop::streaming_tool_context_base(&orch, vec![]).await;
     let (progress_tx, _progress_rx) = tool_api::progress_channel();
     let result = read
@@ -280,6 +286,7 @@ async fn actual_read_image_result_is_carried_typed_but_default_native_renderer_i
     match result {
         Ok(result) => {
             assert_eq!(result.data.string_at("/type"), Some("image"));
+
             let changed = crate::prompt::changed_files::ChangedFile::from_read_result(
                 path.to_string_lossy().into_owned(),
                 &result.data,
@@ -290,6 +297,7 @@ async fn actual_read_image_result_is_carried_typed_but_default_native_renderer_i
                 crate::prompt::changed_files::render_changed_file_message(&changed, "Read")
                     .is_none()
             );
+
             // The current 2.1.291 default renderer maps this variant to [].
             assert!(orch.changed_files_reminder_messages(None).await.is_empty());
         }
@@ -511,6 +519,7 @@ async fn reminder_refresh_does_not_create_a_canonical_route_after_alias_disappea
         1,
         "the live alias route reaches the changed target"
     );
+
     assert_eq!(
         tool_api::read_file_state::get(&orch.prompt_runtime.read_state_map, &cache_key)
             .unwrap()
@@ -570,6 +579,7 @@ async fn absolute_route_parent_above_root_matches_the_clamped_target() {
         }))
         .expect("test permission update is valid JSON"),
     ]);
+
     let orch = orch_with_gate(dir.path().to_path_buf(), gate);
     tool_api::read_file_state::set_with_requested_path(
         &orch.prompt_runtime.read_state_map,
@@ -822,6 +832,7 @@ async fn native_reminder_route_set_accepts_31_leaf_links_and_rejects_32() {
     };
     let policy =
         permission::PermissionPolicy::new(permission::PermissionMode::Default).with_roots(roots);
+
     let gate = Arc::new(permission::PolicyPermissionGate::new(
         Arc::new(policy),
         Arc::new(NoOpPermissionGate),
@@ -915,6 +926,7 @@ async fn cancelled_changed_file_route_resolution_has_no_cache_side_effect() {
         .changed_files_reminder_messages(Some(&cancel))
         .await
         .is_empty());
+
     assert_eq!(
         tool_api::read_file_state::get(&orch.prompt_runtime.read_state_map, &key)
             .unwrap()
@@ -1039,6 +1051,7 @@ async fn rendered_memory_seed_retains_prompt_route_and_can_emit_changed_file_not
 
     orch.seed_memory_read_state(std::slice::from_ref(&memory))
         .await;
+
     let key = crate::turn_loop::normalize_lexically(&path);
     {
         let mut state = orch.prompt_runtime.read_state_map.lock().unwrap();
@@ -1121,6 +1134,7 @@ async fn unrendered_memory_seed_retains_native_route_for_changed_file_checks() {
 
     orch.seed_memory_read_state(std::slice::from_ref(&memory))
         .await;
+
     let key = crate::turn_loop::normalize_lexically(&path);
     {
         let state = orch.prompt_runtime.read_state_map.lock().unwrap();
@@ -1141,6 +1155,7 @@ async fn unrendered_memory_seed_retains_native_route_for_changed_file_checks() {
         1,
         "the live non-rendered seed is a Native candidate"
     );
+
     assert!(reminders[0].text_content().contains("changed after seed"));
 }
 
@@ -1181,6 +1196,7 @@ async fn partial_reads_skip_but_frontmatter_memory_uses_raw_disk_content() {
     };
     orch.seed_memory_read_state(std::slice::from_ref(&memory))
         .await;
+
     let key = crate::turn_loop::normalize_lexically(&memory_path);
     {
         let mut state = orch.prompt_runtime.read_state_map.lock().unwrap();
@@ -1193,6 +1209,7 @@ async fn partial_reads_skip_but_frontmatter_memory_uses_raw_disk_content() {
             entry.content, old_raw,
             "changed-file diff uses exact raw disk bytes"
         );
+
         entry.mtime_ms = 0;
         state.set_with_requested_path(key, entry, false, None);
     }
@@ -1203,6 +1220,7 @@ async fn partial_reads_skip_but_frontmatter_memory_uses_raw_disk_content() {
         1,
         "the partial Read entry stays filtered, but full raw memory remains eligible"
     );
+
     assert!(reminders[0].text_content().contains("new body"));
 }
 
@@ -1247,6 +1265,7 @@ async fn host_seed_records_its_current_route_and_can_emit_changed_file_notice() 
         orch.seed_read_state_from_host(requested.to_str().unwrap(), host_mtime_ms)
             .await
     );
+
     // The host seed follows Native Ke(path.resolve): an above-root parent is
     // clamped, and the resulting absolute lexical route is BOTH cache key and
     // captured source. It does not resolve symlinks to realpath.

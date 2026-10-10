@@ -128,6 +128,7 @@ fn user_text_message_encodes_input_text_message_item() {
 fn assistant_text_message_encodes_output_text_parts() {
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "assistant".to_string(),
         content: vec![ContentBlock::Text {
             text: "answer".to_string(),
@@ -152,6 +153,7 @@ fn assistant_text_message_encodes_output_text_parts() {
 fn tool_call_block_encodes_top_level_function_call_item() {
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "assistant".to_string(),
         content: vec![
             ContentBlock::Text {
@@ -160,6 +162,7 @@ fn tool_call_block_encodes_top_level_function_call_item() {
                 citations: None,
             },
             ContentBlock::ToolCall {
+                input_projection: None,
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
                 input: super::json_payload(serde_json::json!({"command": "ls"})),
@@ -196,8 +199,10 @@ fn tool_call_block_encodes_top_level_function_call_item() {
 fn tool_result_block_encodes_function_call_output_item() {
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
+            output_projection: None,
             tool_call_id: "call_1".to_string(),
             output: super::json_payload(serde_json::json!("done")),
             is_error: Some(false),
@@ -222,8 +227,10 @@ fn tool_result_block_encodes_function_call_output_item() {
 fn tool_result_non_string_output_is_stringified() {
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
+            output_projection: None,
             tool_call_id: "call_2".to_string(),
             output: super::json_payload(serde_json::json!({"exit_code": 0})),
             is_error: Some(false),
@@ -247,6 +254,7 @@ fn image_bytes_encode_input_image_data_uri() {
     let bytes = vec![1u8, 2, 3];
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::Image {
             media_type: "image/png".to_string(),
@@ -274,6 +282,7 @@ fn image_bytes_encode_input_image_data_uri() {
 fn image_url_encodes_input_image_url() {
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
             url: "https://example.com/img.png".to_string(),
@@ -296,6 +305,7 @@ fn document_encodes_input_file_data_uri() {
     let pdf_bytes = vec![0x25u8, 0x50, 0x44, 0x46]; // %PDF
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::Document {
             media_type: "application/pdf".to_string(),
@@ -320,6 +330,7 @@ fn document_encodes_input_file_data_uri() {
 fn mixed_text_and_image_stay_one_message_item_in_order() {
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![
             ContentBlock::Text {
@@ -716,6 +727,7 @@ fn reasoning_history_blocks_are_skipped_not_rejected() {
         request.messages.insert(
             0,
             Message {
+                api_output_config: None,
                 role: "assistant".to_string(),
                 content: vec![block],
             },
@@ -759,6 +771,7 @@ fn foreign_server_generated_blocks_are_omitted_from_replay() {
         request.messages.insert(
             0,
             Message {
+                api_output_config: None,
                 role: "assistant".to_string(),
                 content: vec![block],
             },
@@ -893,6 +906,7 @@ fn decode_response_function_call_becomes_tool_call_with_parsed_arguments() {
     assert_eq!(
         decoded.content,
         vec![ContentBlock::ToolCall {
+            input_projection: None,
             id: "call_7".to_string(),
             name: "Bash".to_string(),
             input: super::json_payload(serde_json::json!({"command": "ls"})),
@@ -944,6 +958,7 @@ fn native_reasoning_and_display_summary_are_both_preserved() {
     assert_eq!(texts, vec!["first", "second"]);
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "assistant".into(),
         content: response.content,
     });
@@ -1023,6 +1038,7 @@ fn decode_response_preserves_output_item_order() {
                 citations: None
             },
             ContentBlock::ToolCall {
+                input_projection: None,
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
                 input: super::json_payload(serde_json::json!({})),
@@ -1396,6 +1412,7 @@ fn stream_function_call_added_starts_tool_block_with_empty_input() {
         HistoryEvent::ContentBlockStart {
             index: 0,
             content_block: ContentBlock::ToolCall {
+                input_projection: None,
                 id: "call_1".to_string(),
                 name: "Bash".to_string(),
                 input: super::json_payload(serde_json::Value::Object(serde_json::Map::new())),
@@ -2166,6 +2183,7 @@ fn stream_happy_path_exact_event_sequence() {
             HistoryEvent::ContentBlockStart {
                 index: 1,
                 content_block: ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "call_1".to_string(),
                     name: "Bash".to_string(),
                     input: super::json_payload(serde_json::Value::Object(serde_json::Map::new())),
@@ -2237,6 +2255,7 @@ async fn native_reasoning_received_at_completion_keeps_its_replay_position() {
     .unwrap();
     let mut request = HistoryFixture::new("gpt-5");
     request.messages.push(Message {
+        api_output_config: None,
         role: "assistant".into(),
         content: response.content,
     });

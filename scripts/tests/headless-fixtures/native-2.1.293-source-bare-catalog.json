@@ -1,0 +1,14 @@
+{
+  "version": "2.1.293",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "scope": "Native bare built-in catalog assembly before user tool selection; normal MCP partition remains separate. Coordinator/REPL branches need independent runtime coverage.",
+  "excerpts": [
+    {
+      "id": "simple_builtin_catalog",
+      "offset": 200332000,
+      "length": 995,
+      "sha256": "abb63ea79fbdbd4c58b67dd5e8d7c3a6363afd8bc4acf79fce18e9c4a2931bff",
+      "source": "var LM=(e,r)=>{if(a.CLAUDE_CODE_SIMPLE&&!r?.skipSimpleModeFilter){let b=Jr();if(b!==null&&HN()&&!r?.skipReplFilter){let O=IA()||e.restricted===!0&&Bo(e,b)!==null?[ub,lb,Aw]:[b,lb,Aw];if(me!==null&&b1())O.push(me);if(Xe.isCoordinatorMode())O.push(xDt,We,vt(),...zm()?[Rt]:[]);return t5(O,e)}let w=It(),E=[...hl()?[hi]:[],...w?[w]:[],ub,lb];if(Xe.isCoordinatorMode())E.push(xDt,We,vt(),...zm()?[Rt]:[]);return t5(E,e)}let n=new Set([U0.name,B0.name,EW.name,ia]),s=kk().filter((b)=>!n.has(b.name)),p=t5(s,e),g=p.some((b)=>Dt(b,Fe))&&hi.isEnabled(),h=!1;if(HN()&&!r?.skipReplFilter){if(p.some((w)=>Dt(w,Gc)))p=p.filter((w)=>!Xb(w,iKt)),h=!0}if(!r?.skipReplFilter&&k_t(p,e,{activeAgents:r?.activeAgents}))p=p.filter((b)=>!Dt(b,pr));let k=p.map((b)=>b.isEnabled()),T=p.filter((b,w)=>k[w]);if(Nv()&&!g&&!h){let b=t5([dP,uP,...lTn([uP.name,dP.name])].filter((w)=>!T.includes(w)),e);T=[...T,...b]}if((_3o()||N2e())&&!Sq(T)&&!T.some((b)=>Dt(b,cl))&&!T.some((b)=>Dt(b,vO)))T=[...T,...t5([Dqr],e)];return T}"
+    }
+  ]
+}

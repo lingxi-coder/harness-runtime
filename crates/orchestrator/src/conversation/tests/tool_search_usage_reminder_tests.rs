@@ -146,6 +146,7 @@ async fn orch(reg: ToolRegistry, assistant_turns: usize) -> ConversationOrchestr
         for _ in 0..assistant_turns {
             s.history
                 .push(lingxi_core::types::ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: MessageId::new(),
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "ok".into(),

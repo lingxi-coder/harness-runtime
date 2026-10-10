@@ -348,6 +348,7 @@ pub(crate) struct HistoryFixture {
 impl HistoryFixture {
     pub fn with_user_text(mut self, text: impl Into<String>) -> Self {
         self.messages.push(Message {
+            api_output_config: None,
             role: "user".into(),
             content: vec![ContentBlock::Text {
                 text: text.into(),

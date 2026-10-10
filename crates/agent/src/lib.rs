@@ -66,8 +66,7 @@ pub use builtins::{
 };
 pub use catalog::{
     load_agents_from_dirs, parse_agent_from_json, parse_agent_markdown,
-    parse_agents_from_flag_json, parse_agents_from_flag_json_checked, parse_agents_from_json,
-    AgentLoadError,
+    parse_agents_from_flag_json_checked, parse_agents_from_json, AgentLoadError,
 };
 pub use color_manager::AgentColorManager;
 pub use context::SubagentContext;
@@ -79,13 +78,8 @@ pub use handle::{
     DefaultModelSelectionProvider, PoolSubagentSpawner, RuntimeLink, StreamingSubagentSpawner,
 };
 pub use mod_agent_offer::{filter_agent_offer_candidates, AgentOfferContext};
-// `agent_listing_delta` shared surface: the ONE `formatAgentLine` and the
-// `shouldInjectAgentListInMessages` gate live in the leaf `platform-api` crate (so
-// `tool-agent` can reach them without depending on this engine crate); re-export
-// them here under the `agent::` path the orchestrator + callers use.
-pub use lingxi_core::host::subagent_spawn::{
-    format_agent_line, should_inject_agent_list_in_messages,
-};
+// Shared renderer for the current per-turn agent catalog reminder.
+pub use lingxi_core::host::subagent_spawn::format_agent_line;
 // Fork-subagent helpers live in the leaf `platform-api` crate (reachable by both
 // `tool-agent` and `agent`); re-export under `agent::` for ergonomic access.
 pub use lingxi_core::host::fork_subagent::{
@@ -94,9 +88,10 @@ pub use lingxi_core::host::fork_subagent::{
 };
 pub use mcp_servers::agent_mcp_specs_to_scoped_configs;
 pub use model_resolution::{
-    resolve_agent_model, resolve_agent_model_with_context, resolve_user_specified_model,
-    FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionContextProvider,
-    ModelResolutionError, ModelRouteFacts,
+    resolve_agent_model, resolve_agent_model_with_context, resolve_skill_model_selection,
+    resolve_user_model_selection, resolve_user_specified_model, FamilyModelDefaults,
+    ModelProviderKind, ModelResolutionContext, ModelResolutionContextProvider,
+    ModelResolutionError, ModelRouteFacts, ResolvedModelSelection,
 };
 pub use observer::{
     propagation_for_spawn, validate_observer_graph, ObserverPropagation, ObserverValidationError,

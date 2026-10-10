@@ -1,25 +1,24 @@
 use super::*;
-use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
-
-// Only generated fixture literals enter this constructor; source payloads stay
-// in their existing carrier throughout persistence and assertions.
-macro_rules! source_fixture {
-    ($($tokens:tt)*) => {
-        Utf16JsonProjection::from_serde_value(&serde_json::json!($($tokens)*)).unwrap()
-    };
-}
 use crate::test_support::{
     noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use crate::OrchestratorConfig;
 use hooks::attachment::HookPublicationGuard;
 use lingxi_core::host::OrchestratorHandle;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::SessionId;
 use platform_posix::fs::PosixFileSystem;
 use session::jsonl::schema::JsonlMessage;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
 use uuid::Uuid;
+
+fn source_payload(message: JsonlMessage) -> Utf16JsonProjection {
+    let bytes = session::jsonl::exact_json::native_message_bytes(&message)
+        .expect("typed JSONL message serializes");
+    let source = std::str::from_utf8(&bytes).expect("native JSONL bytes are UTF-8");
+    Utf16JsonProjection::parse(source).expect("typed JSONL message is valid source JSON")
+}
 
 struct BlockingSessionAppendLog {
     started: Arc<tokio::sync::Notify>,
@@ -134,16 +133,15 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
     );
     let tool_use_id = lingxi_core::types::ToolUseId::from("toolu_interleaved");
     let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: tool_use_id.clone(),
             name: "Read".into(),
-            input: source_fixture!({"file_path":"fixture.txt"}),
+            input: serde_json::json!({"file_path":"fixture.txt"}),
             provider_id: None,
         }],
         stop_reason: Some("tool_use".into()),
-
-        resumable: None,
     };
     orch.session.lock().await.history.push(assistant.clone());
 
@@ -215,10 +213,11 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
     );
 
     let tool_result = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id,
-            content: crate::tool_result_text::root_text("ok"),
+            content: "ok".into(),
             is_error: None,
             provider_tool_use_id: None,
             content_blocks: None,
@@ -249,6 +248,7 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
         Arc::new(tokio::sync::Mutex::new(())),
     );
     let stale_assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "stale answer".into(),
@@ -351,6 +351,7 @@ async fn manual_compaction_owns_snapshot_and_commit_before_queued_fusion() {
             ConversationMessage::user(message_id, text)
         } else {
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: message_id,
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text,
@@ -366,15 +367,8 @@ async fn manual_compaction_owns_snapshot_and_commit_before_queued_fusion() {
     }
     let fusion =
         ConversationMessage::user_meta(lingxi_core::types::MessageId::new(), "fusion".into());
-    let payload = serde_json::to_value(orch.to_jsonl_message(
-        &fusion,
-        &id.to_string(),
-        None,
-        None,
-        None,
-        None,
-    ))
-    .unwrap();
+    let payload =
+        source_payload(orch.to_jsonl_message(&fusion, &id.to_string(), None, None, None, None));
     let append = orch.append_fusion_transcript(writer.as_ref(), id, "delivery", payload);
     tokio::pin!(append);
     assert!(futures::poll!(append.as_mut()).is_pending());
@@ -444,6 +438,7 @@ async fn external_history_and_fusion_share_chain_ownership_in_both_orders() {
                 ConversationMessage::user(external_id, "<bash-stdout>result</bash-stdout>".into())
             } else {
                 ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: external_id,
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "SDK history".into(),
@@ -458,15 +453,14 @@ async fn external_history_and_fusion_share_chain_ownership_in_both_orders() {
                 lingxi_core::types::MessageId::new(),
                 "fusion".into(),
             );
-            let payload = serde_json::to_value(orch.to_jsonl_message(
+            let payload = source_payload(orch.to_jsonl_message(
                 &fusion,
                 &id.to_string(),
                 None,
                 None,
                 None,
                 None,
-            ))
-            .unwrap();
+            ));
             // Poll both real entrypoints while the chain gate is held, fixing
             // their FIFO order without sleeps or a fake persistence layer.
             let owner = orch.turn_gate.lock().await;
@@ -560,15 +554,8 @@ async fn check_fusion_unacknowledged_resume_chain(foreground_before_retry: bool)
     orch.persist_message_to_jsonl(&first).await;
     let fusion =
         ConversationMessage::user_meta(lingxi_core::types::MessageId::new(), "fusion".into());
-    let payload = serde_json::to_value(orch.to_jsonl_message(
-        &fusion,
-        &id.to_string(),
-        None,
-        None,
-        None,
-        None,
-    ))
-    .unwrap();
+    let payload =
+        source_payload(orch.to_jsonl_message(&fusion, &id.to_string(), None, None, None, None));
     let fusion_uuid = fusion.id().as_uuid().to_string();
     let cursor = orch.transcript.last_jsonl_uuid.lock().await.clone();
     {
@@ -683,15 +670,14 @@ async fn fusion_append_waits_for_foreground_and_never_rewinds_a_newer_parent() {
     let fusion_id = lingxi_core::types::MessageId::new();
     let fusion_uuid = fusion_id.as_uuid().to_string();
     let fusion_message = ConversationMessage::user_meta(fusion_id, "fusion".into());
-    let payload = serde_json::to_value(orch.to_jsonl_message(
+    let payload = source_payload(orch.to_jsonl_message(
         &fusion_message,
         &id.to_string(),
         None,
         None,
         None,
         None,
-    ))
-    .unwrap();
+    ));
     let append = orch.append_fusion_transcript(writer.as_ref(), id, "delivery", payload.clone());
     tokio::pin!(append);
     tokio::select! { biased;
@@ -699,6 +685,7 @@ async fn fusion_append_waits_for_foreground_and_never_rewinds_a_newer_parent() {
         () = tokio::task::yield_now() => {}
     }
     let answer = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "foreground answer".into(),
@@ -772,7 +759,11 @@ async fn fusion_append_waits_for_foreground_and_never_rewinds_a_newer_parent() {
             writer.as_ref(),
             other,
             "other-delivery",
-            serde_json::json!({"uuid":other_uuid,"text":"off-session"})
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({
+                "uuid": other_uuid,
+                "text": "off-session"
+            }))
+            .unwrap()
         )
         .await
         .unwrap(),
@@ -953,6 +944,7 @@ async fn tool_result_parents_to_explicit_assistant_uuid() {
 
     // Persist an assistant message first (linear chain — no override).
     let asst_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "I will call a tool".into(),
@@ -1019,6 +1011,7 @@ async fn override_bypasses_last_jsonl_uuid_chain() {
 
     // 2. Persist an assistant message (no override → chains off user).
     let asst_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "ok calling tool".into(),
@@ -1148,6 +1141,7 @@ async fn denied_tool_result_line_carries_tool_denial_kind() {
     orch.record_tool_denial_kind(&tuid, "permission-rule").await;
 
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1199,6 +1193,7 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
     let tuid = lingxi_core::types::ToolUseId::new();
     // 1. The assistant line owning this tool_use.
     let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: tuid.clone(),
@@ -1226,6 +1221,7 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
     .await;
 
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1284,6 +1280,7 @@ async fn error_tool_result_persists_the_bare_error_string() {
         .await;
 
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1330,6 +1327,7 @@ async fn mcp_result_line_carries_mcp_meta_as_a_top_level_sibling() {
         .await;
 
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1383,6 +1381,7 @@ async fn mcp_end_turn_result_persists_only_mcp_meta() {
     .await;
 
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1431,6 +1430,7 @@ async fn native_end_turn_result_persists_tool_ends_turn() {
     .await;
 
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid,
@@ -1523,6 +1523,7 @@ async fn two_tool_results_in_one_user_message_get_no_head_keys() {
         content_blocks: None,
     };
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![mk(a), mk(b)],
         is_meta: false,
@@ -1548,6 +1549,7 @@ async fn allowed_tool_result_line_has_no_denial_kind() {
     let orch = orch_with_writer(dir.path(), session_path.clone());
 
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: lingxi_core::types::ToolUseId::new(),
@@ -1620,6 +1622,7 @@ async fn assistant_row_identity_reports_per_block_jsonl_uuid_not_message_id() {
     let (orch, output) = orch_with_writer_and_output(dir.path(), session_path.clone());
     let message_id = lingxi_core::types::MessageId::new();
     let message = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: message_id,
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "live answer".into(),
@@ -1677,6 +1680,7 @@ async fn assistant_envelope_carries_full_betamessage_shape() {
     let dir = tempfile::tempdir().expect("tempdir");
     let orch = orch_with_writer(dir.path(), dir.path().join("s.jsonl"));
     let msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "hi".into(),
@@ -1921,6 +1925,7 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
     let dir = tempfile::tempdir().expect("tempdir");
     let orch = orch_with_writer(dir.path(), dir.path().join("s.jsonl"));
     let msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "API Error: boom".into(),
@@ -2288,6 +2293,7 @@ fn classified_envelope_stamps_jsonl_top_level_fields() {
     let dir = tempfile::tempdir().expect("tempdir");
     let orch = orch_with_writer(dir.path(), dir.path().join("s.jsonl"));
     let msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "invalid request: bad".into(),
@@ -2426,6 +2432,7 @@ async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_repare
 
     let assistant_id = lingxi_core::types::MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![
             lingxi_core::types::ContentBlock::Text {
@@ -2532,6 +2539,7 @@ async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_repare
 
     // Persist a tool_result for A and for B; each must parent to ITS line.
     let tr_a = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: id_a.clone(),
@@ -2551,6 +2559,7 @@ async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_repare
     orch.persist_message_to_jsonl_with_parent(&tr_a, Some(a_uuid.clone()))
         .await;
     let tr_b = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: id_b.clone(),
@@ -2612,6 +2621,7 @@ async fn stitched_stream_rows_keep_provider_identity_and_supersedes_order() {
     let tool_use_id = lingxi_core::types::ToolUseId::from("toolu_stitched");
     let mut rows = vec![
         crate::streaming_loop::CompletedAssistantRow {
+            per_turn_effort: None,
             stream_order: 4,
             row_id: text_row_id,
             provider_message_id: "provider-message-7".into(),
@@ -2633,6 +2643,7 @@ async fn stitched_stream_rows_keep_provider_identity_and_supersedes_order() {
             supersedes_row_ids: vec![old_text_id, old_metadata_id],
         },
         crate::streaming_loop::CompletedAssistantRow {
+            per_turn_effort: None,
             stream_order: 5,
             row_id: tool_row_id,
             provider_message_id: "provider-message-7".into(),
@@ -2720,6 +2731,7 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
     let orch = orch_with_writer(dir.path(), session_path.clone());
     let parent_id = lingxi_core::types::MessageId::new();
     orch.persist_message_to_jsonl(&ConversationMessage::User {
+        api_message_override: None,
         id: parent_id,
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "prompt".into(),
@@ -2739,6 +2751,7 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
     let row_uuid = row_id.as_uuid().to_string();
     let parent_uuid = parent_id.as_uuid().to_string();
     let mut row = crate::streaming_loop::CompletedAssistantRow {
+        per_turn_effort: None,
         stream_order: 0,
         row_id,
         provider_message_id: "provider-response-1".into(),
@@ -2795,6 +2808,7 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
     let tool_row_id = lingxi_core::types::MessageId::new();
     let tool_row_uuid = tool_row_id.as_uuid().to_string();
     let mut tool_row = crate::streaming_loop::CompletedAssistantRow {
+        per_turn_effort: None,
         stream_order: 1,
         row_id: tool_row_id,
         provider_message_id: "provider-response-1".into(),
@@ -2960,6 +2974,7 @@ async fn completed_row_mod_content_rewrite_preserves_response_envelope() {
         explanation: Some("source response details".into()),
     };
     let mut row = crate::streaming_loop::CompletedAssistantRow {
+        per_turn_effort: None,
         stream_order: 0,
         row_id,
         provider_message_id: "physical-provider-message".into(),
@@ -3117,10 +3132,11 @@ async fn preappended_stream_result_keeps_raw_query_history_and_dispatches_append
         .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)));
     let tool_use_id = lingxi_core::types::ToolUseId::new();
     let raw = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id,
-            content: crate::tool_result_text::root_text("physical result"),
+            content: "physical result".into(),
             is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
@@ -3314,6 +3330,7 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
         },
     ];
     let msg_1 = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: content.clone(),
         stop_reason: Some("tool_use".into()),
@@ -3321,6 +3338,7 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
         resumable: None,
     };
     let msg_2 = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content,
         stop_reason: Some("tool_use".into()),
@@ -3335,6 +3353,7 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
         .persist_assistant_per_block(&msg_2, None, None, None)
         .await;
     let msg_3 = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![
             lingxi_core::types::ContentBlock::Text {
@@ -3379,6 +3398,7 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
         serde_json::json!({ "nested": { "a": 1, "b": 2 } }),
     );
     let msg_4 = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::from("toolu_ordered"),
@@ -3392,6 +3412,7 @@ async fn assistant_per_block_uuids_are_deterministic_for_identical_inputs() {
         resumable: None,
     };
     let msg_5 = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::from("toolu_ordered"),
@@ -3482,6 +3503,7 @@ async fn merged_assistant_persists_model_profile_for_resume() {
     let session = orch.session();
     session.lock().await.model_profile = Some("openrouter".to_string());
     let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "done".to_string(),
@@ -3514,6 +3536,7 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
     let mcp_id = lingxi_core::types::ToolUseId::new();
     let native_id = lingxi_core::types::ToolUseId::new();
     let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![
             lingxi_core::types::ContentBlock::ToolUse {
@@ -3559,6 +3582,7 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
 
     for (id, text) in [(&mcp_id, "mcp"), (&native_id, "native")] {
         let result = ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
@@ -3616,6 +3640,7 @@ async fn scheduled_persistence_keeps_actual_settings_separate_from_session_defau
             state.model_profile = Some("anthropic".into());
         }
         let assistant = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "actual result".into(),

@@ -9,6 +9,68 @@ evidence is reusable only for the exact behavior/source it covered; old
 `Missing`/`Partial` labels are not current findings. Versions after 2.1.295
 are explicitly out of scope.
 
+## Resume checkpoint — 2026-10-09
+
+The user explicitly resumed the remaining task. Target remains frozen at
+2.1.295. SDK HEAD is unchanged and clean. Harness and Product are still in
+the pending merges recorded below. Local main has subsequently advanced to
+Harness `2d20d75cd8be030bb043461fe90a10264800d778` and Product
+`20c7801275dfbf468c61b4708f52cfe5997b227d`; these additional changes have not
+yet been integrated or tested. Finish the current merge, integrate that
+bounded main delta, and validate the resulting candidate before claiming
+acceptance. The seven Tasks diagnostics and five Skill/Mock MCP diagnostics were repaired,
+then the 162 Orchestrator diagnostics were closed. The complete production
+workspace check passed (exit 0, zero compiler errors) against the current
+pending merge, reaching runtime, client, configuration-admin and bridge:
+`/private/tmp/claude-alignment-harness-production-check-after-observer-ready20261009.jsonl`.
+The final rerun after both warning repairs also passed (exit 0, zero errors):
+`/private/tmp/claude-alignment-harness-production-check-final-current-merge20261009.jsonl`.
+Deferred replay now propagates model-resolution failure and a duplicate client
+match arm is removed; neither targeted warning remains. Other existing warnings
+remain and the full lint/test gates have not been run.
+No tests or Native replay were run in this compile repair batch. The later
+frozen main delta and final Product dependency closure remain outstanding.
+Diagnostic/ownership records: `acceptance/compiler-errors-orchestrator-20261009.json`
+and `acceptance/orchestrator-repair-owners-20261009.json` in the integration parent.
+Authoritative resume inventory: `acceptance/resume-state-20261009.json` in
+the integration parent directory. Historical test receipts below remain
+scoped to their recorded source and environment.
+
+## Main-merge pause snapshot — 2026-10-08
+
+The user requested a pause after this integration round. Current repository
+states are Harness `84bc9674f447ce8b06844557c0c976a14fac0ba8` (main merge and
+working-tree integration still in progress), SDK
+`4a54a1de338ee3b5a95c03b5b3800b6fc73543d2` (committed), and Product
+`dbac260f743b212efba5752c2af08f06284b0b45` (main merge and working-tree
+integration still in progress). No final three-repository pin or acceptance
+claim is made here.
+
+The latest Harness production command was `cargo check --locked --offline -j 4
+--message-format=json --workspace --keep-going`, run with the approved build
+environment and elevated filesystem access. It exited 101; the saved complete
+diagnostic log is
+`/private/tmp/claude-alignment-harness-production-check-final-pause-20261008.jsonl`.
+It reported seven compiler errors in `tasks`: duplicate `send_peer`, duplicate
+agent-statistics/token methods, one missing `api_message_override`, and one
+duplicate `agent_spawn_token`. This production check did not compile or run
+tests. The blocked `tasks` crate prevents claiming that the rest of the
+workspace, downstream Product, or runtime acceptance is complete.
+
+Current focused checks on the merged source include SDK lib tests 525/525
+(`.jsonl` log `/private/tmp/claude-alignment-llm-client-lib-final2-20261008.jsonl`),
+SDK `tool_input_json` 23/23 and `anthropic_message_controls` 14/14 (their
+results are in the task transcript; no separate logs were saved), Harness
+`session --lib` (`/private/tmp/claude-alignment-session-check-final-20261008.jsonl`),
+`permission --lib` (`/private/tmp/claude-alignment-permission-check-20261008.jsonl`),
+`jsonrpc` (`/private/tmp/claude-alignment-jsonrpc-check-20261008.jsonl`), and
+`mcp`/`tool-api` production checks
+(`/private/tmp/claude-alignment-mcp-tool-api-check-20261008.jsonl`). These
+scoped passes do not replace the blocked workspace check or integration tests.
+Unless a row below explicitly identifies a run after the main merge, its prior
+pass/failure status is historical evidence for the older source checkpoint and
+must not be read as a result for this working tree.
+
 Final Native target: Claude Code 2.1.295; set `CLAUDE_NATIVE_BINARY` to the
 frozen executable when collecting final-target evidence.
 Path: `/Users/luolingfeng/.local/share/claude/versions/2.1.295`

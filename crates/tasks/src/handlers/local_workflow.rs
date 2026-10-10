@@ -1425,7 +1425,7 @@ impl SubagentSpawner for WorkflowIsolationSpawner {
 
 /// The env var that raises or lowers the workflow's in-flight `agent()` gate
 /// for one run, above (or below) the CPU-derived default.
-const WORKFLOW_MAX_CONCURRENT_AGENTS_ENV: &str = "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS";
+const WORKFLOW_MAX_CONCURRENT_AGENTS_ENV: &str = branding::WORKFLOW_MAX_CONCURRENT_AGENTS_ENV;
 
 /// claude-code's DEFAULT concurrency cap for in-flight `agent()` calls —
 /// `lr(ir())` where `function lr(e){return Math.min(16,Math.max(2,e-2))}`
@@ -1646,6 +1646,7 @@ fn make_request(
 
     SubagentSpawnRequest {
         agent_spawn_token: None,
+        stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
         handback_opt_in: false,
         parent_permission_mode: None,
         handback_enabled: None,
@@ -1700,6 +1701,7 @@ fn make_request(
         origin_session_id: None,
         // Workflow-spawned agents are top-level ⇒ the spawner's default anchors.
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,

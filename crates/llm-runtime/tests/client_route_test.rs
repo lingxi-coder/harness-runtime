@@ -290,11 +290,9 @@ async fn fast_speed_is_removed_for_models_without_the_registry_capability() {
     let mut request = LlmRequest::new("claude-sonnet-5");
     request.set_speed(Some("fast".to_string())).unwrap();
     let prepared = client.prepare(&request).await.unwrap();
-    assert!(
-        json_payload_value(&prepared.provider_request.body_json)
-            .get("speed")
-            .is_none()
-    );
+    assert!(json_payload_value(&prepared.provider_request.body_json)
+        .get("speed")
+        .is_none());
 }
 
 #[tokio::test]
@@ -489,6 +487,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
         &mut resumed,
         &[
             llm_runtime::Message {
+                api_output_config: None,
                 role: "assistant".to_string(),
                 content: vec![
                     llm_runtime::ContentBlock::Reasoning {
@@ -503,6 +502,7 @@ async fn reasoning_is_dropped_for_a_non_reasoning_model_not_hard_failed() {
                 ],
             },
             llm_runtime::Message {
+                api_output_config: None,
                 role: "user".to_string(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "thanks".to_string(),
@@ -575,6 +575,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
     assign_history(
         &mut image_request,
         &[llm_runtime::Message {
+            api_output_config: None,
             role: "user".to_string(),
             content: vec![
                 llm_runtime::ContentBlock::Text {
@@ -607,6 +608,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
         &mut history_request,
         &[
             llm_runtime::Message {
+                api_output_config: None,
                 role: "user".to_string(),
                 content: vec![
                     llm_runtime::ContentBlock::Text {
@@ -621,6 +623,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
                 ],
             },
             llm_runtime::Message {
+                api_output_config: None,
                 role: "assistant".to_string(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "i see a photo".to_string(),
@@ -629,6 +632,7 @@ async fn vision_image_blocks_are_not_silently_dropped_for_non_vision_model() {
                 }],
             },
             llm_runtime::Message {
+                api_output_config: None,
                 role: "user".to_string(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "ok what else".to_string(),
@@ -1064,11 +1068,9 @@ async fn native_hook_prompt_keeps_exact_input_until_sdk_final_serialization() {
         vec![0xd800]
     );
     let ordinary_wire = ordinary.provider_request.wire_body_bytes().unwrap();
-    assert!(
-        String::from_utf8(ordinary_wire)
-            .unwrap()
-            .contains("\\ud800")
-    );
+    assert!(String::from_utf8(ordinary_wire)
+        .unwrap()
+        .contains("\\ud800"));
 }
 
 #[tokio::test]

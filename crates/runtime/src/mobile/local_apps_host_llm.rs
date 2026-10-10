@@ -23,7 +23,7 @@ use lingxi_core::host::OutputStream;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use llm_runtime::{HistoryContentDelta, HistoryEvent};
 use local_apps::AppCapability;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -627,10 +627,10 @@ mod tests {
     use local_apps::error::AppError;
     use local_apps::test_support::FixedClock;
     use local_apps::{
-        AppCapability, AppLayout, AppService, NoopAppEventObserver, load_manifest,
-        load_permissions, save_manifest, save_permissions,
+        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability, AppLayout,
+        AppService, NoopAppEventObserver,
     };
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -750,13 +750,12 @@ mod tests {
         devices: crate::mobile::local_apps_device::DeviceCapabilities,
     ) -> Harness {
         let h = build_harness(model).await;
-        assert!(
-            h.broker
-                .attach_device(Arc::new(
-                    crate::mobile::local_apps_device::SharedDeviceCapabilities::new(devices)
-                ))
-                .is_ok()
-        );
+        assert!(h
+            .broker
+            .attach_device(Arc::new(
+                crate::mobile::local_apps_device::SharedDeviceCapabilities::new(devices)
+            ))
+            .is_ok());
         h
     }
 
@@ -780,11 +779,9 @@ mod tests {
             None,
         );
         assert!(broker.attach_service(service.clone()).is_ok());
-        assert!(
-            broker
-                .attach_llm(Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(model)))))
-                .is_ok()
-        );
+        assert!(broker
+            .attach_llm(Arc::new(SharedLlm::new(Arc::new(LocalAppsLlm::new(model)))))
+            .is_ok());
         let record = service
             .create_app(Some("Chatty"), "an llm test app", None)
             .await

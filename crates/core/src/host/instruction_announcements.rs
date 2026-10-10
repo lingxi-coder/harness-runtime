@@ -396,7 +396,7 @@ pub fn context_attachments(
 ) -> Vec<Utf16JsonProjection> {
     let history = &context.announcement_history;
     let mut attachments = Vec::new();
-    if context.user_context.contains_key("claudeMd") {
+    if context.user_context.contains_key("instructions") {
         if let Some(files) = &context.eager_instructions {
             let files: Vec<_> = files
                 .iter()
@@ -448,7 +448,7 @@ pub fn context_attachments(
     }
 
     let mut keys = context.user_context_order.clone();
-    for key in ["Environment", "claudeMd", "userEmail", "currentDate"] {
+    for key in ["Environment", "instructions", "userEmail", "currentDate"] {
         if !keys.iter().any(|existing| existing == key) {
             keys.push(key.into());
         }
@@ -463,7 +463,7 @@ pub fn context_attachments(
         .filter(|key| {
             !SESSION_CONTEXT_KEYS.contains(&key.as_str())
                 && key.as_str() != "currentDate"
-                && !(key.as_str() == "claudeMd" && context.eager_instructions.is_some())
+                && !(key.as_str() == "instructions" && context.eager_instructions.is_some())
         })
         .filter_map(|key| {
             context

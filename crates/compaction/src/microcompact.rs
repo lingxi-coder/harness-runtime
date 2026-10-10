@@ -474,6 +474,7 @@ impl Microcompactor {
                     is_meta,
                     is_compact_summary,
                     is_visible_in_transcript_only,
+                    api_message_override,
                     turn_companion,
                     usage_limit_note,
                     origin,
@@ -516,6 +517,7 @@ impl Microcompactor {
                         })
                         .collect();
                     ConversationMessage::User {
+                        api_message_override,
                         id,
                         content: new_content,
                         is_meta,
@@ -557,6 +559,7 @@ mod tests {
 
     fn assistant_tool_use(name: &str, id: ToolUseId) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolUse {
                 id,
@@ -571,6 +574,7 @@ mod tests {
 
     fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id,

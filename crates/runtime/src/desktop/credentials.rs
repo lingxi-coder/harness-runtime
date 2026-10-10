@@ -632,21 +632,23 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             // Only the two EXTERNAL sources map: `/login managed key` has no
             // LingXi equivalent, and everything else takes the `/login` wording
             // anyway.
-            credential_origin = match &auth_source {
-                llm_runtime::auth::anthropic::resolver::AuthSource::EnvApiKey => {
-                    // This is the ANTHROPIC auth resolver, and its `EnvApiKey`
-                    // is defined as `ANTHROPIC_API_KEY` (see `AuthSource`), so
-                    // naming the variable here is a fact, not a guess. Another
-                    // provider's resolver supplies its own `apiKeyEnv` name.
-                    orchestrator::api_error_copy::CredentialOrigin::EnvApiKey {
-                        var: "ANTHROPIC_API_KEY".to_string(),
+            if environment_oauth_delegate.is_none() {
+                credential_origin = match &auth_source {
+                    llm_runtime::auth::anthropic::resolver::AuthSource::EnvApiKey => {
+                        // This is the ANTHROPIC auth resolver, and its `EnvApiKey`
+                        // is defined as `ANTHROPIC_API_KEY` (see `AuthSource`), so
+                        // naming the variable here is a fact, not a guess. Another
+                        // provider's resolver supplies its own `apiKeyEnv` name.
+                        orchestrator::api_error_copy::CredentialOrigin::EnvApiKey {
+                            var: "ANTHROPIC_API_KEY".to_string(),
+                        }
                     }
-                }
-                llm_runtime::auth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
-                    orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
-                }
-                _ => orchestrator::api_error_copy::CredentialOrigin::Other,
-            };
+                    llm_runtime::auth::anthropic::resolver::AuthSource::ApiKeyHelper { .. } => {
+                        orchestrator::api_error_copy::CredentialOrigin::ApiKeyHelper
+                    }
+                    _ => orchestrator::api_error_copy::CredentialOrigin::Other,
+                };
+            }
             // Oracle `zv()` = `ms()?.accessToken != null` — reaching this arm
             // means stored OAuth tokens were read.
             has_oauth_token = true;
@@ -656,8 +658,10 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                 tokens.subscription_type.as_ref(),
                 tokens.rate_limit_tier.as_ref(),
             );
-            is_subscriber = seed.is_subscriber;
-            persisted_subscription_type.clone_from(&seed.subscription_type);
+            if environment_oauth_delegate.is_none() {
+                is_subscriber = seed.is_subscriber;
+                persisted_subscription_type.clone_from(&seed.subscription_type);
+            }
             // Re-seed the shared slot with the resolved subscriber flag + the
             // PERSISTED tier so readers see them even before (or without) the
             // background profile+roles fetch landing. SECRECY: deliberately
@@ -665,8 +669,10 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             // non-`Clone`) by exposing + re-wrapping — the audited copy
             // pattern — BEFORE the original moves into `init_refresh_driver`;
             // it is exposed again only inside the spawned fetch task.
-            if let Ok(mut guard) = subscription.write() {
-                *guard = Some(seed);
+            if environment_oauth_delegate.is_none() {
+                if let Ok(mut guard) = subscription.write() {
+                    *guard = Some(seed);
+                }
             }
             let profile_token =
                 lingxi_core::types::Secret::new(tokens.access_token.expose_secret().clone());
@@ -907,6 +913,26 @@ pub(super) async fn resolve_llm_stack_with_credentials(
                     as Arc<dyn llm_runtime::CredentialProvider>
             })
         });
+    let oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = if let Some(lookup) = cfg
+        .oauth_environment_lookup
+        .as_ref()
+        .filter(|_| !cfg.customization_gates.bare)
+    {
+        Some(Arc::new(
+            llm_runtime::auth::anthropic::environment::EnvironmentOAuthCredentialProvider::live(
+                lookup.clone(),
+                stored_delegate,
+            ),
+        ))
+    } else {
+        environment_oauth_delegate.or_else(|| {
+            oauth_auth_state.clone().map(|state| {
+                let driver = Arc::new(RefreshDriver::new(state));
+                Arc::new(OAuthCredentialProvider::new(driver))
+                    as Arc<dyn llm_runtime::CredentialProvider>
+            })
+        })
+    };
 
     let provider_region = match effective_settings_for_model
         .as_ref()
@@ -1348,7 +1374,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
             .flatten(),
         cfg.api_key_helper.clone(),
         oauth_delegates,
-    );
+    )
+    .with_anthropic_api_key_source(cfg.api_key_source.clone());
     // GitHub Copilot needs a short-lived token minted from the raw OAuth token
     // (api.githubcopilot.com rejects the raw token). Wrap the composite so the
     // `github-copilot` credential is exchanged + cached; every other credential

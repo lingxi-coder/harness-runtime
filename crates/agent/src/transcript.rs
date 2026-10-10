@@ -810,6 +810,7 @@ fn rewrite_append_message(
     };
     Ok(match original {
         ConversationMessage::User {
+            api_message_override,
             id,
             content: old_content,
             is_meta,
@@ -820,6 +821,7 @@ fn rewrite_append_message(
             origin,
             turn_origin,
         } => ConversationMessage::User {
+            api_message_override: api_message_override.clone(),
             id: *id,
             content: rewrite_append_blocks(old_content, &content),
             is_meta: *is_meta,
@@ -833,11 +835,13 @@ fn rewrite_append_message(
         ConversationMessage::Assistant {
             id,
             content: old_content,
+            per_turn_effort,
             stop_reason,
             resumable,
         } => ConversationMessage::Assistant {
             id: *id,
             content: rewrite_append_blocks(old_content, &content),
+            per_turn_effort: per_turn_effort.clone(),
             stop_reason: stop_reason.clone(),
             resumable: resumable.clone(),
         },
@@ -845,6 +849,7 @@ fn rewrite_append_message(
             id,
             subtype,
             compact_metadata,
+            api_system,
             model_fallback,
             refusal_fallback,
             ..
@@ -871,6 +876,7 @@ fn rewrite_append_message(
                 .expect("rewritten system text derives from exact source units"),
                 subtype: subtype.clone(),
                 compact_metadata: compact_metadata.clone(),
+                api_system: api_system.clone(),
                 model_fallback: model_fallback.clone(),
                 refusal_fallback: refusal_fallback.clone(),
             }
@@ -1295,6 +1301,13 @@ async fn mod_append_source_attachment(
     }
 }
 
+#[derive(Clone, Default)]
+struct TranscriptModelSelection {
+    model: Option<String>,
+    model_profile: Option<String>,
+    mod_model: Option<String>,
+}
+
 /// Appends [`TranscriptEntry`] lines to a per-agent transcript file.
 #[derive(Clone)]
 pub struct AgentTranscriptWriter {
@@ -1306,14 +1319,12 @@ pub struct AgentTranscriptWriter {
     fs: Option<Arc<dyn FileSystem>>,
     agent_name: Option<String>,
     agent_type: Option<String>,
-    model: Option<String>,
-    model_profile: Option<String>,
     correlation_id: Option<String>,
+    model_selection: Arc<Mutex<TranscriptModelSelection>>,
     journal_lock: Arc<tokio::sync::Mutex<()>>,
     source_attachments: Arc<Mutex<HashMap<MessageId, SourceAttachment>>>,
     mod_executor: Option<Arc<hooks::HookExecutorImpl>>,
     mod_cwd: Option<PathBuf>,
-    mod_model: Option<String>,
     appended_rows: Arc<Mutex<HashMap<MessageId, AppendedRow>>>,
     dispatched_attachment_rows: Arc<Mutex<HashSet<String>>>,
 }
@@ -1328,14 +1339,12 @@ impl AgentTranscriptWriter {
             fs: Some(fs),
             agent_name: None,
             agent_type: None,
-            model: None,
-            model_profile: None,
             correlation_id: None,
+            model_selection: Arc::new(Mutex::new(TranscriptModelSelection::default())),
             journal_lock: Arc::new(tokio::sync::Mutex::new(())),
             source_attachments: Arc::new(Mutex::new(HashMap::new())),
             mod_executor: None,
             mod_cwd: None,
-            mod_model: None,
             appended_rows: Arc::new(Mutex::new(HashMap::new())),
             dispatched_attachment_rows: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -1352,14 +1361,12 @@ impl AgentTranscriptWriter {
             fs: None,
             agent_name: None,
             agent_type: None,
-            model: None,
-            model_profile: None,
             correlation_id: None,
+            model_selection: Arc::new(Mutex::new(TranscriptModelSelection::default())),
             journal_lock: Arc::new(tokio::sync::Mutex::new(())),
             source_attachments: Arc::new(Mutex::new(HashMap::new())),
             mod_executor: None,
             mod_cwd: None,
-            mod_model: None,
             appended_rows: Arc::new(Mutex::new(HashMap::new())),
             dispatched_attachment_rows: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -1377,8 +1384,13 @@ impl AgentTranscriptWriter {
     ) -> Self {
         self.agent_name = agent_name;
         self.agent_type = agent_type;
-        self.model = model;
-        self.model_profile = model_profile;
+        let mut selection = self
+            .model_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        selection.model = model;
+        selection.model_profile = model_profile;
+        drop(selection);
         self
     }
 
@@ -1402,8 +1414,54 @@ impl AgentTranscriptWriter {
     ) -> Self {
         self.mod_executor = executor;
         self.mod_cwd = Some(cwd);
-        self.mod_model = model;
+        self.model_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mod_model = model;
         self
+    }
+
+    fn model_selection(&self) -> TranscriptModelSelection {
+        self.model_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Persist a committed logical selection even if the child parks before
+    /// another ordinary message is written. Cloned writers share the state.
+    pub(crate) async fn record_model_selection(
+        &self,
+        model: &str,
+        model_profile: Option<&str>,
+    ) -> Result<(), lingxi_core::host::FsError> {
+        let _journal = self.journal_lock.lock().await;
+        let projection = Utf16JsonProjection::from_serde_value(&serde_json::json!({
+            "type": "model-selection",
+            "agent_id": self.agent_id,
+            "timestamp": SystemTime::now(),
+            "model": model,
+            "model_profile": model_profile,
+            "message": ConversationMessage::System {
+                id: MessageId::new(),
+                content: "Model selection changed".into(),
+                subtype: Some("agent_model_selection".into()),
+                api_system: None,
+                compact_metadata: None,
+                model_fallback: None,
+                refusal_fallback: None,
+            },
+        }))
+        .map_err(|_| attachment_io("model selection transcript row is invalid"))?;
+        self.append_projection_locked(projection).await?;
+        let mut selection = self
+            .model_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        selection.model = Some(model.to_owned());
+        selection.model_profile = model_profile.map(str::to_owned);
+        selection.mod_model = Some(model.to_owned());
+        Ok(())
     }
 
     /// Associate an original attachment with its derived model message before
@@ -1528,6 +1586,7 @@ impl AgentTranscriptWriter {
     }
 
     fn message_entry(&self, message: &ConversationMessage) -> TranscriptEntry {
+        let selection = self.model_selection();
         TranscriptEntry {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),
@@ -1538,8 +1597,8 @@ impl AgentTranscriptWriter {
             error: None,
             agent_name: self.agent_name.clone(),
             agent_type: self.agent_type.clone(),
-            model: self.model.clone(),
-            model_profile: self.model_profile.clone(),
+            model: selection.model,
+            model_profile: selection.model_profile,
             correlation_id: self.correlation_id.clone(),
             source_attachment: None,
             source_attachment_uuid: None,
@@ -1632,6 +1691,7 @@ impl AgentTranscriptWriter {
         let row_id = message.id();
         let entry = self.resolve_retained_row(message, prior_history).await?;
         *message = entry.message.clone();
+        let selection = self.model_selection();
         let transcript_entry = TranscriptEntry {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),
@@ -1642,8 +1702,8 @@ impl AgentTranscriptWriter {
             error: None,
             agent_name: self.agent_name.clone(),
             agent_type: self.agent_type.clone(),
-            model: self.model.clone(),
-            model_profile: self.model_profile.clone(),
+            model: selection.model,
+            model_profile: selection.model_profile,
             correlation_id: self.correlation_id.clone(),
             source_attachment: entry
                 .source_attachment
@@ -1739,11 +1799,15 @@ impl AgentTranscriptWriter {
 
         if let Some(host) = host.as_ref() {
             if host.has_event("session.append") {
+                let selection = self.model_selection();
                 *message = mod_append_message_row(
                     host,
                     cwd,
                     self.agent_id,
-                    self.mod_model.as_deref().or(self.model.as_deref()),
+                    selection
+                        .mod_model
+                        .as_deref()
+                        .or(selection.model.as_deref()),
                     prior_history,
                     message,
                 )
@@ -1773,6 +1837,7 @@ impl AgentTranscriptWriter {
                 .expect("thinking ranges serialize")
                 .into(),
             subtype: Some("thinking_stripped".into()),
+            api_system: None,
             compact_metadata: None,
             model_fallback: None,
             refusal_fallback: None,
@@ -1900,6 +1965,7 @@ impl AgentTranscriptWriter {
         error: Option<&str>,
     ) -> Result<(), lingxi_core::host::FsError> {
         let detail = error.unwrap_or(status);
+        let selection = self.model_selection();
         let entry = TranscriptEntry {
             agent_id: self.agent_id,
             timestamp: SystemTime::now(),
@@ -1907,6 +1973,7 @@ impl AgentTranscriptWriter {
                 id: lingxi_core::types::MessageId::new(),
                 content: detail.to_string().into(),
                 subtype: Some(format!("agent_{status}")),
+                api_system: None,
                 compact_metadata: None,
                 model_fallback: None,
                 refusal_fallback: None,
@@ -1917,8 +1984,8 @@ impl AgentTranscriptWriter {
             error: error.map(str::to_string),
             agent_name: self.agent_name.clone(),
             agent_type: self.agent_type.clone(),
-            model: self.model.clone(),
-            model_profile: self.model_profile.clone(),
+            model: selection.model,
+            model_profile: selection.model_profile,
             correlation_id: self.correlation_id.clone(),
             source_attachment: None,
             source_attachment_uuid: None,
@@ -1950,10 +2017,17 @@ impl AgentTranscriptWriter {
         &self,
         projection: Utf16JsonProjection,
     ) -> Result<(), lingxi_core::host::FsError> {
+        let _journal = self.journal_lock.lock().await;
+        self.append_projection_locked(projection).await
+    }
+
+    async fn append_projection_locked(
+        &self,
+        projection: Utf16JsonProjection,
+    ) -> Result<(), lingxi_core::host::FsError> {
         let Some(fs) = &self.fs else {
             return Ok(());
         };
-        let _journal = self.journal_lock.lock().await;
         self.recover_attachment_intent().await?;
         let line = format!(
             "{}\n",
@@ -2542,6 +2616,45 @@ mod tests {
                 "not used by transcript test".into(),
             ))
         }
+    }
+
+    #[tokio::test]
+    async fn model_selection_is_shared_and_commits_only_after_persistence() {
+        let fs = Arc::new(FailOnceTranscriptFs::default());
+        let writer = AgentTranscriptWriter::new(
+            "/tmp/agent-model-selection.jsonl".into(),
+            AgentId::new(),
+            fs.clone(),
+        )
+        .with_metadata(None, None, Some("shared-model".into()), Some("a".into()));
+        let cloned = writer.clone();
+        assert!(writer
+            .record_model_selection("shared-model", Some("b"))
+            .await
+            .is_err());
+        let selection = cloned.model_selection();
+        assert_eq!(selection.model.as_deref(), Some("shared-model"));
+        assert_eq!(selection.model_profile.as_deref(), Some("a"));
+
+        writer
+            .record_model_selection("shared-model", Some("b"))
+            .await
+            .unwrap();
+        cloned.record_terminal("idle", None).await.unwrap();
+        let body = fs.body.lock().unwrap();
+        let rows: Vec<Value> = body
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows[0]["type"], "model-selection");
+        for row in &rows {
+            assert_eq!(row["model"], "shared-model");
+            assert_eq!(row["model_profile"], "b");
+        }
+        assert_eq!(
+            cloned.model_selection().mod_model.as_deref(),
+            Some("shared-model")
+        );
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ use lingxi_core::host::{
     McpConnectOptions, McpError, McpProtocolEra, McpTransport, McpTransportSpec,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
 use platform_common::RemoteMcpTransport;
 use serde_json::{json, Value};
 use std::{
@@ -19,6 +20,7 @@ fn source(value: &Value) -> Utf16JsonProjection {
 fn assert_source_eq(value: &Utf16JsonProjection, expected: &Value) {
     assert!(value.semantically_eq(&source(expected)));
 }
+
 #[derive(Clone, Default)]
 struct Mock {
     calls: Arc<Mutex<Vec<(Value, HeaderMap)>>>,
@@ -109,6 +111,7 @@ async fn ordinary_http_tool_fulfils_registered_local_handler_and_retains_headers
     .unwrap()
     .unwrap();
     assert_eq!(result.content.string_at("/0/text"), Some("done"));
+
     assert_eq!(
         *ids.lock().unwrap(),
         vec![jsonrpc::Id::String("original-key".into())]
@@ -143,6 +146,7 @@ async fn ordinary_http_missing_local_handler_is_native_capability_error() {
     assert!(error.data.as_ref().unwrap().semantically_eq(&source(
         &json!({"key":"original-key","method":"roots/list"})
     )));
+
     assert_eq!(
         state
             .calls
@@ -270,6 +274,7 @@ async fn retry_timeout_aborts_actual_http_socket_and_keeps_connection_usable() {
     .await
     .unwrap();
     assert_source_eq(&result, &json!({"content":[]}));
+
     server.await.unwrap();
     let requests = captured.lock().unwrap();
     assert_eq!(requests.len(), 3);
@@ -408,6 +413,7 @@ async fn successful_response_keeps_sse_notifications_and_input_required_retry_ru
         .await
         .unwrap();
         assert_source_eq(&result, &json!({"content":[]}));
+
         let note = tokio::time::timeout(Duration::from_secs(1), notifications.recv())
             .await
             .unwrap()

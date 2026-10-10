@@ -8,6 +8,7 @@ fn tool_result(
     content_blocks: Option<Vec<serde_json::Value>>,
 ) -> ConversationMessage {
     ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
             tool_use_id: ToolUseId::new(),

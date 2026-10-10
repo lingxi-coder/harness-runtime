@@ -20,6 +20,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use branding::{
+    MAX_CONCURRENT_SUBAGENTS_ENV, MAX_SUBAGENTS_PER_SESSION_ENV, MAX_SUBAGENT_SPAWN_DEPTH_ENV,
+};
 use lingxi_core::host::agent_statistics::{AgentSpawnRefusal, AgentSpawnToken};
 use lingxi_core::host::budget::BudgetError;
 use lingxi_core::host::fusion::{
@@ -96,10 +99,6 @@ impl AgentTool {
 
 /// `Agent` — canonical tool name (claude-code `AGENT_TOOL_NAME`).
 pub const AGENT_TOOL_NAME: &str = "Agent";
-
-/// `Task` — legacy alias the dispatcher must accept (claude-code
-/// `LEGACY_AGENT_TOOL_NAME`).
-pub const LEGACY_AGENT_TOOL_NAME: &str = "Task";
 
 /// Four built-in subagent types — byte-aligned with upstream
 /// `claude-code/src/tools/AgentTool/built-in/*.ts`.
@@ -227,10 +226,12 @@ pub struct AgentToolInput {
     /// exactly as claude's `?? ` does.
     #[serde(default)]
     pub subagent_type: Option<String>,
-    /// `model?` — optional model-family override `'sonnet' | 'opus' |
-    /// 'haiku'` (AgentTool.tsx:86).
+    /// Optional catalog model ID, configured alias, or profile-qualified model.
     #[serde(default)]
     pub model: Option<String>,
+    /// Optional configured provider profile for the model override.
+    #[serde(default)]
+    pub model_profile: Option<String>,
     /// `run_in_background?` — optional (AgentTool.tsx:87). Carried; background
     /// dispatch is handled by the host runtime / coordinator.
     #[serde(default)]
@@ -238,16 +239,6 @@ pub struct AgentToolInput {
     /// `name?` — optional teammate name (AgentTool.tsx:94).
     #[serde(default)]
     pub name: Option<String>,
-    /// `team_name?` — deprecated and ignored; the session owns one implicit team.
-    #[serde(default)]
-    pub team_name: Option<String>,
-    /// `mode?` — DEPRECATED and ignored (claude 2.1.212). Still accepted on the
-    /// wire for back-compat, but the value is never applied: spawned subagents
-    /// inherit the parent session's live permission mode (claude `_=yn(l),
-    /// y=_.mode`), and only the agent-definition frontmatter may override it. The
-    /// call param is read but NEVER threaded into the spawn request.
-    #[serde(default)]
-    pub mode: Option<String>,
     /// `isolation?` — optional `'worktree' | 'remote'` (AgentTool.tsx:99).
     #[serde(default)]
     pub isolation: Option<String>,
@@ -361,10 +352,9 @@ fn parse_agent_tool_input(source: &Utf16JsonProjection) -> Result<AgentToolInput
         prompt: String::from_utf16_lossy(&prompt_units),
         subagent_type: optional_string("subagent_type")?,
         model: optional_string("model")?,
+        model_profile: optional_string("model_profile")?,
         run_in_background: optional_bool("run_in_background")?,
         name: optional_string("name")?,
-        team_name: optional_string("team_name")?,
-        mode: optional_string("mode")?,
         isolation: optional_string("isolation")?,
         cwd: optional_string("cwd")?,
         context_paths: context_paths.into_iter().map(PathBuf::from).collect(),
@@ -572,16 +562,11 @@ fn reserved_agent_id_shape(name: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// claude `G4o()`'s `model` parameter description (@3573156), the arm every
-/// non-coordinator session sees.
-///
-/// 2.1.266 rewrote the 2.1.238 sentence pair to name the *configured default
-/// subagent model* — the precedence clause gained "and the configured default
-/// subagent model", and the fallback clause became "else the default (inherits
-/// from the parent unless a default subagent model is configured)". The port
-/// carried the 2.1.238 text ("or inherits from the parent"), which describes a
-/// precedence the resolver no longer has.
-pub(crate) const AGENT_MODEL_PARAM_DESCRIPTION: &str = "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter and the configured default subagent model. If omitted, uses the agent definition's model, else the default (inherits from the parent unless a default subagent model is configured). Ignored for subagent_type: \"fork\" — forks always inherit the parent model.";
+/// Current model-selection policy advertised to ordinary Agent calls.
+/// Per-call choices precede definition/default choices; deployment policy may
+/// replace the complete model/profile selection.
+pub(crate) const AGENT_MODEL_PARAM_DESCRIPTION: &str = "Optional catalog model ID, configured alias, or profile-qualified model (\"profile/model\") for this agent. Takes precedence over the agent definition's model and the configured default subagent model. A configured deployment model override can replace this model and profile. If omitted, uses the agent definition's model, else the configured default or the parent model. Unqualified selections prefer the parent's provider profile unless model_profile is specified. Ignored for subagent_type: \"fork\" — forks always inherit the parent model and profile.";
+const AGENT_MODEL_PROFILE_PARAM_DESCRIPTION: &str = "Optional configured provider profile for the model selection; requires model. Omit it to prefer the parent's profile for an unqualified model, or specify the profile in model as \"profile/model\". Ignored for subagent_type: \"fork\" — forks always inherit the parent model and profile.";
 
 /// The coordinator-mode suffix `G4o()` appends to
 /// [`AGENT_MODEL_PARAM_DESCRIPTION`] (`xi()?…:""`, @3573581 / @3573661).
@@ -592,29 +577,21 @@ const AGENT_MODEL_PARAM_COORDINATOR_FORCED_SUFFIX: &str =
     " Unavailable on this session: this parameter is ignored — do not set it.";
 const AGENT_MODEL_PARAM_COORDINATOR_SUFFIX: &str = " Set this only when EXPLICITLY asked by the user for a specific model, never because the task seems small, simple, or cheap; otherwise omit it so the worker uses the default (the session model, unless a default subagent model is configured).";
 
-/// `a.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL` — when set on a
-/// COORDINATOR session the `model` argument is ignored outright (and `call`
-/// clears it), so the description says so instead of steering its use.
+/// Require coordinator workers to inherit the session model and profile.
 #[must_use]
 pub(crate) fn coordinator_forces_worker_inherit_model() -> bool {
     lingxi_core::host::env::is_env_truthy(
-        std::env::var("LINGXI_COORDINATOR_FORCE_WORKER_INHERIT_MODEL")
-            .or_else(|_| std::env::var("CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL"))
+        std::env::var(branding::COORDINATOR_FORCE_WORKER_INHERIT_MODEL_ENV)
             .ok()
             .as_deref(),
     )
 }
 
-/// `a.CLAUDE_CODE_SUBAGENT_MODEL_FORCE` — the deployment pin that takes the
-/// `model` argument away from the model entirely. `gSn()` (@3575600) drops the
-/// property from the advertised schema, and the LONG-arm agent-definition
-/// bullet drops its "; the `model` parameter here overrides the definition for
-/// this one call" clause (@3569298).
+/// Disable per-call model and provider-profile selection for subagents.
 #[must_use]
 pub(crate) fn subagent_model_forced() -> bool {
     lingxi_core::host::env::is_env_truthy(
-        std::env::var("LINGXI_SUBAGENT_MODEL_FORCE")
-            .or_else(|_| std::env::var("CLAUDE_CODE_SUBAGENT_MODEL_FORCE"))
+        std::env::var(branding::SUBAGENT_MODEL_FORCE_ENV)
             .ok()
             .as_deref(),
     )
@@ -638,8 +615,11 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             },
             "model": {
                 "type": "string",
-                "enum": ["sonnet", "opus", "haiku", "fable"],
                 "description": AGENT_MODEL_PARAM_DESCRIPTION
+            },
+            "model_profile": {
+                "type": "string",
+                "description": AGENT_MODEL_PROFILE_PARAM_DESCRIPTION
             },
             "run_in_background": {
                 "type": "boolean",
@@ -655,15 +635,6 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 // `call` (see `AGENT_NAME_PATTERN` / `validate_agent_name`).
                 "pattern": AGENT_NAME_PATTERN,
                 "description": "Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running."
-            },
-            "team_name": {
-                "type": "string",
-                "description": "Deprecated; ignored. The session has a single implicit team."
-            },
-            "mode": {
-                "type": "string",
-                "enum": ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"],
-                "description": "Deprecated; ignored. Subagents inherit the parent session's permission mode; agent-definition frontmatter may override it."
             },
             "isolation": {
                 "type": "string",
@@ -709,7 +680,11 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
                 "description": "Fusion panel mode when subagent_type is \"fusion\". \"analysis\" (default): read-only panels answer the task. \"implement\": each panel changes the code in its own git worktree and the host runs the configured verification commands on every result. Ignored for other agent types."
             }
         },
-        "required": ["description", "prompt"]
+        "required": ["description", "prompt"],
+        "allOf": [{
+            "if": { "required": ["model_profile"] },
+            "then": { "required": ["model"] }
+        }]
     })
 });
 
@@ -951,16 +926,35 @@ static AGENT_INPUT_SCHEMA_MODEL_NO_BACKGROUND: Lazy<Value> = Lazy::new(|| {
 /// instance and memoized, matching the binary's `m(...)` memoization of the
 /// whole builder.
 fn project_agent_input_schema(base: &Value, is_coordinator: bool) -> Value {
+    project_agent_input_schema_with_policy(
+        base,
+        is_coordinator,
+        subagent_model_forced(),
+        coordinator_forces_worker_inherit_model(),
+    )
+}
+
+fn project_agent_input_schema_with_policy(
+    base: &Value,
+    is_coordinator: bool,
+    model_forced: bool,
+    coordinator_forces_inherit: bool,
+) -> Value {
     let mut schema = base.clone();
     let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
         return schema;
     };
-    if subagent_model_forced() {
+    if model_forced {
         props.remove("model");
+        props.remove("model_profile");
+        schema
+            .as_object_mut()
+            .expect("object schema")
+            .remove("allOf");
         return schema;
     }
     if is_coordinator {
-        let suffix = if coordinator_forces_worker_inherit_model() {
+        let suffix = if coordinator_forces_inherit {
             AGENT_MODEL_PARAM_COORDINATOR_FORCED_SUFFIX
         } else {
             AGENT_MODEL_PARAM_COORDINATOR_SUFFIX
@@ -971,8 +965,63 @@ fn project_agent_input_schema(base: &Value, is_coordinator: bool) -> Value {
                 Value::String(format!("{AGENT_MODEL_PARAM_DESCRIPTION}{suffix}")),
             );
         }
+        if let Some(profile) = props
+            .get_mut("model_profile")
+            .and_then(Value::as_object_mut)
+        {
+            profile.insert(
+                "description".to_string(),
+                Value::String(format!("{AGENT_MODEL_PROFILE_PARAM_DESCRIPTION}{suffix}")),
+            );
+        }
+    }
+    if is_coordinator && coordinator_forces_inherit {
+        schema
+            .as_object_mut()
+            .expect("object schema")
+            .remove("allOf");
     }
     schema
+}
+
+fn clear_model_overrides_when_forced(parsed: &mut AgentToolInput, forced: bool) {
+    if forced {
+        parsed.model = None;
+        parsed.model_profile = None;
+    }
+}
+
+fn spawn_model_profile(parsed: &AgentToolInput, is_fork: bool) -> Option<String> {
+    if is_fork {
+        None
+    } else {
+        parsed.model_profile.clone()
+    }
+}
+
+fn model_profile_after_hook(
+    input: &Value,
+    previous: Option<String>,
+) -> Result<Option<String>, ToolError> {
+    match input.get("model_profile") {
+        None => Ok(previous),
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(profile)) => Ok(Some(profile.clone())),
+        Some(_) => Err(ToolError::InvalidInput(
+            "agent.spawn: model_profile must be a string or null".into(),
+        )),
+    }
+}
+
+fn model_after_hook(input: &Value, previous: Option<String>) -> Result<Option<String>, ToolError> {
+    match input.get("model") {
+        None => Ok(previous),
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(model)) => Ok(Some(model.clone())),
+        Some(_) => Err(ToolError::InvalidInput(
+            "agent.spawn: model must be a string or null".into(),
+        )),
+    }
 }
 
 /// Format the M3-05 byte-locked budget-exceeded denial string.
@@ -1554,7 +1603,7 @@ fn fusion_stage_name(stage: &FusionStage) -> &'static str {
 /// arm already refunds is knowable on the `Err` and drop paths too — the
 /// old `AtomicBool` threw the number away and every runtime failure kept the
 /// phantom slots charged against
-/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` forever.
+/// `LINGXI_MAX_SUBAGENTS_PER_SESSION` forever.
 ///
 /// Returns at least 1 for a proving event, so "nonzero" keeps meaning
 /// exactly what the old boolean meant even against an executor that reports
@@ -1732,7 +1781,7 @@ fn fusion_category_proves_never_dispatched(category: Option<&str>) -> bool {
 /// ones that provably never became a subagent
 /// (see [`fusion_category_proves_never_dispatched`]); counting those as
 /// spawned under-releases the reservation and permanently over-charges
-/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`.
+/// `LINGXI_MAX_SUBAGENTS_PER_SESSION`.
 fn fusion_panels_that_reached_the_spawner(panels: &[lingxi_core::host::PanelOutcome]) -> usize {
     panels
         .iter()
@@ -1969,8 +2018,8 @@ impl Drop for FusionSpawnReservationGuard {
 const MAX_SUBAGENTS_PER_SESSION_DEFAULT: u64 = 200;
 
 /// Resolve the per-session subagent spawn cap from a raw
-/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` value (claude 2.1.212 `xtu()` =
-/// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION ?? 200`). Split from the env read for
+/// `LINGXI_MAX_SUBAGENTS_PER_SESSION` value (claude 2.1.212 `xtu()` =
+/// `LINGXI_MAX_SUBAGENTS_PER_SESSION ?? 200`). Split from the env read for
 /// testability. An unset OR unparseable value falls back to the default 200 (the
 /// binary keeps a non-numeric env string, whose numeric comparison never trips
 /// the cap; treating garbage as "default 200" is the faithful common-case
@@ -1983,7 +2032,7 @@ fn max_subagents_per_session_from(raw: Option<&str>) -> u64 {
 /// The live per-session subagent spawn cap (claude 2.1.212 `xtu()`).
 fn max_subagents_per_session() -> u64 {
     max_subagents_per_session_from(
-        std::env::var("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION")
+        std::env::var(branding::MAX_SUBAGENTS_PER_SESSION_ENV)
             .ok()
             .as_deref(),
     )
@@ -1991,13 +2040,13 @@ fn max_subagents_per_session() -> u64 {
 
 fn subagent_depth_limit_error(depth: u32, limit: u32) -> String {
     format!(
-        "Subagent nesting limit reached (depth {depth} of {limit}). Complete this task directly using your tools instead of spawning another agent. If the user explicitly requested deeper nesting, ask them to raise CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH."
+        "Subagent nesting limit reached (depth {depth} of {limit}). Complete this task directly using your tools instead of spawning another agent. If the user explicitly requested deeper nesting, ask them to raise {MAX_SUBAGENT_SPAWN_DEPTH_ENV}."
     )
 }
 
 fn concurrent_subagent_limit_error(limit: usize) -> String {
     format!(
-        "Concurrent subagent limit reached. You can run {limit} subagents at once. Do not retry. If the user wants more concurrent subagents, ask them to increase CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS."
+        "Concurrent subagent limit reached. You can run {limit} subagents at once. Do not retry. If the user wants more concurrent subagents, ask them to increase {MAX_CONCURRENT_SUBAGENTS_ENV}."
     )
 }
 
@@ -2636,7 +2685,7 @@ impl AgentTool {
                     format!(
                         "Subagent spawn limit reached ({spawned} of {cap} agents spawned). \
 Complete the remaining work directly with your tools instead of spawning more agents. \
-If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
+If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SESSION_ENV}."
                     )
                     .into(),
                 ));
@@ -2819,7 +2868,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 // Every other variant means panels genuinely ran (the error
                 // itself carries no panel count to trim by), so the
                 // reservation stays charged; a repeated failing Fusion run
-                // still advances `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`
+                // still advances `LINGXI_MAX_SUBAGENTS_PER_SESSION`
                 // instead of being free to retry forever.
                 //
                 // `Cancelled` is the one variant that spans BOTH sides of
@@ -2865,7 +2914,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                         // above refunds. Without this, two outcomes of an
                         // identical 2-of-3 resolution accounted differently
                         // and every runtime failure permanently narrowed
-                        // `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` by the
+                        // `LINGXI_MAX_SUBAGENTS_PER_SESSION` by the
                         // surplus.
                         //
                         // [round-12 review, finding 3] …and only for the
@@ -2921,22 +2970,6 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     /// Format one agent catalog line for the tool prompt, matching claude-code's
-    /// `formatAgentLine` (AgentTool/prompt.ts:43-46):
-    /// `- {agentType}: {whenToUse} (Tools: {toolsDescription})`. Delegates to the
-    /// single source of truth in `traits` so the inline prompt path here and the
-    /// `agent_listing_delta` attachment path (orchestrator) render identical
-    /// lines. The `toolsDescription` is pre-rendered by the spawner (TS
-    /// `getToolsDescription`).
-    /// `lean` is `U2n`'s second argument — the LEAN-prompt flag for the model
-    /// this prompt is being rendered for. A definition that declares a
-    /// `whenToUseLean` renders it only on that arm.
-    fn format_agent_line(
-        agent: &lingxi_core::host::subagent_spawn::SubagentListingEntry,
-        lean: bool,
-    ) -> String {
-        lingxi_core::host::subagent_spawn::format_agent_line(agent, lean)
-    }
-
     /// Build the dynamic Agent tool prompt, porting claude-code v2.1.193's
     /// `getPrompt` (binary `bin/claude.exe` offset ~208233723). 2.1.193 ALWAYS
     /// externalizes the agent catalog to a per-turn `agent_listing_delta`
@@ -2944,10 +2977,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// [`crate::PoolSubagentSpawner`]-fed); the tool DESCRIPTION carries only the
     /// static pointer line "Available agent types are listed in <system-reminder>
     /// messages in the conversation." — there is NO inline-catalog variant in the
-    /// description. The `should_inject_agent_list_in_messages()` gate (now default
-    /// ON, see [`lingxi_core::host::subagent_spawn`]) reflects that: ON ⇒ pointer (the
-    /// 2.1.193 default); an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
-    /// opt-out keeps a LEGACY inline-catalog body (not a 2.1.193 form).
+    /// description. The catalog always travels in the per-turn reminder.
     ///
     /// The body is MODEL-GATED, exactly as the binary's `if(m){…}` split
     /// (`m = qk(model)` = `tool_api::dh_simple_system_prompt`): a lean-prompt
@@ -2976,7 +3006,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// sentence explains `"fork"`, a fork addendum follows `## When to use`, and
     /// the SendMessage bullet gains the `(except subagent_type: "fork", …)`
     /// qualifier. Default ON for interactive non-coordinator sessions; set
-    /// `LINGXI_FORK_SUBAGENT=0` (or `CLAUDE_CODE_FORK_SUBAGENT=0`) to disable.
+    /// `LINGXI_FORK_SUBAGENT=0` to disable.
     ///
     /// Deferred vs binary (no behavioral surface here): the embedded-grep hint
     /// swap (`S = VH()&&Sh()?…`, which only fires in sessions where Glob/Grep
@@ -3033,14 +3063,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         general_purpose_available: bool,
     ) -> String {
         // `re = PC({model, leanPrompt})` — the LEAN-prompt flag, computed ONCE
-        // and used for both the catalog lines (`U2n`'s second argument) and the
-        // SHORT/LONG arm split below, exactly as `H2n` does.
+        // and used for the SHORT/LONG arm split below, exactly as `H2n` does.
         let lean = tool_api::dh_simple_system_prompt(model);
         // Catalog placement (binary intro `p`): the 2.1.193 default externalizes
         // the catalog to the orchestrator's `<system-reminder>` attachment, so the
-        // description carries only the static pointer line. A LEGACY inline body is
-        // retained behind an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
-        // opt-out (gate OFF) — not a 2.1.193 form, but a usable escape hatch.
+        // description carries only the static pointer line.
         //
         // [round-3 review, finding 6] The externalized catalog is built by
         // `agent_listing_reminder_message` from `builtin_agent_definitions()` +
@@ -3070,20 +3097,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                     entry.agent_type, entry.when_to_use
                 )
             });
-        let agent_list_section =
-            if lingxi_core::host::subagent_spawn::should_inject_agent_list_in_messages() {
-                format!(
-                    "Available agent types are listed in <system-reminder> messages in the conversation.{}",
-                    fusion_notice.unwrap_or_default()
-                )
-            } else {
-                let agent_lines = agents
-                    .iter()
-                    .map(|agent| Self::format_agent_line(agent, lean))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!("Available agent types and the tools they have access to:\n{agent_lines}")
-            };
+        let agent_list_section = format!(
+            "Available agent types are listed in <system-reminder> messages in the conversation.{}",
+            fusion_notice.unwrap_or_default()
+        );
 
         // Pro-plan gate `d` (binary `d=vi()==="pro"?<block>:""`): on the `pro`
         // plan, discourage spawning. Read from the process-global subscription
@@ -3849,6 +3866,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
         };
         let request = SubagentSpawnRequest {
             agent_spawn_token: agent_spawn_token.clone(),
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
             agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
             teammate_color: None,
             subagent_type: effective_type.to_string(),
@@ -3862,18 +3880,11 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             context_paths: parsed.context_paths.clone(),
             description: Some(description_source.clone()),
             model: if is_fork { None } else { parsed.model.clone() },
-            model_profile: if parsed.model.is_none() {
-                ctx.options.model_profile.clone()
-            } else {
-                None
-            },
+            model_profile: spawn_model_profile(parsed, is_fork),
             run_in_background: true,
             name: if is_fork { None } else { parsed.name.clone() },
             team_name: None,
-            // (parity 2.1.212) The `mode` call param is DEPRECATED and ignored:
-            // claude no longer destructures/passes it. The child inherits the
-            // parent's live permission mode (with agent-definition frontmatter as
-            // the only override), so `parsed.mode` is never threaded here.
+            // Permission mode belongs to the parent session and agent definition.
             mode: None,
             isolation: if is_fork { None } else { effective_isolation },
             // The RESOLVED cwd (explicit `cwd` override, else the isolation
@@ -3886,7 +3897,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             fork_context_messages: None,
             instruction_context: ctx.instruction_context.clone(),
             fork_parent_system_prompt: None,
-            // The Agent (Task) tool has no structured-output schema param.
+            // The Agent tool has no structured-output schema param.
             schema: None,
             structured_output_mode: StructuredOutputMode::default(),
             structured_output_parse_retries: 0,
@@ -3914,6 +3925,7 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             // (claude `getAgentModel(…, toolUseContext.options.mainLoopModel, …)`,
             // AgentTool.tsx:418) — see the sync spawn path for the full note.
             parent_model_override: main_loop_model_parent(ctx),
+            parent_model_profile_override: ctx.options.model_profile.clone(),
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -4003,10 +4015,12 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
                         ),
                     )));
                 }
-                Err(ToolError::SubagentFailed(agent_spawn_error_message(
-                    "Agent: async spawn failed: ",
-                    &e,
-                )))
+                Err(ToolError::Internal(
+                    agent_spawn_error_message("Agent: async spawn failed: ", &e)
+                        .string_at("")
+                        .expect("non-hook spawn diagnostics are valid strings")
+                        .to_owned(),
+                ))
             }
         }
     }
@@ -4016,10 +4030,6 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
 impl Tool for AgentTool {
     fn name(&self) -> &str {
         AGENT_TOOL_NAME
-    }
-    fn aliases(&self) -> &[&str] {
-        const ALIASES: &[&str] = &[LEGACY_AGENT_TOOL_NAME];
-        ALIASES
     }
     fn search_hint(&self) -> Option<Utf16JsonProjection> {
         // claude `searchHint: 'delegate work to a subagent'` (AgentTool.tsx:227).
@@ -4345,21 +4355,41 @@ impl Tool for AgentTool {
             .then_some(parsed.run_in_background)
             .flatten();
 
-        // `if(xi()&&a.CLAUDE_CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL)F=void 0`
-        // (@3577560) — on a coordinator session pinned to worker inheritance the
-        // `model` argument is dropped before anything reads it, which is also
-        // what the schema description advertises. Dropping it here (rather than
-        // at each of the four `parsed.model` reads) keeps the selection, the
-        // spawn request and the telemetry on one value.
-        if parsed.model.is_some()
-            && coordinator_forces_worker_inherit_model()
-            && self
-                .ctx
-                .coordinator_mode
-                .as_ref()
-                .is_some_and(|m| m.is_enabled())
-        {
-            parsed.model = None;
+        let inherited_statistics = match (self.ctx.task_registry.as_ref(), ctx.agent_id) {
+            (Some(registry), Some(agent_id)) => {
+                registry.agent_statistics_for_parent(agent_id).await
+            }
+            _ => None,
+        };
+        let statistics = match inherited_statistics {
+            Some(statistics) => Some(statistics),
+            None => match (
+                self.ctx.task_registry.as_ref(),
+                Self::origin_session_id(&ctx).await,
+            ) {
+                (Some(registry), Some(session_id)) => registry.agent_session_statistics(session_id),
+                _ => None,
+            },
+        };
+        let requested_background = self
+            .advertise_run_in_background
+            .then_some(parsed.run_in_background)
+            .flatten();
+
+        // Model and profile are one selection: forced inheritance clears both.
+        // Keep this policy for Mod rewrites as well as the original call.
+        let model_overrides_forced = subagent_model_forced()
+            || (coordinator_forces_worker_inherit_model()
+                && self
+                    .ctx
+                    .coordinator_mode
+                    .as_ref()
+                    .is_some_and(|m| m.is_enabled()));
+        clear_model_overrides_when_forced(&mut parsed, model_overrides_forced);
+        if parsed.model_profile.is_some() && parsed.model.is_none() {
+            return Err(ToolError::InvalidInput(
+                "Agent: model_profile requires an explicit model".into(),
+            ));
         }
 
         // `name` zod chain `z.string().regex(uZc).refine(t=>t!==K9)` (binary
@@ -4384,7 +4414,7 @@ impl Tool for AgentTool {
 
         // Claude Code 2.1.217 defaults the nesting cap to 1: the main thread
         // (depth 0) may spawn a child, while that child may not spawn another
-        // unless CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH raises the limit.
+        // unless LINGXI_MAX_SUBAGENT_SPAWN_DEPTH raises the limit.
         let depth_limit = lingxi_core::host::subagent_spawn::max_subagent_spawn_depth();
         if ctx.depth >= depth_limit {
             if let Some(statistics) = &statistics {
@@ -4525,7 +4555,7 @@ impl Tool for AgentTool {
 
         // 2.1.263 src_160988549.js:3517864. Named teammates branch before
         // ordinary type resolution, concurrency accounting, and MCP checks.
-        // team_name and mode are schema-only inputs; neither selects a team.
+        // The session owns the implicit team; input cannot select a team.
         let teammate_candidate = spawner.teammate_enabled()
             && parsed.name.is_some()
             && !is_fork
@@ -4549,7 +4579,8 @@ impl Tool for AgentTool {
                         })))
         });
         if teammate_candidate && !special_type {
-            let requested = parsed.subagent_type.as_deref();
+            let requested_type = parsed.subagent_type.clone();
+            let requested = requested_type.as_deref();
             if let (Some(kind), Some(gate)) = (requested, &self.ctx.permission_gate) {
                 if let Some(source) = gate.agent_type_deny(kind).await {
                     return Err(ToolError::InvalidInput(format!(
@@ -4820,6 +4851,7 @@ impl Tool for AgentTool {
                 creator_agent_id: ctx.agent_id,
                 origin_session_id,
                 parent_model_override: main_loop_model_parent(&ctx),
+                parent_model_profile_override: ctx.options.model_profile.clone(),
                 parent_permission_mode: parent_permission_mode(
                     &ctx,
                     self.ctx.permission_gate.as_ref(),
@@ -5192,7 +5224,7 @@ impl Tool for AgentTool {
 
         // Per-session subagent spawn cap (claude 2.1.212 `AgentTool.call` `N()`):
         // before every spawn, reject the launch once the session has already
-        // spawned `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` agents (default 200),
+        // spawned `LINGXI_MAX_SUBAGENTS_PER_SESSION` agents (default 200),
         // otherwise bump the counter. The counter lives on the session
         // `taskRegistry` (`getTotalAgentSpawns` / `incrementTotalAgentSpawns`) so
         // it is shared across every `AgentTool::call` in the session and across
@@ -5215,7 +5247,7 @@ impl Tool for AgentTool {
                     format!(
                         "Subagent spawn limit reached ({spawned} of {cap} agents spawned). \
 Complete the remaining work directly with your tools instead of spawning more agents. \
-If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
+If more agents are genuinely needed, ask the user to raise {MAX_SUBAGENTS_PER_SESSION_ENV}."
                     )
                     .into(),
                 ));
@@ -5817,6 +5849,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
 
         let request = SubagentSpawnRequest {
             agent_spawn_token: agent_spawn_token.clone(),
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
             agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
             teammate_color: None,
             // Propagate the RESOLVED effective type (fork → `fork`; omitted →
@@ -5840,11 +5873,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // FORK_AGENT's `Inherit` resolves to the parent model unchanged; the
             // explicit-model override is honored only on the non-fork path.
             model: if is_fork { None } else { parsed.model.clone() },
-            model_profile: if parsed.model.is_none() {
-                ctx.options.model_profile.clone()
-            } else {
-                None
-            },
+            model_profile: spawn_model_profile(&parsed, is_fork),
             // This is the synchronous arm after the resolved availability and
             // subscription gates above. Do not leak the caller's now-disabled
             // request bit into the child runtime snapshot.
@@ -5852,9 +5881,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // Fork path carries no teammate/isolation/cwd overrides.
             name: if is_fork { None } else { parsed.name.clone() },
             team_name: None,
-            // (parity 2.1.212) DEPRECATED `mode` call param — ignored (see the
-            // async spawn path). The child inherits the parent's live permission
-            // mode; only agent-definition frontmatter overrides it.
+            // Permission mode belongs to the parent session and agent definition.
             mode: None,
             isolation: if is_fork {
                 None
@@ -5912,6 +5939,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
             // dispatching runner's own model, mirroring runAgent.ts:678). When set
             // it takes precedence over the spawner's boot/live `default_model`.
             parent_model_override: main_loop_model_parent(&ctx),
+            parent_model_profile_override: ctx.options.model_profile.clone(),
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -5936,7 +5964,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // Nested-progress bridge: `spawn_with_progress` feeds one String line per
         // subagent tool call; forward each as a `ToolProgress` the turn loop
         // re-emits as `SubagentActivity`, so the subagent's work renders under
-        // this Task cell. The forwarder ends when `spawn_with_progress` returns
+        // this Agent cell. The forwarder ends when `spawn_with_progress` returns
         // (its `prog_tx` drops → `prog_rx` closes).
         let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<String>(64);
         let forward_progress = progress.clone();
@@ -5972,7 +6000,9 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
         });
 
-        let (outcome, foreground_worktree_result) = if let Some(registry) =
+        let spawner_owns_stop =
+            spawner.owns_subagent_stop_hooks(false, origin_session_id, request.stop_hook_scope);
+        let (outcome, foreground_worktree_result, terminal_hooks_owned) = if let Some(registry) =
             self.ctx.task_registry.clone()
         {
             let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -6008,8 +6038,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 run.await
             };
             match result {
-                foreground_task::ForegroundResult::Finished(result, worktree) => {
-                    (result, Some(worktree))
+                foreground_task::ForegroundResult::Finished(result, worktree, hooks_owned) => {
+                    (result, Some(worktree), hooks_owned)
                 }
                 foreground_task::ForegroundResult::Backgrounded(launch, task_id) => {
                     if let Some(name) = parsed.name.as_deref() {
@@ -6063,7 +6093,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     .spawn_with_progress(request, inherit, Some(prog_tx))
                     .await
             };
-            (result, None)
+            (result, None, spawner_owns_stop)
         };
         // `prog_tx` is now dropped → the forwarder drains and exits.
         let _ = forwarder.await;
@@ -6336,9 +6366,15 @@ Use /mcp to configure and authenticate the required MCP servers.",
                     subagent_hooks_fired: true,
                 })
             }
-            Ok(SubagentResult::Failed { reason, .. }) => {
+            Ok(SubagentResult::Failed {
+                agent_id, reason, ..
+            }) => {
                 Self::emit_failed(&bus, &invocation_id, "subagent_failed", duration_ms).await;
-                Err(ToolError::SubagentFailed(reason.into()))
+                Err(ToolError::SubagentFailed {
+                    agent_id,
+                    reason: reason.into(),
+                    terminal_hooks_owned,
+                })
             }
             Ok(SubagentResult::Killed { .. }) => {
                 Self::emit_failed(&bus, &invocation_id, "killed", duration_ms).await;
@@ -6398,19 +6434,20 @@ Use /mcp to configure and authenticate the required MCP servers.",
             }
             Err(e) => {
                 Self::emit_failed(&bus, &invocation_id, "spawn_error", duration_ms).await;
-                Err(ToolError::SubagentFailed(agent_spawn_error_message(
-                    "Agent: spawner failed: ",
-                    &e,
-                )))
+                Err(ToolError::Internal(
+                    agent_spawn_error_message("Agent: spawner failed: ", &e)
+                        .string_at("")
+                        .expect("non-hook spawn diagnostics are valid strings")
+                        .to_owned(),
+                ))
             }
         }
     }
 }
 
 /// Test-only: serializes every test whose prompt output depends on a
-/// process-global env gate — `LINGXI_AGENT_LIST_IN_MESSAGES` AND
-/// `LINGXI_FORK_SUBAGENT`, both of which `build_prompt_with_async_agents`
-/// consults.
+/// process-global env gate such as `LINGXI_FORK_SUBAGENT`, which
+/// `build_prompt_with_async_agents` consults.
 ///
 /// Lives HERE, not inside `agent_test`, so the description tests below can
 /// reach it. They previously could not, and their module doc claimed they
@@ -6418,7 +6455,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
 /// was written about, but NOT of the fork gate, which is read inside the
 /// builder. That is how they raced.
 #[cfg(test)]
-pub(crate) static AGENT_LIST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static AGENT_PROMPT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod forwarded_server_fallback_progress_tests {
@@ -6460,19 +6497,19 @@ mod agent_test;
 /// ⚠️ That is NOT sufficient on its own: the builder also consults
 /// `LINGXI_FORK_SUBAGENT` internally (`is_fork_subagent_enabled`), which the
 /// fork tests in `agent_test.rs` flip. Every test here therefore runs under
-/// [`prompt_env`], which takes the shared [`AGENT_LIST_ENV_LOCK`] and clears
+/// [`prompt_env`], which takes the shared [`AGENT_PROMPT_ENV_LOCK`] and clears
 /// that variable. An earlier version of this doc claimed these tests never
 /// touch the process env; the fork gate made that false and the suite failed
 /// intermittently on whichever test happened to run alongside a fork test.
 #[cfg(test)]
 mod f_description_l_gate_tests {
-    use super::{AgentTool, AGENT_LIST_ENV_LOCK};
+    use super::{AgentTool, AGENT_PROMPT_ENV_LOCK};
 
     /// Pin the non-fork description (`LINGXI_FORK_SUBAGENT=0`). 2.1.232 defaults
     /// the feature ON for interactive sessions; these tests lock the `l`-gate
     /// tail bullets of the non-fork form.
     fn prompt_env<T>(body: impl FnOnce() -> T) -> T {
-        let _guard = AGENT_LIST_ENV_LOCK
+        let _guard = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved = std::env::var("LINGXI_FORK_SUBAGENT").ok();
@@ -6618,9 +6655,7 @@ mod f_description_l_gate_tests {
         }
     }
 
-    /// [round-3 review, finding 6] Under the DEFAULT gate
-    /// (`LINGXI_AGENT_LIST_IN_MESSAGES` unset ⇒ `should_inject_agent_list_in_messages()`
-    /// true), the externalized system-reminder catalog
+    /// [round-3 review, finding 6] The current system-reminder catalog
     /// (`agent_listing_reminder_message`, a different crate) is built from
     /// `builtin_agent_definitions()` + the disk catalog — neither of which
     /// carries the synthetic `fusion` entry `append_fusion_listing` adds to
@@ -6643,11 +6678,7 @@ mod f_description_l_gate_tests {
             when_to_use_lean: None,
             tools_description: "Fusion deliberation (read-only panel)".into(),
         });
-        // `prompt_env` already takes `AGENT_LIST_ENV_LOCK` — do the
-        // `LINGXI_AGENT_LIST_IN_MESSAGES` reset INSIDE its closure rather
-        // than locking the (non-reentrant) mutex a second time out here.
         let p = prompt_env(|| {
-            std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
             AgentTool::build_prompt_with_async_agents(&fixture, &[], false, true, LEAN_MODEL, true)
         });
         assert!(
@@ -6671,7 +6702,6 @@ mod f_description_l_gate_tests {
     #[test]
     fn default_gate_omits_fusion_notice_when_the_entry_is_absent() {
         let p = prompt_env(|| {
-            std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
             AgentTool::build_prompt_with_async_agents(&agents(), &[], false, true, LEAN_MODEL, true)
         });
         assert!(

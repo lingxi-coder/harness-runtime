@@ -464,6 +464,26 @@ fn move_session_sidecar_best_effort(source: &std::path::Path, target: &std::path
 }
 
 impl ConversationOrchestrator {
+    /// Capture the composition-owned session writer before publishing a host
+    /// input transport. The returned owner is independent of later responses.
+    pub fn session_transcript_writer(&self) -> Option<Arc<session::jsonl::JsonlWriter>> {
+        self.transcript.jsonl_writer.clone()
+    }
+    /// Exact captured model/profile's native provider identity for host metadata.
+    pub fn model_is_first_party_route(&self, model: &str, profile: Option<&str>) -> bool {
+        self.api.is_first_party_route(model, profile)
+    }
+
+    /// Inspect the exact captured model/profile's credential source without
+    /// executing authentication or changing the session's selected route.
+    pub async fn model_credential_source(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<llm_runtime::CredentialSource, LlmError> {
+        self.api.credential_source(model, profile).await
+    }
+
     /// Record the selected route from an admitted first-party server
     /// fallback. This records only model-selection state; it deliberately does
     /// not touch the local refusal cascade, `refusal_occurred`, or model-switch
@@ -867,6 +887,7 @@ impl ConversationOrchestrator {
         let reserve = if claude_thinking { 2048 } else { 0 };
         let messages = {
             vec![ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: prompt.to_owned(),
@@ -1053,6 +1074,7 @@ impl ConversationOrchestrator {
         }
         let mut request = sidequery::ForkedAgentRequest {
             prompt_messages: vec![ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: prompt,
@@ -1128,6 +1150,7 @@ impl ConversationOrchestrator {
                 request
                     .prompt_messages
                     .push(ConversationMessage::Assistant {
+                        per_turn_effort: None,
                         id: MessageId::new(),
                         content: assistant_content,
                         stop_reason: Some("tool_use".into()),
@@ -1396,12 +1419,11 @@ impl ConversationOrchestrator {
         writer: &session::jsonl::JsonlWriter,
         session_id: lingxi_core::types::SessionId,
         delivery_id: &str,
-        payload: serde_json::Value,
+        payload: Utf16JsonProjection,
     ) -> Result<session::jsonl::TranscriptAppendOutcome, session::jsonl::TranscriptWriterError>
     {
         let uuid = payload
-            .get("uuid")
-            .and_then(serde_json::Value::as_str)
+            .string_at("/uuid")
             .filter(|uuid| !uuid.is_empty())
             .ok_or(session::jsonl::TranscriptWriterError::MissingMessageUuid)?
             .to_string();
@@ -1604,7 +1626,7 @@ impl ConversationOrchestrator {
     /// JSON object with a single `name` field; this side query is history-inert
     /// and tool-less, sharing the same fork runner as `/recap`.
     pub(crate) const SESSION_NAME_PROMPT: &str = "Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation. Use lowercase words separated by hyphens. Examples: \"fix-login-bug\", \"add-auth-feature\", \"refactor-api-client\", \"debug-test-failures\". Return JSON with a \"name\" field.";
-    pub(crate) const PROMPT_SUGGESTION_PROMPT: &str = r#"[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]
+    pub(crate) const PROMPT_SUGGESTION_PROMPT: &str = r#"[SUGGESTION MODE: Suggest what the user might naturally type next in this conversation.]
 
 FIRST: Look at the user's recent messages and original request.
 
@@ -1615,8 +1637,8 @@ THE TEST: Would they think "I was just about to type that"?
 EXAMPLES:
 User asked "fix the bug and run tests", bug is fixed → "run the tests"
 After code written → "try it out"
-Claude offers options → suggest the one the user would likely pick, based on conversation
-Claude asks to continue → "yes" or "go ahead"
+The assistant offers options → suggest the one the user would likely pick, based on conversation
+The assistant asks to continue → "yes" or "go ahead"
 Task complete, obvious follow-up → "commit this" or "push it"
 After error or misunderstanding → silence (let them assess/correct)
 
@@ -1625,7 +1647,7 @@ Be specific: "run the tests" beats "continue".
 NEVER SUGGEST:
 - Evaluative ("looks good", "thanks")
 - Questions ("what about...?")
-- Claude-voice ("Let me...", "I'll...", "Here's...")
+- Assistant-voice ("Let me...", "I'll...", "Here's...")
 - New ideas they didn't ask about
 - Multiple sentences
 
@@ -2258,6 +2280,11 @@ Reply with ONLY the suggestion, no quotes or explanation."#;
                     output_tokens: mu.usage.tokens.output,
                     cache_read_input_tokens: mu.cache_read_input_tokens,
                     cache_creation_input_tokens: mu.cache_creation_input_tokens,
+                    reasoning_tokens: mu.usage.tokens.reasoning_output,
+                    web_search_requests: mu
+                        .usage
+                        .server_tool_use
+                        .map_or(0, |tools| u64::from(tools.web_search_requests)),
                 })
                 .collect(),
             unknown_models: !state.unpriced_models.is_empty(),
@@ -2463,6 +2490,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
             // (`llm-runtime/src/convert.rs`), so this is transcript + TUI only
             // and never becomes model context.
             let notice_msg = lingxi_core::types::ConversationMessage::System {
+                api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: content.into(),
                 subtype: Some("model_refusal_fallback".to_string()),
@@ -4215,6 +4243,7 @@ mod session_sidecar_tests {
     #[test]
     fn prompt_suggestion_gate_recognizes_synthetic_api_error_assistants() {
         let assistant = |reason: &str| ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "response".to_string(),

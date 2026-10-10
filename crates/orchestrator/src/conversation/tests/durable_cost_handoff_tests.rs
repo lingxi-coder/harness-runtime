@@ -963,6 +963,7 @@ impl SideQueryClient for CancelAfterCompactionResponse {
 
 fn assistant_message(text: &str) -> ConversationMessage {
     ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: text.into(),

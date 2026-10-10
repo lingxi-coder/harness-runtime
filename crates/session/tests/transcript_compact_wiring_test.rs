@@ -58,8 +58,7 @@ fn boundary_line() -> JsonlMessage {
         "compactMetadata".into(),
         json!({"trigger":"auto","preTokens":1000}),
     );
-    JsonlMessage {
-        message_type: "system".into(),
+    JsonlMessage {         message_type: "system".into(),
         uuid: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into(),
         parent_uuid: None,
         session_id: SESSION_ID.into(),

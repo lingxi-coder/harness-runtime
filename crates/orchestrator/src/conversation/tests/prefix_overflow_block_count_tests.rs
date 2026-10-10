@@ -26,6 +26,7 @@ fn counts_documents_and_images_across_user_and_assistant() {
     // #55 a3p documentBlockCount / imageBlockCount.
     let msgs = vec![
         ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -44,6 +45,7 @@ fn counts_documents_and_images_across_user_and_assistant() {
             turn_origin: None,
         },
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![image_block()],
             stop_reason: None,
@@ -51,6 +53,7 @@ fn counts_documents_and_images_across_user_and_assistant() {
         },
         // System messages carry a flat string — never counted.
         ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: "system".into(),
             subtype: None,

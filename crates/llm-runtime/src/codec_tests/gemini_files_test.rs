@@ -589,6 +589,7 @@ fn uploaded_file_uri_round_trips_into_gemini_file_data_encoding() {
     let codec = GeminiCodec::new(GEMINI_BASE);
     let mut request = HistoryFixture::new("gemini-2.0-flash");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
             url: file.uri.clone(),

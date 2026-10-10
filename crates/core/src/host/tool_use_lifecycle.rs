@@ -4,6 +4,7 @@
 //! provider or SDK wire format.
 
 use crate::types::ToolUseId;
+use branding::MAX_TOOL_USE_CONCURRENCY_ENV;
 use std::collections::HashSet;
 
 /// Native `la()` concurrency default when the typed environment value is
@@ -13,11 +14,7 @@ pub const DEFAULT_MAX_TOOL_USE_CONCURRENCY: usize = 10;
 /// Read the host-branded tool-use concurrency limit.
 #[must_use]
 pub fn max_tool_use_concurrency() -> usize {
-    max_tool_use_concurrency_from(
-        std::env::var("LINGXI_MAX_TOOL_USE_CONCURRENCY")
-            .ok()
-            .as_deref(),
-    )
+    max_tool_use_concurrency_from(std::env::var(MAX_TOOL_USE_CONCURRENCY_ENV).ok().as_deref())
 }
 
 /// Resolve the concurrency limit with Native typed-integer environment

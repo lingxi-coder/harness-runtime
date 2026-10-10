@@ -389,7 +389,6 @@ pub(super) fn api_projection(
             .unwrap_or(0);
         let removed_rows = start + first_complete_user;
         rows.drain(..removed_rows);
-        rows.drain(..removed_rows);
     }
     Ok(projection_array(rows))
 }

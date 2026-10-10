@@ -413,16 +413,12 @@ async fn execute_stream_decodes_anthropic_event_sequence() {
     let (events, error) = collect_events(&mut stream).await;
 
     assert!(error.is_none(), "unexpected error: {error:?}");
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::Start { .. }))
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::TextDelta { text, .. } if text == "hi"))
-    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Start { .. })));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::TextDelta { text, .. } if text == "hi")));
     assert!(matches!(
         events.last(),
         Some(StreamEvent::End {
@@ -461,18 +457,14 @@ async fn execute_stream_threads_provider_metadata_headers_to_responses_decoder()
     let (events, error) = collect_events(&mut stream).await;
 
     assert!(error.is_none(), "unexpected stream error: {error:?}");
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::Start { .. }))
-    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Start { .. })));
     for (name, expected) in &headers {
-        assert!(
-            stream
-                .headers()
-                .iter()
-                .any(|(key, value)| key == name && value == expected)
-        );
+        assert!(stream
+            .headers()
+            .iter()
+            .any(|(key, value)| key == name && value == expected));
     }
 }
 
@@ -801,11 +793,9 @@ async fn mid_stream_failure_after_events_is_stream_interrupted() {
         .expect("stream");
 
     let (events, error) = collect_events(&mut stream).await;
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, StreamEvent::Start { .. }))
-    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::Start { .. })));
     assert!(
         matches!(error, Some(SdkError::StreamInterrupted { message }) if message.contains("connection reset"))
     );

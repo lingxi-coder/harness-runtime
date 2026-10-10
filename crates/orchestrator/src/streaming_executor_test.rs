@@ -52,6 +52,7 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream::{self, StreamExt};
     use lingxi_core::types::{utf16_json::Utf16JsonProjection, MessageId};
+
     use llm_runtime::{HistoryEvent, LlmError};
     use serde_json::json;
     use std::path::PathBuf;
@@ -204,6 +205,7 @@ mod tests {
             }
             Ok(ToolCallResult {
                 data: source_json!({ "content": "ok" }),
+
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
@@ -303,6 +305,7 @@ mod tests {
         async fn validate_input(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
@@ -311,6 +314,7 @@ mod tests {
         async fn check_permissions(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -326,6 +330,7 @@ mod tests {
         async fn description(
             &self,
             _input: &Utf16JsonProjection,
+
             _opts: &DescriptionOptions,
         ) -> String {
             "detached continuation".into()
@@ -338,6 +343,7 @@ mod tests {
         async fn call(
             &self,
             input: Utf16JsonProjection,
+
             ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -395,6 +401,7 @@ mod tests {
             .to_owned();
             Ok(ToolCallResult {
                 data: source_json!({ "step": step }),
+
                 model_content: None,
                 new_messages: Vec::new(),
                 context_modifier: Some(Box::new(move |mut context: ToolUseContext| {
@@ -405,6 +412,7 @@ mod tests {
                 is_error: false,
                 mcp_meta: (step == "old").then(|| {
                     source_json!({
+
                         "fence_probe": "old-generation",
                         "_meta": { "claude/endTurn": true },
                     })
@@ -434,6 +442,7 @@ mod tests {
                 exempt_top_level_keys: None,
             }
         }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
@@ -449,6 +458,7 @@ mod tests {
         async fn validate_input(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
@@ -456,6 +466,7 @@ mod tests {
         async fn check_permissions(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -470,6 +481,7 @@ mod tests {
         async fn description(
             &self,
             _input: &Utf16JsonProjection,
+
             _opts: &DescriptionOptions,
         ) -> String {
             "W1 capture".into()
@@ -480,6 +492,7 @@ mod tests {
         async fn call(
             &self,
             input: Utf16JsonProjection,
+
             ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -507,6 +520,7 @@ mod tests {
             };
             self.captured.lock().unwrap().push(captured.clone());
             let held = input.at_pointer("/hold").and_then(|value| value.as_bool()) == Some(true);
+
             if held {
                 self.first_started.notify_one();
                 self.release_first.notified().await;
@@ -569,6 +583,7 @@ mod tests {
             });
             let result = ToolCallResult {
                 data: source_json!({ "content": "ok" }),
+
                 model_content: None,
                 new_messages: vec![],
                 context_modifier,
@@ -630,6 +645,7 @@ mod tests {
         async fn validate_input(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
@@ -638,6 +654,7 @@ mod tests {
         async fn check_permissions(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -653,6 +670,7 @@ mod tests {
         async fn description(
             &self,
             _input: &Utf16JsonProjection,
+
             _opts: &DescriptionOptions,
         ) -> String {
             "progress flood".into()
@@ -665,6 +683,7 @@ mod tests {
         async fn call(
             &self,
             _input: Utf16JsonProjection,
+
             ctx: ToolUseContext,
             tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -853,6 +872,7 @@ mod tests {
         async fn validate_input(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
@@ -898,6 +918,7 @@ mod tests {
         async fn description(
             &self,
             _input: &Utf16JsonProjection,
+
             _opts: &DescriptionOptions,
         ) -> String {
             "parked permission tool".into()
@@ -966,6 +987,7 @@ mod tests {
         async fn validate_input(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
@@ -974,6 +996,7 @@ mod tests {
         async fn check_permissions(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -989,6 +1012,7 @@ mod tests {
         async fn description(
             &self,
             _input: &Utf16JsonProjection,
+
             _opts: &DescriptionOptions,
         ) -> String {
             "actor queue".into()
@@ -1001,6 +1025,7 @@ mod tests {
         async fn call(
             &self,
             input: Utf16JsonProjection,
+
             ctx: ToolUseContext,
             _tx: ToolProgressSender,
         ) -> Result<ToolCallResult, ToolError> {
@@ -1163,6 +1188,7 @@ mod tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: source_json!({ "content": "ok" }),
+
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
@@ -1202,6 +1228,7 @@ mod tests {
                 outcome: hooks::HookOutcome::Success,
                 stdout: String::new().into(),
                 stderr: String::new().into(),
+
                 exit_code: Some(0),
                 response: Some(hooks::response::HookResponse {
                     additional_context: Some("POST-ERROR-CTX".into()),
@@ -1696,6 +1723,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty());
+
         assert!(streaming.captured_calls().await.is_empty());
     }
 
@@ -2423,6 +2451,7 @@ mod tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: source_json!({ "content": "ok" }),
+
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
@@ -2566,6 +2595,7 @@ mod tests {
         ) -> Result<ToolCallResult, ToolError> {
             Ok(ToolCallResult {
                 data: source_json!({ "content": "ok" }),
+
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
@@ -2607,6 +2637,7 @@ mod tests {
                 exempt_top_level_keys: None,
             }
         }
+
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
         }
@@ -2622,6 +2653,7 @@ mod tests {
         async fn validate_input(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> Result<(), ValidationError> {
             Ok(())
@@ -2629,6 +2661,7 @@ mod tests {
         async fn check_permissions(
             &self,
             _input: &Utf16JsonProjection,
+
             _ctx: &ToolUseContext,
         ) -> permission::PermissionResult {
             permission::PermissionResult::Allow {
@@ -2643,6 +2676,7 @@ mod tests {
         async fn description(
             &self,
             _input: &Utf16JsonProjection,
+
             _opts: &DescriptionOptions,
         ) -> String {
             "stream boundary serial tool".into()
@@ -2670,6 +2704,7 @@ mod tests {
             }
             Ok(ToolCallResult {
                 data: source_json!({ "content": input.string_at("/step").unwrap_or_default() }),
+
                 model_content: None,
                 new_messages: vec![],
                 context_modifier: None,
@@ -2702,6 +2737,7 @@ mod tests {
         async fn emit_text(&self, _text: &Utf16JsonProjection) {}
         async fn emit_tool_call(&self, _id: &ToolUseId, _tool: &str, _input: &Utf16JsonProjection) {
         }
+
         async fn emit_tool_result(
             &self,
             id: &ToolUseId,
@@ -2819,6 +2855,7 @@ mod tests {
             .tools
             .iter()
             .all(|tool| tool.status == ToolStatus::Executing));
+
         release_actor_call(&mut releases, "A").await;
         release_actor_call(&mut releases, "B").await;
         exec.run_to_completion().await.unwrap();
@@ -2918,6 +2955,7 @@ mod tests {
         assert!(exec.tools[1..]
             .iter()
             .all(|tool| tool.status == ToolStatus::Queued));
+
         release_actor_call(&mut releases, "A").await;
         let mut entries = vec![
             next_actor_start(&mut started).await,
@@ -3187,6 +3225,7 @@ mod tests {
         else {
             panic!()
         };
+
         assert!(
             is_error.unwrap_or(false),
             "user-interrupted result must be an error"
@@ -3315,6 +3354,7 @@ mod tests {
             a,
         )
         .await;
+
         while !exec.inflight_is_empty() {
             exec.drain_one().await;
         }
@@ -3420,6 +3460,7 @@ mod tests {
             assert!(matches!(
                 &result.tool_use_result,
                 Some(text) if text.string_at("") == Some(expected.as_str())
+
             ));
             if tool_use_id.as_str() == queued_id.as_str() {
                 assert_eq!(provider_tool_use_id.as_deref(), Some("provider-queued"));
@@ -3787,6 +3828,7 @@ mod tests {
             a,
         )
         .await;
+
         // Not fired yet → no abort for either.
         assert_eq!(exec.abort_reason_for(0), None);
         assert_eq!(exec.abort_reason_for(1), None);
@@ -3822,6 +3864,7 @@ mod tests {
             a,
         )
         .await;
+
         user_cancel.cancel();
         exec.apply_abort_to_pending().await;
         exec.run_to_completion().await.unwrap();
@@ -3847,6 +3890,7 @@ mod tests {
         )
         .await
         .unwrap();
+
         exec.add_tool(
             ToolUseId::new(),
             "McpCancelTool".into(),
@@ -3905,6 +3949,7 @@ mod tests {
             a,
         )
         .await;
+
         // Wait for the real Tool::call entry before firing user cancellation.
         started.notified().await;
         assert_eq!(exec.tools[0].status, ToolStatus::Executing);
@@ -3925,6 +3970,7 @@ mod tests {
         assert!(!content
             .string_at("")
             .is_some_and(|text| text.contains("cancel-tool-ran-to-end")));
+
         let drained = exec.take_newly_completed();
         assert_eq!(drained.len(), 1);
         let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
@@ -4007,6 +4053,7 @@ mod tests {
             a,
         )
         .await;
+
         // Wait for the real Tool::call entry, then discard while it is in flight.
         started.notified().await;
         assert_eq!(exec.tools[0].status, ToolStatus::Executing);
@@ -4253,6 +4300,7 @@ mod tests {
         )
         .await
         .unwrap();
+
         let assistant_id = MessageId::new();
         let fallback = HistoryEvent::ServerFallback {
             event: Box::new(
@@ -4428,6 +4476,7 @@ mod tests {
         )
         .await
         .unwrap();
+
         let mut hooks = hooks::HookRegistry::new();
         hooks.set_mod_host(host.clone());
         let orch = ConversationOrchestrator::into_shared(
@@ -4481,6 +4530,7 @@ mod tests {
                 && input
                     .object_entries()
                     .is_some_and(|entries| entries.is_empty())
+
         ));
         assert_eq!(
             turn.assistant_blocks,
@@ -4504,6 +4554,7 @@ mod tests {
             observed.string_at("/result/uuid"),
             Some(row.row_id.as_uuid().to_string().as_str())
         );
+
         let ContentBlock::ToolResult { is_error, .. } = executor.tools[0].result.as_ref().unwrap()
         else {
             panic!("expected the original tool result");
@@ -4789,6 +4840,7 @@ mod tests {
                 id: ToolUseId::from(first_id),
                 name: "W1Capture".into(),
                 input: project_test_tool_input(json!({ "hold": false })),
+
                 provider_id: None,
             }]
         );
@@ -5094,6 +5146,7 @@ mod tests {
                     id: second_id.clone(),
                     name: "W1Capture".into(),
                     input: project_test_tool_input(second_input.clone()),
+
                     provider_id: None,
                 },
             ],
@@ -5111,6 +5164,7 @@ mod tests {
                 assistant_id.clone(),
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: 0,
+
                     query_history: query_history.clone(),
                     assistant_message: full_row.clone(),
                     same_turn_tool_uses: Vec::new(),
@@ -5141,6 +5195,7 @@ mod tests {
                         id: first_id.clone(),
                         name: "W1Capture".into(),
                         input: project_test_tool_input(json!({"hold": true})),
+
                         provider_id: None,
                     }],
                 },
@@ -5194,6 +5249,7 @@ mod tests {
                     id: first_id.clone(),
                     name: "W1Capture".into(),
                     input: project_test_tool_input(json!({"hold": true})),
+
                     provider_id: None,
                 }]
             );
@@ -5291,6 +5347,7 @@ mod tests {
                 assistant_id,
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: 0,
+
                     query_history: query_history.clone(),
                     assistant_message: first_row,
                     same_turn_tool_uses: Vec::new(),
@@ -5338,6 +5395,7 @@ mod tests {
                 assistant_id,
                 crate::turn_loop::ToolUseDispatchFacts {
                     native_query_depth: 0,
+
                     query_history: query_history.clone(),
                     assistant_message: second_row,
                     same_turn_tool_uses: Vec::new(),
@@ -5691,6 +5749,7 @@ mod tests {
             .lock()
             .await
             .contains_key(old_id.as_str()));
+
         assert_eq!(
             orch.session.lock().await.history.len(),
             history_before_late_return,
@@ -5825,6 +5884,7 @@ mod tests {
             .lock()
             .await
             .contains_key(tool_id.as_str()));
+
         assert_eq!(
             orch.session.lock().await.history.len(),
             history_before_late_return,
@@ -5916,6 +5976,7 @@ mod tests {
         )
         .await
         .unwrap();
+
         let mut hook_registry = hooks::HookRegistry::new();
         hook_registry.set_mod_host(host.clone());
         let hook_registry = Arc::new(tokio::sync::RwLock::new(hook_registry));
@@ -5963,6 +6024,7 @@ mod tests {
                     event,
                     lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                         if plugin == "clock-after-generation" && text.string_at("") == Some("held stale callback entered")
+
                 ));
                 if entered {
                     break;
@@ -6000,6 +6062,7 @@ mod tests {
                         ToolUseId::new(),
                         "SafeTool".into(),
                         project_test_tool_input(json!({"observe": true})),
+
                         None,
                         MessageId::new(),
                     )
@@ -6011,26 +6074,31 @@ mod tests {
                     lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                         if plugin == "clock-after-generation"
                             && text.string_at("") == Some("stale callback rejection and all raw output attempts reached")
+
                 ));
                 let live_callback_ran = events.iter().any(|event| matches!(
                     event,
                     lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                         if plugin == "clock-after-generation" && text.string_at("") == Some("live timer callback ran")
+
                 ));
                 let accepted_status = events.iter().any(|event| matches!(
                     event,
                     lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                         if plugin == "clock-after-generation" && text.string_at("") == Some("accepted timer status")
+
                 ));
                 let accepted_toast = events.iter().any(|event| matches!(
                     event,
                     lingxi_core::host::OutputEvent::ModToast { plugin, text, .. }
                         if plugin == "clock-after-generation" && text.string_at("") == Some("accepted timer toast")
+
                 ));
                 let accepted_log = events.iter().any(|event| matches!(
                     event,
                     lingxi_core::host::OutputEvent::ModLog { plugin, text }
                         if plugin == "clock-after-generation" && text.string_at("") == Some("accepted timer log")
+
                 ));
                 if stale_callback_reported && live_callback_ran
                     && accepted_status && accepted_toast && accepted_log
@@ -6057,6 +6125,7 @@ mod tests {
                 event,
                 lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                     if plugin == "clock-after-generation" && text.string_at("") == Some("held stale callback entered")
+
             )),
             "the old callback's entered status proves it reached the non-cooperative gate"
         );
@@ -6065,6 +6134,7 @@ mod tests {
                 event,
                 lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                     if plugin == "clock-after-generation" && text.string_at("") == Some("obsolete timer status")
+
             )),
             "an expired generation cannot publish a raw id-zero status"
         );
@@ -6073,6 +6143,7 @@ mod tests {
                 event,
                 lingxi_core::host::OutputEvent::ModToast { plugin, text, .. }
                     if plugin == "clock-after-generation" && text.string_at("") == Some("obsolete timer toast")
+
             )),
             "an expired generation cannot publish a raw id-zero toast"
         );
@@ -6081,6 +6152,7 @@ mod tests {
                 event,
                 lingxi_core::host::OutputEvent::ModLog { plugin, text }
                     if plugin == "clock-after-generation" && text.string_at("") == Some("obsolete timer log")
+
             )),
             "an expired generation cannot publish a raw id-zero log"
         );
@@ -6090,6 +6162,7 @@ mod tests {
                 lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                     if plugin == "clock-after-generation"
                         && text.string_at("") == Some("stale callback rejection and all raw output attempts reached")
+
             )),
             "two generation-fenced state.get catches bracketed all three old output attempts"
         );
@@ -6097,21 +6170,25 @@ mod tests {
             event,
             lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                 if plugin == "clock-after-generation" && text.string_at("") == Some("accepted timer status")
+
         )));
         assert!(events.iter().any(|event| matches!(
             event,
             lingxi_core::host::OutputEvent::ModToast { plugin, text, .. }
                 if plugin == "clock-after-generation" && text.string_at("") == Some("accepted timer toast")
+
         )));
         assert!(events.iter().any(|event| matches!(
             event,
             lingxi_core::host::OutputEvent::ModLog { plugin, text }
                 if plugin == "clock-after-generation" && text.string_at("") == Some("accepted timer log")
+
         )));
         assert!(events.iter().any(|event| matches!(
             event,
             lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                 if plugin == "clock-after-generation" && text.string_at("") == Some("live timer callback ran")
+
         )));
         assert!(
             fallback_events.iter().all(|event| !matches!(
@@ -6216,6 +6293,7 @@ mod tests {
         )
         .await
         .unwrap();
+
         host.load(
             "clock-after-owner-drop-live",
             dir.path(),
@@ -6271,6 +6349,7 @@ mod tests {
                     event,
                     lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                         if plugin == "clock-after-owner-drop" && text.string_at("") == Some("held dropped callback entered")
+
                 ));
                 if entered {
                     break;
@@ -6303,6 +6382,7 @@ mod tests {
                         ToolUseId::new(),
                         "SafeTool".into(),
                         project_test_tool_input(json!({"observeStale": true, "observeLive": true})),
+
                         None,
                         MessageId::new(),
                     )
@@ -6314,30 +6394,35 @@ mod tests {
                     lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                         if plugin == "clock-after-owner-drop"
                             && text.string_at("") == Some("dropped callback rejection and all raw output attempts reached")
+
                 ));
                 let live_callback_ran = events.iter().any(|event| matches!(
                     event,
                     lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                         if plugin == "clock-after-owner-drop-live"
                             && text.string_at("") == Some("drop test live timer callback ran")
+
                 ));
                 let accepted_status = events.iter().any(|event| matches!(
                     event,
                     lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                         if plugin == "clock-after-owner-drop-live"
                             && text.string_at("") == Some("accepted dropped test status")
+
                 ));
                 let accepted_toast = events.iter().any(|event| matches!(
                     event,
                     lingxi_core::host::OutputEvent::ModToast { plugin, text, .. }
                         if plugin == "clock-after-owner-drop-live"
                             && text.string_at("") == Some("accepted dropped test toast")
+
                 ));
                 let accepted_log = events.iter().any(|event| matches!(
                     event,
                     lingxi_core::host::OutputEvent::ModLog { plugin, text }
                         if plugin == "clock-after-owner-drop-live"
                             && text.string_at("") == Some("accepted dropped test log")
+
                 ));
                 if stale_callback_reported && live_callback_ran
                     && accepted_status && accepted_toast && accepted_log
@@ -6364,6 +6449,7 @@ mod tests {
                 event,
                 lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                     if plugin == "clock-after-owner-drop" && text.string_at("") == Some("held dropped callback entered")
+
             )),
             "the old callback's entered status proves it reached the non-cooperative gate"
         );
@@ -6372,6 +6458,7 @@ mod tests {
                 event,
                 lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                     if plugin == "clock-after-owner-drop" && text.string_at("") == Some("obsolete dropped timer status")
+
             )),
             "a dropped generation cannot publish a raw id-zero status"
         );
@@ -6380,6 +6467,7 @@ mod tests {
                 event,
                 lingxi_core::host::OutputEvent::ModToast { plugin, text, .. }
                     if plugin == "clock-after-owner-drop" && text.string_at("") == Some("obsolete dropped timer toast")
+
             )),
             "a dropped generation cannot publish a raw id-zero toast"
         );
@@ -6388,6 +6476,7 @@ mod tests {
                 event,
                 lingxi_core::host::OutputEvent::ModLog { plugin, text }
                     if plugin == "clock-after-owner-drop" && text.string_at("") == Some("obsolete dropped timer log")
+
             )),
             "a dropped generation cannot publish a raw id-zero log"
         );
@@ -6397,6 +6486,7 @@ mod tests {
                 lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                     if plugin == "clock-after-owner-drop"
                         && text.string_at("") == Some("dropped callback rejection and all raw output attempts reached")
+
             )),
             "two generation-fenced state.get catches bracketed all three old output attempts"
         );
@@ -6404,22 +6494,26 @@ mod tests {
             event,
             lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                 if plugin == "clock-after-owner-drop-live" && text.string_at("") == Some("accepted dropped test status")
+
         )));
         assert!(events.iter().any(|event| matches!(
             event,
             lingxi_core::host::OutputEvent::ModToast { plugin, text, .. }
                 if plugin == "clock-after-owner-drop-live" && text.string_at("") == Some("accepted dropped test toast")
+
         )));
         assert!(events.iter().any(|event| matches!(
             event,
             lingxi_core::host::OutputEvent::ModLog { plugin, text }
                 if plugin == "clock-after-owner-drop-live" && text.string_at("") == Some("accepted dropped test log")
+
         )));
         assert!(events.iter().any(|event| matches!(
             event,
             lingxi_core::host::OutputEvent::ModStatus { plugin, text: Some(text) }
                 if plugin == "clock-after-owner-drop-live"
                     && text.string_at("") == Some("drop test live timer callback ran")
+
         )));
         assert!(
             fallback_events.iter().all(|event| !matches!(
@@ -6533,6 +6627,7 @@ mod tests {
             .lock()
             .await
             .contains_key(tool_id.as_str()));
+
         assert_eq!(
             fixture.orch.session.lock().await.history.len(),
             history_before_late_return
@@ -6588,6 +6683,7 @@ mod tests {
             .sink
             .future_dropped
             .load(std::sync::atomic::Ordering::SeqCst));
+
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             fixture.blocked_send_finished.notified(),
@@ -6628,6 +6724,7 @@ mod tests {
             .lock()
             .await
             .contains_key(tool_id.as_str()));
+
         assert_eq!(
             fixture.orch.session.lock().await.history.len(),
             history_before_late_return

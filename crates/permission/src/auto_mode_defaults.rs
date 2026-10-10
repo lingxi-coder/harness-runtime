@@ -18,7 +18,7 @@
 /// The 20 shipped `environment` entries, verbatim.
 pub const DEFAULT_ENVIRONMENT: [&str; 20] = [
     r"**Organization**: None configured",
-    r"**Primary use of Claude Code**: software development",
+    r"**Primary use**: software development",
     r"**Cloud provider(s)**: None configured",
     r"**Repository visibility**: assume private unless the remote host and repo name indicate otherwise, or a visibility check in the transcript shows public",
     r"**Internal sharing / snippet hosting**: None configured — treat public paste/gist services as outside the trust boundary",
@@ -55,8 +55,8 @@ pub const DEFAULT_ALLOW_LABELS: [&str; 17] = [
     r"Scheduled-Task Fires",
     r"Multi-Agent Coordination",
     r"Memory Directory",
-    r"LINGXI.md Content",
-    r"Claude Code Scheduling",
+    r"Instruction File Content",
+    r"Agent Scheduling",
     r"Browser Trusted Navigation",
 ];
 

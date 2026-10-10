@@ -111,6 +111,29 @@ pub(crate) struct ModResultStage {
 }
 
 impl ModResultStage {
+    pub(crate) fn mod_answer_projection(
+        &self,
+        display: &Source,
+    ) -> Result<Source, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+        let data = self
+            .tool_use_result
+            .clone()
+            .unwrap_or_else(|| display.clone());
+        let text = self
+            .frame
+            .as_ref()
+            .map(|frame| frame.model_text.clone())
+            .unwrap_or_else(|| display.clone());
+        if !text.semantically_eq(display) {
+            return Err(
+                lingxi_core::types::utf16_json::Utf16JsonProjectionError::InvalidProjection(
+                    "Mod result text association changed",
+                ),
+            );
+        }
+        Source::object(vec![("result".into(), data), ("text".into(), text)])
+    }
+
     pub(crate) fn denial_kind(&self) -> Option<&str> {
         self.denial_kind.as_deref()
     }
@@ -1191,6 +1214,7 @@ impl ConversationOrchestrator {
             payload["foldedUuids"] = serde_json::json!(uuids);
         }
         let record = ConversationMessage::System {
+            api_system: None,
             id: fire.fire_id,
             content: payload.to_string().into(),
             subtype: Some("scheduled_task_fire".into()),
@@ -1416,7 +1440,7 @@ impl ConversationOrchestrator {
         match denial_kind {
             Some(kind) => {
                 self.output
-                    .emit_tool_result_denied(id, tool, model_text, result, kind)
+                    .emit_tool_result_denied(id, tool, model_text, result, kind, None)
                     .await;
             }
             None => {
@@ -1534,7 +1558,7 @@ impl ConversationOrchestrator {
         match denial_kind {
             Some(kind) => {
                 self.output
-                    .emit_tool_result_denied(id, &tool, content, &result, &kind)
+                    .emit_tool_result_denied(id, &tool, content, &result, &kind, None)
                     .await;
             }
             None => {
@@ -2078,10 +2102,26 @@ impl ConversationOrchestrator {
                 };
                 ("assistant", inner)
             }
+            ConversationMessage::System {
+                api_system: Some(message),
+                ..
+            } => (
+                "system",
+                serde_json::json!({"role":"system","content":null}),
+            ),
             ConversationMessage::System { content, .. } => (
                 "system",
                 serde_json::json!({ "role": "system", "content": null }),
             ),
+        };
+        let api_output_config = if let ConversationMessage::System {
+            api_system: Some(message),
+            ..
+        } = msg
+        {
+            message.output_config.as_ref()
+        } else {
+            None
         };
         // Stamp the shared inner Anthropic `message.id` on assistant lines so the
         // loader's sibling-grouping (by inner `message.id`) reconstructs the DAG.
@@ -2104,6 +2144,30 @@ impl ConversationOrchestrator {
         // every existing golden fixture — keep their exact byte shape.
         let mut extra = serde_json::Map::new();
         let mut source_extra_fields = Vec::new();
+        if matches!(
+            msg,
+            ConversationMessage::System {
+                api_system: Some(_),
+                ..
+            }
+        ) {
+            extra.insert("subtype".into(), "api_system".into());
+        }
+        if let Some(config) = api_output_config {
+            source_extra_fields.push((
+                "outputConfig",
+                Source::parse(&serde_json::to_string(config).expect("typed API output config"))
+                    .expect("valid source API output config"),
+            ));
+        }
+        if let ConversationMessage::Assistant {
+            per_turn_effort: Some(effort),
+            ..
+        } = msg
+        {
+            source_extra_fields.push(("effort", effort.clone()));
+            source_extra_fields.push(("perTurnEffort", effort.clone()));
+        }
         let invoked_skill_contents = self
             .transcript
             .post_compact_skill_attachments
@@ -2374,6 +2438,19 @@ impl ConversationOrchestrator {
                     .expect("content blocks form an array"),
                 )
             }
+            ConversationMessage::System {
+                api_system: Some(message),
+                ..
+            } if !inner_message.is_null() => Some(
+                Source::array(
+                    message
+                        .content
+                        .iter()
+                        .map(mod_append_content_block)
+                        .collect(),
+                )
+                .expect("API system content"),
+            ),
             ConversationMessage::System { content, .. } if !inner_message.is_null() => {
                 Some(content.clone())
             }
@@ -2396,11 +2473,6 @@ impl ConversationOrchestrator {
                     lingxi_core::types::utf16_json::Utf16JsonProjection::array(contents)
                         .expect("invoked-skill contents form an array"),
                 )
-                .expect("JSONL extra metadata is an object");
-        }
-        if let Some(attachment) = source_attachment {
-            extra_projection
-                .set_field("attachment", attachment)
                 .expect("JSONL extra metadata is an object");
         }
         let mut jsonl_message = session::JsonlMessage {
@@ -2431,7 +2503,7 @@ impl ConversationOrchestrator {
                 &inner_message,
             )
             .expect("generated JSONL inner message is valid JSON"),
-            attachment_projection: None,
+            attachment_projection: source_attachment,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
             turn_companion: None,
@@ -2521,6 +2593,17 @@ impl ConversationOrchestrator {
         resolved
     }
 
+    /// Reserve the identity shared by inherited fork rows and the next real
+    /// user prompt. Repeated calls before that prompt reuse the same value.
+    pub async fn reserve_next_prompt_id(&self) -> String {
+        self.prompt_runtime
+            .pending_prompt_id
+            .lock()
+            .await
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone()
+    }
+
     /// The stable per-turn `promptId` for `msg` — the parity analog of
     /// `getPromptId()` (`sessionStorage.ts:1045`).
     ///
@@ -2559,7 +2642,14 @@ impl ConversationOrchestrator {
             }
         } else {
             // Genuine new user prompt — start a fresh prompt id for this turn.
-            *slot = Some(uuid::Uuid::new_v4().to_string());
+            *slot = Some(
+                self.prompt_runtime
+                    .pending_prompt_id
+                    .lock()
+                    .await
+                    .take()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            );
         }
         slot.clone()
     }
@@ -2893,7 +2983,7 @@ impl ConversationOrchestrator {
         let session_id_str = self.session.lock().await.session_id.as_uuid().to_string();
         let parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
         let git_branch = self.resolve_git_branch().await;
-        let extra = source_object([("attachment", payload)]);
+        let extra = source_object([]);
 
         let jmsg = session::JsonlMessage {
             message_type: "attachment".to_string(),
@@ -2908,7 +2998,7 @@ impl ConversationOrchestrator {
             // Attachment lines carry NO inner `message`.
             message: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
                 .expect("null is valid JSON"),
-            attachment_projection: None,
+            attachment_projection: Some(payload),
             tool_use_result_projection: None,
             mcp_meta_projection: None,
             turn_companion: None,
@@ -2934,6 +3024,124 @@ impl ConversationOrchestrator {
                 self.record_transcript_append_failure(&session_id_str, "hook_attachment", &e)
                     .await;
             }
+        }
+    }
+
+    /// A host-queued human persists as a rendered attachment, independently
+    /// of its transient model/history projection. No synthetic USER row is written.
+    pub(super) async fn persist_queued_input_to_jsonl(
+        &self,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        source_uuid: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        delivery: &crate::prompt::mid_turn_input::MidTurnInputDelivery,
+        rendered: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) {
+        if active_mod_result_stage_is_virtual().await {
+            return;
+        }
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            return;
+        };
+        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
+        let mut attachment = source_object([
+            ("type", Source::from("queued_command")),
+            ("prompt", prompt.clone()),
+        ]);
+        if let Some(source_uuid) = source_uuid {
+            attachment
+                .set_field("source_uuid", source_uuid.clone())
+                .expect("validated source UUID");
+        }
+        attachment
+            .set_field("delivery_id", delivery.delivery_id.as_str().into())
+            .expect("delivery identity");
+        attachment
+            .set_field("commandMode", "prompt".into())
+            .expect("prompt mode");
+        attachment
+            .set_field("timestamp", delivery.timestamp.as_str().into())
+            .expect("admission timestamp");
+        let extra = source_object([
+            ("rendered", rendered.clone()),
+            ("renderedRole", Source::from("system")),
+        ]);
+        let row = session::JsonlMessage {
+            message_type: "attachment".into(),
+            uuid: uuid::Uuid::new_v4().to_string(),
+            parent_uuid: self.transcript.last_jsonl_uuid.lock().await.clone(),
+            session_id: session_id.clone(),
+            timestamp: delivery.timestamp.clone(),
+            cwd: self.current_cwd().to_string_lossy().into_owned(),
+            version: delivery.reference_version.clone(),
+            message: source_null(),
+            attachment_projection: Some(attachment),
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
+            is_sidechain: false,
+            user_type: Some("external".into()),
+            git_branch: self.resolve_git_branch().await,
+            entrypoint: Some("sdk-cli".into()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+        };
+        match writer.append(&row).await {
+            Ok(()) => {
+                *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
+                telemetry::emit_session_appended(&session_id, &row.uuid);
+            }
+            Err(error) => {
+                self.record_transcript_append_failure(&session_id, "queued_command", &error)
+                    .await
+            }
+        }
+    }
+
+    pub(super) async fn persist_absorbed_queue_input(
+        &self,
+        input: &crate::prompt::mid_turn_input::MidTurnInput,
+    ) {
+        let (Some(writer), Some(delivery)) = (
+            self.transcript.jsonl_writer.as_ref(),
+            input.queue_delivery.as_ref(),
+        ) else {
+            return;
+        };
+        let session_id = self.session.lock().await.session_id.as_uuid().to_string();
+        let prompt = input
+            .projected_content
+            .clone()
+            .unwrap_or_else(|| input.text.clone());
+        let mut record = source_object([
+            ("type", "queue-operation".into()),
+            ("operation", "remove".into()),
+            (
+                "timestamp",
+                chrono::Utc::now()
+                    .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                    .to_string()
+                    .into(),
+            ),
+            ("sessionId", session_id.clone().into()),
+            ("content", prompt),
+            ("reason", "absorbed_mid_turn".into()),
+        ]);
+        if let Some(uuid) = &input.source_message_uuid {
+            record
+                .set_field("commandUuid", uuid.clone())
+                .expect("source UUID");
+        }
+        record
+            .set_field("deliveryId", delivery.delivery_id.as_str().into())
+            .expect("delivery identity");
+        if let Err(error) = writer.append_queue_operation(&record).await {
+            self.record_transcript_append_failure(&session_id, "queue-operation", &error)
+                .await;
         }
     }
 
@@ -2979,7 +3187,10 @@ impl ConversationOrchestrator {
             version: env!("CARGO_PKG_VERSION").into(),
             message: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
                 .expect("null is valid JSON"),
-            attachment_projection: None,
+            attachment_projection: Some(source_object([
+                ("type", "thinking_stripped".into()),
+                ("scope", "all".into()),
+            ])),
             tool_use_result_projection: None,
             mcp_meta_projection: None,
             turn_companion: None,
@@ -2993,12 +3204,7 @@ impl ConversationOrchestrator {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
-                &serde_json::json!({
-                    "attachment": {"type": "thinking_stripped", "scope": "all"}
-                }),
-            )
-            .expect("generated thinking attachment is valid JSON"),
+            extra: source_object([]),
         };
         match writer.append(&row).await {
             Ok(()) => {
@@ -3392,9 +3598,7 @@ impl ConversationOrchestrator {
         // are emitted in `TOOL_RESULT_HEAD_EXTRA` order regardless of the
         // order they are inserted here.
         if let Some(result) = self.take_tool_use_result(msg).await {
-            jmsg.extra
-                .set_field("toolUseResult", result)
-                .expect("extra metadata is an object");
+            jmsg.tool_use_result_projection = Some(result);
         }
         if let Some(kind) = self.take_tool_denial_kind(msg).await {
             jmsg.extra
@@ -3406,9 +3610,7 @@ impl ConversationOrchestrator {
                 .expect("extra metadata is an object");
         }
         if let Some(meta) = self.take_tool_use_mcp_meta(msg).await {
-            jmsg.extra
-                .set_field("mcpMeta", meta)
-                .expect("extra metadata is an object");
+            jmsg.mcp_meta_projection = Some(meta);
         }
         if self.tool_result_message_ends_turn(msg).await {
             jmsg.extra
@@ -3724,6 +3926,7 @@ impl ConversationOrchestrator {
             content,
             stop_reason,
             resumable,
+            per_turn_effort,
         } = msg
         else {
             // Defensive: non-assistant messages fall back to the normal single
@@ -3766,6 +3969,7 @@ impl ConversationOrchestrator {
             // The fallback identity is fixed before append-through. The current
             // parent is selected later, inside the short durable commit lease.
             let original_single = ConversationMessage::Assistant {
+                per_turn_effort: per_turn_effort.clone(),
                 id: MessageId::new(),
                 content: vec![block.clone()],
                 stop_reason: stop_reason.clone(),
@@ -3794,6 +3998,7 @@ impl ConversationOrchestrator {
             let mut next_block_groups = block_groups.clone();
             next_block_groups[block_index] = rewritten_blocks.clone();
             let rewritten_merged = ConversationMessage::Assistant {
+                per_turn_effort: per_turn_effort.clone(),
                 id: *turn_id,
                 content: next_block_groups.iter().flatten().cloned().collect(),
                 stop_reason: stop_reason.clone(),
@@ -3911,6 +4116,7 @@ impl ConversationOrchestrator {
             }
         }
         let rewritten_merged = ConversationMessage::Assistant {
+            per_turn_effort: per_turn_effort.clone(),
             id: *turn_id,
             content: block_groups.into_iter().flatten().collect(),
             stop_reason: stop_reason.clone(),
@@ -3956,6 +4162,9 @@ impl ConversationOrchestrator {
         }
         let row_uuid = row.row_id.as_uuid().to_string();
         let message = ConversationMessage::Assistant {
+            per_turn_effort: (!row.is_api_error)
+                .then(|| row.per_turn_effort.clone())
+                .flatten(),
             id: row.row_id,
             content: row.content.clone(),
             stop_reason: row.stop_reason.clone(),
@@ -4015,6 +4224,9 @@ impl ConversationOrchestrator {
         let writer = self.transcript.jsonl_writer.as_ref()?;
 
         let single = ConversationMessage::Assistant {
+            per_turn_effort: (!row.is_api_error)
+                .then(|| row.per_turn_effort.clone())
+                .flatten(),
             id: row.row_id,
             content: row.content.clone(),
             stop_reason: row.stop_reason.clone(),
@@ -4332,6 +4544,9 @@ impl ConversationOrchestrator {
     /// persistence seams, including writer-less runtimes.
     pub(crate) async fn note_assistant_commit(&self, msg: &ConversationMessage) {
         if matches!(msg, ConversationMessage::Assistant { .. }) {
+            // An ordinary later assistant replaces a recoverable API-error row.
+            // API persistence stamps its explicit marker after this common seam.
+            self.note_turn_api_error_stop_reason(None);
             self.session.lock().await.message_timing.last_assistant_at =
                 Some(std::time::SystemTime::now());
         }
@@ -4397,321 +4612,6 @@ fn scheduled_fire_prompt_matches_oracle_sanitization_and_utf16_limit() {
             case["expected"].as_str().unwrap()
         );
     }
-}
-#[cfg(test)]
-#[tokio::test]
-async fn mod_utf16_text_preserves_raw_jsonl_and_normalizes_public_cold_resume() {
-    use hooks::mods::ModHost;
-    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, SessionId};
-    use llm_runtime::services::sdk::{self, WireCodec};
-    use serde_json::{json, Value};
-    use std::sync::Arc;
-
-    let root = tempfile::tempdir().expect("temporary session root");
-    let cwd = root.path().to_string_lossy().into_owned();
-    let session_id = SessionId::new();
-    let transcript_path =
-        session::jsonl::session_path(root.path(), &cwd, &session_id.as_uuid().to_string());
-    let state_root = root.path().join("durable-state");
-    std::fs::create_dir_all(&state_root).expect("create durable state root");
-    let durable = Arc::new(
-        session::jsonl::DurableTranscriptWriter::open(&state_root)
-            .expect("open durable transcript writer"),
-    );
-    let writer = Arc::new(
-        session::jsonl::JsonlWriter::new(
-            transcript_path.clone(),
-            Arc::new(platform_posix::fs::PosixFileSystem::new(
-                root.path().to_path_buf(),
-            )),
-        )
-        .with_durable_lock(durable),
-    );
-    writer
-        .activate_session_target(
-            session_id,
-            transcript_path.clone(),
-            root.path().to_path_buf(),
-        )
-        .expect("bind durable transcript target");
-
-    let accepted_units = "accepted Mod text "
-        .encode_utf16()
-        .chain([0xd800, 0x03a9, 0xdc00])
-        .collect::<Vec<_>>();
-    let accepted_text = String::from_utf16_lossy(&accepted_units);
-    let replacement_text = String::from_utf16_lossy(
-        &accepted_units
-            .iter()
-            .map(|unit| match unit {
-                0xd800 | 0xdc00 => 0xfffd,
-                unit => *unit,
-            })
-            .collect::<Vec<_>>(),
-    );
-    let source_units = "source Mod text "
-        .encode_utf16()
-        .chain([0xd800, 0x03a9, 0xdc00])
-        .collect::<Vec<_>>();
-    let source_text = String::from_utf16_lossy(&source_units);
-
-    let module_path = root.path().join("utf16-session-append.js");
-    std::fs::write(
-        &module_path,
-        r#"
-const units = text => Array.from({length:text.length}, (_, index) => text.charCodeAt(index));
-export function register(on) {
-  on('session.append', async ($, event, next) => {
-    if (event.message.type !== 'assistant') return next(event);
-    const before = event.message.content.filter(block => block.type === 'text').map(block => ({text:block.text.toWellFormed(), units:units(block.text)}));
-    const content = event.message.content.map(block => block.type === 'text'
-      ? {...block, text:'accepted Mod text ' + String.fromCharCode(0xd800) + 'Ω' + String.fromCharCode(0xdc00), citations:null}
-      : block);
-    const forwarded = {...event, message:{...event.message, content}};
-    const result = await next(forwarded);
-    const resultUnits = result.message.content.filter(block => block.type === 'text').map(block => ({text:block.text.toWellFormed(), units:units(block.text)}));
-    await $.fs.write('append-units.json', JSON.stringify({before, forwarded:units(content[0].text), result:resultUnits, citations:result.message.content[0].citations}));
-    return result;
-  });
-  on('turn.complete', async ($, event, next) => {
-    // Direct session API calls: this module registers no `session.messages`
-    // middleware, so both forms cross the nested worker API result boundary.
-    const summary = await $.session.messages();
-    const api = await $.session.messages({as:'api'});
-    const summaryRow = summary.find(row => row.role === 'assistant' && row.text.startsWith('accepted Mod text '));
-    const apiBlock = api.flatMap(row => row.content ?? []).find(block => block.type === 'text' && block.text.startsWith('accepted Mod text '));
-    const observe = row => row && ({text:row.text.toWellFormed(), units:units(row.text)});
-    const observeBlock = block => block && ({text:block.text.toWellFormed(), units:units(block.text), citations:block.citations});
-    const suffix = event.answer === 'cold-resume' ? 'resume' : 'live';
-    await $.fs.write('session-views-' + suffix + '.json', JSON.stringify({summary:observe(summaryRow), api:observeBlock(apiBlock)}));
-    return next(event);
-  });
-}
-"#,
-    )
-    .expect("write UTF-16 Mod fixture");
-    let host = ModHost::start(None).await.expect("start Mod host");
-    host.load(
-        "utf16-session-append",
-        root.path(),
-        &module_path,
-        Source::parse("{}").unwrap(),
-    )
-    .await
-    .expect("load UTF-16 session.append Mod");
-    let mut hook_registry = hooks::HookRegistry::new();
-    hook_registry.set_mod_host(host.clone());
-    let orchestrator = ConversationOrchestrator::new(
-        crate::OrchestratorConfig::default(),
-        Arc::new(crate::test_support::MockApiClient::new(vec![])),
-        Arc::new(tool_api::registry::ToolRegistry::new()),
-        crate::test_support::noop_hook_executor(),
-        Arc::new(crate::test_support::NoOpPermissionGate),
-        Arc::new(crate::test_support::MockOutputStream::new()),
-        Arc::new(crate::test_support::StaticMemoryProvider::empty()),
-        root.path().to_path_buf(),
-    )
-    .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hook_registry)))
-    .with_jsonl_writer(writer)
-    .with_session_id(session_id)
-    .with_config_home(root.path().to_path_buf());
-
-    let prompt =
-        ConversationMessage::user(MessageId::new(), "live UTF-16 session projection".into());
-    orchestrator
-        .session
-        .lock()
-        .await
-        .history
-        .push(prompt.clone());
-    orchestrator.persist_message_to_jsonl(&prompt).await;
-    let assistant = ConversationMessage::Assistant {
-        id: MessageId::new(),
-        content: vec![ContentBlock::TextJsUtf16 {
-            text: source_text.clone(),
-            utf16_code_units: source_units.clone(),
-            citations: Some(Some(
-                Source::parse(r#"[{"type":"source","label":"before"}]"#).unwrap(),
-            )),
-        }],
-        stop_reason: Some("end_turn".into()),
-        resumable: None,
-    };
-    orchestrator
-        .session
-        .lock()
-        .await
-        .history
-        .push(assistant.clone());
-    let accepted = orchestrator
-        .persist_assistant_merged(&assistant, None, None, None)
-        .await;
-    assert!(matches!(
-        &accepted,
-        ConversationMessage::Assistant { content, .. }
-            if matches!(content.as_slice(), [ContentBlock::TextJsUtf16 {
-                text, utf16_code_units, citations: Some(None),
-            }] if text == &accepted_text && utf16_code_units == &accepted_units)
-    ));
-    let append_views: Value = serde_json::from_str(
-        &std::fs::read_to_string(root.path().join("append-units.json"))
-            .expect("read session.append observations"),
-    )
-    .expect("parse session.append observations");
-    assert_eq!(append_views["before"][0]["units"], json!(&source_units));
-    assert_eq!(append_views["forwarded"], json!(&accepted_units));
-    assert_eq!(append_views["result"][0]["units"], json!(&accepted_units));
-    assert_eq!(append_views["citations"], Value::Null);
-
-    let fire_turn_complete = |answer: &'static str| {
-        let host = host.clone();
-        let orchestrator = &orchestrator;
-        async move {
-            host.dispatch_with_ui_meta_at_session(
-                "turn.complete",
-                Source::from_serde_value(&json!({"answer":answer,"turnId":"utf16-live-test","durationMs":0,"isAborted":false,"reason":"answer"})).unwrap(),
-                orchestrator,
-                |event| async move { Ok(Some(source_object([("text", event.expect("turn event").subprojection("/answer").unwrap())]))) },
-                |_, _| async {},
-                |_, _, _| async {},
-                |_, _| async {},
-            )
-            .await
-            .expect("dispatch session.messages through a real Mod hook")
-        }
-    };
-    fire_turn_complete("live").await;
-    let live_views: Value = serde_json::from_str(
-        &std::fs::read_to_string(root.path().join("session-views-live.json"))
-            .expect("read live session.messages observation"),
-    )
-    .expect("parse live session.messages observation");
-    assert_eq!(live_views["summary"]["units"], json!(&accepted_units));
-    assert_eq!(live_views["api"]["units"], json!(&accepted_units));
-    assert_eq!(live_views["api"]["citations"], Value::Null);
-
-    let live_history = orchestrator.session.lock().await.history.clone();
-    let llm_messages =
-        llm_runtime::convert::to_llm_messages(live_history).expect("convert exact live history");
-    let (request, live_overrides) = llm_runtime::convert::history_input(
-        "claude-sonnet-4-5",
-        &llm_messages,
-        &[],
-        &[],
-        sdk::protocol::ProtocolFamily::AnthropicMessages,
-    )
-    .expect("project exact live history");
-    assert!(live_overrides
-        .values()
-        .any(|units| units == &accepted_units));
-    let profile: sdk::protocol::ProviderProfile = serde_json::from_value(json!({
-        "provider_id":"anthropic", "profile_name":"test", "base_url":"https://api.anthropic.com",
-        "protocol":"anthropic_messages", "auth":"none", "models":[]
-    }))
-    .expect("build public Anthropic codec profile");
-    let encoded = sdk::AnthropicMessagesCodec
-        .encode_request(
-            sdk::EncodeRequest::new(&request),
-            &sdk::CodecContext::new(&profile, &request.model, sdk::RequestMode::Complete),
-        )
-        .expect("public SDK encodes the safe Anthropic body");
-    let encoded_json = JsonPayload::parse(std::str::from_utf8(&encoded.body).unwrap())
-        .expect("parse exact public SDK request projection");
-    let live_wire = String::from_utf8(
-        sdk::exact_json::serialize_json_payload_with_overrides(
-            &encoded_json,
-            &live_overrides,
-            sdk::exact_json::JsonEncoding::JavaScript,
-        )
-        .expect("public SDK serializes host UTF-16 sidecars"),
-    )
-    .expect("exact public SDK body remains UTF-8 JSON");
-    assert!(
-        live_wire.contains(r#""text":"accepted Mod text \ud800Ω\udc00""#),
-        "{live_wire}"
-    );
-    assert!(live_wire.contains(r#""citations":null"#), "{live_wire}");
-
-    let raw_jsonl =
-        std::fs::read_to_string(&transcript_path).expect("read durable transcript bytes");
-    assert!(raw_jsonl.contains(r#"\ud800Ω\udc00"#), "{raw_jsonl}");
-    assert!(!raw_jsonl.contains("utf16_code_units"), "{raw_jsonl}");
-    assert!(
-        !raw_jsonl.contains("__lingxiModUtf16StringsV1"),
-        "{raw_jsonl}"
-    );
-    let loaded = session::jsonl::load_session(
-        root.path(),
-        &cwd,
-        session_id.as_uuid(),
-        Arc::new(platform_posix::fs::PosixFileSystem::new(
-            root.path().to_path_buf(),
-        )),
-    )
-    .await
-    .expect("load durable UTF-16 transcript");
-    let assistant_row = loaded.last().expect("loaded assistant row");
-    assert_eq!(
-        session::jsonl::exact_json::message_utf16_overrides(assistant_row)
-            ["/message/content/0/text"],
-        accepted_units
-    );
-    let resumed = crate::resume::state_from_messages(session_id.as_uuid(), &loaded);
-    let ConversationMessage::Assistant { content, .. } = &resumed.history[1] else {
-        panic!("resumed accepted row stays assistant history");
-    };
-    assert!(matches!(
-        content.as_slice(),
-        [ContentBlock::Text { text, citations: Some(None) }]
-            if text == &replacement_text
-    ));
-    orchestrator.session.lock().await.history = resumed.history;
-    fire_turn_complete("cold-resume").await;
-    let resumed_views: Value = serde_json::from_str(
-        &std::fs::read_to_string(root.path().join("session-views-resume.json"))
-            .expect("read resumed session.messages observation"),
-    )
-    .expect("parse resumed session.messages observation");
-    let replacement_units = replacement_text.encode_utf16().collect::<Vec<_>>();
-    assert_eq!(resumed_views["summary"]["units"], json!(&replacement_units));
-    assert_eq!(resumed_views["api"]["units"], json!(&replacement_units));
-
-    let resumed_llm =
-        llm_runtime::convert::to_llm_messages(orchestrator.session.lock().await.history.clone())
-            .expect("convert cold-resumed history");
-    let (resumed_request, resumed_overrides) = llm_runtime::convert::history_input(
-        "claude-sonnet-4-5",
-        &resumed_llm,
-        &[],
-        &[],
-        sdk::protocol::ProtocolFamily::AnthropicMessages,
-    )
-    .expect("project cold-resumed history");
-    assert!(resumed_overrides
-        .values()
-        .any(|units| units == &accepted_units));
-    let resumed_encoded = sdk::AnthropicMessagesCodec
-        .encode_request(
-            sdk::EncodeRequest::new(&resumed_request),
-            &sdk::CodecContext::new(&profile, &resumed_request.model, sdk::RequestMode::Complete),
-        )
-        .expect("public SDK encodes the cold-resume projection");
-    let resumed_json = JsonPayload::parse(std::str::from_utf8(&resumed_encoded.body).unwrap())
-        .expect("parse exact public SDK cold-resume projection");
-    let resumed_wire = String::from_utf8(
-        sdk::exact_json::serialize_json_payload_with_overrides(
-            &resumed_json,
-            &resumed_overrides,
-            sdk::exact_json::JsonEncoding::JavaScript,
-        )
-        .expect("public SDK serializes cold-resumed UTF-16 sidecars"),
-    )
-    .expect("resumed public SDK body is UTF-8 JSON");
-    assert!(resumed_wire.contains(&replacement_text), "{resumed_wire}");
-    assert!(
-        resumed_wire.contains(r#""citations":null"#),
-        "{resumed_wire}"
-    );
 }
 
 #[cfg(test)]
@@ -5471,4 +5371,129 @@ export function register(on) {
     let resumed_wire = String::from_utf8(resumed_encoded.body.to_vec())
         .expect("resumed public SDK body is UTF-8 JSON");
     assert!(resumed_wire.contains(&replacement_text), "{resumed_wire}");
+}
+
+#[cfg(test)]
+mod rich_append_projection_tests {
+    use super::*;
+    use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
+
+    fn worker_frame(message: &ConversationMessage) -> Source {
+        source_object([("message", mod_append_message(message))])
+    }
+
+    #[test]
+    fn tool_input_keeps_exact_source_and_changed_surrogate_keys_do_not_match() {
+        let input = Source::parse(r#"{"\ud800":"\udfff"}"#).unwrap();
+        let original = ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            stop_reason: Some("tool_use".into()),
+            resumable: None,
+            content: vec![ContentBlock::ToolUse {
+                id: ToolUseId::from("toolu_exact"),
+                name: "Echo".into(),
+                input: input.clone(),
+                provider_id: None,
+            }],
+        };
+
+        let forwarded = worker_frame(&original);
+        let forwarded_message = forwarded.subprojection("/message").unwrap();
+        let rewritten = rewrite_mod_append_message(&original, &forwarded_message).unwrap();
+        assert!(mod_append_projection_matches(
+            &rewritten,
+            &forwarded_message
+        ));
+        assert_eq!(
+            mod_append_message(&rewritten)
+                .subprojection("/content/0/input")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            input.to_json_string().unwrap()
+        );
+
+        let mut tampered = mod_append_message(&original);
+        let mut blocks = source_array_items(&tampered.subprojection("/content").unwrap()).unwrap();
+        blocks[0]
+            .set_field("input", Source::parse(r#"{"\ud801":"\udfff"}"#).unwrap())
+            .unwrap();
+        tampered
+            .set_field("content", Source::array(blocks).unwrap())
+            .unwrap();
+        assert!(!mod_append_projection_matches(&rewritten, &tampered));
+    }
+
+    #[test]
+    fn tool_result_source_survives_omission_and_block_repositioning() {
+        let data = Source::parse(r#"[{"type":"text","text":"\udc00","\udfff":"\ud800"}]"#).unwrap();
+        let original = ConversationMessage::User {
+            api_message_override: None,
+            id: MessageId::new(),
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::from("toolu_exact"),
+                content: "�".into(),
+                is_error: Some(false),
+                provider_tool_use_id: None,
+                content_blocks: Some(data.clone()),
+            }],
+        };
+
+        let omitted = source_object([(
+            "content",
+            Source::array(vec![source_object([
+                ("type", "tool_result".into()),
+                ("tool_use_id", "toolu_exact".into()),
+            ])])
+            .unwrap(),
+        )]);
+        let retained = rewrite_mod_append_message(&original, &omitted).unwrap();
+        assert_eq!(
+            mod_append_message(&retained)
+                .subprojection("/content/0/content")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            data.to_json_string().unwrap()
+        );
+
+        let reordered = source_object([(
+            "content",
+            Source::array(vec![
+                source_object([
+                    ("type", "text".into()),
+                    ("text", "added before the result".into()),
+                ]),
+                source_object([
+                    ("type", "tool_result".into()),
+                    ("tool_use_id", "toolu_exact".into()),
+                    ("content", data.clone()),
+                    ("is_error", Source::parse("false").unwrap()),
+                ]),
+            ])
+            .unwrap(),
+        )]);
+        let rewritten = rewrite_mod_append_message(&original, &reordered).unwrap();
+        let rewritten_source = mod_append_message(&rewritten);
+        assert_eq!(
+            rewritten_source
+                .subprojection("/content/0/content")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            data.to_json_string().unwrap()
+        );
+        assert!(rewritten_source
+            .to_json_string()
+            .unwrap()
+            .contains("added before the result"));
+    }
 }

@@ -11,6 +11,7 @@ use serde_json::json;
 
 fn user(text: &str) -> ConversationMessage {
     ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: text.into(),
@@ -312,6 +313,7 @@ async fn auxiliary_history_conversion_does_not_use_the_parent_continuation_bound
 
 fn history_user(content: Vec<ContentBlock>) -> ConversationMessage {
     ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content,
         is_meta: false,
@@ -366,7 +368,7 @@ fn gemini_native_history() -> (Vec<ConversationMessage>, wire::ContinuationRef) 
                 text: "Inspect the desktop".into(),
                 citations: None,
             }]),
-            ConversationMessage::Assistant {
+            ConversationMessage::Assistant { per_turn_effort: None,
                 id: MessageId::new(),
                 stop_reason: Some("tool_use".into()),
                 resumable: None,

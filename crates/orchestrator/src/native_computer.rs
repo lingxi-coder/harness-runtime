@@ -955,7 +955,7 @@ pub(crate) async fn before_execution(
             _ => {
                 return Err(ToolError::PermissionDenied(
                     "provider computer safety check was not acknowledged".into(),
-                ))
+                ));
             }
         }
     }
@@ -1381,9 +1381,7 @@ async fn prepare_stored_row(
         None,
     );
     if let Some(result) = orch.take_tool_use_result(message).await {
-        row.extra
-            .set_field("toolUseResult", result)
-            .map_err(internal)?;
+        row.tool_use_result_projection = Some(result);
     }
     if let Some(kind) = orch.take_tool_denial_kind(message).await {
         row.extra
@@ -1391,7 +1389,7 @@ async fn prepare_stored_row(
             .map_err(internal)?;
     }
     if let Some(meta) = orch.take_tool_use_mcp_meta(message).await {
-        row.extra.set_field("mcpMeta", meta).map_err(internal)?;
+        row.mcp_meta_projection = Some(meta);
     }
     if let Some(source) = orch.take_source_tool_assistant_uuid(message).await {
         row.extra
@@ -1399,6 +1397,12 @@ async fn prepare_stored_row(
             .map_err(internal)?;
     }
     Ok(row)
+}
+
+fn transcript_row_source(
+    row: &session::jsonl::JsonlMessage,
+) -> Result<Utf16JsonProjection, OrchestratorError> {
+    session::jsonl::exact_json::native_message_projection(row).map_err(internal)
 }
 
 /// Fsync the exact saved row; recovery retains IDs, timestamps and metadata.
@@ -1416,13 +1420,11 @@ async fn persist_stored_row(
     if row.session_id != session_id.as_uuid().to_string() {
         return Err(internal("saved row belongs to another session"));
     }
-    let exact = session::jsonl::exact_json::message_utf16_overrides(row);
     let (_, is_tip) = writer
-        .append_json_once_durable_for_session_with_tip_exact(
+        .append_native_json_once_durable_for_session_with_tip(
             session_id,
             delivery,
-            serde_json::to_value(row).map_err(internal)?,
-            exact,
+            transcript_row_source(row)?,
         )
         .await
         .map_err(internal)?;
@@ -1572,7 +1574,6 @@ pub(crate) async fn persist_native_assistant(
         )
         .map_err(internal)?;
     let uuid = row.uuid.clone();
-    let exact = session::jsonl::exact_json::message_utf16_overrides(&row);
     let saved_response = if expected_ack.is_empty() {
         None
     } else {
@@ -1585,7 +1586,7 @@ pub(crate) async fn persist_native_assistant(
             .await?,
         )
     };
-    let payload = serde_json::to_value(row).map_err(internal)?;
+    let payload = transcript_row_source(&row)?;
     let mut persisted = None;
     let success = fence
         .commit_if_current(Box::pin(async {
@@ -1598,11 +1599,10 @@ pub(crate) async fn persist_native_assistant(
             }
             persisted = Some(
                 writer
-                    .append_json_once_durable_for_session_with_tip_exact(
+                    .append_native_json_once_durable_for_session_with_tip(
                         session_id,
                         &format!("native-response:{}", response.id),
                         payload,
-                        exact,
                     )
                     .await
                     .map_err(internal),
@@ -1879,6 +1879,7 @@ pub(crate) async fn prepare_receipts(
             block: &block,
         })?;
         let message = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ProviderContent {
                 protocol: protocol_name(call.context.provider),

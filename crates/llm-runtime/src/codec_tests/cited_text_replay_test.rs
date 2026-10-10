@@ -75,6 +75,7 @@ fn visible_text(response: &HistoryResponse) -> Vec<String> {
 fn replay_request(response: HistoryResponse) -> HistoryFixture {
     let mut request = HistoryFixture::new("claude-sonnet-4-6");
     request.messages.push(Message {
+        api_output_config: None,
         role: "assistant".into(),
         content: response.content,
     });

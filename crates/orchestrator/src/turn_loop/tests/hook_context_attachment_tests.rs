@@ -3,6 +3,7 @@ use super::{
     ConversationOrchestrator, PostToolBatchDispatch,
 };
 use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
+use crate::test_support::{MockApiClient, MockOutputStream, NoOpPermissionGate};
 use crate::OrchestratorConfig;
 use async_trait::async_trait;
 use hooks::attachment::HookPublicationGuard;
@@ -255,6 +256,222 @@ fn uses() -> Vec<(
         tool_api::tool_trait::generated_builtin_result(&json!({})),
         None,
     )]
+}
+
+struct FailedAgentTool(
+    Option<lingxi_core::types::AgentId>,
+    &'static str,
+    Option<Arc<HookExecutorImpl>>,
+);
+
+#[async_trait]
+impl Tool for FailedAgentTool {
+    fn name(&self) -> &str {
+        "Agent"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        EchoTool.input_schema()
+    }
+    fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    async fn check_permissions(
+        &self,
+        input: &serde_json::Value,
+        ctx: &ToolUseContext,
+    ) -> permission::PermissionResult {
+        EchoTool.check_permissions(input, ctx).await
+    }
+    async fn description(&self, _input: &serde_json::Value, _opts: &DescriptionOptions) -> String {
+        "Failure lifecycle fixture".into()
+    }
+    async fn prompt(&self, _opts: &PromptOptions) -> String {
+        String::new()
+    }
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        ctx: ToolUseContext,
+        _tx: ToolProgressSender,
+    ) -> Result<ToolCallResult, ToolError> {
+        if let (Some(child), Some(executor)) = (self.0, &self.2) {
+            let session = ctx.session.as_ref().unwrap().lock().await.session_id;
+            executor
+                .subagent_stop_firer(session)
+                .unwrap()
+                .fire(
+                    child,
+                    "general-purpose",
+                    lingxi_core::host::subagent_spawn::SubagentStopStatus::Failed,
+                )
+                .await;
+        }
+        Err(match self.0 {
+            Some(agent_id) => ToolError::SubagentFailed {
+                agent_id,
+                reason: self.1.into(),
+                terminal_hooks_owned: self.2.is_some(),
+            },
+            None => ToolError::Internal(self.1.into()),
+        })
+    }
+}
+
+struct RecordingSubagentLifecycle(Arc<Mutex<Vec<(HookEvent, HookContext)>>>);
+
+#[async_trait]
+impl BuiltinHookHandler for RecordingSubagentLifecycle {
+    async fn handle(&self, event: &HookEvent, ctx: &HookContext) -> HookResult {
+        self.0.lock().unwrap().push((event.clone(), ctx.clone()));
+        HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: None,
+        }
+    }
+    fn id(&self) -> &str {
+        "record-subagent-lifecycle"
+    }
+}
+
+#[tokio::test]
+async fn failed_agent_dispatch_consumes_its_child_route_and_admission_failure_has_no_lifecycle() {
+    for (failed_child, reason, owned) in [
+        (true, "provider request failed", false),
+        (true, "owned foreground failure", true),
+        (false, "spawn admission failed", false),
+        // The real Agent tool's Killed result becomes this ordinary tool
+        // error. Cancellation never runs the child's stop hooks.
+        (false, "Agent: subagent was killed", false),
+    ] {
+        let child_id = lingxi_core::types::AgentId::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut hook_registry = HookRegistry::new();
+        hook_registry.register(HookDefinition {
+            id: HookId::new(),
+            name: "record-subagent-lifecycle".into(),
+            events: vec![HookEventType::SubagentStart, HookEventType::SubagentStop],
+            if_condition: None,
+            executor: DefHookExecutor::Builtin {
+                handler_id: "record-subagent-lifecycle".into(),
+            },
+            source: HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+        });
+        let mut executor = HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(hook_registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        executor.register_builtin(Arc::new(RecordingSubagentLifecycle(seen.clone())));
+        let hooks = Arc::new(executor);
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(FailedAgentTool(
+            failed_child.then_some(child_id),
+            reason,
+            owned.then(|| hooks.clone()),
+        )));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig {
+                model: "parent-model".into(),
+                ..Default::default()
+            },
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            hooks.clone(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let orch = ConversationOrchestrator::into_shared(orch);
+        let session_id = {
+            let mut session = orch.session.lock().await;
+            session.model_profile = Some("parent-profile".into());
+            session.session_id
+        };
+        let child_route = hooks::HookModelSelection {
+            model: "child-model".into(),
+            model_profile: Some("child-profile".into()),
+        };
+        let child_history = hooks::PromptHookTranscript {
+            messages: vec![ConversationMessage::user(
+                MessageId::new(),
+                "child-only evidence".into(),
+            )],
+            ..Default::default()
+        };
+        hooks.publish_agent_prompt_transcript(
+            session_id,
+            child_id,
+            child_route.clone(),
+            child_history.clone(),
+            hooks::AgentStopMetadata {
+                owner: owned.then(|| hooks.subagent_stop_firer(session_id).unwrap()),
+                ..Default::default()
+            },
+        );
+        let uses = vec![(
+            ToolUseId::new(),
+            "Agent".into(),
+            json!({"subagent_type":"general-purpose"}),
+            None,
+        )];
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch");
+        let expected_content = format!("Error: {reason}");
+        assert!(
+            matches!(&results[0], ContentBlock::ToolResult { is_error: Some(true), content, .. }
+            if content == &expected_content)
+        );
+        let calls = seen.lock().unwrap();
+        if failed_child {
+            assert_eq!(
+                calls.len(),
+                1,
+                "a terminal failure cannot manufacture SubagentStart"
+            );
+            assert!(
+                matches!(&calls[0].0, HookEvent::SubagentStop { agent_id, status, .. }
+                if *agent_id == child_id && status == "failed")
+            );
+            assert_eq!(calls[0].1.model_selection.as_ref(), Some(&child_route));
+            assert_eq!(
+                calls[0].1.prompt_transcript.as_ref().unwrap().messages,
+                child_history.messages
+            );
+            assert!(hooks
+                .take_agent_prompt_transcript(session_id, child_id)
+                .is_none());
+        } else {
+            assert!(
+                calls.is_empty(),
+                "admission and cancellation have no stop lifecycle"
+            );
+            assert!(hooks
+                .take_agent_prompt_transcript(session_id, child_id)
+                .is_some());
+        }
+    }
 }
 
 /// Same as [`post_hook_executor`] but registered for `PostToolBatch`, the
@@ -1056,6 +1273,7 @@ async fn accepted_assistant_row_keeps_its_fence_until_request_admission() {
         entered: Mutex::new(None),
     });
     let row = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "accepted assistant row".into(),
@@ -1388,6 +1606,7 @@ async fn dispatched_tool_result_reaches_the_transcript_as_tool_use_result() {
         .await
         .expect("dispatch");
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: results,
         is_meta: false,
@@ -1764,9 +1983,6 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
     );
 }
 
-/// O2: the PreToolUse `preventContinuation` record. The model-facing prose
-/// was already byte-correct (`Execution stopped by hook` default, BIN off
-/// 235403061); only the persisted attachment was missing.
 #[tokio::test]
 async fn pre_tool_use_prevent_continuation_is_persisted_as_an_attachment() {
     let orch = orch_with_pre_hook(

@@ -12,28 +12,13 @@ pub(crate) fn observer_env_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-/// Observer agents remain experimental in claude-code 2.1.270 (`PZr`): the
-/// parser accepts the declaration unconditionally, but the runtime only arms
-/// it when the experimental env toggle is on and background tasks are not
-/// globally disabled. LingXi mirrors that externally observable GATE, under
-/// its own name.
-///
-/// The toggle is `LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS`. Upstream spells
-/// it `CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS`; that name is deliberately no
-/// longer read. It is an opt-in for an experimental LingXi subsystem, not an
-/// inbound contract a third-party process writes, so it is not in the brand
-/// gate's `KEEP_CLAUDE_ENV` list — unlike
-/// `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` just above, which IS honoured
-/// because a user migrating from claude-code sets it to mean "no background
-/// work", and silently ignoring that would start work they asked to stop.
+/// Observer agents are enabled by `LINGXI_CODE_EXPERIMENTAL_OBSERVER_AGENTS`
+/// when `LINGXI_DISABLE_BACKGROUND_TASKS` is not enabled. Parsing an observer
+/// declaration does not enable execution on its own.
 #[must_use]
 pub fn observer_agents_enabled() -> bool {
     let disabled = lingxi_core::host::env::is_env_truthy(
         std::env::var("LINGXI_DISABLE_BACKGROUND_TASKS")
-            .ok()
-            .as_deref(),
-    ) || lingxi_core::host::env::is_env_truthy(
-        std::env::var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
             .ok()
             .as_deref(),
     );
@@ -315,7 +300,7 @@ mod tests {
 
     fn definition(name: &str, observer: Option<ObserverSpec>) -> AgentDefinition {
         AgentDefinition {
-            omit_claude_md: false,
+            omit_instructions: false,
             cache_ttl: None,
             agent_type: name.into(),
             when_to_use: String::new(),
@@ -422,21 +407,18 @@ mod tests {
             "the LingXi flag enables observers"
         );
 
-        // Both background-disable spellings still force it off. The upstream
-        // one is honoured on purpose: a user migrating from claude-code sets it
-        // to mean "no background work", and ignoring that would start work they
-        // asked to stop.
-        for disable in [
-            "LINGXI_DISABLE_BACKGROUND_TASKS",
-            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
-        ] {
-            std::env::set_var(disable, "1");
-            assert!(
-                !observer_agents_enabled(),
-                "{disable} must force observers off"
-            );
-            std::env::remove_var(disable);
-        }
+        std::env::set_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+        assert!(
+            observer_agents_enabled(),
+            "only the LingXi background flag is read"
+        );
+        std::env::remove_var("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS");
+        std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
+        assert!(
+            !observer_agents_enabled(),
+            "the LingXi background flag disables observers"
+        );
+        std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
 
         // Truthiness is the shared parser's, not a bare `is_set` check.
         std::env::set_var(FLAG, "true");

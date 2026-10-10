@@ -93,6 +93,58 @@ fn runtime(auth: AuthStrategy, credential: CredentialConfig) -> ModelRuntime {
     .unwrap()
 }
 
+fn runtime_config(auth: AuthStrategy, credential: CredentialConfig) -> ClientConfig {
+    let aws = auth == AuthStrategy::AwsSigV4;
+    ClientConfig {
+        providers: vec![ProviderProfile {
+            wire_profile: None,
+            regions: wire::Region::all(),
+            provider_id: if aws {
+                ProviderId::BedrockClaude
+            } else {
+                ProviderId::OpenAI
+            },
+            profile_name: "p".into(),
+            base_url: if aws {
+                "https://bedrock-runtime.us-east-1.amazonaws.com"
+            } else {
+                "https://api.openai.com/v1"
+            }
+            .into(),
+            protocol: if aws {
+                ProtocolFamily::AnthropicMessages
+            } else {
+                ProtocolFamily::OpenAiResponses
+            },
+            auth,
+            credential,
+            models: vec![ModelProfile {
+                display_model: "model".into(),
+                request_model: "model".into(),
+                billing_model: "model".into(),
+                aliases: vec![],
+                description: None,
+                metadata: Default::default(),
+                capabilities: Capabilities {
+                    streaming: true,
+                    ..Default::default()
+                },
+            }],
+            pricing: PricingConfig::default(),
+            signing: aws.then(|| SigningConfig {
+                region: "us-east-1".into(),
+                service: "bedrock".into(),
+            }),
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+            vision_delegate: None,
+            connection: Default::default(),
+        }],
+    }
+}
+
 fn snapshot(profile: &str) -> RequestCredentialSnapshot {
     RequestCredentialSnapshot {
         profile: profile.into(),
@@ -102,12 +154,12 @@ fn snapshot(profile: &str) -> RequestCredentialSnapshot {
 
 fn request(method: &str, body: &'static [u8]) -> sdk::HttpRequest {
     sdk::HttpRequest {
+        http1_header_layout: None,
         method: method.into(),
         url: "https://api.openai.com/v1/responses".into(),
         headers: vec![("Content-Type".into(), "application/json".into())],
         body: body.into(),
         timeout: None,
-        http1_header_layout: None,
     }
 }
 
@@ -292,4 +344,48 @@ async fn frozen_sigv4_material_signs_each_current_method_body_and_timestamp() {
         header(&final_request, "x-amz-date")
     );
     assert_eq!(store.loads.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn logical_request_retains_oauth_across_retry_drafts_and_next_turn_reads_host_rotation() {
+    use crate::auth::anthropic::environment::{
+        EnvironmentLookup, EnvironmentOAuthCredentialProvider,
+    };
+    let token = Arc::new(Mutex::new("first".to_owned()));
+    let read = token.clone();
+    let provider = Arc::new(EnvironmentOAuthCredentialProvider::live(
+        EnvironmentLookup::new(move |key| {
+            (key == "CLAUDE_CODE_OAUTH_TOKEN").then(|| read.lock().unwrap().clone())
+        }),
+        None,
+    ));
+    let mut config = runtime_config(
+        AuthStrategy::Bearer,
+        CredentialConfig::HostManaged {
+            id: "anthropic-oauth".into(),
+        },
+    );
+    config.providers[0].provider_id = ProviderId::AnthropicFirstParty;
+    config.providers[0].protocol = ProtocolFamily::AnthropicMessages;
+    config.providers[0].auth = AuthStrategy::OAuthBearer;
+    let client = ModelRuntime::from_config(config)
+        .unwrap()
+        .with_credential_provider(provider);
+    let logical = crate::RequestCredentials::default();
+    let draft = || {
+        HostAuthenticator::for_request(client.clone(), "p".into(), None, Arc::new(Mutex::new(None)))
+            .with_request_credentials(Some(&logical))
+    };
+    assert!(
+        matches!(draft().captured_credential().await.unwrap(),Some(Credential::AnthropicOAuth {access_token,..}) if access_token=="first")
+    );
+    *token.lock().unwrap() = "second".into();
+    assert!(
+        matches!(draft().captured_credential().await.unwrap(),Some(Credential::AnthropicOAuth {access_token,..}) if access_token=="first")
+    );
+    let next = HostAuthenticator::for_request(client, "p".into(), None, Arc::new(Mutex::new(None)))
+        .with_request_credentials(Some(&crate::RequestCredentials::default()));
+    assert!(
+        matches!(next.captured_credential().await.unwrap(),Some(Credential::AnthropicOAuth {access_token,..}) if access_token=="second")
+    );
 }

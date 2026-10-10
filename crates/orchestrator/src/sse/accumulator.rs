@@ -38,6 +38,7 @@ pub enum BlockKind {
     },
     /// A `tool_use` block — accumulates `input_json_delta` chunks.
     ToolUse {
+        initial_input: Option<Utf16JsonProjection>,
         /// Stable identifier echoed back in the matching `ToolResult`.
         id: ToolUseId,
         /// Tool name (e.g. `"Read"`).
@@ -429,12 +430,15 @@ impl BlockAccumulator {
                 signature: state.signature,
             },
             BlockKind::ToolUse {
+                initial_input,
                 id,
                 name,
                 provider_id,
             } => {
                 let input = if state.json_buf.is_empty() {
-                    Utf16JsonProjection::parse("{}").expect("empty JSON object is valid")
+                    initial_input.unwrap_or_else(|| {
+                        Utf16JsonProjection::parse("{}").expect("empty JSON object is valid")
+                    })
                 } else {
                     Utf16JsonProjection::parse_utf16_json(&state.json_buf).map_err(|e| {
                         StreamingError::ToolUseJsonParse {
@@ -445,9 +449,9 @@ impl BlockAccumulator {
                     })?
                 };
                 CompletedBlock::ToolUse {
+                    input,
                     id,
                     name,
-                    input,
                     provider_id,
                 }
             }

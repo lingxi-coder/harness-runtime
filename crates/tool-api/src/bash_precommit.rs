@@ -44,7 +44,7 @@ impl BashPrecommitLatch {
 /// The defined disable env value wins in both directions, then the setting.
 #[must_use]
 pub fn include_git_instructions() -> bool {
-    std::env::var("LINGXI_DISABLE_GIT_INSTRUCTIONS").map_or_else(
+    std::env::var(branding::DISABLE_GIT_INSTRUCTIONS_ENV).map_or_else(
         |_| lingxi_core::host::session_flags::include_git_instructions().unwrap_or(true),
         |value| !lingxi_core::host::env::is_env_truthy(Some(&value)),
     )

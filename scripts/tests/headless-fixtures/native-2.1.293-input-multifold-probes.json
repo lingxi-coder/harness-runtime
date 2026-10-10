@@ -1,0 +1,1175 @@
+{
+  "version": "2.1.293",
+  "captureRoot": "/tmp/headless-baseline-293-input-multifold",
+  "scope": "Two native controlled multi-human midtool captures; no Harness parity claim",
+  "runs": [
+    {
+      "side": "native-a",
+      "observation": {
+        "argv": [
+          "--bare",
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--model",
+          "claude-sonnet-5-5",
+          "--system-prompt",
+          "You are a local deterministic headless fixture.",
+          "--tools",
+          "Bash",
+          "--permission-mode",
+          "dontAsk",
+          "--permission-prompts",
+          "none",
+          "--verbose",
+          "--session-id",
+          "79653a26-3887-47ed-87f0-d457100149e9",
+          "--input-format",
+          "stream-json",
+          "--include-partial-messages",
+          "--replay-user-messages",
+          "--allowedTools=Bash"
+        ],
+        "sessionId": "79653a26-3887-47ed-87f0-d457100149e9",
+        "primarySessionId": "79653a26-3887-47ed-87f0-d457100149e9",
+        "sessionIds": [
+          "79653a26-3887-47ed-87f0-d457100149e9"
+        ],
+        "pid": 66526,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "resultCount": 1,
+        "resultSubtypes": [
+          "success"
+        ],
+        "permissionRequests": 0,
+        "controlResponses": [],
+        "initialized": true,
+        "interruptSent": false,
+        "sessions": [
+          {
+            "path": "projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+            "bytes": 10424,
+            "sha256": "df419137d907e55f48b571ecd6f9ace1f5d50a02192c3d43f9e944534011ff93"
+          }
+        ],
+        "channels": {
+          "stdin": {
+            "bytes": 723,
+            "sha256": "18f2b1446f1d214e638e5c60f95789c534d87f1416cfad96cd9fc5789c163d2f"
+          },
+          "stdout": {
+            "bytes": 28989,
+            "sha256": "ec1572c0eecf4164efa9cdd9ac0532922ccc9d06dd436b50b07b3acafaeb8c23"
+          },
+          "stderr": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        }
+      },
+      "stdin": "{\"type\":\"control_request\",\"request_id\":\"fixture-initialize\",\"request\":{\"subtype\":\"initialize\",\"hooks\":{},\"sdkMcpServers\":[]}}\n{\"type\":\"user\",\"session_id\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000051\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MULTIFOLD_A\"}}\n{\"type\":\"user\",\"session_id\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000052\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MULTIFOLD_B\"}}\n{\"type\":\"user\",\"session_id\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000053\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MULTIFOLD_C\"}}\n",
+      "notableFrames": [
+        {
+          "ordinal": 2,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000051",
+            "state": "queued",
+            "uuid": "30bbc501-68d2-4cae-81f0-fbc731fa6dee",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 3,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000051",
+            "state": "started",
+            "uuid": "ffbf93dc-b4ae-4652-be9e-d5afd4ed8412",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 5,
+          "row": {
+            "type": "system",
+            "subtype": "status",
+            "status": "requesting",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "d0f07c0b-191a-4c16-9d09-0b7093e6dea9",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051"
+            ]
+          }
+        },
+        {
+          "ordinal": 6,
+          "row": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "HEADLESS_MULTIFOLD_A"
+            },
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "parent_tool_use_id": null,
+            "uuid": "00000000-0000-4000-8000-000000000051",
+            "timestamp": "2026-10-08T07:43:32.418Z",
+            "isReplay": true
+          }
+        },
+        {
+          "ordinal": 7,
+          "row": {
+            "type": "stream_event",
+            "event": {
+              "type": "message_start",
+              "message": {
+                "id": "msg_headless_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                }
+              }
+            },
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "parent_tool_use_id": null,
+            "uuid": "cb4706bc-50ff-409e-a11e-3ebf5e52e974",
+            "ttft_ms": 4,
+            "thinking_display": "updates",
+            "user_message_uuid": "00000000-0000-4000-8000-000000000051",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051"
+            ]
+          }
+        },
+        {
+          "ordinal": 10,
+          "row": {
+            "type": "assistant",
+            "message": {
+              "id": "msg_headless_1",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-5-5",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "tool_headless_1",
+                  "name": "Bash",
+                  "input": {
+                    "command": "sleep 0.2; printf HEADLESS_TOOL",
+                    "description": "Controlled local multi-input queue window"
+                  }
+                }
+              ],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 1,
+                "output_tokens": 0
+              },
+              "context_management": null
+            },
+            "parent_tool_use_id": null,
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "260cea30-a545-4923-864e-5e27cace58bf",
+            "timestamp": "2026-10-08T07:43:32.437Z",
+            "user_message_uuid": "00000000-0000-4000-8000-000000000051",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051"
+            ]
+          }
+        },
+        {
+          "ordinal": 14,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000052",
+            "state": "queued",
+            "uuid": "f3324272-044d-46e6-b190-123ea7d382ba",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 15,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000053",
+            "state": "queued",
+            "uuid": "97b56f4d-5e80-4cf9-b772-6ef1be41e146",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 16,
+          "row": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "tool_use_id": "tool_headless_1",
+                  "type": "tool_result",
+                  "content": "HEADLESS_TOOL",
+                  "is_error": false
+                }
+              ]
+            },
+            "parent_tool_use_id": null,
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "5b1f0fe9-0caf-435e-b1e9-c6959a2ff856",
+            "timestamp": "2026-10-08T07:43:32.679Z",
+            "tool_use_result": {
+              "stdout": "HEADLESS_TOOL",
+              "stderr": "",
+              "interrupted": false,
+              "isImage": false,
+              "noOutputExpected": false
+            },
+            "tool_result_meta": [
+              {
+                "id": "tool_headless_1",
+                "permission_decision": {
+                  "decision": "accept",
+                  "source": "config",
+                  "reason_type": "rule"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "ordinal": 17,
+          "row": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "HEADLESS_MULTIFOLD_B"
+            },
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "parent_tool_use_id": null,
+            "uuid": "00000000-0000-4000-8000-000000000052",
+            "timestamp": "2026-10-08T07:43:32.448Z",
+            "isReplay": true
+          }
+        },
+        {
+          "ordinal": 18,
+          "row": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "HEADLESS_MULTIFOLD_C"
+            },
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "parent_tool_use_id": null,
+            "uuid": "00000000-0000-4000-8000-000000000053",
+            "timestamp": "2026-10-08T07:43:32.448Z",
+            "isReplay": true
+          }
+        },
+        {
+          "ordinal": 19,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000052",
+            "state": "started",
+            "uuid": "7d2ff349-5da3-4b0b-9281-01f0bcc1a83b",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 20,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000053",
+            "state": "started",
+            "uuid": "bfb35bfe-ca0e-4721-8ca4-becbc8a5b80b",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 21,
+          "row": {
+            "type": "system",
+            "subtype": "status",
+            "status": "requesting",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "4d039f6d-428b-47e4-a57c-f934169110e0",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051",
+              "00000000-0000-4000-8000-000000000052",
+              "00000000-0000-4000-8000-000000000053"
+            ]
+          }
+        },
+        {
+          "ordinal": 25,
+          "row": {
+            "type": "assistant",
+            "message": {
+              "id": "msg_headless_2",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-5-5",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_MULTIFOLD_RESPONSE"
+                }
+              ],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 1,
+                "output_tokens": 0
+              },
+              "context_management": null
+            },
+            "parent_tool_use_id": null,
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "f939f5d2-5083-4e72-8743-7d8fdfd428d9",
+            "timestamp": "2026-10-08T07:43:32.687Z"
+          }
+        },
+        {
+          "ordinal": 29,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000052",
+            "state": "completed",
+            "uuid": "15255988-86ab-46df-821a-b943b49b2dc6",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 30,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000053",
+            "state": "completed",
+            "uuid": "5649720c-3bcf-47ef-a64b-b16d28f3879f",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 31,
+          "row": {
+            "duration_api_ms": 22,
+            "stop_reason": "end_turn",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "total_cost_usd": 4.4e-05,
+            "usage": {
+              "input_tokens": 2,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 4,
+              "output_tokens_details": {
+                "thinking_tokens": 0
+              },
+              "server_tool_use": {
+                "web_search_requests": 0,
+                "web_fetch_requests": 0
+              },
+              "service_tier": "standard",
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "inference_geo": "",
+              "iterations": [],
+              "speed": "standard",
+              "fallback_credit": null
+            },
+            "modelUsage": {
+              "claude-sonnet-5-5": {
+                "inputTokens": 2,
+                "outputTokens": 4,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "webSearchRequests": 0,
+                "costUSD": 4.4e-05,
+                "contextWindow": 1000000,
+                "maxOutputTokens": 128000,
+                "thinkingTokens": 0,
+                "canonicalModel": "claude-sonnet-5-5",
+                "provider": "firstParty",
+                "costBasis": "list"
+              }
+            },
+            "permission_denials": [],
+            "terminal_reason": "completed",
+            "fast_mode_state": "off",
+            "fast_mode_disabled_reason": "sdk_opt_in_required",
+            "subagent_stats": {
+              "spawned": 0,
+              "requested": {
+                "background": 0,
+                "foreground": 0,
+                "unset": 0
+              },
+              "started_in_background": 0,
+              "max_depth": 0,
+              "spawned_by_subagents": 0,
+              "completed": 0,
+              "failed": 0,
+              "killed": {
+                "parent": 0,
+                "user": 0,
+                "system": 0
+              },
+              "refused": {
+                "depth_limit": 0,
+                "concurrency_limit": 0,
+                "budget": 0
+              },
+              "by_type": {}
+            },
+            "safety_stops": 0,
+            "is_error": false,
+            "num_turns": 2,
+            "subtype": "success",
+            "api_error_status": null,
+            "result": "HEADLESS_MULTIFOLD_RESPONSE",
+            "ttft_ms": 21,
+            "type": "result",
+            "duration_ms": 274,
+            "uuid": "bfbe52e9-7f29-4e5a-b66e-63f76f375e8c",
+            "ttft_stream_ms": 20,
+            "time_to_request_ms": 16,
+            "first_content_frame_ms": 20,
+            "user_message_uuid": "00000000-0000-4000-8000-000000000051",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051",
+              "00000000-0000-4000-8000-000000000052",
+              "00000000-0000-4000-8000-000000000053"
+            ],
+            "request_sent_wall_ms": 1791445412432,
+            "first_request_input_tokens": 1,
+            "queued_turn_count": 0,
+            "result_index": 0
+          }
+        },
+        {
+          "ordinal": 32,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000051",
+            "state": "completed",
+            "uuid": "6daef17f-0807-4579-821f-c434bf17cda3",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        }
+      ],
+      "providerMessages": [
+        [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "HEADLESS_MULTIFOLD_A",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "content": [],
+            "output_config": {
+              "effort": "medium"
+            }
+          }
+        ],
+        [
+          {
+            "role": "user",
+            "content": "HEADLESS_MULTIFOLD_A"
+          },
+          {
+            "role": "system",
+            "content": [],
+            "output_config": {
+              "effort": "medium"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool_headless_1",
+                "name": "Bash",
+                "input": {
+                  "command": "sleep 0.2; printf HEADLESS_TOOL",
+                  "description": "Controlled local multi-input queue window"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "tool_use_id": "tool_headless_1",
+                "type": "tool_result",
+                "content": "HEADLESS_TOOL",
+                "is_error": false
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "content": [
+              {
+                "type": "text",
+                "text": "The user sent a new message while you were working:\nHEADLESS_MULTIFOLD_B\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\n\nThe user sent a new message while you were working:\nHEADLESS_MULTIFOLD_C\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ]
+          }
+        ]
+      ],
+      "sessionRows": [
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "78e15cef059245fbf06435ce816a33cec95a02aeffef00340cece5c80ddc37a8",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"timestamp\":\"2026-10-08T07:43:32.414Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_A\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "3e01d0c25c7a40564b27b09a13235f2ca827bff3b7d884cf5dad4e5da7818a5a",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"dequeue\",\"timestamp\":\"2026-10-08T07:43:32.414Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "cdc73acdf8023d53fff3f5cf4639a744952b5c32fe89b4d9d4d96f3c44c5b2c5",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"timestamp\":\"2026-10-08T07:43:32.448Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_B\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "b5599166f7c8276dfe095572cebfdc2164e9f3c4a4f0c1277db07870002e9c4d",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"timestamp\":\"2026-10-08T07:43:32.448Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_C\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "420e52807fd88bb03880ac38c8fc95dbf2a5a003d42a597ee932b30de07e453d",
+          "rawLine": "{\"parentUuid\":\"5b1f0fe9-0caf-435e-b1e9-c6959a2ff856\",\"isSidechain\":false,\"attachment\":{\"type\":\"queued_command\",\"prompt\":\"HEADLESS_MULTIFOLD_B\",\"source_uuid\":\"00000000-0000-4000-8000-000000000052\",\"delivery_id\":\"f1b88f9e-f8c5-4ecc-8b46-5a7877fd492b\",\"commandMode\":\"prompt\",\"timestamp\":\"2026-10-08T07:43:32.448Z\"},\"type\":\"attachment\",\"uuid\":\"c122d685-49e7-4773-a2ec-e9b952bcefd4\",\"timestamp\":\"2026-10-08T07:43:32.448Z\",\"rendered\":[{\"content\":\"<system-reminder>\\nThe user sent a new message while you were working:\\nHEADLESS_MULTIFOLD_B\\n\\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\\n</system-reminder>\"}],\"renderedRole\":\"system\",\"userType\":\"external\",\"entrypoint\":\"sdk-cli\",\"cwd\":\"/private/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/workspace\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"version\":\"2.1.293\",\"gitBranch\":\"HEAD\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "25c5f34139eeefab8659ad6f203027c6cfbf469d2c0bbcbd069e9f0ddf8821f4",
+          "rawLine": "{\"parentUuid\":\"c122d685-49e7-4773-a2ec-e9b952bcefd4\",\"isSidechain\":false,\"attachment\":{\"type\":\"queued_command\",\"prompt\":\"HEADLESS_MULTIFOLD_C\",\"source_uuid\":\"00000000-0000-4000-8000-000000000053\",\"delivery_id\":\"20987fe8-0856-44b8-b608-d441431b4e2c\",\"commandMode\":\"prompt\",\"timestamp\":\"2026-10-08T07:43:32.448Z\"},\"type\":\"attachment\",\"uuid\":\"97b6eb3f-d73a-4b51-a701-0d00eb24ed9f\",\"timestamp\":\"2026-10-08T07:43:32.448Z\",\"rendered\":[{\"content\":\"<system-reminder>\\nThe user sent a new message while you were working:\\nHEADLESS_MULTIFOLD_C\\n\\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\\n</system-reminder>\"}],\"renderedRole\":\"system\",\"userType\":\"external\",\"entrypoint\":\"sdk-cli\",\"cwd\":\"/private/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/workspace\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"version\":\"2.1.293\",\"gitBranch\":\"HEAD\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "d3bc00343e3f8a3070b02526059a230d48156194b31f04230742430383a7a2bb",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"remove\",\"timestamp\":\"2026-10-08T07:43:32.682Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_B\",\"reason\":\"absorbed_mid_turn\",\"commandUuid\":\"00000000-0000-4000-8000-000000000052\",\"deliveryId\":\"f1b88f9e-f8c5-4ecc-8b46-5a7877fd492b\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-a/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "4b1c77b70325a06c999c76fea5f10cbb62b4cc796a907191488656479ff0fe01",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"remove\",\"timestamp\":\"2026-10-08T07:43:32.682Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_C\",\"reason\":\"absorbed_mid_turn\",\"commandUuid\":\"00000000-0000-4000-8000-000000000053\",\"deliveryId\":\"20987fe8-0856-44b8-b608-d441431b4e2c\"}"
+        }
+      ]
+    },
+    {
+      "side": "native-b",
+      "observation": {
+        "argv": [
+          "--bare",
+          "--print",
+          "--output-format",
+          "stream-json",
+          "--model",
+          "claude-sonnet-5-5",
+          "--system-prompt",
+          "You are a local deterministic headless fixture.",
+          "--tools",
+          "Bash",
+          "--permission-mode",
+          "dontAsk",
+          "--permission-prompts",
+          "none",
+          "--verbose",
+          "--session-id",
+          "79653a26-3887-47ed-87f0-d457100149e9",
+          "--input-format",
+          "stream-json",
+          "--include-partial-messages",
+          "--replay-user-messages",
+          "--allowedTools=Bash"
+        ],
+        "sessionId": "79653a26-3887-47ed-87f0-d457100149e9",
+        "primarySessionId": "79653a26-3887-47ed-87f0-d457100149e9",
+        "sessionIds": [
+          "79653a26-3887-47ed-87f0-d457100149e9"
+        ],
+        "pid": 66590,
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "timedOut": false,
+        "resultCount": 1,
+        "resultSubtypes": [
+          "success"
+        ],
+        "permissionRequests": 0,
+        "controlResponses": [],
+        "initialized": true,
+        "interruptSent": false,
+        "sessions": [
+          {
+            "path": "projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+            "bytes": 10424,
+            "sha256": "98dabfbd8bc49ff8e49f8edda26ceccafaed8aae32db8488ef717946da1287d9"
+          }
+        ],
+        "channels": {
+          "stdin": {
+            "bytes": 723,
+            "sha256": "18f2b1446f1d214e638e5c60f95789c534d87f1416cfad96cd9fc5789c163d2f"
+          },
+          "stdout": {
+            "bytes": 28989,
+            "sha256": "3d9e55223c17fbe04fe2db09993a486a0f5061ef2fbe1735f4c7491260bb77d6"
+          },
+          "stderr": {
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        }
+      },
+      "stdin": "{\"type\":\"control_request\",\"request_id\":\"fixture-initialize\",\"request\":{\"subtype\":\"initialize\",\"hooks\":{},\"sdkMcpServers\":[]}}\n{\"type\":\"user\",\"session_id\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000051\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MULTIFOLD_A\"}}\n{\"type\":\"user\",\"session_id\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000052\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MULTIFOLD_B\"}}\n{\"type\":\"user\",\"session_id\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000053\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MULTIFOLD_C\"}}\n",
+      "notableFrames": [
+        {
+          "ordinal": 2,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000051",
+            "state": "queued",
+            "uuid": "6eea1b24-841b-4db5-9b12-609ac7eb4b3e",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 3,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000051",
+            "state": "started",
+            "uuid": "6fda5b84-6712-4228-8bae-53fb587f2f0b",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 5,
+          "row": {
+            "type": "system",
+            "subtype": "status",
+            "status": "requesting",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "36dbe74e-59e2-45ce-959e-4f4c89fa0a2f",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051"
+            ]
+          }
+        },
+        {
+          "ordinal": 6,
+          "row": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "HEADLESS_MULTIFOLD_A"
+            },
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "parent_tool_use_id": null,
+            "uuid": "00000000-0000-4000-8000-000000000051",
+            "timestamp": "2026-10-08T07:43:32.869Z",
+            "isReplay": true
+          }
+        },
+        {
+          "ordinal": 7,
+          "row": {
+            "type": "stream_event",
+            "event": {
+              "type": "message_start",
+              "message": {
+                "id": "msg_headless_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                }
+              }
+            },
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "parent_tool_use_id": null,
+            "uuid": "76f76c6e-4986-4694-8d16-f0f93e21d561",
+            "ttft_ms": 3,
+            "thinking_display": "updates",
+            "user_message_uuid": "00000000-0000-4000-8000-000000000051",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051"
+            ]
+          }
+        },
+        {
+          "ordinal": 10,
+          "row": {
+            "type": "assistant",
+            "message": {
+              "id": "msg_headless_1",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-5-5",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "tool_headless_1",
+                  "name": "Bash",
+                  "input": {
+                    "command": "sleep 0.2; printf HEADLESS_TOOL",
+                    "description": "Controlled local multi-input queue window"
+                  }
+                }
+              ],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 1,
+                "output_tokens": 0
+              },
+              "context_management": null
+            },
+            "parent_tool_use_id": null,
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "d548a544-69be-412a-acdc-f68987d58fe1",
+            "timestamp": "2026-10-08T07:43:32.886Z",
+            "user_message_uuid": "00000000-0000-4000-8000-000000000051",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051"
+            ]
+          }
+        },
+        {
+          "ordinal": 14,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000052",
+            "state": "queued",
+            "uuid": "2bfa29ce-f440-4300-9fa9-d1123a108b6f",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 15,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000053",
+            "state": "queued",
+            "uuid": "8301a5ff-3227-42b1-9c14-3c23f41ea352",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 16,
+          "row": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "tool_use_id": "tool_headless_1",
+                  "type": "tool_result",
+                  "content": "HEADLESS_TOOL",
+                  "is_error": false
+                }
+              ]
+            },
+            "parent_tool_use_id": null,
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "4c770a95-e20c-4053-950b-efc7e18907e3",
+            "timestamp": "2026-10-08T07:43:33.131Z",
+            "tool_use_result": {
+              "stdout": "HEADLESS_TOOL",
+              "stderr": "",
+              "interrupted": false,
+              "isImage": false,
+              "noOutputExpected": false
+            },
+            "tool_result_meta": [
+              {
+                "id": "tool_headless_1",
+                "permission_decision": {
+                  "decision": "accept",
+                  "source": "config",
+                  "reason_type": "rule"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "ordinal": 17,
+          "row": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "HEADLESS_MULTIFOLD_B"
+            },
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "parent_tool_use_id": null,
+            "uuid": "00000000-0000-4000-8000-000000000052",
+            "timestamp": "2026-10-08T07:43:32.898Z",
+            "isReplay": true
+          }
+        },
+        {
+          "ordinal": 18,
+          "row": {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": "HEADLESS_MULTIFOLD_C"
+            },
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "parent_tool_use_id": null,
+            "uuid": "00000000-0000-4000-8000-000000000053",
+            "timestamp": "2026-10-08T07:43:32.898Z",
+            "isReplay": true
+          }
+        },
+        {
+          "ordinal": 19,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000052",
+            "state": "started",
+            "uuid": "edc8bfcd-ec34-4c83-808d-9489cd913ae4",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 20,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000053",
+            "state": "started",
+            "uuid": "6ac4f027-e7aa-49f2-939f-ad8894c17e8b",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 21,
+          "row": {
+            "type": "system",
+            "subtype": "status",
+            "status": "requesting",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "1600f8b1-a7aa-4388-9e0e-e86551a315d5",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051",
+              "00000000-0000-4000-8000-000000000052",
+              "00000000-0000-4000-8000-000000000053"
+            ]
+          }
+        },
+        {
+          "ordinal": 25,
+          "row": {
+            "type": "assistant",
+            "message": {
+              "id": "msg_headless_2",
+              "type": "message",
+              "role": "assistant",
+              "model": "claude-sonnet-5-5",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_MULTIFOLD_RESPONSE"
+                }
+              ],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 1,
+                "output_tokens": 0
+              },
+              "context_management": null
+            },
+            "parent_tool_use_id": null,
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "uuid": "121423ad-f2cf-435b-afd6-b01e6f079484",
+            "timestamp": "2026-10-08T07:43:33.143Z"
+          }
+        },
+        {
+          "ordinal": 29,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000052",
+            "state": "completed",
+            "uuid": "82f24919-2638-42f8-b6d4-13bcc81427de",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 30,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000053",
+            "state": "completed",
+            "uuid": "20a3aa6d-4127-4291-8f9e-f946e9109ccd",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        },
+        {
+          "ordinal": 31,
+          "row": {
+            "duration_api_ms": 20,
+            "stop_reason": "end_turn",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9",
+            "total_cost_usd": 4.4e-05,
+            "usage": {
+              "input_tokens": 2,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 4,
+              "output_tokens_details": {
+                "thinking_tokens": 0
+              },
+              "server_tool_use": {
+                "web_search_requests": 0,
+                "web_fetch_requests": 0
+              },
+              "service_tier": "standard",
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "inference_geo": "",
+              "iterations": [],
+              "speed": "standard",
+              "fallback_credit": null
+            },
+            "modelUsage": {
+              "claude-sonnet-5-5": {
+                "inputTokens": 2,
+                "outputTokens": 4,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "webSearchRequests": 0,
+                "costUSD": 4.4e-05,
+                "contextWindow": 1000000,
+                "maxOutputTokens": 128000,
+                "thinkingTokens": 0,
+                "canonicalModel": "claude-sonnet-5-5",
+                "provider": "firstParty",
+                "costBasis": "list"
+              }
+            },
+            "permission_denials": [],
+            "terminal_reason": "completed",
+            "fast_mode_state": "off",
+            "fast_mode_disabled_reason": "sdk_opt_in_required",
+            "subagent_stats": {
+              "spawned": 0,
+              "requested": {
+                "background": 0,
+                "foreground": 0,
+                "unset": 0
+              },
+              "started_in_background": 0,
+              "max_depth": 0,
+              "spawned_by_subagents": 0,
+              "completed": 0,
+              "failed": 0,
+              "killed": {
+                "parent": 0,
+                "user": 0,
+                "system": 0
+              },
+              "refused": {
+                "depth_limit": 0,
+                "concurrency_limit": 0,
+                "budget": 0
+              },
+              "by_type": {}
+            },
+            "safety_stops": 0,
+            "is_error": false,
+            "num_turns": 2,
+            "subtype": "success",
+            "api_error_status": null,
+            "result": "HEADLESS_MULTIFOLD_RESPONSE",
+            "ttft_ms": 20,
+            "type": "result",
+            "duration_ms": 280,
+            "uuid": "0b2659dd-d939-4f7d-a212-8d061505cf67",
+            "ttft_stream_ms": 19,
+            "time_to_request_ms": 16,
+            "first_content_frame_ms": 19,
+            "user_message_uuid": "00000000-0000-4000-8000-000000000051",
+            "user_message_uuids": [
+              "00000000-0000-4000-8000-000000000051",
+              "00000000-0000-4000-8000-000000000052",
+              "00000000-0000-4000-8000-000000000053"
+            ],
+            "request_sent_wall_ms": 1791445412883,
+            "first_request_input_tokens": 1,
+            "queued_turn_count": 0,
+            "result_index": 0
+          }
+        },
+        {
+          "ordinal": 32,
+          "row": {
+            "type": "command_lifecycle",
+            "command_uuid": "00000000-0000-4000-8000-000000000051",
+            "state": "completed",
+            "uuid": "1091f43a-b051-4f35-876b-1803aff5815a",
+            "session_id": "79653a26-3887-47ed-87f0-d457100149e9"
+          }
+        }
+      ],
+      "providerMessages": [
+        [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "HEADLESS_MULTIFOLD_A",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "content": [],
+            "output_config": {
+              "effort": "medium"
+            }
+          }
+        ],
+        [
+          {
+            "role": "user",
+            "content": "HEADLESS_MULTIFOLD_A"
+          },
+          {
+            "role": "system",
+            "content": [],
+            "output_config": {
+              "effort": "medium"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "tool_headless_1",
+                "name": "Bash",
+                "input": {
+                  "command": "sleep 0.2; printf HEADLESS_TOOL",
+                  "description": "Controlled local multi-input queue window"
+                }
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "tool_use_id": "tool_headless_1",
+                "type": "tool_result",
+                "content": "HEADLESS_TOOL",
+                "is_error": false
+              }
+            ]
+          },
+          {
+            "role": "system",
+            "content": [
+              {
+                "type": "text",
+                "text": "The user sent a new message while you were working:\nHEADLESS_MULTIFOLD_B\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\n\nThe user sent a new message while you were working:\nHEADLESS_MULTIFOLD_C\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+                "cache_control": {
+                  "type": "ephemeral"
+                }
+              }
+            ]
+          }
+        ]
+      ],
+      "sessionRows": [
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "2d800ab633ecd289c8295c518ec31a97ca72e4bd1456bbcf46c591fa31457dbf",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"timestamp\":\"2026-10-08T07:43:32.865Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_A\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "d96b172577d5530a79109cd5169f7e9bd62ef6ca3e6a2ff5d8c1e958e4b27bbe",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"dequeue\",\"timestamp\":\"2026-10-08T07:43:32.865Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "95e30258ba56aa974ded989d7c5f63efc0caf050e10ac6a76409404e23b3355f",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"timestamp\":\"2026-10-08T07:43:32.898Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_B\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "15d7e7207fa2b3cc37a1a90e304d51ad1eece4b78fcb581e78cd9bb9ae299e89",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"timestamp\":\"2026-10-08T07:43:32.898Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_C\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "6686336d8ef7d5db5d7a2d60ab8cf8ca5df1e6da0e3681b0c34963c1674127bd",
+          "rawLine": "{\"parentUuid\":\"4c770a95-e20c-4053-950b-efc7e18907e3\",\"isSidechain\":false,\"attachment\":{\"type\":\"queued_command\",\"prompt\":\"HEADLESS_MULTIFOLD_B\",\"source_uuid\":\"00000000-0000-4000-8000-000000000052\",\"delivery_id\":\"374beda2-3c6e-4b45-bc31-0291cdbe2f92\",\"commandMode\":\"prompt\",\"timestamp\":\"2026-10-08T07:43:32.898Z\"},\"type\":\"attachment\",\"uuid\":\"09088205-87ca-418a-b922-b0edb8e7ed91\",\"timestamp\":\"2026-10-08T07:43:32.898Z\",\"rendered\":[{\"content\":\"<system-reminder>\\nThe user sent a new message while you were working:\\nHEADLESS_MULTIFOLD_B\\n\\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\\n</system-reminder>\"}],\"renderedRole\":\"system\",\"userType\":\"external\",\"entrypoint\":\"sdk-cli\",\"cwd\":\"/private/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/workspace\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"version\":\"2.1.293\",\"gitBranch\":\"HEAD\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "a6edfc9e7c4c311e3d4cdf316fd76a98df1823a5c3a10840f8420f26174cd04c",
+          "rawLine": "{\"parentUuid\":\"09088205-87ca-418a-b922-b0edb8e7ed91\",\"isSidechain\":false,\"attachment\":{\"type\":\"queued_command\",\"prompt\":\"HEADLESS_MULTIFOLD_C\",\"source_uuid\":\"00000000-0000-4000-8000-000000000053\",\"delivery_id\":\"06528858-ec02-4b0b-8be3-52692c97a0d7\",\"commandMode\":\"prompt\",\"timestamp\":\"2026-10-08T07:43:32.898Z\"},\"type\":\"attachment\",\"uuid\":\"a3a120b5-e32c-4ca6-88be-32227befc5ef\",\"timestamp\":\"2026-10-08T07:43:32.898Z\",\"rendered\":[{\"content\":\"<system-reminder>\\nThe user sent a new message while you were working:\\nHEADLESS_MULTIFOLD_C\\n\\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.\\n</system-reminder>\"}],\"renderedRole\":\"system\",\"userType\":\"external\",\"entrypoint\":\"sdk-cli\",\"cwd\":\"/private/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/workspace\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"version\":\"2.1.293\",\"gitBranch\":\"HEAD\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "91c3bc347591138b4feca7ba8a73958eb13c5638dbaa4036ce0013390893fbf6",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"remove\",\"timestamp\":\"2026-10-08T07:43:33.135Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_B\",\"reason\":\"absorbed_mid_turn\",\"commandUuid\":\"00000000-0000-4000-8000-000000000052\",\"deliveryId\":\"374beda2-3c6e-4b45-bc31-0291cdbe2f92\"}"
+        },
+        {
+          "path": "/tmp/headless-baseline-293-input-multifold/probe-input-midtool-burst/native-b/processes/0/sessions/projects/-private-tmp-headless-baseline-293-input-multifold-probe-input-midtool-burst-workspace/79653a26-3887-47ed-87f0-d457100149e9.jsonl",
+          "sha256": "68a4f3184ce68f527a2c9e8e924fd992496fb5b689a7c6c28f5c4dfef6b6e8ba",
+          "rawLine": "{\"type\":\"queue-operation\",\"operation\":\"remove\",\"timestamp\":\"2026-10-08T07:43:33.135Z\",\"sessionId\":\"79653a26-3887-47ed-87f0-d457100149e9\",\"content\":\"HEADLESS_MULTIFOLD_C\",\"reason\":\"absorbed_mid_turn\",\"commandUuid\":\"00000000-0000-4000-8000-000000000053\",\"deliveryId\":\"06528858-ec02-4b0b-8be3-52692c97a0d7\"}"
+        }
+      ]
+    }
+  ]
+}

@@ -141,11 +141,8 @@ impl HandbackReportOutput {
             .encode_utf16(),
         );
         Some(PersistedHandbackBody {
-            text: Utf16JsonProjection::root_string(
-                String::from_utf16_lossy(&pointer),
-                pointer,
-            )
-            .expect("persisted Handback pointer is a source string"),
+            text: Utf16JsonProjection::root_string(String::from_utf16_lossy(&pointer), pointer)
+                .expect("persisted Handback pointer is a source string"),
         })
     }
 }

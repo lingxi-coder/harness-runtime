@@ -372,7 +372,7 @@ pub(super) fn rule_tool_name(rule: &str) -> &str {
 /// Apply an `agent.spawn` hook's `modified_input` to a spawn request.
 ///
 /// Pure so the rewrite rules are testable without standing up a spawner. Only
-/// the four fields upstream allows are honoured; anything else in the object is
+/// the declared child model/route, agent type, and cwd fields are honoured; anything else is
 /// ignored rather than reflected, so a hook cannot reach fields it was never
 /// given authority over by guessing their names.
 #[must_use]
@@ -392,14 +392,21 @@ pub(crate) fn apply_spawn_rewrite(
         }
     }
     if updated.contains_property("model") {
-        let next = strict_source_string(updated, "/model");
+        let next = strict_optional_source_string(updated, "/model", "model")?;
         if next != rewritten.model {
             rewritten.model = next;
             changed.push("model");
         }
     }
+    if updated.contains_property("model_profile") {
+        let next = strict_optional_source_string(updated, "/model_profile", "model_profile")?;
+        if next != rewritten.model_profile {
+            rewritten.model_profile = next;
+            changed.push("model_profile");
+        }
+    }
     if updated.contains_property("cwd") {
-        let next = strict_source_string(updated, "/cwd");
+        let next = strict_optional_source_string(updated, "/cwd", "cwd")?;
         if next != rewritten.cwd {
             rewritten.cwd = next;
             changed.push("cwd");
@@ -423,6 +430,7 @@ pub(crate) fn apply_spawn_rewrite(
                 .to_string(),
         ));
     }
+    validate_child_model_profile(&rewritten).map_err(Utf16JsonProjection::from)?;
     if changed.is_empty() {
         return Ok(None);
     }
@@ -436,8 +444,49 @@ pub(crate) fn apply_spawn_rewrite(
     Ok(Some(rewritten))
 }
 
+/// Read a hook-provided agent identity only when its source is a scalar
+/// UTF-16 string. An unpaired surrogate cannot name a Rust-side catalog entry
+/// and must not be replaced by U+FFFD during lookup.
 fn strict_source_string(source: &Utf16JsonProjection, pointer: &str) -> Option<String> {
     String::from_utf16(&source.string_units(pointer)?).ok()
+}
+
+fn validate_child_model_profile(request: &SubagentSpawnRequest) -> Result<(), String> {
+    let Some(profile) = request.model_profile.as_deref() else {
+        return Ok(());
+    };
+    if lingxi_core::host::effort::trim_js_whitespace(profile).is_empty() {
+        return Err("subagent model_profile must be a nonempty string".into());
+    }
+    if !request
+        .model
+        .as_deref()
+        .is_some_and(|model| !lingxi_core::host::effort::trim_js_whitespace(model).is_empty())
+    {
+        return Err("subagent model_profile requires an explicit model; clear both model and model_profile to inherit".into());
+    }
+    Ok(())
+}
+
+fn strict_optional_source_string(
+    source: &Utf16JsonProjection,
+    pointer: &str,
+    field: &str,
+) -> Result<Option<String>, Utf16JsonProjection> {
+    let value = source.subprojection(pointer).map_err(|_| {
+        Utf16JsonProjection::from(format!("agent.spawn {field} must be a string or null"))
+    })?;
+    if value.at_pointer("").is_some_and(|root| root.is_null()) {
+        return Ok(None);
+    }
+    let Some(units) = value.string_units("") else {
+        return Err(Utf16JsonProjection::from(format!(
+            "agent.spawn {field} must be a string or null"
+        )));
+    };
+    String::from_utf16(&units)
+        .map(Some)
+        .map_err(|_| Utf16JsonProjection::from(format!("agent.spawn {field} must be valid UTF-16")))
 }
 
 impl PoolSubagentSpawner {
@@ -446,13 +495,14 @@ impl PoolSubagentSpawner {
     ///
     /// First looks the definition up by precedence (see [`Self::lookup_definition`]),
     /// then resolves its [`AgentModel`] to a concrete wire model id via
-    /// [`crate::model_resolution::resolve_agent_model`] (when a `parent_model`
+    /// [`crate::model_resolution::resolve_agent_model_with_context`] (when a `parent_model`
     /// is supplied): `Inherit`→parent model; a bare family alias→the parent's exact
     /// id when same-tier, else the family's concrete default id. Without a
     /// `parent_model` the model string is left RAW (legacy behavior). The caller
     /// computes `parent_model` via [`Self::effective_parent_model`] (the request's
     /// `parent_model_override` — the LIVE / immediate-parent model — else the
     /// spawner's boot/live default).
+    #[cfg(test)]
     pub(super) async fn resolve_definition(
         &self,
         subagent_type: &str,
@@ -461,11 +511,12 @@ impl PoolSubagentSpawner {
         self.resolve_definition_with_profile(subagent_type, parent_model, None, None)
             .await
     }
+    #[cfg(test)]
     pub(super) async fn resolve_definition_with_profile(
         &self,
         subagent_type: &str,
         parent_model: Option<&str>,
-        _parent_model_profile: Option<&str>,
+        parent_model_profile: Option<&str>,
         parent_context: Option<&crate::model_resolution::ModelResolutionContext>,
     ) -> Result<AgentDefinition, crate::model_resolution::ModelResolutionError> {
         let mut def = self.lookup_definition(subagent_type).await;
@@ -476,6 +527,10 @@ impl PoolSubagentSpawner {
             .map(str::to_string)
             .or_else(|| self.resolved_default_model());
         if let Some(parent_model) = parent.as_deref() {
+            let context = match parent_context {
+                Some(context) => context.clone(),
+                None => self.context_for_route(parent_model, parent_model_profile)?,
+            };
             // 2.1.198 `GAe`: the built-in Explore definition's model is derived
             // from the SESSION model (inherit, capped at "opus" for
             // fable/mythos-class firstParty sessions) BEFORE the normal
@@ -484,20 +539,9 @@ impl PoolSubagentSpawner {
             def.model = crate::model_resolution::resolve_builtin_explore_model(
                 &def,
                 parent_model,
-                parent_context.is_some_and(|context| {
-                    context.route.provider
-                        == Some(crate::model_resolution::ModelProviderKind::FirstParty)
-                }),
+                context.route.provider
+                    == Some(crate::model_resolution::ModelProviderKind::FirstParty),
             );
-            let context = parent_context.cloned().unwrap_or_else(|| {
-                crate::model_resolution::ModelResolutionContext {
-                    route: crate::model_resolution::ModelRouteFacts {
-                        model: parent_model.to_string(),
-                        ..crate::model_resolution::ModelRouteFacts::default()
-                    },
-                    ..crate::model_resolution::ModelResolutionContext::default()
-                }
-            });
             def.model = AgentModel::Explicit(self.resolve_model_pref(
                 &def.model,
                 parent_model,
@@ -599,7 +643,7 @@ impl PoolSubagentSpawner {
     /// `max_turns: 1`, so a fallback agent can still run a tool-using loop.
     pub(super) fn fallback_definition(subagent_type: &str) -> AgentDefinition {
         AgentDefinition {
-            omit_claude_md: false,
+            omit_instructions: false,
             cache_ttl: None,
             agent_type: subagent_type.into(),
             when_to_use: String::new(),
@@ -635,6 +679,7 @@ impl PoolSubagentSpawner {
     /// live registry per `agent_def`'s [`AgentToolPolicy`]. Returns
     /// `(tool_schemas, allowed_tool_names)`. Unset registry → `(empty, empty)`
     /// (no tools advertised, allow-list guard skipped).
+    #[cfg(test)]
     pub(super) async fn resolve_tools(
         &self,
         agent_def: &AgentDefinition,
@@ -655,8 +700,18 @@ impl PoolSubagentSpawner {
         ),
         SubagentSpawnError,
     > {
+        if self.tool_registry.get().is_none() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let parent_selection = self
+            .resolved_default_selection()
+            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
+        let child_selection = self
+            .resolve_child_model_selection(&agent_def.model, parent_selection.as_ref(), None)
+            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
         self.resolve_tools_with_handback(
             agent_def,
+            child_selection.as_ref(),
             depth,
             agent_mcp_tools,
             None,
@@ -668,6 +723,7 @@ impl PoolSubagentSpawner {
     pub(super) async fn resolve_tools_with_handback(
         &self,
         agent_def: &AgentDefinition,
+        child_selection: Option<&crate::model_resolution::ResolvedModelSelection>,
         // The resolved subagent's own recursion depth — gates its `Agent` tool
         // against Claude's configured maximum spawn depth. Threaded from
         // `request.depth`.
@@ -693,17 +749,11 @@ impl PoolSubagentSpawner {
         };
         // Delegate to the shared resolver (single source of truth, also used by
         // the in-process teammate handler). The tool-wide deny names come from the
-        // boot policy via the set-once cell (UNFILLED / EMPTY ⇒ no tools dropped,
-        // regression-safe). The `default_model` only anchors the model-gated tool
-        // prompt for an `AgentModel::Inherit` def; on the production spawn path the
-        // def's model is already resolved to `Explicit` (so the param is inert
-        // there). The resolved current selection anchors direct-call / Inherit
-        // cases; when a configured live route is unavailable, no boot snapshot
-        // is substituted. This prompt-only argument is not the spawn admission
-        // route, which is resolved separately from the request's parent facts.
+        // boot policy via the set-once cell. Tool prompts use the child's
+        // admitted route directly; a same-named model on another profile must
+        // retain that profile's tool capability facts.
         let empty: Vec<String> = Vec::new();
         let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
-        let default_model = self.resolved_default_model();
         let coordinator_mode = self
             .coordinator_mode
             .get()
@@ -712,7 +762,7 @@ impl PoolSubagentSpawner {
             registry.as_ref(),
             agent_def,
             denied,
-            default_model.as_deref(),
+            child_selection,
             depth,
             coordinator_mode,
             agent_mcp_tools,
@@ -794,6 +844,7 @@ impl PoolSubagentSpawner {
                 .string_units("")
                 .expect("SubagentSpawnRequest.prompt is a root string");
             vec![ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: String::from_utf16_lossy(&utf16_code_units),
@@ -849,6 +900,7 @@ impl PoolSubagentSpawner {
             },
             // Set by `build_subagent_context` from `request.model_profile`.
             model_profile: None,
+            model_resolution_context_provider: None,
             server_fallback_model_enforcement: None,
             // Set by `spawn` from `self.api_client` / `inherit.tool_invoker` /
             // `inherit.budget` just before pool allocation. `tool_schemas` +
@@ -870,6 +922,8 @@ impl PoolSubagentSpawner {
             // / `hook_cwd` carry the boot-set values.
             hook_executor: None,
             agent_spawn_token: None,
+            stop_hook_scope: Default::default(),
+            subagent_stop_firer: None,
             strict_plugin_only_hooks: false,
             skill_loader: None,
             hook_session_id: lingxi_core::types::SessionId::nil(),
@@ -967,6 +1021,7 @@ impl PoolSubagentSpawner {
         &self,
         request: &SubagentSpawnRequest,
         origin_session_id: Option<lingxi_core::types::SessionId>,
+        safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
     ) -> Result<Option<SubagentSpawnRequest>, SubagentSpawnError> {
         // `RuntimeLink::get` already hands back an owned `Arc`; the
         // `OnceLock` this arrived on borrows and needs a `.cloned()`.
@@ -990,6 +1045,7 @@ impl PoolSubagentSpawner {
         let event = hooks::events::HookEvent::AgentSpawn {
             agent_type: request.subagent_type.clone(),
             model: request.model.clone(),
+            model_profile: request.model_profile.clone(),
             cwd: request.cwd.clone(),
             background: request.run_in_background,
             parent_agent_id: request.creator_agent_id,
@@ -999,6 +1055,7 @@ impl PoolSubagentSpawner {
                 event,
                 hooks::HookContext {
                     session_id: origin_session_id.unwrap_or(self.hook_session_id),
+                    model_safety_observer: safety_observer,
                     cwd: self.hook_cwd.clone(),
                     ..Default::default()
                 },
@@ -1076,10 +1133,17 @@ impl PoolSubagentSpawner {
             .as_ref()
             .and_then(|(_, owner)| *owner)
             .or_else(|| self.resolved_origin_session_id(request));
+        let safety_budget = origin_session_id
+            .and_then(|session_id| inherit.budget.scoped_for_session(session_id))
+            .unwrap_or_else(|| Arc::clone(&inherit.budget));
+        let safety_observer = safety_budget
+            .model_safety_observer()
+            .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
         let rewritten = self
-            .apply_agent_spawn_hook(request, origin_session_id)
+            .apply_agent_spawn_hook(request, origin_session_id, safety_observer)
             .await?;
         let request = rewritten.as_ref().unwrap_or(request);
+        validate_child_model_profile(request).map_err(SubagentSpawnError::Runtime)?;
 
         // The parent / main-loop model this spawn resolves against: the request's
         // `parent_model_override` (the LIVE session model at top level / the
@@ -1087,17 +1151,26 @@ impl PoolSubagentSpawner {
         // `AgentTool`, claude `AgentTool.tsx:418`) else the spawner's boot/live
         // default. Computed ONCE and threaded into definition + model-override +
         // tool resolution so all three agree on the same anchor.
-        let parent_selection = self
-            .effective_parent_selection(request)
-            .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
+        let explicit_child_route = request.model.as_deref().is_some_and(|model| {
+            !lingxi_core::host::effort::trim_js_whitespace(model).is_empty()
+                && (request.model_profile.is_some() || model.contains('/'))
+        });
+        let has_parent_override = request
+            .parent_model_override
+            .as_deref()
+            .is_some_and(|model| !lingxi_core::host::effort::trim_js_whitespace(model).is_empty());
+        let parent_selection = match self.effective_parent_selection(request) {
+            Ok(selection) => selection,
+            // A complete child route can stand on its own when an unrelated
+            // root route was removed. Inheritance and explicit parent hints
+            // still require their own route to resolve successfully.
+            Err(_) if explicit_child_route && !has_parent_override => None,
+            Err(error) => return Err(SubagentSpawnError::Runtime(error.to_string())),
+        };
         let has_explicit_provider_model = request
             .model
             .as_deref()
-            .is_some_and(|model| !model.trim().is_empty())
-            && request
-                .model_profile
-                .as_deref()
-                .is_some_and(|profile| !profile.trim().is_empty());
+            .is_some_and(|model| !model.trim().is_empty());
         if parent_selection.is_none()
             && self.default_model_selection_provider.get().is_some()
             && !has_explicit_provider_model
@@ -1106,22 +1179,37 @@ impl PoolSubagentSpawner {
                 "live session model/provider selection is unavailable".to_string(),
             ));
         }
-        let parent_model = parent_selection
-            .as_ref()
-            .map(|selection| selection.model.clone());
-        let mut def = self
-            .resolve_definition_with_profile(
-                &request.subagent_type,
-                parent_model.as_deref(),
-                parent_selection
-                    .as_ref()
-                    .and_then(|selection| selection.model_profile.as_deref()),
-                parent_selection
-                    .as_ref()
-                    .map(|selection| &selection.model_resolution_context),
+        let mut def = self.lookup_definition(&request.subagent_type).await;
+        // Select the caller's preference before resolving the definition's
+        // default: a profile without that default can still run an explicit
+        // provider-local model supplied by the caller.
+        let explicit_model = request
+            .model
+            .as_deref()
+            .map(lingxi_core::host::effort::trim_js_whitespace)
+            .filter(|model| !model.is_empty());
+        let preference = if let Some(model) = explicit_model {
+            AgentModel::Explicit(model.to_string())
+        } else if let Some(parent) = parent_selection.as_ref() {
+            crate::model_resolution::resolve_builtin_explore_model(
+                &def,
+                &parent.model,
+                parent.model_resolution_context.route.provider
+                    == Some(crate::model_resolution::ModelProviderKind::FirstParty),
             )
-            .await
+        } else {
+            def.model.clone()
+        };
+        let child_selection = self
+            .resolve_child_model_selection(
+                &preference,
+                parent_selection.as_ref(),
+                explicit_model.and(request.model_profile.as_deref()),
+            )
             .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?;
+        if let Some(selection) = &child_selection {
+            def.model = AgentModel::Explicit(selection.model.clone());
+        }
         // Per-spawn system-prompt override (workflow xBp / DBp): replace the
         // resolved definition's body with the caller's override BEFORE the Notes
         // trailer is appended by `make_subagent_context`.
@@ -1138,71 +1226,23 @@ impl PoolSubagentSpawner {
                 }
             }
         }
-        // AgentTool spawn-surface parity: an explicit `model` from the caller
-        // (TS schema `model: 'sonnet' | 'opus' | 'haiku'`) takes precedence over
-        // the definition's model frontmatter (AgentTool.tsx:86).
-        // `model_profile` pins the CHILD only when accompanied by an explicit
-        // child model. Without `request.model` it is a parent hint and must not
-        // leak onto a definition that resolves to a different model.
-        let mut accepted_request_model_profile = request
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .and(request.model_profile.clone());
-        if let Some(model_pref) = request.model.as_deref() {
-            // Dual-LLM dual-PROVIDER routing: when the caller pinned a provider
-            // profile (`model_profile`), `request.model` is ALREADY the concrete
-            // provider-local wire model (the candidate's resolved `request_model`,
-            // e.g. `gpt-4o` / `gemini-1.5-pro`). The family-alias logic in
-            // `resolve_agent_model` (alias→parent-tier matching, parent region
-            // prefix) is Claude-shaped and would mangle a foreign concrete id, so
-            // it is BYPASSED here: the model is used verbatim as `Explicit`. The
-            // `profile` (set just below from `request.model_profile`) selects the
-            // provider in the typed streaming request.
-            if request.model_profile.is_some() {
-                let (resolved, accepted) = self.resolve_provider_model_pref(
-                    model_pref,
-                    parent_model.as_deref(),
-                    parent_selection
-                        .as_ref()
-                        .map(|selection| &selection.model_resolution_context),
-                )?;
-                def.model = AgentModel::Explicit(resolved);
-                if !accepted {
-                    accepted_request_model_profile = None;
-                }
-            } else {
-                let requested = AgentModel::Alias(model_pref.to_string());
-                def.model = match parent_model.as_deref() {
-                    Some(parent) => {
-                        let context = parent_selection
-                            .as_ref()
-                            .map(|selection| &selection.model_resolution_context)
-                            .ok_or_else(|| {
-                                SubagentSpawnError::Runtime(
-                                    "model route context is unavailable for the selected parent route".into(),
-                                )
-                            })?;
-                        AgentModel::Explicit(
-                            self.resolve_model_pref(&requested, parent, context)
-                                .map_err(|error| SubagentSpawnError::Runtime(error.to_string()))?,
-                        )
-                    }
-                    None => requested,
-                };
-            }
-        }
-        // Per-spawn effort override (claude-code workflow `agent({effort})` →
-        // `me={...ie,effort:ae}`): a level/integer opt overrides the resolved
-        // definition's effort frontmatter. Ignored when unparseable.
-        if let Some(effort) = &request.effort {
-            if let Some(parsed) = crate::definition::AgentEffort::from_json(effort) {
-                def.effort = Some(parsed);
-            }
+        if let Some(effort) = request.effort.as_ref().filter(|effort| {
+            !effort.is_null()
+                && !effort.as_str().is_some_and(|value| {
+                    lingxi_core::host::effort::trim_js_whitespace(value).is_empty()
+                })
+        }) {
+            let parsed = crate::definition::AgentEffort::from_json(effort).ok_or_else(|| {
+                SubagentSpawnError::Runtime(format!("invalid subagent effort: {effort}"))
+            })?;
+            def.effort = Some(parsed);
         }
         let is_fork_spawn =
             request.fork_parent_system_prompt.is_some() || request.fork_context_messages.is_some();
+        let trusted_parent_override = request
+            .parent_permission_mode
+            .as_deref()
+            .and_then(crate::permission_mode::parse_wire_mode);
         let parent_permission_mode = request
             .parent_permission_mode
             .clone()
@@ -1212,15 +1252,12 @@ impl PoolSubagentSpawner {
             .and_then(crate::permission_mode::parse_wire_mode)
             .unwrap_or(self.permission_mode);
         let effective_permission_mode = if is_fork_spawn {
-            None
+            trusted_parent_override
         } else {
-            // (parity 2.1.212) The Agent/Task `mode` call param is DEPRECATED and
-            // ignored: claude reads the PARENT's live mode (`_=yn(l),y=_.mode`)
-            // and never consults the spawn param. The child therefore inherits the
-            // parent's live permission mode (`self.permission_mode`), with the
-            // agent-definition frontmatter as the ONLY override source. Pass `None`
-            // for the requested spawn mode so `request.mode` — carried for
-            // back-compat — is never applied.
+            // The model-authored `mode` parameter is ignored. The definition
+            // policy resolves against the actual immediate parent's mode;
+            // retaining a trusted parent override prevents the shared root
+            // invoker's gate from replacing it when the definition inherits.
             crate::permission_mode::effective_child_mode(
                 None,
                 parent_mode,
@@ -1228,9 +1265,16 @@ impl PoolSubagentSpawner {
                 self.spawn_bypass_gates.get().copied().unwrap_or_default(),
                 &mut |m| tracing::warn!("{m}"),
             )
+            .or(trusted_parent_override)
         };
         if effective_permission_mode == Some(PermissionMode::Plan) {
             def.permission_mode = AgentPermissionMode::Plan;
+        } else if effective_permission_mode.is_some()
+            && def.permission_mode == AgentPermissionMode::Plan
+        {
+            // A permissive parent can suppress the definition's Plan fallback.
+            // Tool schema narrowing must follow the chosen enforcing mode.
+            def.permission_mode = AgentPermissionMode::Bubble;
         }
         // Fork carriers (codex #5): on the fork path `fork_context_messages`
         // carries the byte-exact forked prefix and `fork_parent_system_prompt`
@@ -1311,16 +1355,13 @@ impl PoolSubagentSpawner {
             .unwrap_or_else(|| Arc::clone(&inherit.budget));
         ctx.budget = Some(child_budget);
         ctx.api_client.clone_from(&self.api_client);
-        // Per-spawn provider routing (dual-LLM dual-PROVIDER): the runner passes
-        // this in the typed streaming request's `profile` field
-        // methods so the round-trip targets the candidate's resolved provider.
-        let resolved_model = crate::runner::resolve_model(&ctx);
-        ctx.model_profile = accepted_request_model_profile.or_else(|| {
-            parent_selection
-                .as_ref()
-                .filter(|selection| selection.model == resolved_model)
-                .and_then(|selection| selection.model_profile.clone())
-        });
+        // The same resolution chooses the wire model and profile, even when
+        // the model changed within the selected provider's catalog.
+        ctx.model_profile = child_selection
+            .as_ref()
+            .and_then(|selection| selection.model_profile.clone());
+        ctx.model_resolution_context_provider =
+            self.model_resolution_context_provider.get().cloned();
         ctx.server_fallback_model_enforcement = self
             .model_restriction
             .as_ref()
@@ -1335,6 +1376,11 @@ impl PoolSubagentSpawner {
             .unwrap_or(false);
         ctx.skill_loader = self.skill_loader.get();
         ctx.hook_session_id = ctx.origin_session_id.unwrap_or(self.hook_session_id);
+        ctx.stop_hook_scope = request.stop_hook_scope;
+        ctx.subagent_stop_firer = ctx
+            .hook_executor
+            .as_ref()
+            .and_then(|executor| executor.subagent_stop_firer(ctx.hook_session_id));
         ctx.hook_cwd = self.hook_cwd.clone();
         // A RESTORE seeds the child from its recovered conversation, replacing
         // prompt + fork-context + preload (see `SubagentContext::resumed_history`).
@@ -1453,6 +1499,7 @@ impl PoolSubagentSpawner {
         let (tool_schemas, allowed_tools, handback_active) = self
             .resolve_tools_with_handback(
                 &ctx.agent_definition,
+                child_selection.as_ref(),
                 request.depth,
                 &agent_mcp.tools,
                 handback_tool.as_ref(),
@@ -1479,6 +1526,9 @@ impl PoolSubagentSpawner {
             Arc::get_mut(&mut runtime)
                 .expect("private report runtime")
                 .spawn_bypass_gates = self.spawn_bypass_gates.get().copied().unwrap_or_default();
+            Arc::get_mut(&mut runtime)
+                .expect("private report runtime")
+                .trusted_parent_permission_mode = trusted_parent_override;
             Arc::get_mut(&mut runtime)
                 .expect("private report runtime")
                 .ends_turn_enabled = request.handback_ends_turn_enabled;
@@ -1551,15 +1601,12 @@ impl PoolSubagentSpawner {
         // worktree path (or honours an explicit `cwd`) and threads it via
         // `request.cwd`. Set it on the context so the runner threads it into every
         // dispatched tool's `cwd`. `None` ⇒ the shared session workspace (legacy).
-        // Per-spawn permission mode (claude-code 2.1.212): the Agent `mode` call
-        // param is DEPRECATED and ignored — the child inherits the parent's live
-        // permission-mode anchor (claude `_=yn(l),y=_.mode`), and ONLY the agent
-        // definition's own permission mode may override it. The resulting override
-        // (or `None`, meaning "inherit the live mode unchanged") is threaded into
-        // the child's tool-dispatch permission checks (via
+        // Thread the selected definition mode or trusted immediate-parent mode
+        // into the child's dispatch checks. An absent override inherits the
+        // bound invoker's live gate. The fork preserves a supplied trusted
+        // parent mode while keeping its exact inherited tool pool (via
         // `SubagentContext::permission_mode_override` → `SubagentInvocationContext`
-        // → the gate's `PermissionCheckContext`). The fork path replays the parent's
-        // rendered context verbatim, so it never applies a mode override.
+        // → the gate's `PermissionCheckContext`).
         ctx.permission_mode_override =
             effective_permission_mode.map(|m| crate::permission_mode::wire_mode_str(m).to_string());
         // Carry the fork-time command-deny snapshot through to the runner, which

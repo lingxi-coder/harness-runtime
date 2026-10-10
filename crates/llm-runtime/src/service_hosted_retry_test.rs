@@ -878,6 +878,7 @@ fn durable_replay_companions_are_classified_after_canonical_conversion() {
         let (input, _) = crate::convert::history_input(
             MODEL,
             &[crate::Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: history.content,
             }],
@@ -901,7 +902,7 @@ fn durable_observations_are_removed_before_sdk_execution_classification() {
     let mut request = request(false);
     let (input, _) = crate::convert::history_input(
         MODEL,
-        &[crate::Message {
+        &[crate::Message { api_output_config: None,
             role: "assistant".into(),
             content: vec![crate::ContentBlock::ProviderContent {
             protocol: "anthropic_messages".into(),

@@ -37,6 +37,7 @@ pub(super) fn process_visible_response<'a>(
         //    `final_message_id` to return to the caller.
         let assistant_id = MessageId::new();
         let mut assistant_msg = ConversationMessage::Assistant {
+            per_turn_effort: response.per_turn_effort(),
             id: assistant_id,
             content: assistant_blocks.clone(),
             stop_reason: response.stop_reason.clone(),
@@ -292,6 +293,7 @@ pub(super) fn process_visible_response<'a>(
                 remaining_injected = rest;
 
                 let mut tool_result_msg = ConversationMessage::User {
+                    api_message_override: None,
                     id: MessageId::new(),
                     content: result_content,
                     is_meta: false,
@@ -427,12 +429,13 @@ pub(super) fn process_visible_response<'a>(
             // AFTER `injected_messages` so it mirrors the streaming twin's ordering.
             // Empty for every existing tool + non-`model:` skills → strict no-op
             // (session.model untouched → byte-identical turn-loop fixtures).
+            let mut model_result = Ok(());
             publication_fence
-                .commit_if_current(Box::pin(apply_model_context_modifiers(
-                    orch,
-                    context_modifiers,
-                )))
+                .commit_if_current(Box::pin(async {
+                    model_result = apply_model_context_modifiers(orch, context_modifiers).await;
+                }))
                 .await;
+            model_result?;
         }
         crate::native_computer::prepare_receipts(
             orch,

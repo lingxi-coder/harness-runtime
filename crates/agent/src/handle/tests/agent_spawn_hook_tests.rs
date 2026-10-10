@@ -51,6 +51,7 @@ fn spawn_hook_rewrite_preserves_host_caller_provenance() {
         hook_origin: FieldPresence::Value(json!(["host-plugin", "parent-api"])),
     };
     let request = SubagentSpawnRequest {
+        stop_hook_scope: Default::default(),
         agent_spawn_provenance: provenance.clone(),
         ..request()
     };
@@ -178,5 +179,63 @@ fn a_null_model_clears_the_pin_while_omitting_it_leaves_it() {
         apply_spawn_rewrite(&request(), Some(&json!({"cwd": "/repo"})))
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn spawn_hook_profile_omission_preserves_and_null_clears() {
+    let request = SubagentSpawnRequest {
+        model_profile: Some("a".into()),
+        parent_model_profile_override: Some("trusted-parent".into()),
+        ..request()
+    };
+    let same = apply_spawn_rewrite(&request, Some(&json!({"model": "other-model"})))
+        .unwrap()
+        .unwrap();
+    assert_eq!(same.model_profile.as_deref(), Some("a"));
+    let cleared = apply_spawn_rewrite(
+        &request,
+        Some(&json!({"model_profile": null, "parent_model_profile_override": "b"})),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(cleared.model_profile, None);
+    assert_eq!(
+        cleared.parent_model_profile_override.as_deref(),
+        Some("trusted-parent")
+    );
+    for value in [json!(42), json!(false), json!({})] {
+        assert!(
+            apply_spawn_rewrite(&request, Some(&json!({"model_profile": value})))
+                .unwrap_err()
+                .contains("must be a string or null")
+        );
+    }
+}
+
+#[test]
+fn spawn_hook_profile_requires_child_model_and_clear_both_to_inherit() {
+    let pinned = SubagentSpawnRequest {
+        model_profile: Some("a".into()),
+        ..request()
+    };
+    let error = apply_spawn_rewrite(&pinned, Some(&json!({"model": null}))).unwrap_err();
+    assert!(error.contains("requires an explicit model"));
+    let cleared = apply_spawn_rewrite(
+        &pinned,
+        Some(&json!({"model": null, "model_profile": null})),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(cleared.model, None);
+    assert_eq!(cleared.model_profile, None);
+    let inherited = SubagentSpawnRequest {
+        model: None,
+        ..request()
+    };
+    assert!(
+        apply_spawn_rewrite(&inherited, Some(&json!({"model_profile": "b"})))
+            .unwrap_err()
+            .contains("requires an explicit model")
     );
 }

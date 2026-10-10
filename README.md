@@ -31,14 +31,61 @@ harness-runtime = { git = "https://github.com/lingxi-coder/harness-runtime.git",
 
 | Feature | 作用 |
 | --- | --- |
-| `core`（默认） | Agent、会话、编排、权限等共享执行组件；公开 `Harness`、`HarnessBuilder` 和 `SessionHandle`。 |
-| `desktop` | 桌面装配，包含 `core`；入口在 `harness_runtime::desktop`，包括 `build` 和 `build_harness`。 |
-| `mobile` | iOS/Android 共用的 Rust 装配，包含 `core`；入口在 `harness_runtime::mobile`，包括 `build_mobile`。 |
+| `engine`（默认） | Agent、会话、编排、权限等共享执行组件；公开 `Harness`、`HarnessBuilder` 和 `SessionHandle`。 |
+| `desktop` | 桌面装配，包含 `engine`；`desktop` 提供 `build` / `build_harness`，`headless` 提供注入式 print 和双向 SDK 服务。 |
+| `mobile` | iOS/Android 共用的 Rust 装配，包含 `engine`；入口在 `harness_runtime::mobile`，包括 `build_mobile`。 |
 | `uniffi` | 移动端原生绑定，自动启用 `mobile`。 |
 | `android-computer-use` | Android 设备交互能力，自动启用 `mobile`。 |
 | `realtime-websocket` | 启用模型运行时的 WebSocket 实时能力。 |
 
 `HarnessBuilder` 接受宿主已经装配好的 `SessionService` 和 `LifecycleService`，不会自行启动进程或网络请求。桌面宿主可使用 `desktop::build_harness` 注入输出流和权限门控；移动宿主应通过 `mobile::build_mobile` 注入对应平台能力。宿主负责停止接收新任务、等待进行中的回合结束，再调用 `Harness::shutdown()`；若返回的 `ShutdownReport.complete` 为 `false`，需处理错误并串行重试。产品构建信息由宿主注入，`desktop::runtime_build_info()` / `mobile::runtime_build_info()` 分别可读取运行时自身身份。
+
+需要 Claude 兼容 print 或双向 stream-json 的宿主使用同一个 `headless::run` 入口：
+
+```rust,no_run
+use std::sync::Arc;
+use harness_runtime::{desktop::DesktopConfig, headless::{self, HeadlessConfig,
+    HeadlessOptions, HeadlessHostServices, HeadlessIo, HeadlessSignals,
+    HeadlessExit, SessionStart}};
+
+async fn print_once(
+    desktop: DesktopConfig,
+    services: Arc<dyn HeadlessHostServices>,
+    io: HeadlessIo,
+    prompt: String,
+) -> HeadlessExit {
+    headless::run(
+        HeadlessConfig {
+            desktop,
+            options: HeadlessOptions { prompt: Some(prompt), ..Default::default() },
+            session_start: SessionStart::New,
+        },
+        services,
+        io,
+        HeadlessSignals::default(),
+    ).await
+}
+```
+
+`HeadlessIo::new` 接受宿主的 `AsyncRead`、stdout 和 stderr writer。宿主通过 `HeadlessSignals::channel()` 传入 interrupt、terminate；服务不读取全局 stdio、不安装进程信号处理器，也不调用 `process::exit`。`HeadlessHostServices` 承接环境和凭证更新、产品偏好及账户信息。普通模式沿用 desktop 的 tools、skills、hooks、MCP 和插件装配；`bare` 由 `DesktopConfig` 单独选择。
+
+text 输入会读到 EOF，并按原生顺序将参数 prompt、一个 LF 和管道内容拼接。仅使用参数 prompt 时可传入 `tokio::io::empty()`；终端输入由宿主设置 `io.input_is_terminal = true`，服务不会等待终端 EOF。双向 stream-json 使用独立的持续输入生命周期。
+
+宿主的 Tokio 工作线程需采用既有 Harness 执行器的 8 MiB 栈预算；调试构建的完整模型回合会超过默认 2 MiB。CLI 和 mobile 宿主使用同一常量，Rust 嵌入方按下面的方式配置自己的运行时：
+
+```rust,no_run
+let runtime = tokio::runtime::Builder::new_multi_thread()
+    .enable_all()
+    .thread_stack_size(harness_runtime::RUNTIME_THREAD_STACK_SIZE)
+    .build()
+    .expect("build Harness host runtime");
+```
+
+权限模式、图片输入和保留 UTF-16 的 JSON schema 类型分别从 `headless::PermissionMode`、`headless::ImageSource` 和 `headless::Utf16JsonProjection` 公开。使用 `Utf16JsonProjection::parse` 读取原始 schema，避免孤立 surrogate 在普通字符串转换中丢失。
+
+`HeadlessExit` 分别报告执行、关闭和交付状态，不在协议输出中增加字段。若首次关闭未完成，`cleanup` 中的观察句柄可调用 `wait()`；独立清理任务继续保留原 runtime owner，丢弃观察句柄不会取消持久化。丢弃 `run` 的等待 future 会请求取消，然后继续等待已有执行和清理 owner 收尾。
+
+本轮协议基线固定为 Claude Code 2.1.293。版本、分发物 SHA-256、原生产物与当前验收缺口记录在 [Headless 原生差分基线](docs/parity/headless-native-baseline.md)。源码、mock 和编译检查分别记录，不能代替 Native↔Harness 字节验收；同进程多个 Headless 会话的完整隔离尚不属于此接口的保证。
 
 宿主装配好 `Harness` 后，可通过统一会话接口运行回合：
 

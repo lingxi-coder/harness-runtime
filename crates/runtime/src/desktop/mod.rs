@@ -2146,7 +2146,7 @@ impl DesktopBashRunner {
         // A minimal per-call context for a user-initiated `!` command: no
         // tool_use_id, empty history, inert options. The model id is unused for
         // execution (only `BashTool::prompt` reads it).
-        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
+        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone(), None);
         match tool
             .call(
                 source_object([("command", command.into())]),
@@ -2341,7 +2341,7 @@ impl DesktopWorktreeCommandHandler {
         input: Utf16JsonProjection,
     ) -> Utf16JsonProjection {
         let (progress_tx, _progress_rx) = tool_api::progress_channel();
-        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
+        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone(), None);
         match tool.call(input, use_ctx, progress_tx).await {
             Ok(result) => result
                 .model_content
@@ -2426,6 +2426,11 @@ impl BuiltinCommandHandler for DesktopWorktreeCommandHandler {
 }
 
 pub struct DesktopRuntime {
+    /// Startup producers withheld until a cold-resume host has mounted history
+    /// and initialized its output/control transport.
+    deferred_startup: tokio::sync::Mutex<Option<DeferredDesktopStartup>>,
+    fork_writer: Option<Arc<session::JsonlWriter>>,
+    pending_fork_history: tokio::sync::Mutex<Option<PendingForkHistory>>,
     /// Catalog notifications owned by this credential scope.
     pub catalog_registry: FusionCatalogRegistry,
     /// Product region actually selected by the running client.
@@ -2859,6 +2864,9 @@ pub enum BuildError {
     /// API base URL resolution / api-client construction failed.
     #[error("api base resolution failed: {0}")]
     ApiBase(String),
+    /// Explicit custom-agent configuration could not be parsed.
+    #[error("Invalid --agents configuration: {0}")]
+    InvalidAgents(String),
     /// Custom beta headers were requested for a route/auth mode that cannot
     /// safely carry Anthropic first-party API-key beta headers.
     #[error("custom betas require a first-party Anthropic API-key session")]
@@ -3812,26 +3820,28 @@ fn agent_source_is_trusted(source: agent::AgentSource) -> bool {
 /// disabled)",{level:"warn"})`). Merge precedence per `XXt`'s tier map
 /// `[built-in, plugin, userSettings, projectSettings, flagSettings,
 /// policySettings]` (later wins): a flag agent REPLACES a same-named
-/// user/project dir agent, else appends. Parse failures inside
-/// [`agent::parse_agents_from_flag_json`] log and contribute no agents —
-/// the flag never aborts boot.
+/// user/project dir agent, else appends. Invalid explicit configuration is
+/// rejected before the catalog changes.
 fn merge_cli_flag_agents(
     agents: &mut Vec<agent::AgentDefinition>,
     cli_agents_json: Option<&str>,
     safe_mode: bool,
-) {
-    let Some(raw) = cli_agents_json else { return };
+) -> Result<(), String> {
+    let Some(raw) = cli_agents_json else {
+        return Ok(());
+    };
     if safe_mode {
         tracing::warn!("--agents: ignored in safe mode (user-supplied custom agents are disabled)");
-        return;
+        return Ok(());
     }
-    for a in agent::parse_agents_from_flag_json(raw) {
+    for a in agent::parse_agents_from_flag_json_checked(raw)? {
         if let Some(slot) = agents.iter_mut().find(|e| e.agent_type == a.agent_type) {
             *slot = a;
         } else {
             agents.push(a);
         }
     }
+    Ok(())
 }
 
 /// (M7 cc2.1.220) Boot gates for [`merge_agent_frontmatter_mcp_servers`],
@@ -4651,6 +4661,7 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
 /// of the plugin-agent catalog portion.
 pub struct PluginRuntime {
     manager: Arc<plugin::PluginManager>,
+    load_order: RwLock<Vec<lingxi_core::types::PluginId>>,
     analytics_bus: Arc<telemetry::AnalyticsBus>,
     plugins_dir: std::path::PathBuf,
     home: std::path::PathBuf,
@@ -4667,6 +4678,52 @@ pub struct PluginRuntime {
 }
 
 impl PluginRuntime {
+    /// Active manifests with explicit local directories in argv order, then
+    /// the remaining plugins in their actual discovery/enable order.
+    pub async fn loaded_plugins(&self) -> Vec<(plugin::PluginManifest, std::path::PathBuf)> {
+        let _refresh_guard = self.refresh_lock.lock().await;
+        let live: std::collections::HashSet<_> =
+            self.manager.loaded_plugin_ids().await.into_iter().collect();
+        let mut result = Vec::new();
+        for id in self
+            .load_order
+            .read()
+            .await
+            .iter()
+            .filter(|id| live.contains(*id))
+        {
+            match self.manager.plugin_state(id).await {
+                Some(
+                    plugin::PluginState::Loaded {
+                        manifest,
+                        install_dir,
+                        ..
+                    }
+                    | plugin::PluginState::DisablingFailed {
+                        manifest,
+                        install_dir,
+                        ..
+                    },
+                ) => {
+                    result.push((manifest, install_dir));
+                }
+                _ => {}
+            }
+        }
+        // Stable sorting preserves discovery order for each category; it does
+        // not manufacture an ordering for marketplace or builtin sources.
+        result.sort_by_key(|(_, dir)| {
+            self.cli_plugin_dirs
+                .iter()
+                .position(|configured| {
+                    dir.starts_with(configured)
+                        || (!configured.is_absolute() && dir.starts_with(self.cwd.join(configured)))
+                })
+                .unwrap_or(usize::MAX)
+        });
+        result
+    }
+
     /// Re-read the on-disk enabled set and reconcile it into the live session.
     /// Returns the component tallies for the confirmation message. Best-effort
     /// on load failures, but conservative on unload failures: if any currently
@@ -4725,6 +4782,7 @@ impl PluginRuntime {
         if counts.errors > 0 {
             return counts;
         }
+        self.load_order.write().await.clear();
 
         // (3) Enable each target plugin. The manager validates agent privileges
         //     before materialising every component into the shared registries.
@@ -4740,6 +4798,7 @@ impl PluginRuntime {
             );
             match self.manager.enable(&id, manifest, dir).await {
                 Ok(()) => {
+                    self.load_order.write().await.push(id);
                     counts.enabled += 1;
                     counts.commands += this.0;
                     counts.agents += this.1;
@@ -4821,6 +4880,135 @@ struct PendingAsyncHookResponse {
 struct AsyncHookResponseBuffer {
     responses: Arc<std::sync::Mutex<Vec<PendingAsyncHookResponse>>>,
     rewake_target: Arc<std::sync::OnceLock<std::sync::Weak<dyn OrchestratorHandle>>>,
+    pending_rewakes: Arc<std::sync::Mutex<Vec<Option<lingxi_core::host::CancellationToken>>>>,
+}
+
+struct DeferredDesktopStartup {
+    async_hook_responses: AsyncHookResponseBuffer,
+    sdk_mcp_configs: Vec<mcp::McpServerConfig>,
+    mcp_tool_context: tool_api::BuiltinToolContext,
+}
+
+struct PendingForkHistory {
+    messages: Vec<session::jsonl::JsonlMessage>,
+    next: usize,
+    prompt_id: Option<String>,
+}
+
+impl PendingForkHistory {
+    async fn flush(
+        &mut self,
+        writer: &session::JsonlWriter,
+        session_id: &str,
+        prompt_id: &str,
+    ) -> Result<(), String> {
+        while let Some(message) = self.messages.get(self.next) {
+            let mut message = message.clone();
+            message.session_id = session_id.to_owned();
+            if message.message_type == "user" {
+                message.prompt_id = Some(prompt_id.to_owned());
+            }
+            writer
+                .append_native_message_once(&message)
+                .await
+                .map_err(|error| error.to_string())?;
+            self.next += 1;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pending_fork_history_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn inherited_rows_replay_in_chain_order_exactly_once_with_current_prompt_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_id = "11111111-2222-3333-4444-555555555555";
+        let first = r#"{"parentUuid":null,"isSidechain":false,"promptId":"old","type":"user","message":{"role":"user","content":{"\ud800":"\udc00"}},"uuid":"first","timestamp":"2026-10-07T00:00:00.000Z","cwd":"/source","sessionId":"11111111-2222-3333-4444-555555555555","version":"test"}"#;
+        let second = serde_json::json!({
+            "parentUuid":"first", "isSidechain":false, "promptId":"old", "type":"user",
+            "message":{"role":"user","content":"follow-up"}, "uuid":"second",
+            "timestamp":"2026-10-07T00:00:01.000Z", "cwd":"/source", "sessionId":source_id, "version":"test",
+        });
+        let original = format!("{second}\n{first}\n");
+        let source_path = directory.path().join("source.jsonl");
+        tokio::fs::write(&source_path, &original).await.unwrap();
+        let loaded = session::jsonl::route_lines(&original);
+        let (messages, _) = session::jsonl::build_conversation_chain(&loaded, source_id);
+        let target_id = lingxi_core::types::SessionId::new();
+        let target_path = directory.path().join("fork.jsonl");
+        let writer = session::JsonlWriter::new(
+            target_path.clone(),
+            Arc::new(platform::DesktopFileSystem::new(
+                directory.path().to_path_buf(),
+            )),
+        )
+        .with_durable_lock(Arc::new(
+            session::jsonl::DurableTranscriptWriter::open(directory.path().join("ledger")).unwrap(),
+        ));
+        writer
+            .activate_session_target(
+                target_id,
+                target_path.clone(),
+                directory.path().to_path_buf(),
+            )
+            .unwrap();
+        let mut pending = PendingForkHistory {
+            messages: messages.clone(),
+            next: 0,
+            prompt_id: Some("current".into()),
+        };
+        pending
+            .flush(&writer, &target_id.as_uuid().to_string(), "current")
+            .await
+            .unwrap();
+        // A new waiter replaying the same descriptor after an uncertain ack
+        // uses the same ordinary UUID-only transaction, never duplicates rows.
+        let mut retry = PendingForkHistory {
+            messages,
+            next: 0,
+            prompt_id: Some("current".into()),
+        };
+        retry
+            .flush(&writer, &target_id.as_uuid().to_string(), "current")
+            .await
+            .unwrap();
+        let copied = tokio::fs::read_to_string(&target_path).await.unwrap();
+        let loaded = session::jsonl::route_lines(&copied);
+        assert_eq!(loaded.messages_in_order.len(), 2);
+        assert_eq!(loaded.messages_in_order[0].uuid, "first");
+        assert_eq!(
+            loaded.messages_in_order[1].parent_uuid.as_deref(),
+            Some("first")
+        );
+        assert!(loaded
+            .messages_in_order
+            .iter()
+            .all(|row| row.prompt_id.as_deref() == Some("current")
+                && row.session_id == target_id.as_uuid().to_string()));
+        assert!(copied.contains(r#""\ud800":"\udc00""#));
+        assert!(!copied.contains("forkedFrom"));
+        assert!(!copied.contains("deliveryId"));
+        assert_eq!(
+            tokio::fs::read_to_string(source_path).await.unwrap(),
+            original
+        );
+    }
+}
+
+async fn activate_startup_producers(
+    orchestrator: &Arc<ConversationOrchestrator>,
+    buffer: &AsyncHookResponseBuffer,
+) {
+    orchestrator.set_main_report_waker(Arc::new(
+        crate::main_report_waker::DirectMainReportWaker::new(orchestrator),
+    ));
+    if let Err(error) = orchestrator.recover_main_reports().await {
+        tracing::warn!(%error, "could not recover admitted subagent reports");
+    }
+    buffer.attach_rewake_target(orchestrator);
 }
 
 impl AsyncHookResponseBuffer {
@@ -4844,7 +5032,7 @@ impl AsyncHookResponseBuffer {
 
     fn attach_rewake_target(&self, orchestrator: &Arc<ConversationOrchestrator>) {
         let target: Arc<dyn OrchestratorHandle> = orchestrator.clone();
-        let _ = self.rewake_target.set(Arc::downgrade(&target));
+        self.attach_rewake_handle(&target);
     }
 
     fn schedule_rewake(&self, generation_cancel: Option<lingxi_core::host::CancellationToken>) {
@@ -5284,6 +5472,7 @@ async fn apply_worktree_launch(
     worktree_launch: &Option<String>,
     tmux_launch: &Option<String>,
     ctx: &BuiltinToolContext,
+    diagnostics: Option<&dyn DesktopDiagnosticSink>,
 ) -> Result<(), BuildError> {
     let Some(name_or_empty) = worktree_launch else {
         if tmux_launch.is_some() {
@@ -5368,11 +5557,12 @@ async fn apply_worktree_launch(
                 // can find it — without this the derived name is invisible.
                 // Emitted on STDERR (not 206's stdout) so it never pollutes
                 // `--print`/stream-json stdout; this follows the port's boot-
-                // notice precedent (the settings-warning `eprintln!` in
-                // `build`). Colorization (206 `ht.green`) is dropped.
-                eprintln!(
-                    "Created tmux session: {session_name}\nTo attach: tmux attach -t {session_name}"
-                );
+                // notice precedent. Colorization (206 `ht.green`) is dropped.
+                if let Some(diagnostics) = diagnostics {
+                    diagnostics.stderr_line(&format!(
+                        "Created tmux session: {session_name}\nTo attach: tmux attach -t {session_name}"
+                    )).await;
+                }
                 if let Some(session) = ctx
                     .worktree_session
                     .lock()
@@ -5390,7 +5580,11 @@ async fn apply_worktree_launch(
                 // Failed to create tmux session: {error}")`), so print it (on
                 // stderr, matching 206's `console.error`) in addition to the
                 // structured `tracing::warn!`.
-                eprintln!("Warning: Failed to create tmux session: {e}");
+                if let Some(diagnostics) = diagnostics {
+                    diagnostics
+                        .stderr_line(&format!("Warning: Failed to create tmux session: {e}"))
+                        .await;
+                }
                 tracing::warn!(
                     error = %e,
                     session_name = %session_name,
@@ -5475,8 +5669,12 @@ use configuration::resolve_memory_feature_gates;
 use configuration::ApiProvider;
 pub use configuration::CustomizationGates;
 pub use configuration::DesktopConfig;
+pub use configuration::DesktopDiagnosticSink;
 pub use configuration::DesktopEngineConfig;
+pub use configuration::DesktopMcpServices;
+pub use configuration::DesktopRequestIdentity;
 pub use configuration::DesktopSessionComposition;
+pub use configuration::DesktopSessionResumeSnapshot;
 pub use credentials::api_service_from_stack;
 use credentials::aws_auth_refresher;
 pub use credentials::build_api_service;
@@ -5490,17 +5688,6 @@ use credentials::resolve_llm_stack_with_credentials;
 use credentials::CredentialStoreAuthProvider;
 pub use credentials::LlmStack;
 pub use credentials::SharedCredentialStack;
-use fusion_services::desktop_fusion_attempts;
-use fusion_services::desktop_fusion_catalog_row;
-use fusion_services::desktop_fusion_runtime_config;
-use fusion_services::filter_fusion_catalog;
-pub use fusion_services::fusion_credential_restart_required_message;
-use fusion_services::fusion_route_flag;
-pub use fusion_services::publish_fusion_catalog_credential;
-pub use fusion_services::refresh_fusion_catalog_after_credential_delete;
-pub use fusion_services::refresh_fusion_catalog_after_credential_write;
-pub use fusion_services::register_fusion_catalog_refresher;
-pub use fusion_services::spawn_fusion_catalog_refresh;
 use fusion_services::DesktopFusionConfigSource;
 use fusion_services::DesktopFusionExecutor;
 use fusion_services::DesktopFusionPriceBook;
@@ -5537,7 +5724,6 @@ use permission_config::sandbox_auto_allow_from_settings_tiers;
 use permission_config::sandbox_runtime_config_from_settings_tiers;
 use permission_config::should_enforce_permissions;
 use permission_config::strict_allowlist_override;
-use permission_config::BootPermissionTiers;
 pub use shutdown::refresh_process_session_presence;
 #[cfg(any(unix, windows))]
 pub use shutdown::supervisor_exit_sink;

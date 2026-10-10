@@ -390,7 +390,10 @@ fn is_loop_session(messages: &[JsonlMessage]) -> bool {
             continue;
         }
         // `if(s.isMeta===!0||s.isCompactSummary===!0) continue`.
-        if m.extra.get_property("isMeta").and_then(JsonValueView::as_bool) == Some(true)
+        if m.extra
+            .get_property("isMeta")
+            .and_then(JsonValueView::as_bool)
+            == Some(true)
             || m.extra
                 .get_property("isCompactSummary")
                 .and_then(JsonValueView::as_bool)
@@ -1636,8 +1639,6 @@ pub async fn read_agent_resume_state(
     fs: Arc<dyn FileSystem>,
     session_id: &str,
 ) -> (Option<String>, Option<Value>) {
-    use sha2::{Digest, Sha256};
-
     if !tokio::fs::try_exists(transcript_path)
         .await
         .unwrap_or(false)
@@ -1648,6 +1649,19 @@ pub async fn read_agent_resume_state(
     let Ok(loaded) = reader.read_routed().await else {
         return (None, None);
     };
+    agent_resume_state_from_loaded(&loaded, session_id)
+}
+
+/// Read the same verified agent metadata from an already captured transcript.
+/// Cold-resume hosts use this to keep history and startup configuration on one
+/// writer-leased snapshot rather than reopening the source during assembly.
+#[must_use]
+pub fn agent_resume_state_from_loaded(
+    loaded: &LoadedTranscript,
+    session_id: &str,
+) -> (Option<String>, Option<Value>) {
+    use sha2::{Digest, Sha256};
+
     let setting = loaded
         .agent_settings
         .get(session_id)
@@ -2500,9 +2514,15 @@ fn preserved_tail_state(loaded: &LoadedTranscript) -> PreservedTailState {
             return state;
         };
         let (Some(head), Some(tail), Some(anchor)) = (
-            segment.get_property("headUuid").and_then(JsonValueView::as_str),
-            segment.get_property("tailUuid").and_then(JsonValueView::as_str),
-            segment.get_property("anchorUuid").and_then(JsonValueView::as_str),
+            segment
+                .get_property("headUuid")
+                .and_then(JsonValueView::as_str),
+            segment
+                .get_property("tailUuid")
+                .and_then(JsonValueView::as_str),
+            segment
+                .get_property("anchorUuid")
+                .and_then(JsonValueView::as_str),
         ) else {
             return state;
         };
@@ -2544,7 +2564,9 @@ fn preserved_tail_state(loaded: &LoadedTranscript) -> PreservedTailState {
                 if let Some(values) = messages.get_property(key) {
                     if let Some(length) = values.array_len() {
                         for index in 0..length {
-                            if let Some(id) = values.get_index(index).and_then(JsonValueView::as_str) {
+                            if let Some(id) =
+                                values.get_index(index).and_then(JsonValueView::as_str)
+                            {
                                 ids.insert(id);
                             }
                         }
@@ -2732,7 +2754,7 @@ mod tests {
             Value::Object(compact_metadata),
         );
         JsonlMessage {
-            message_type: "system".to_string(),
+                        message_type: "system".to_string(),
             uuid: uuid.to_string(),
             parent_uuid: None,
             session_id: "11111111-2222-3333-4444-555555555555".to_string(),
@@ -2752,16 +2774,16 @@ mod tests {
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         }
     }
 
     fn user_line(uuid: &str) -> JsonlMessage {
         JsonlMessage {
-            message_type: "user".to_string(),
+                        message_type: "user".to_string(),
             uuid: uuid.to_string(),
             parent_uuid: None,
             session_id: "11111111-2222-3333-4444-555555555555".to_string(),
@@ -2776,15 +2798,16 @@ mod tests {
             slug: None,
             prompt_id: None,
             logical_parent_uuid: None,
-            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").expect("empty JSON object"),
+            extra: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+                .expect("empty JSON object"),
 
             attachment_projection: None,
             tool_use_result_projection: None,
             mcp_meta_projection: None,
-        turn_companion: None,
-        usage_limit_note: None,
-        origin_projection: None,
-        turn_origin_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
         }
     }
 

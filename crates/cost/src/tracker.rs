@@ -399,7 +399,6 @@ impl CostSessionScope {
     pub fn model_safety_observer(&self) -> lingxi_core::host::model_safety::ModelSafetyObserver {
         self.tracker.selected_entry().safety_stops.observer()
     }
-
     /// Pin one tracker view to its canonical originating session.
     #[must_use]
     pub fn new(tracker: Arc<CostTracker>) -> Self {

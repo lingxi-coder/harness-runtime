@@ -7,6 +7,7 @@
 //! these immutable source snapshots and never resolves a plugin filesystem
 //! path itself.
 
+use branding::MOD_BUN_EXECUTABLE_ENV;
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -822,7 +823,7 @@ async fn transform_source_graph(
             sources: HashMap::new(),
         });
     }
-    let configured = std::env::var_os("LINGXI_MOD_BUN_EXECUTABLE");
+    let configured = std::env::var_os(MOD_BUN_EXECUTABLE_ENV);
     let executable = bun_executable
         .or_else(|| configured.as_deref().map(Path::new))
         .unwrap_or_else(|| Path::new("bun"));
@@ -1957,7 +1958,7 @@ mod tests {
 
     #[tokio::test]
     async fn packaged_bun_compiler_path_works_without_path_lookup() {
-        const CHILD: &str = "LINGXI_TEST_PACKAGED_BUN_COMPILER_CHILD";
+        const CHILD: &str = concat!(branding::ENV_PREFIX, "TEST_PACKAGED_BUN_COMPILER_CHILD");
         if std::env::var_os(CHILD).is_some() {
             let directory = tempdir().unwrap();
             fs::write(
@@ -2009,7 +2010,7 @@ mod tests {
         command
             .args(["--exact", &test_name, "--nocapture"])
             .env(CHILD, "1")
-            .env("LINGXI_MOD_BUN_EXECUTABLE", compiler)
+            .env(MOD_BUN_EXECUTABLE_ENV, compiler)
             .env("PATH", directory.path().join("no-system-tools"))
             .kill_on_drop(true);
         let output = tokio::time::timeout(Duration::from_secs(20), command.output())

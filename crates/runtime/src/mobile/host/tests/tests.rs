@@ -205,6 +205,7 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
 #[test]
 fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
     let visible = lingxi_core::types::ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "visible".to_string(),
@@ -213,6 +214,7 @@ fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
         stop_reason: None,
     };
     let compact = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "replacement summary".to_string(),
@@ -358,6 +360,7 @@ fn session_agent_id_from_nested_transcript_path_requires_agent_jsonl_shape() {
 #[test]
 fn session_agent_index_excludes_hidden_transcript_records() {
     let hidden_meta = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "<runtime-reminder>internal</runtime-reminder>".to_string(),
@@ -368,6 +371,7 @@ fn session_agent_index_excludes_hidden_transcript_records() {
         is_visible_in_transcript_only: false,
     };
     let hidden_summary = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
@@ -375,6 +379,7 @@ fn session_agent_index_excludes_hidden_transcript_records() {
         is_visible_in_transcript_only: false,
     };
     let hidden_transcript_only = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
@@ -382,6 +387,7 @@ fn session_agent_index_excludes_hidden_transcript_records() {
         is_visible_in_transcript_only: true,
     };
     let visible = lingxi_core::types::ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         stop_reason: None,
@@ -432,6 +438,7 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
         .on_event(SubagentObservation::Message {
             agent_id,
             message: lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "working".to_string(),
@@ -517,6 +524,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
         .on_event(SubagentObservation::Message {
             agent_id,
             message: lingxi_core::types::ConversationMessage::System {
+                api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 subtype: Some("agent_idle".to_string()),
                 content: "idle".into(),
@@ -551,6 +559,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
         .on_event(SubagentObservation::Message {
             agent_id,
             message: lingxi_core::types::ConversationMessage::User {
+                api_message_override: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "follow-up".to_string(),
@@ -580,6 +589,7 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
         .on_event(SubagentObservation::Message {
             agent_id,
             message: lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "resumed".to_string(),
@@ -2813,7 +2823,7 @@ async fn build_mobile_with_injected_memory_reaches_system_prompt() {
         .await
         .expect("build_mobile with an injected memory provider must succeed");
 
-    // R-P1: claudeMd lives in the leading additional-context `<system-reminder>`
+    // R-P1: instructions lives in the leading additional-context `<system-reminder>`
     // meta now (same `memory_block::format`), NOT the system prompt.
     let ctx = rt
         .orchestrator

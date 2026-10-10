@@ -414,6 +414,7 @@ mod tests {
                     ));
                 } else {
                     s.history.push(ConversationMessage::Assistant {
+                        per_turn_effort: None,
                         id: MessageId::new(),
                         content: vec![lingxi_core::types::ContentBlock::Text {
                             text: format!("reply-{i}"),

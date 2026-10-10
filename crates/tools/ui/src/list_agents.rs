@@ -10,16 +10,16 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use tool_api::BuiltinToolContext;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
-    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, generated_builtin_result,
-    generated_builtin_schema, source_text_projection,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext,
 };
+use tool_api::BuiltinToolContext;
 
 /// Model-facing name (2.1.232 `zy`).
 pub const LIST_AGENTS_TOOL_NAME: &str = "ListAgents";

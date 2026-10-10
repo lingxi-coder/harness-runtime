@@ -149,6 +149,15 @@ fn render_mod_prompt_context(resolved: &Utf16JsonProjection) -> Option<Conversat
     ))
 }
 
+/// Agent state prepared before a resumed session crosses its activation boundary.
+#[derive(Debug)]
+pub(crate) struct PreparedMainThreadAgentRestore {
+    wanted: Option<String>,
+    definition: Option<agent::AgentDefinition>,
+    model_override: Option<agent::model_resolution::ResolvedModelSelection>,
+    hooks_trusted: bool,
+}
+
 fn prompt_tool_descriptions(
     wire_tools: &[lingxi_core::host::SourceToolWireDefinition],
 ) -> Vec<lingxi_core::host::PromptToolDescription> {
@@ -426,16 +435,16 @@ impl ConversationOrchestrator {
             .await = Some(agent_id);
     }
 
-    /// Restore the main-thread agent selected by a resumed session. Prefer the
-    /// immutable, integrity-checked transcript snapshot; legacy transcripts
-    /// fall back to the current live catalog by agent type. A missing or
-    /// unresolvable selection explicitly restores default behavior instead of
-    /// retaining state from the session that was previously mounted.
-    pub(crate) async fn restore_main_thread_agent_from_resume(
+    /// Resolve the agent against the target session's route before preparing
+    /// or activating any session-owned state. Keep its complete definition and
+    /// route so the eventual application has no second fallible model lookup.
+    pub(crate) async fn prepare_main_thread_agent_from_resume(
         &self,
         wanted: Option<String>,
         snapshot: Option<serde_json::Value>,
-    ) {
+        target_model: &str,
+        target_profile: Option<&str>,
+    ) -> Result<PreparedMainThreadAgentRestore, agent::model_resolution::ModelResolutionError> {
         let mut resolved = match (wanted.as_deref(), snapshot) {
             (Some(wanted), Some(value)) => serde_json::from_value::<agent::AgentDefinition>(value)
                 .ok()
@@ -459,16 +468,80 @@ impl ConversationOrchestrator {
             }
         }
 
-        match resolved {
+        let mut model_override = None;
+        let mut hooks_trusted = false;
+        if let Some(definition) = resolved.as_ref() {
+            // (cc 2.1.218 `mvo`) ORIGIN TRUST — the RESUME surface. The
+            // resumed `agent-setting` snapshot carries the definition's
+            // `frontmatter_hooks` verbatim, so without this check a
+            // definition whose hooks were correctly REFUSED at `--agent`
+            // time would be silently installed on the next resume of that
+            // session. Evaluated BEFORE the fields are moved below.
+            hooks_trusted = agent::hooks_trust::agent_hooks_origin_trusted(&definition, &self.cwd);
+            // (gap218 #43 / cc 2.1.218 `NQe`) Adopt the resumed agent's
+            // frontmatter `model`, resolved to a wire id — the hot-resume twin
+            // of the composition root's COLD-resume gate. Applied ONLY when the
+            // user did NOT pass `--model` (`apply_resumed_agent_model` is
+            // `!default_model_explicit`, set at the root) AND the agent declares
+            // a concrete model (`AgentModel != Inherit`, oracle `i.model &&
+            // i.model!=="inherit"`); an explicit `--model` is never overridden.
+            // Evaluated BEFORE `definition.*` moves into the call below.
+            model_override = if self.config.apply_resumed_agent_model {
+                match &definition.model {
+                    agent::AgentModel::Alias(spec) | agent::AgentModel::Explicit(spec) => {
+                        let provider = self.model_resolution_context_provider.as_ref().ok_or_else(
+                            || agent::model_resolution::ModelResolutionError::RouteUnavailable {
+                                model: spec.clone(),
+                                profile: target_profile.map(str::to_owned),
+                                reason: "model route resolver is unavailable".into(),
+                            },
+                        )?;
+                        // The saved model may have left the catalog. The
+                        // agent's preference owns the next model selection;
+                        // only its relative aliases need this profile's defaults.
+                        let context = agent::model_resolution::ModelResolutionContext {
+                            route: agent::model_resolution::ModelRouteFacts {
+                                model: target_model.to_owned(),
+                                profile: target_profile.map(str::to_owned),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        };
+                        let selection = agent::model_resolution::resolve_user_model_selection(
+                            spec,
+                            None,
+                            &context,
+                            provider.as_ref(),
+                        )?;
+                        Some(selection)
+                    }
+                    agent::AgentModel::Inherit => None,
+                }
+            } else {
+                None
+            };
+        }
+        Ok(PreparedMainThreadAgentRestore {
+            wanted,
+            definition: resolved,
+            model_override,
+            hooks_trusted,
+        })
+    }
+
+    /// Apply a previously prepared agent after session activation.
+    pub(crate) async fn restore_main_thread_agent_from_resume(
+        &self,
+        prepared: PreparedMainThreadAgentRestore,
+    ) {
+        let PreparedMainThreadAgentRestore {
+            wanted,
+            definition,
+            model_override,
+            hooks_trusted,
+        } = prepared;
+        match definition {
             Some(definition) => {
-                // (cc 2.1.218 `mvo`) ORIGIN TRUST — the RESUME surface. The
-                // resumed `agent-setting` snapshot carries the definition's
-                // `frontmatter_hooks` verbatim, so without this check a
-                // definition whose hooks were correctly REFUSED at `--agent`
-                // time would be silently installed on the next resume of that
-                // session. Evaluated BEFORE the fields are moved below.
-                let hooks_trusted =
-                    agent::hooks_trust::agent_hooks_origin_trusted(&definition, &self.cwd);
                 if !hooks_trusted {
                     agent::hooks_trust::report_untrusted_hooks(
                         &definition,
@@ -477,44 +550,24 @@ impl ConversationOrchestrator {
                         false,
                     );
                 }
-                // (gap218 #43 / cc 2.1.218 `NQe`) Adopt the resumed agent's
-                // frontmatter `model`, resolved to a wire id — the hot-resume twin
-                // of the composition root's COLD-resume gate. Applied ONLY when the
-                // user did NOT pass `--model` (`apply_resumed_agent_model` is
-                // `!default_model_explicit`, set at the root) AND the agent declares
-                // a concrete model (`AgentModel != Inherit`, oracle `i.model &&
-                // i.model!=="inherit"`); an explicit `--model` is never overridden.
-                // `resolve_user_specified_model` is `Zo` (alias → wire id).
-                // Evaluated BEFORE `definition.*` moves into the call below.
-                let model_override = if self.config.apply_resumed_agent_model {
-                    match &definition.model {
-                        agent::AgentModel::Alias(spec) | agent::AgentModel::Explicit(spec) => {
-                            let profile = self.session.lock().await.model_profile.clone();
-                            self.model_resolution_context_provider
-                                .as_ref()
-                                .and_then(|provider| {
-                                    let context = provider
-                                        .context_for_route(spec, profile.as_deref())
-                                        .ok()?;
-                                    let model =
-                                        agent::model_resolution::resolve_user_specified_model(
-                                            spec, &context,
-                                        )
-                                        .ok()?;
-                                    Some((model, context.route.profile))
-                                })
-                        }
-                        agent::AgentModel::Inherit => None,
+                if let Some(selection) = model_override {
+                    {
+                        let mut state = self.session.lock().await;
+                        state.model.clone_from(&selection.model);
+                        state.model_profile.clone_from(&selection.model_profile);
                     }
-                } else {
-                    None
-                };
+                    self.tools
+                        .set_main_loop_model(super::tooling_impl::canonical_main_loop_model(
+                            &selection.model,
+                            Some(&selection.model_resolution_context),
+                        ));
+                }
                 self.set_main_thread_agent(
                     definition.agent_type,
                     definition.system_prompt,
                     definition.tools,
                     definition.disallowed_tools,
-                    model_override,
+                    None,
                 )
                 .await;
                 if hooks_trusted {
@@ -539,6 +592,23 @@ impl ConversationOrchestrator {
                 self.replace_main_thread_agent_hooks(&[]).await;
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn restore_main_thread_agent_for_test(
+        &self,
+        wanted: Option<String>,
+        snapshot: Option<serde_json::Value>,
+    ) -> Result<(), agent::model_resolution::ModelResolutionError> {
+        let (model, profile) = {
+            let state = self.session.lock().await;
+            (state.model.clone(), state.model_profile.clone())
+        };
+        let prepared = self
+            .prepare_main_thread_agent_from_resume(wanted, snapshot, &model, profile.as_deref())
+            .await?;
+        self.restore_main_thread_agent_from_resume(prepared).await;
+        Ok(())
     }
 
     /// The adopted main-thread agent's `agentType` (claude-code `MB()`), or
@@ -640,7 +710,7 @@ impl ConversationOrchestrator {
         input
     }
 
-    async fn current_prompt_route(&self) -> (String, Option<String>) {
+    pub(super) async fn current_prompt_route(&self) -> (String, Option<String>) {
         if let Some(settings) = crate::scheduled_turn::current() {
             return (settings.model, Some(settings.provider));
         }
@@ -822,7 +892,7 @@ impl ConversationOrchestrator {
     /// carries them here because one predicate feeds both record and reuse.
     pub(crate) fn prompt_snapshot_eligible(&self) -> bool {
         let simple = lingxi_core::host::env::is_env_truthy(
-            std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref(),
+            std::env::var(branding::SIMPLE_ENV).ok().as_deref(),
         );
         // `CLAUDE_CODE_SESSION_KIND` in claude-code; the port already spells it
         // `LINGXI_SESSION_KIND` at its other reader (`tool_api::defer`).
@@ -1033,7 +1103,7 @@ impl ConversationOrchestrator {
     }
 
     /// Read-only introspection seam for the ordinary per-turn additional
-    /// context (`claudeMd` / `userEmail` / `currentDate`). Companion to
+    /// context (`instructions` / `userEmail` / `currentDate`). Companion to
     /// [`Self::assemble_system_prompt_preview`] — lets a host/composition-root
     /// test prove an injected memory provider reaches the additional-context
     /// message without a live model round-trip.
@@ -1194,7 +1264,7 @@ impl ConversationOrchestrator {
     /// byte-identical (INERT INVARIANT).
     ///
     /// Both prompt-side memory readers go through here: the system prompt
-    /// ([`Self::build_prompt_context`]) and the per-turn `claudeMd` context
+    /// ([`Self::build_prompt_context`]) and the per-turn `instructions` context
     /// message ([`Self::additional_context_message`]). Keeping ONE derivation
     /// is the point — the second reader having its own (raw, unresolved) copy
     /// is what kept every mobile workspace `LINGXI.md` out of the model.
@@ -1897,7 +1967,7 @@ impl ConversationOrchestrator {
     /// (the IMPORTANT line is indented by exactly six spaces).
     ///
     /// The `userContext` keys, in claude-code insertion order (`pS`,
-    /// binary offset ~197202100): `claudeMd` (the assembled LINGXI.md memory
+    /// binary offset ~197202100): `instructions` (the assembled LINGXI.md memory
     /// block — [`memory_block::format`]), `userEmail`
     /// (`The user's email address is {email}.`, only when configured), and
     /// `currentDate` (`Today's date is {YYYY-MM-DD}.`, always present). The
@@ -2090,7 +2160,10 @@ impl ConversationOrchestrator {
             crate::prompt::MemoryFile,
         >,
     ) -> Result<Option<ConversationMessage>, String> {
-        // `claudeMd` value = the assembled memory block (preamble + `Contents
+        if self.config.bare {
+            return Ok(None);
+        }
+        // `instructions` value = the assembled memory block (preamble + `Contents
         // of …:` blocks). Empty when no LINGXI.md files are loaded.
         //
         // Task 5 (worktree 206 session-cwd plumbing): read the LIVE
@@ -2119,7 +2192,7 @@ impl ConversationOrchestrator {
         // per-machine env into the first user message that the oracle never sends.
         // Gate the env-block re-emission on the absence of a system-prompt override
         // so the exclude-dynamic flag is a complete no-op when a custom prompt is
-        // active. (The claudeMd / userEmail / currentDate entries below stay
+        // active. (The instructions / userEmail / currentDate entries below stay
         // unconditional — they are unrelated to this flag.)
         //
         // Gv and every projection retain one original asynchronous build.

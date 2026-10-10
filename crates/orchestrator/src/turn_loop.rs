@@ -33,6 +33,7 @@ pub(crate) use batch_hooks::apply_model_context_modifiers;
 pub(crate) use batch_hooks::apply_model_context_state;
 #[cfg(test)]
 use batch_hooks::post_tool_batch_identity;
+pub(crate) use batch_hooks::resolve_model_context_modifier;
 pub(crate) use batch_hooks::run_post_tool_batch_hooks;
 pub(crate) use batch_hooks::run_post_tool_batch_hooks_after_turn_end;
 pub(crate) use batch_hooks::{PostToolBatchDispatch, PostToolBatchOutcome};
@@ -102,14 +103,13 @@ use tool_results::tool_result_to_model_text;
 /// literal (not imported) so `orchestrator` keeps no dependency on `tool-worktree`.
 const ENTER_WORKTREE_TOOL_NAME: &str = "EnterWorktree";
 
-/// Registry name of the subagent-spawning tool (`tools/agent` `AGENT_TOOL_NAME`)
-/// and its legacy alias (`LEGACY_AGENT_TOOL_NAME`). A completed dispatch of this
+/// Registry name of the subagent-spawning tool (`tools/agent` `AGENT_TOOL_NAME`).
+/// A completed dispatch of this
 /// tool means the spawned subagent's loop has stopped, so it is where the turn
 /// loop fires the `SubagentStop` hook. Held as literals (not imported) so
 /// `orchestrator` keeps no dependency on `tools/agent` — same precedent as
 /// `ENTER_WORKTREE_TOOL_NAME`.
 const AGENT_TOOL_NAME: &str = "Agent";
-const LEGACY_AGENT_TOOL_NAME: &str = "Task";
 
 /// #40: apply a hook's folded `terminalSequence` (claude-code `szn`, BIN off
 /// 205755390) via the allowlist validator
@@ -750,7 +750,15 @@ async fn execute_one_turn_with_recovery_tracked_impl(
             };
             let error_kind = env.error;
             crate::server_fallback::flush_pending_notice(orch).await;
-            let assistant_id = surface_model_error(orch, content, env).await;
+            let provider_status = match &e {
+                OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner)
+                    if !matches!(inner.classification_source(), LlmError::RequestTooLarge) =>
+                {
+                    inner.http_status()
+                }
+                _ => None,
+            };
+            let assistant_id = surface_model_error(orch, content, env, provider_status).await;
             orch.mark_mod_turn_error();
             // SLASH-04: this arm is the oracle's `api_error` reason (see the
             // NAMING NOTE on `GoalClearBucket`), so it is classified by

@@ -6,19 +6,17 @@
 //! id under that same lock, appends through the exact no-follow handle, and
 //! fsyncs before acknowledging success.
 
-use crate::jsonl::exact_json::{
-    to_vec_with_overrides, ExactJsonError, Utf16Overrides,
-};
+use crate::jsonl::exact_json::{payload_without_delivery_id, ExactJsonError};
 use crate::jsonl::journal::{SESSION_STATE_DIR_MODE, SESSION_STATE_FILE_MODE};
 use crate::jsonl::message_identity::{self, IdentityLogStore};
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::host::rooted_fs::{
     atomic_write_pinned, atomic_write_stream_pinned, lock_exclusive_pinned,
     open_append_file_pinned, open_read_file_pinned, root_identity, sync_parent_pinned,
     AtomicWriteOptions, RootIdentity,
 };
 use lingxi_core::host::FsError;
-use serde_json::{Map, Value};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use serde_json::Value;
 use std::cell::Cell;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -49,6 +47,9 @@ pub enum TranscriptWriterError {
     /// Exact JavaScript JSON string encoding failed.
     #[error(transparent)]
     ExactJson(#[from] ExactJsonError),
+    /// Flat source JSON projection failed validation or serialization.
+    #[error(transparent)]
+    Projection(#[from] lingxi_core::types::utf16_json::Utf16JsonProjectionError),
     /// Rooted filesystem failure.
     #[error(transparent)]
     Fs(#[from] FsError),
@@ -367,7 +368,7 @@ impl DurableTranscriptWriter {
         &self,
         transcript_relative: &Path,
         delivery_id: &str,
-        payload: Value,
+        payload: Utf16JsonProjection,
     ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
         self.append_json_once_at(
             &self.root,
@@ -390,7 +391,7 @@ impl DurableTranscriptWriter {
         transcript_identity: &RootIdentity,
         transcript_relative: &Path,
         delivery_id: &str,
-        payload: Value,
+        payload: Utf16JsonProjection,
     ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
         self.begin_transaction()?.append_json_once_at(
             transcript_root,
@@ -426,31 +427,25 @@ impl DurableTranscriptWriter {
         transcript_identity: &RootIdentity,
         transcript_relative: &Path,
         delivery_id: &str,
-        mut payload: Value,
-        utf16_overrides: &Utf16Overrides,
+        mut payload: Utf16JsonProjection,
         stamp_delivery_id: bool,
         identity_registration: Option<(&IdentityLogStore, &Path)>,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
-        if !matches!(payload, Value::Object(_)) {
+        if payload.object_entries().is_none() {
             return Err(TranscriptWriterError::PayloadNotObject);
         }
-        if !stamp_delivery_id && payload.get("deliveryId").is_some() {
+        if !stamp_delivery_id && payload.contains_property("deliveryId") {
             return Err(TranscriptWriterError::NativeDeliveryIdField);
         }
         let message_uuid = payload
-            .get("uuid")
-            .and_then(Value::as_str)
+            .string_at("/uuid")
             .filter(|uuid| !uuid.is_empty())
             .ok_or(TranscriptWriterError::MissingMessageUuid)?
             .to_string();
         if stamp_delivery_id {
             payload
-                .as_object_mut()
-                .expect("object payload checked")
-                .insert(
-                    "deliveryId".to_string(),
-                    Value::String(delivery_id.to_string()),
-                );
+                .set_field("deliveryId", Utf16JsonProjection::from(delivery_id))
+                .map_err(crate::jsonl::exact_json::projection_error)?;
         }
         let (file_present, missing_final_delimiter, existing_match, last_uuid) =
             match open_read_file_pinned(
@@ -459,13 +454,8 @@ impl DurableTranscriptWriter {
                 Some(transcript_identity),
             ) {
                 Ok(file) => {
-                    let (missing_delimiter, matching, last_uuid) = self.scan_existing(
-                        file,
-                        delivery_id,
-                        &message_uuid,
-                        &payload,
-                        utf16_overrides,
-                    )?;
+                    let (missing_delimiter, matching, last_uuid) =
+                        self.scan_existing(file, delivery_id, &message_uuid, &payload)?;
                     (true, missing_delimiter, matching, last_uuid)
                 }
                 Err(FsError::NotFound(_)) => (false, false, None, None),
@@ -493,16 +483,22 @@ impl DurableTranscriptWriter {
         // only after the UUID duplicate check, while the same transaction is
         // held, so a retry can keep the original parent even after later
         // messages were appended.
-        let needs_parent = payload.get("parentUuid").is_none_or(Value::is_null);
+        let needs_parent = payload
+            .at_pointer("/parentUuid")
+            .is_none_or(|parent| parent.is_null());
         if needs_parent {
-            if let Value::Object(object) = &mut payload {
-                object.insert(
-                    "parentUuid".to_string(),
-                    last_uuid.map_or(Value::Null, Value::String),
-                );
-            }
+            let parent = last_uuid.map_or_else(
+                || Utf16JsonProjection::parse("null").expect("null is valid JSON"),
+                Utf16JsonProjection::from,
+            );
+            payload
+                .set_field("parentUuid", parent)
+                .map_err(crate::jsonl::exact_json::projection_error)?;
         }
-        let mut line = to_vec_with_overrides(&payload, utf16_overrides)?;
+        let mut line = payload
+            .to_json_string()
+            .map_err(crate::jsonl::exact_json::projection_error)?
+            .into_bytes();
         line.push(b'\n');
         if line.len() > self.max_record_bytes {
             return Err(TranscriptWriterError::ScanTooLarge {
@@ -605,8 +601,7 @@ impl DurableTranscriptWriter {
         file: std::fs::File,
         delivery_id: &str,
         message_uuid: &str,
-        payload: &Value,
-        utf16_overrides: &Utf16Overrides,
+        payload: &Utf16JsonProjection,
     ) -> Result<
         (
             bool,
@@ -618,15 +613,8 @@ impl DurableTranscriptWriter {
         #[cfg(test)]
         self.duplicate_scans
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let encoded = to_vec_with_overrides(payload, utf16_overrides)?;
-        let mut expected = Utf16JsonProjection::parse(
-            std::str::from_utf8(&encoded).expect("exact JSON encoder emits UTF-8"),
-        )
-        .map_err(crate::jsonl::exact_json::projection_error)?;
+        let expected = payload.clone();
         let expected_delivery_id = expected.string_at("/deliveryId").map(str::to_owned);
-        expected
-            .remove_field("deliveryId")
-            .map_err(crate::jsonl::exact_json::projection_error)?;
         let expected = TranscriptExpectation {
             projection: expected,
             delivery_id: expected_delivery_id,
@@ -755,10 +743,8 @@ impl DurableTranscriptWriter {
                 None => actual.at_pointer("/deliveryId").is_none(),
             };
         if matches_uuid || matches_delivery {
-            actual
-                .remove_field("deliveryId")
-                .map_err(crate::jsonl::exact_json::projection_error)?;
-            let mut comparable_expected = expected.projection.clone();
+            let mut comparable_actual = payload_without_delivery_id(actual)?;
+            let mut comparable_expected = payload_without_delivery_id(expected.projection.clone())?;
             // A caller may use null as the parent placeholder for a new
             // Fusion delivery. Existing duplicate rows carry their resolved
             // parent; compare all immutable fields while ignoring only this
@@ -767,7 +753,7 @@ impl DurableTranscriptWriter {
                 .at_pointer("/parentUuid")
                 .is_none_or(|parent| parent.is_null())
             {
-                actual
+                comparable_actual
                     .remove_field("parentUuid")
                     .map_err(crate::jsonl::exact_json::projection_error)?;
                 comparable_expected
@@ -777,9 +763,7 @@ impl DurableTranscriptWriter {
             // Native rows identify their prepared UUID alone. Fusion rows
             // carry the current delivery identity as well. A retry must use
             // the same format and immutable payload as its original append.
-            let outcome = if identities_agree
-                && actual.semantically_eq(&comparable_expected)
-            {
+            let outcome = if identities_agree && comparable_actual == comparable_expected {
                 Ok(TranscriptAppendOutcome::AlreadyPresent)
             } else {
                 Err(TranscriptWriterError::DeliveryConflict {
@@ -837,80 +821,25 @@ impl DurableTranscriptWriter {
         }
         Ok(identity.uuid.filter(|uuid| !uuid.is_empty()))
     }
-
-    /// Append a pre-serialized JSON object exactly once.  This is useful for
-    /// callers that already have a stable wire DTO and want to avoid a second
-    /// serialization pass; the method still canonicalizes the delivery id.
-    pub fn append_object_once(
-        &self,
-        transcript_relative: &Path,
-        delivery_id: &str,
-        payload: Map<String, Value>,
-    ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
-        self.append_json_once(transcript_relative, delivery_id, Value::Object(payload))
-    }
 }
 
 impl DurableTranscriptTransaction<'_> {
-    /// Append one already-serialized JSON object while this transaction owns
-    /// the session lock. This is intentionally not append-once: relocation
-    /// markers are ordinary transcript metadata and their caller serializes
-    /// them with the shared in-process writer mutex.
+    /// Append one source JSON value while this transaction owns the session
+    /// lock. This is intentionally not append-once: relocation markers are
+    /// ordinary transcript metadata and their caller serializes them with the
+    /// shared in-process writer mutex.
     pub fn append_raw_json_at(
         &self,
         transcript_root: &Path,
         transcript_identity: &RootIdentity,
         transcript_relative: &Path,
-        payload: Value,
+        payload: Utf16JsonProjection,
     ) -> Result<(), TranscriptWriterError> {
-        self.append_raw_json_at_exact(
-            transcript_root,
-            transcript_identity,
-            transcript_relative,
-            payload,
-            &Utf16Overrides::new(),
-        )
-    }
-
-    /// Append one ordinary native row with recovered exact string leaves.
-    /// It retains the ordinary path's ordering and durability policy.
-    pub fn append_raw_json_at_exact(
-        &self,
-        transcript_root: &Path,
-        transcript_identity: &RootIdentity,
-        transcript_relative: &Path,
-        payload: Value,
-        utf16_overrides: &Utf16Overrides,
-    ) -> Result<(), TranscriptWriterError> {
-        let line = to_vec_with_overrides(&payload, utf16_overrides)?;
-        self.append_serialized_json_at(
-            transcript_root,
-            transcript_identity,
-            transcript_relative,
-            line,
-        )
-    }
-
-    /// Append a caller-validated, already serialized JSON row without
-    /// deserializing it into a recursive `Value`. The ordinary Native
-    /// attachment path uses this for its flat raw payload.
-    pub(crate) fn append_serialized_json_at(
-        &self,
-        transcript_root: &Path,
-        transcript_identity: &RootIdentity,
-        transcript_relative: &Path,
-        mut line: Vec<u8>,
-    ) -> Result<(), TranscriptWriterError> {
+        let mut line = payload
+            .to_json_string()
+            .map_err(crate::jsonl::exact_json::projection_error)?
+            .into_bytes();
         line.push(b'\n');
-        // Ordinary transcript rows do not buy durability, and never did: the
-        // non-durable writer this path replaced only flushed. They travel
-        // through the transaction for ORDERING -- so a `/cd` relocation cannot
-        // split an ordinary append from a Fusion delivery -- not for fsync.
-        // Paying `F_FULLFSYNC` per row costs 10-100ms each on macOS and turns
-        // an ordinary turn into several of them.
-        //
-        // The directory entry is a different matter: creating the file is
-        // worth one parent sync, so a crash cannot lose the transcript itself.
         let file_present =
             lingxi_core::host::rooted_fs::checked_join(transcript_root, transcript_relative)
                 .map(|path| path.exists())
@@ -1095,7 +1024,7 @@ impl DurableTranscriptTransaction<'_> {
         &self,
         transcript_relative: &Path,
         delivery_id: &str,
-        payload: Value,
+        payload: Utf16JsonProjection,
     ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
         self.append_json_once_at(
             &self.writer.root,
@@ -1114,7 +1043,7 @@ impl DurableTranscriptTransaction<'_> {
         transcript_identity: &RootIdentity,
         transcript_relative: &Path,
         delivery_id: &str,
-        payload: Value,
+        payload: Utf16JsonProjection,
     ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
         self.append_json_once_at_with_tip(
             transcript_root,
@@ -1127,16 +1056,14 @@ impl DurableTranscriptTransaction<'_> {
     }
 
     /// Return whether this delivery is the durable UUID tip observed under the
-    /// same transaction. In particular, a recovered duplicate may still be
-    /// the tip after its earlier write succeeded but fsync failed. No second
-    /// scan or unlocked tip lookup is needed.
+    /// same transaction. Duplicate lookup and tip observation share one scan.
     pub fn append_json_once_at_with_tip(
         &self,
         transcript_root: &Path,
         transcript_identity: &RootIdentity,
         transcript_relative: &Path,
         delivery_id: &str,
-        payload: Value,
+        payload: Utf16JsonProjection,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         self.writer.append_json_once_at_locked(
             transcript_root,
@@ -1144,22 +1071,21 @@ impl DurableTranscriptTransaction<'_> {
             transcript_relative,
             delivery_id,
             payload,
-            &Utf16Overrides::new(),
             true,
             None,
         )
     }
 
-    /// Append one durable delivery and register its outer UUID in the Host
-    /// identity sidecar under the same transaction, only after duplicate
-    /// detection has established that a new row will be written.
+    /// Append a delivery row and register its outer UUID in the Host identity
+    /// sidecar under the same transaction. A Fusion delivery includes its
+    /// private delivery id in the transcript row.
     pub(crate) fn append_json_once_at_with_tip_identity(
         &self,
         transcript_root: &Path,
         transcript_identity: &RootIdentity,
         transcript_relative: &Path,
         delivery_id: &str,
-        payload: Value,
+        payload: Utf16JsonProjection,
         identity_store: &IdentityLogStore,
         transcript_path: &Path,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
@@ -1169,46 +1095,21 @@ impl DurableTranscriptTransaction<'_> {
             transcript_relative,
             delivery_id,
             payload,
-            &Utf16Overrides::new(),
             true,
             Some((identity_store, transcript_path)),
         )
     }
 
-    /// Append native exact JavaScript strings once by their prepared UUID.
-    /// The delivery key stays private; no `deliveryId` field is emitted.
-    pub fn append_json_once_at_with_tip_exact(
+    /// Append one prepared Native UUID row and register that same identity in
+    /// the Host sidecar under the transaction. The delivery key remains
+    /// private and is not added to the JSONL payload.
+    pub(crate) fn append_native_json_once_at_with_tip_identity(
         &self,
         transcript_root: &Path,
         transcript_identity: &RootIdentity,
         transcript_relative: &Path,
         delivery_id: &str,
-        payload: Value,
-        utf16_overrides: &Utf16Overrides,
-    ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
-        self.writer.append_json_once_at_locked(
-            transcript_root,
-            transcript_identity,
-            transcript_relative,
-            delivery_id,
-            payload,
-            utf16_overrides,
-            false,
-            None,
-        )
-    }
-
-    /// The ordinary Host session writer variant. It records the outer UUID in
-    /// its Host-only identity sidecar under this already-held transaction,
-    /// after duplicate detection and before the transcript append.
-    pub(crate) fn append_json_once_at_with_tip_exact_identity(
-        &self,
-        transcript_root: &Path,
-        transcript_identity: &RootIdentity,
-        transcript_relative: &Path,
-        delivery_id: &str,
-        payload: Value,
-        utf16_overrides: &Utf16Overrides,
+        payload: Utf16JsonProjection,
         identity_store: &IdentityLogStore,
         transcript_path: &Path,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
@@ -1218,7 +1119,6 @@ impl DurableTranscriptTransaction<'_> {
             transcript_relative,
             delivery_id,
             payload,
-            utf16_overrides,
             false,
             Some((identity_store, transcript_path)),
         )
@@ -1232,7 +1132,11 @@ fn transcript_line_has_uuid(line: &[u8], expected_uuid: &str) -> bool {
     };
     Utf16JsonProjection::parse(line)
         .ok()
-        .and_then(|projection| projection.string_at("/uuid").map(|uuid| uuid == expected_uuid))
+        .and_then(|projection| {
+            projection
+                .string_at("/uuid")
+                .map(|uuid| uuid == expected_uuid)
+        })
         .unwrap_or(false)
 }
 
@@ -1241,28 +1145,36 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn source_payload(value: Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).unwrap()
+    }
+
     #[test]
-    fn native_exact_written_failure_requires_durable_cold_retry_and_same_units() {
+    fn native_source_written_failure_requires_durable_cold_retry_and_same_units() {
         let dir = tempfile::tempdir().unwrap();
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let identity = root_identity(dir.path()).unwrap();
         let path = Path::new("native.jsonl");
-        let payload = json!({"uuid":"native-peer", "parentUuid":null, "origin":{"kind":"peer","body":"\u{fffd}"}, "message":{"content":[{"type":"text","text":"\u{fffd}"}]}});
-        let overrides = Utf16Overrides::from([
-            ("/origin/body".into(), vec![0xd83d]),
-            ("/message/content/0/text".into(), vec![0xd83d]),
-        ]);
+        let transcript_path = dir.path().join(path);
+        let identity_store = IdentityLogStore::default();
+        message_identity::bootstrap_at(&identity_store, &transcript_path, dir.path(), &identity)
+            .unwrap();
+        let payload = Utf16JsonProjection::parse(
+            r#"{"uuid":"native-peer","parentUuid":null,"origin":{"kind":"peer","body":"\ud83d"},"message":{"content":[{"type":"text","text":"\ud83d"}]}}"#,
+        )
+        .unwrap();
         writer
             .fail_next_append_sync
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
-            writer.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+            writer.with_transaction(|tx| tx.append_native_json_once_at_with_tip_identity(
                 dir.path(),
                 &identity,
                 path,
                 "private-delivery",
                 payload.clone(),
-                &overrides
+                &identity_store,
+                &transcript_path,
             )),
             Err(TranscriptWriterError::WrittenButNotDurable(_))
         ));
@@ -1271,41 +1183,52 @@ mod tests {
         assert!(!raw.contains("deliveryId"));
         drop(writer);
         let cold = DurableTranscriptWriter::open(dir.path()).unwrap();
+        let cold_identity_store = IdentityLogStore::default();
+        message_identity::bootstrap_at(
+            &cold_identity_store,
+            &transcript_path,
+            dir.path(),
+            &identity,
+        )
+        .unwrap();
         cold.fail_next_existing_sync_for_test();
         assert!(cold
-            .with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+            .with_transaction(|tx| tx.append_native_json_once_at_with_tip_identity(
                 dir.path(),
                 &identity,
                 path,
                 "private-delivery",
                 payload.clone(),
-                &overrides
+                &cold_identity_store,
+                &transcript_path,
             ))
             .is_err());
         assert_eq!(
-            cold.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+            cold.with_transaction(|tx| tx.append_native_json_once_at_with_tip_identity(
                 dir.path(),
                 &identity,
                 path,
                 "private-delivery",
                 payload.clone(),
-                &overrides
+                &cold_identity_store,
+                &transcript_path,
             ))
             .unwrap(),
             (TranscriptAppendOutcome::AlreadyPresent, true)
         );
-        let different = Utf16Overrides::from([
-            ("/origin/body".into(), vec![0xdc00]),
-            ("/message/content/0/text".into(), vec![0xd83d]),
-        ]);
+        let different = Utf16JsonProjection::parse(
+            r#"{"uuid":"native-peer","parentUuid":null,"origin":{"kind":"peer","body":"\udc00"},"message":{"content":[{"type":"text","text":"\ud83d"}]}}"#,
+        )
+        .unwrap();
         assert!(matches!(
-            cold.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+            cold.with_transaction(|tx| tx.append_native_json_once_at_with_tip_identity(
                 dir.path(),
                 &identity,
                 path,
                 "private-delivery",
-                payload,
-                &different
+                different,
+                &cold_identity_store,
+                &transcript_path,
             )),
             Err(TranscriptWriterError::DeliveryConflict { .. })
         ));
@@ -1322,10 +1245,14 @@ mod tests {
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let path = Path::new("transcript.jsonl");
         let identity = lingxi_core::host::rooted_fs::root_identity(dir.path()).unwrap();
-
         writer
             .with_transaction(|transaction| {
-                transaction.append_raw_json_at(dir.path(), &identity, path, json!({"n": 1}))
+                transaction.append_raw_json_at(
+                    dir.path(),
+                    &identity,
+                    path,
+                    source_payload(json!({"n": 1})),
+                )
             })
             .unwrap();
         // One parent sync for creating the file, and nothing else.
@@ -1334,7 +1261,12 @@ mod tests {
         for n in 2..=5 {
             writer
                 .with_transaction(|transaction| {
-                    transaction.append_raw_json_at(dir.path(), &identity, path, json!({"n": n}))
+                    transaction.append_raw_json_at(
+                        dir.path(),
+                        &identity,
+                        path,
+                        source_payload(json!({"n": n})),
+                    )
                 })
                 .unwrap();
         }
@@ -1346,7 +1278,7 @@ mod tests {
 
         assert_eq!(
             writer
-                .append_json_once(path, "delivery", json!({"uuid": "fusion"}))
+                .append_json_once(path, "delivery", source_payload(json!({"uuid": "fusion"})))
                 .unwrap(),
             TranscriptAppendOutcome::Appended
         );
@@ -1456,7 +1388,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let path = Path::new("transcript.jsonl");
-        let payload = json!({"uuid":"fusion", "text":"answer"});
+        let payload = source_payload(json!({"uuid":"fusion", "text":"answer"}));
         writer
             .fail_next_append_sync
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1487,7 +1419,11 @@ mod tests {
         };
         assert_eq!(retry(), (TranscriptAppendOutcome::AlreadyPresent, true));
         writer
-            .append_json_once(path, "later", json!({"uuid":"later", "text":"next"}))
+            .append_json_once(
+                path,
+                "later",
+                source_payload(json!({"uuid":"later", "text":"next"})),
+            )
             .unwrap();
         assert_eq!(retry(), (TranscriptAppendOutcome::AlreadyPresent, false));
     }
@@ -1501,9 +1437,9 @@ mod tests {
         let path = Path::new("transcript.jsonl");
         writer.begin_transaction().unwrap().append_raw_json_at(
             dir.path(), &writer.identity, path,
-            json!({"uuid":"image", "message":{"content":[{"type":"image","data":"A".repeat(64 * 1024)}]}}),
+            source_payload(json!({"uuid":"image", "message":{"content":[{"type":"image","data":"A".repeat(64 * 1024)}]}})),
         ).unwrap();
-        let payload = json!({"uuid":"fusion", "text":"answer", "parentUuid":null});
+        let payload = source_payload(json!({"uuid":"fusion", "text":"answer", "parentUuid":null}));
         assert_eq!(
             writer
                 .append_json_once(path, "delivery", payload.clone())
@@ -1534,14 +1470,22 @@ mod tests {
             serde_json::to_vec(&json!({"uuid":"fusion", "text":"x".repeat(4096)})).unwrap();
         std::fs::write(dir.path().join(path), &original).unwrap();
         assert!(matches!(
-            writer.append_json_once(path, "delivery", json!({"uuid":"fusion","text":"answer"})),
+            writer.append_json_once(
+                path,
+                "delivery",
+                source_payload(json!({"uuid":"fusion","text":"answer"})),
+            ),
             Err(TranscriptWriterError::DeliveryConflict { .. })
         ));
         let mut broken = original;
         broken.pop();
         std::fs::write(dir.path().join(path), &broken).unwrap();
         assert!(matches!(
-            writer.append_json_once(path, "delivery", json!({"uuid":"other","text":"answer"})),
+            writer.append_json_once(
+                path,
+                "delivery",
+                source_payload(json!({"uuid":"other","text":"answer"})),
+            ),
             Err(TranscriptWriterError::CorruptLine { .. })
         ));
     }
@@ -1568,7 +1512,7 @@ mod tests {
         for bytes in cases {
             std::fs::write(dir.path().join(path), &bytes).unwrap();
             assert!(matches!(
-                writer.append_json_once(path, "d", json!({"uuid":"f"})),
+                writer.append_json_once(path, "d", source_payload(json!({"uuid":"f"}))),
                 Err(TranscriptWriterError::CorruptLine { .. })
             ));
             assert_eq!(std::fs::read(dir.path().join(path)).unwrap(), bytes);
@@ -1578,7 +1522,7 @@ mod tests {
             std::fs::write(dir.path().join(path), format!("{prefix}{suffix}\"}}")).unwrap();
             assert_eq!(
                 writer
-                    .append_json_once(path, "d", json!({"uuid":"f"}))
+                    .append_json_once(path, "d", source_payload(json!({"uuid":"f"})))
                     .unwrap(),
                 TranscriptAppendOutcome::Appended
             );
@@ -1592,13 +1536,21 @@ mod tests {
         let path = Path::new("transcript.jsonl");
         assert_eq!(
             writer
-                .append_json_once(path, "delivery-1", json!({"uuid":"message-1","text":"ok"}),)
+                .append_json_once(
+                    path,
+                    "delivery-1",
+                    source_payload(json!({"uuid":"message-1","text":"ok"})),
+                )
                 .unwrap(),
             TranscriptAppendOutcome::Appended
         );
         assert_eq!(
             writer
-                .append_json_once(path, "delivery-1", json!({"uuid":"message-1","text":"ok"}),)
+                .append_json_once(
+                    path,
+                    "delivery-1",
+                    source_payload(json!({"uuid":"message-1","text":"ok"})),
+                )
                 .unwrap(),
             TranscriptAppendOutcome::AlreadyPresent
         );
@@ -1616,7 +1568,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let path = Path::new("transcript.jsonl");
-        let payload = json!({"uuid":"message-1","text":"ok"});
+        let payload = source_payload(json!({"uuid":"message-1","text":"ok"}));
         assert_eq!(
             writer
                 .append_json_once(path, "delivery-1", payload.clone())
@@ -1652,13 +1604,17 @@ mod tests {
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let path = Path::new("transcript.jsonl");
         writer
-            .append_json_once(path, "delivery-1", json!({"uuid":"message-1","text":"ok"}))
+            .append_json_once(
+                path,
+                "delivery-1",
+                source_payload(json!({"uuid":"message-1","text":"ok"})),
+            )
             .unwrap();
         assert!(matches!(
             writer.append_json_once(
                 path,
                 "delivery-2",
-                json!({"uuid":"message-1","text":"different"}),
+                source_payload(json!({"uuid":"message-1","text":"different"})),
             ),
             Err(TranscriptWriterError::DeliveryConflict { .. })
         ));
@@ -1677,14 +1633,18 @@ mod tests {
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let path = Path::new("transcript.jsonl");
         writer
-            .append_json_once(path, "delivery-1", json!({"uuid":"message-1","text":"ok"}))
+            .append_json_once(
+                path,
+                "delivery-1",
+                source_payload(json!({"uuid":"message-1","text":"ok"})),
+            )
             .unwrap();
 
         assert!(matches!(
             writer.append_json_once(
                 path,
                 "delivery-1",
-                json!({"uuid":"message-2","text":"ok"}),
+                source_payload(json!({"uuid":"message-2","text":"ok"})),
             ),
             Err(TranscriptWriterError::DeliveryConflict { delivery_id })
                 if delivery_id == "delivery-1"
@@ -1704,14 +1664,18 @@ mod tests {
         let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
         let path = Path::new("transcript.jsonl");
         writer
-            .append_json_once(path, "delivery-1", json!({"uuid":"message-1","text":"ok"}))
+            .append_json_once(
+                path,
+                "delivery-1",
+                source_payload(json!({"uuid":"message-1","text":"ok"})),
+            )
             .unwrap();
 
         assert!(matches!(
             writer.append_json_once(
                 path,
                 "delivery-2",
-                json!({"uuid":"message-1","text":"ok"}),
+                source_payload(json!({"uuid":"message-1","text":"ok"})),
             ),
             Err(TranscriptWriterError::DeliveryConflict { delivery_id })
                 if delivery_id == "delivery-2"
@@ -1733,66 +1697,78 @@ mod tests {
         let mut existing = serde_json::to_vec(&json!({"uuid":"message-1","text":"ok"})).unwrap();
         existing.push(b'\n');
         std::fs::write(dir.path().join(path), existing).unwrap();
+        let identity = root_identity(dir.path()).unwrap();
+        let transcript_path = dir.path().join(path);
+        let identity_store = IdentityLogStore::default();
+        message_identity::bootstrap_at(&identity_store, &transcript_path, dir.path(), &identity)
+            .unwrap();
 
-        let payload = json!({"uuid":"message-1","text":"ok"});
+        let payload = source_payload(json!({"uuid":"message-1","text":"ok"}));
         assert!(matches!(
             writer.append_json_once(path, "delivery-1", payload.clone()),
             Err(TranscriptWriterError::DeliveryConflict { .. })
         ));
         // A current native UUID-only append still retries its own row.
-        let identity = root_identity(dir.path()).unwrap();
         assert_eq!(
             writer
-                .with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+                .with_transaction(|tx| tx.append_native_json_once_at_with_tip_identity(
                     dir.path(),
                     &identity,
                     path,
                     "private-delivery",
                     payload.clone(),
-                    &Utf16Overrides::new(),
+                    &identity_store,
+                    &transcript_path,
                 ))
                 .unwrap(),
             (TranscriptAppendOutcome::AlreadyPresent, true)
         );
 
         let mut invalid_native = payload.clone();
-        invalid_native["deliveryId"] = Value::Null;
+        invalid_native
+            .set_field("deliveryId", Utf16JsonProjection::parse("null").unwrap())
+            .unwrap();
         assert!(matches!(
-            writer.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+            writer.with_transaction(|tx| tx.append_native_json_once_at_with_tip_identity(
                 dir.path(),
                 &identity,
                 path,
                 "private-delivery",
                 invalid_native.clone(),
-                &Utf16Overrides::new(),
+                &identity_store,
+                &transcript_path,
             )),
             Err(TranscriptWriterError::NativeDeliveryIdField)
         ));
-        std::fs::write(dir.path().join(path), format!("{invalid_native}\n")).unwrap();
+        let invalid_line = invalid_native.to_json_string().unwrap();
+        std::fs::write(dir.path().join(path), format!("{invalid_line}\n")).unwrap();
         assert!(matches!(
-            writer.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+            writer.with_transaction(|tx| tx.append_native_json_once_at_with_tip_identity(
                 dir.path(),
                 &identity,
                 path,
                 "private-delivery",
                 payload.clone(),
-                &Utf16Overrides::new(),
+                &identity_store,
+                &transcript_path,
             )),
             Err(TranscriptWriterError::DeliveryConflict { .. })
         ));
 
         let fusion_path = Path::new("fusion.jsonl");
+        let fusion_transcript_path = dir.path().join(fusion_path);
         writer
             .append_json_once(fusion_path, "delivery-1", payload.clone())
             .unwrap();
         assert!(matches!(
-            writer.with_transaction(|tx| tx.append_json_once_at_with_tip_exact(
+            writer.with_transaction(|tx| tx.append_native_json_once_at_with_tip_identity(
                 dir.path(),
                 &identity,
                 fusion_path,
                 "private-delivery",
                 payload,
-                &Utf16Overrides::new(),
+                &identity_store,
+                &fusion_transcript_path,
             )),
             Err(TranscriptWriterError::DeliveryConflict { .. })
         ));
@@ -1820,7 +1796,7 @@ mod tests {
                     &transcript_identity,
                     path,
                     "delivery-1",
-                    json!({"uuid":"message-1","text":"ok"}),
+                    source_payload(json!({"uuid":"message-1","text":"ok"})),
                 )
             })
             .unwrap();
@@ -1834,7 +1810,7 @@ mod tests {
                     &transcript_identity,
                     path,
                     "delivery-1",
-                    json!({"uuid":"message-1","text":"ok"}),
+                    source_payload(json!({"uuid":"message-1","text":"ok"})),
                 )
             })
             .unwrap();
@@ -1863,14 +1839,14 @@ mod tests {
                     &identity,
                     path,
                     "delivery-1",
-                    json!({"uuid":"message-1", "parentUuid": null, "type":"user"}),
+                    source_payload(json!({"uuid":"message-1", "parentUuid": null, "type":"user"})),
                 )?;
                 transaction.append_json_once_at(
                     transcript_dir.path(),
                     &identity,
                     path,
                     "delivery-2",
-                    json!({"uuid":"message-2", "parentUuid": null, "type":"user"}),
+                    source_payload(json!({"uuid":"message-2", "parentUuid": null, "type":"user"})),
                 )
             })
             .unwrap();
@@ -1890,7 +1866,7 @@ mod tests {
                     &identity,
                     path,
                     "delivery-2",
-                    json!({"uuid":"message-2", "parentUuid": null, "type":"user"}),
+                    source_payload(json!({"uuid":"message-2", "parentUuid": null, "type":"user"})),
                 )
                 .unwrap(),
             TranscriptAppendOutcome::AlreadyPresent
@@ -1928,7 +1904,7 @@ mod tests {
                 .append_json_once(
                     path,
                     "delivery-new",
-                    json!({"uuid":"message-new","text":"ok"}),
+                    source_payload(json!({"uuid":"message-new","text":"ok"})),
                 )
                 .unwrap(),
             TranscriptAppendOutcome::Appended
@@ -1946,7 +1922,11 @@ mod tests {
         symlink("missing-target", dir.path().join(path)).unwrap();
 
         assert!(matches!(
-            writer.append_json_once(path, "delivery-1", json!({"uuid":"message-1","text":"ok"}),),
+            writer.append_json_once(
+                path,
+                "delivery-1",
+                source_payload(json!({"uuid":"message-1","text":"ok"})),
+            ),
             Err(TranscriptWriterError::Fs(_))
         ));
     }

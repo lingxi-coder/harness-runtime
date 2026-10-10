@@ -94,6 +94,7 @@ mod tests {
     #[test]
     fn user_image_block_becomes_placeholder_text() {
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -138,6 +139,7 @@ mod tests {
         // TS only strips `user` messages; an assistant message is returned as-is
         // even if it (hypothetically) carried an image block.
         let assistant = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![image_block()],
             stop_reason: None,
@@ -151,9 +153,9 @@ mod tests {
     fn strips_nested_media_without_changing_tool_result_identity_or_text() {
         let id = lingxi_core::types::ToolUseId::new();
         let input = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: id.clone(),
+            content: vec![ContentBlock::ToolResult { tool_use_id: id.clone(),
                 content: "read result".into(),
                 is_error: Some(false),
                 provider_tool_use_id: Some("provider-read".into()),

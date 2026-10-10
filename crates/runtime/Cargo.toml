@@ -29,6 +29,11 @@ engine = [
 ]
 desktop = [
     "engine",
+    "dep:msgqueue",
+    "tokio/io-util",
+    "dep:uuid",
+    "dep:chrono",
+    "dep:jsonrpc",
     "dep:branding",
     "command-api/builtin-handlers",
     "dep:cron",
@@ -167,6 +172,7 @@ collaboration = [
 ]
 
 [dependencies]
+chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
 
 mobile-linux-api.workspace = true
 

@@ -254,6 +254,7 @@ pub fn canonical_response_content(
     protocol: wire::ProtocolFamily,
 ) -> Result<Vec<wire::ContentBlock>, LlmError> {
     let message = crate::Message {
+        api_output_config: None,
         role: "assistant".into(),
         content: response.content.clone(),
     };

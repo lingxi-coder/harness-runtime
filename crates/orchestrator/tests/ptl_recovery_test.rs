@@ -145,6 +145,7 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
             ),
         ));
         s.history.push(ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: format!(

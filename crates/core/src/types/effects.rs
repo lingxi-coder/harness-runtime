@@ -368,6 +368,7 @@ mod tests {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         };
         let effect = Effect::RequestModel {
             request_id: RequestId::nil(),

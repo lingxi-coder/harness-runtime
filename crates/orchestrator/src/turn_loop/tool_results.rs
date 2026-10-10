@@ -487,7 +487,13 @@ pub(super) fn tool_result_to_model_text(data: &Utf16JsonProjection) -> Utf16Json
             }
         }
     }
-    crate::tool_result_text::normalized_tool_result_projection(data)
+    if data.array_len("").is_some() || data.at_pointer("").is_some_and(|value| value.is_null()) {
+        data.to_json_string()
+            .expect("valid source tool output")
+            .into()
+    } else {
+        crate::tool_result_text::normalized_tool_result_projection(data)
+    }
 }
 
 /// Map ToolSearch's matched names to Anthropic `tool_reference` blocks. Empty

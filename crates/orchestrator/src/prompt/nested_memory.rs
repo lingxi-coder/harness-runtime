@@ -219,7 +219,7 @@ pub fn discover_with_excludes(
         home,
         managed_dir,
         excluder,
-        InstructionFilesMode::ClaudeMd,
+        InstructionFilesMode::LingxiMd,
     )
 }
 
@@ -294,7 +294,7 @@ pub fn discover_agents(
     use memory::lingxi_md::agents::{ancestors, identity};
     if !matches!(
         mode,
-        InstructionFilesMode::ClaudeMdOrAgentsMd | InstructionFilesMode::ClaudeMdAndAgentsMd
+        InstructionFilesMode::LingxiMdOrAgentsMd | InstructionFilesMode::LingxiMdAndAgentsMd
     ) || !memory::lingxi_md::agents::attachments_enabled()
     {
         return Vec::new();
@@ -307,7 +307,7 @@ pub fn discover_agents(
     let approved = migrations::global_config::global_config_path().is_some_and(|path| {
         migrations::global_config::check_has_lingxi_md_external_includes_approved(&path, &root)
     });
-    if mode == InstructionFilesMode::ClaudeMdOrAgentsMd
+    if mode == InstructionFilesMode::LingxiMdOrAgentsMd
         && !ancestors(&root, None, home, false, approved, excluder).is_empty()
     {
         return Vec::new();
@@ -328,7 +328,7 @@ pub fn discover_agents(
     ancestors(parent, Some(&root), home, true, approved, excluder)
         .into_iter()
         .filter(|group| {
-            mode == InstructionFilesMode::ClaudeMdAndAgentsMd || !branded_dirs.contains(&group.dir)
+            mode == InstructionFilesMode::LingxiMdAndAgentsMd || !branded_dirs.contains(&group.dir)
         })
         .flat_map(|group| group.files)
         .filter(|file| !bodies.contains(file.body.trim()) && paths.insert(identity(&file.path)))
@@ -382,7 +382,7 @@ mod tests {
                 &home,
                 Some(&managed),
                 None,
-                InstructionFilesMode::ClaudeMd,
+                InstructionFilesMode::LingxiMd,
             )),
             vec![managed_rule.clone(), user_rule, project_rule],
         );
@@ -415,7 +415,7 @@ mod tests {
                 &home,
                 None,
                 None,
-                InstructionFilesMode::ClaudeMd,
+                InstructionFilesMode::LingxiMd,
             )
         };
         fs::write(&rule, "---\npaths: docs/**\n---\nold body").unwrap();

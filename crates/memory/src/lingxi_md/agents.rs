@@ -1,4 +1,4 @@
-//! Claude Code 2.1.286 instruction-file plugin's filesystem contract.
+//! Builtin instruction-file plugin's filesystem contract.
 //!
 //! The option belongs to `pluginConfigs[plugin].options`, not project settings.
 //! Hosts supply trusted user, flag and managed tiers in increasing precedence.
@@ -14,49 +14,40 @@ use super::{loader, LingxiMdExcluder, LingxiMdTier};
 /// Instruction file selection resolved from trusted builtin plugin options.
 pub enum InstructionFilesMode {
     /// Load the existing branded instruction hierarchy.
-    ClaudeMd,
+    LingxiMd,
     /// Use AGENTS.md when the project has no branded instruction files.
     #[default]
-    ClaudeMdOrAgentsMd,
+    LingxiMdOrAgentsMd,
     /// Merge both instruction hierarchies by directory.
-    ClaudeMdAndAgentsMd,
+    LingxiMdAndAgentsMd,
     /// Load enterprise managed instructions only.
     ManagedOnly,
 }
 
 impl InstructionFilesMode {
     #[must_use]
-    /// Resolve current and legacy option spellings using builtin precedence.
+    /// Resolve the current `instructionFiles` option.
+    ///
+    /// `lingxi-md` loads the LINGXI.md hierarchy, `lingxi-md-or-agents-md`
+    /// falls back to AGENTS.md, and `lingxi-md-and-agents-md` loads both.
+    /// Absent or unrecognized values use the fallback mode.
     pub fn from_options(options: &Value) -> Self {
-        let current = match options["instructionFiles"].as_str() {
-            Some("claude-md") => Self::ClaudeMd,
-            Some("claude-md-and-agents-md") => Self::ClaudeMdAndAgentsMd,
+        match options["instructionFiles"].as_str() {
+            Some("lingxi-md") => Self::LingxiMd,
+            Some("lingxi-md-and-agents-md") => Self::LingxiMdAndAgentsMd,
             Some("managed-only") => Self::ManagedOnly,
-            _ => Self::ClaudeMdOrAgentsMd,
-        };
-        // Ye honours the old spelling only when the resolved new mode is the
-        // default, including an explicitly selected default or invalid value.
-        if current == Self::ClaudeMdOrAgentsMd && options.get("projectInstructions").is_some() {
-            return match options["projectInstructions"].as_str() {
-                Some("none") => Self::ManagedOnly,
-                Some("agents-fallback") => Self::ClaudeMdOrAgentsMd,
-                Some("both") => Self::ClaudeMdAndAgentsMd,
-                _ => Self::ClaudeMd,
-            };
+            _ => Self::LingxiMdOrAgentsMd,
         }
-        current
     }
 }
 
-/// Alias first, canonical builtin ID last within each trusted settings tier.
+/// Read the canonical builtin ID within each trusted settings tier.
 #[must_use]
 pub fn options_from_tiers<'a>(tiers: impl IntoIterator<Item = &'a Value>) -> Value {
     let mut result = serde_json::Map::new();
     for tier in tiers {
-        for key in ["agents-md@builtin", "cc-plugin-agents-md@builtin"] {
-            if let Some(options) = tier["pluginConfigs"][key]["options"].as_object() {
-                result.extend(options.clone());
-            }
+        if let Some(options) = tier["pluginConfigs"]["agents-md@builtin"]["options"].as_object() {
+            result.extend(options.clone());
         }
     }
     Value::Object(result)
@@ -151,7 +142,7 @@ pub fn ancestors(
 #[must_use]
 /// Whether nested instruction attachments are enabled for this process.
 pub fn attachments_enabled() -> bool {
-    !["LINGXI_SIMPLE", "LINGXI_DISABLE_ATTACHMENTS"]
+    ![branding::SIMPLE_ENV, branding::DISABLE_ATTACHMENTS_ENV]
         .iter()
         .any(|key| {
             std::env::var(key).is_ok_and(|value| {
@@ -169,32 +160,68 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn option_precedence_and_legacy_default_match_plugin() {
+    fn current_instruction_modes_are_resolved() {
         assert_eq!(
             InstructionFilesMode::from_options(&json!({})),
-            InstructionFilesMode::ClaudeMdOrAgentsMd
+            InstructionFilesMode::LingxiMdOrAgentsMd
+        );
+        assert_eq!(
+            InstructionFilesMode::from_options(&json!({"instructionFiles":"lingxi-md"})),
+            InstructionFilesMode::LingxiMd
         );
         assert_eq!(
             InstructionFilesMode::from_options(
-                &json!({"instructionFiles":"claude-md-or-agents-md","projectInstructions":"both"})
+                &json!({"instructionFiles":"lingxi-md-or-agents-md"})
             ),
-            InstructionFilesMode::ClaudeMdAndAgentsMd
+            InstructionFilesMode::LingxiMdOrAgentsMd
         );
         assert_eq!(
             InstructionFilesMode::from_options(
-                &json!({"instructionFiles":"managed-only","projectInstructions":"both"})
+                &json!({"instructionFiles":"lingxi-md-and-agents-md"})
             ),
+            InstructionFilesMode::LingxiMdAndAgentsMd
+        );
+        assert_eq!(
+            InstructionFilesMode::from_options(&json!({"instructionFiles":"managed-only"})),
             InstructionFilesMode::ManagedOnly
         );
-        assert_eq!(
-            InstructionFilesMode::from_options(&json!({"projectInstructions":false})),
-            InstructionFilesMode::ClaudeMd
-        );
-        let user = json!({"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"claude-md","x":1}},"cc-plugin-agents-md@builtin":{"options":{"x":2}}}});
+    }
+
+    #[test]
+    fn obsolete_instruction_options_do_not_override_current_modes() {
+        for obsolete in ["none", "both", "agents-fallback"] {
+            assert_eq!(
+                InstructionFilesMode::from_options(&json!({"projectInstructions":obsolete})),
+                InstructionFilesMode::LingxiMdOrAgentsMd
+            );
+            assert_eq!(
+                InstructionFilesMode::from_options(
+                    &json!({"instructionFiles":"lingxi-md","projectInstructions":obsolete})
+                ),
+                InstructionFilesMode::LingxiMd
+            );
+        }
+        for obsolete in ["claude-md", "claude-md-and-agents-md"] {
+            assert_eq!(
+                InstructionFilesMode::from_options(&json!({"instructionFiles":obsolete})),
+                InstructionFilesMode::LingxiMdOrAgentsMd
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_plugin_options_follow_settings_precedence() {
+        let user = json!({"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"lingxi-md","x":1}},"cc-plugin-agents-md@builtin":{"options":{"x":2,"legacy":true}}}});
         let policy = json!({"pluginConfigs":{"agents-md@builtin":{"options":{"instructionFiles":"managed-only"}}}});
         assert_eq!(
             options_from_tiers([&user, &policy]),
-            json!({"instructionFiles":"managed-only","x":2})
+            json!({"instructionFiles":"managed-only","x":1})
+        );
+        assert_eq!(
+            options_from_tiers([
+                &json!({"pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"managed-only"}}}})
+            ]),
+            json!({})
         );
     }
 }

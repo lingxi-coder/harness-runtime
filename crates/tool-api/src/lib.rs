@@ -29,6 +29,7 @@ pub mod model_prompt_gate;
 pub mod native_output;
 pub mod native_schema;
 pub mod nested_memory_triggers;
+pub mod output_schema;
 pub mod progress;
 pub mod read_file_state;
 pub mod registry;

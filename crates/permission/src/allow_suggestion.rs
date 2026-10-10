@@ -717,6 +717,23 @@ mod tests {
         let suggestions = json!([
             {
                 "type": "addRules",
+                "rules": [{"toolName": "Bash"}],
+                "behavior": "allow",
+                "destination": "session"
+            }
+        ]);
+        assert_eq!(
+            permission_persistence_suggestion("Bash", &suggestions)
+                .map(|suggestion| suggestion.label),
+            Some("Yes, and don't ask again for any Bash command".to_string())
+        );
+    }
+
+    #[test]
+    fn permission_persistence_suggestion_rejects_removed_agent_alias() {
+        let suggestions = json!([
+            {
+                "type": "addRules",
                 "rules": [{"toolName": "Task"}],
                 "behavior": "allow",
                 "destination": "session"
@@ -725,7 +742,7 @@ mod tests {
         assert_eq!(
             permission_persistence_suggestion("Agent", &suggestions)
                 .map(|suggestion| suggestion.label),
-            Some("Yes, and don't ask again for any Agent command".to_string())
+            None
         );
     }
 

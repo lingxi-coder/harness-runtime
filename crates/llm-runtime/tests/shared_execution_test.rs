@@ -103,6 +103,7 @@ async fn shared_execution_sends_exact_tool_result_string_without_internal_sideca
     assign_history(
         &mut request,
         &[Message {
+            api_output_config: None,
             role: "user".into(),
             content: vec![ContentBlock::ToolResult {
                 tool_call_id: "call-1".into(),

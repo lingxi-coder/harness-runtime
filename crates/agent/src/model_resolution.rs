@@ -150,6 +150,10 @@ pub struct ModelResolutionContext {
     pub route: ModelRouteFacts,
     /// Defaults/overrides for the active route.
     pub family_defaults: FamilyModelDefaults,
+    /// Concrete provider-local model IDs registered on this route.
+    pub registered_model_ids: std::collections::BTreeSet<String>,
+    /// Explicit route-scoped aliases, preserving ambiguous candidate sets.
+    pub catalog_aliases: std::collections::BTreeMap<String, Vec<String>>,
     /// Native's dynamically selected `best` model, when a trusted source exists.
     pub best_model: Option<String>,
     /// Whether the Native Fable strategy is available for this host/session.
@@ -218,6 +222,163 @@ where
     ) -> Result<ModelResolutionContext, ModelResolutionError> {
         self(model, profile)
     }
+}
+
+/// A model and its provider route resolved together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModelSelection {
+    /// Provider-local model sent on the wire.
+    pub model: String,
+    /// Profile that selects the configured endpoint and credentials.
+    pub model_profile: Option<String>,
+    /// Facts for the selected route, including its scoped aliases.
+    pub model_resolution_context: ModelResolutionContext,
+}
+
+/// Resolve a user model preference while keeping model and provider identity
+/// together. Relative family aliases use the parent's catalog. Concrete models
+/// prefer that route, and may select another configured route when unavailable
+/// there. A qualified `profile/model` reference is resolved by the host registry.
+pub fn resolve_user_model_selection(
+    model_input: &str,
+    model_profile: Option<&str>,
+    parent_context: &ModelResolutionContext,
+    provider: &dyn ModelResolutionContextProvider,
+) -> Result<ResolvedModelSelection, ModelResolutionError> {
+    let model_input = lingxi_core::host::effort::trim_js_whitespace(model_input);
+    let relative_alias = is_relative_model_alias(model_input);
+    let (context, resolve_alias) = if let Some(profile) = model_profile {
+        let context = provider.context_for_route(model_input, Some(profile))?;
+        let resolve_alias = relative_alias && !is_registered_concrete_model(model_input, &context);
+        (context, resolve_alias)
+    } else if relative_alias {
+        let scoped = parent_context
+            .route
+            .profile
+            .as_deref()
+            .and_then(|profile| provider.context_for_route(model_input, Some(profile)).ok())
+            .filter(|context| {
+                is_registered_concrete_model(model_input, context)
+                    || has_relative_model_preference(model_input, context)
+            })
+            .unwrap_or_else(|| parent_context.clone());
+        if is_registered_concrete_model(model_input, &scoped) {
+            let context =
+                provider.context_for_route(model_input, scoped.route.profile.as_deref())?;
+            (context, false)
+        } else if has_relative_model_preference(model_input, &scoped) {
+            (scoped, true)
+        } else {
+            match provider.context_for_route(model_input, None) {
+                Ok(context) if is_registered_concrete_model(model_input, &context) => {
+                    (context, false)
+                }
+                Ok(context)
+                    if parent_context.route.profile.is_none()
+                        && has_relative_model_preference(model_input, &context) =>
+                {
+                    (context, true)
+                }
+                Err(error @ ModelResolutionError::AmbiguousRoute { .. }) => return Err(error),
+                _ => (scoped, true),
+            }
+        }
+    } else {
+        let context = match provider
+            .context_for_route(model_input, parent_context.route.profile.as_deref())
+        {
+            Ok(context) => context,
+            Err(ModelResolutionError::RouteUnavailable { .. })
+                if parent_context.route.profile.is_some() =>
+            {
+                provider.context_for_route(model_input, None)?
+            }
+            Err(error) => return Err(error),
+        };
+        (context, false)
+    };
+    let model = if resolve_alias {
+        resolve_user_specified_model(model_input, &context)?
+    } else {
+        let model = &context.route.model;
+        if !context.disable_1m_context && has_1m_context(model) {
+            normalize_1m_suffix(model)
+        } else {
+            model.clone()
+        }
+    };
+    let final_context = provider.context_for_route(&model, context.route.profile.as_deref())?;
+    Ok(ResolvedModelSelection {
+        model: final_context.route.model.clone(),
+        model_profile: final_context.route.profile.clone(),
+        model_resolution_context: final_context,
+    })
+}
+
+pub(crate) fn is_registered_concrete_model(model: &str, context: &ModelResolutionContext) -> bool {
+    let model = lingxi_core::host::effort::trim_js_whitespace(model);
+    let bare = strip_1m_suffix(model);
+    context.registered_model_ids.iter().any(|registered| {
+        registered.eq_ignore_ascii_case(model) || registered.eq_ignore_ascii_case(&bare)
+    })
+}
+
+pub(crate) fn has_relative_model_preference(model: &str, context: &ModelResolutionContext) -> bool {
+    let base = strip_1m_suffix(&model.to_lowercase());
+    context.catalog_aliases.contains_key(&base)
+        || match base.as_str() {
+            "opus" | "sonnet" | "haiku" | "fable" => context.family_defaults.get(&base).is_some(),
+            "opusplan" => context.family_defaults.sonnet.is_some(),
+            "best" => context.best_model.is_some() || context.family_defaults.opus.is_some(),
+            _ => false,
+        }
+}
+
+/// Resolve a skill model preference using the live parent route. An inherited
+/// context-window suffix is retained only when the selected route supports it.
+pub fn resolve_skill_model_selection(
+    model_input: &str,
+    model_profile: Option<&str>,
+    parent_context: &ModelResolutionContext,
+    provider: &dyn ModelResolutionContextProvider,
+) -> Result<ResolvedModelSelection, ModelResolutionError> {
+    let selection =
+        resolve_user_model_selection(model_input, model_profile, parent_context, provider)?;
+    let target = &selection.model_resolution_context;
+    if !has_1m_context(&parent_context.route.model)
+        || has_1m_context(model_input)
+        || has_1m_context(&selection.model)
+        || parent_context.disable_1m_context
+        || target.disable_1m_context
+        || target.native_1m != Some(true)
+        || target.route.provider.is_none()
+        || target.route.profile != parent_context.route.profile
+        || target.route.provider != parent_context.route.provider
+        || target.route.endpoint != parent_context.route.endpoint
+        || target.route.protocol != parent_context.route.protocol
+        || (target.route.provider == Some(ModelProviderKind::Other)
+            && target.route.profile.is_none()
+            && target.route.endpoint.is_none())
+    {
+        return Ok(selection);
+    }
+    resolve_user_model_selection(
+        &format!("{}[1m]", selection.model),
+        selection.model_profile.as_deref(),
+        parent_context,
+        provider,
+    )
+}
+
+/// Whether a model preference names a route-scoped family or reserved strategy.
+#[must_use]
+pub fn is_relative_model_alias(model: &str) -> bool {
+    let normalized = lingxi_core::host::effort::trim_js_whitespace(model).to_lowercase();
+    let base = strip_1m_suffix(&normalized);
+    matches!(
+        base.as_str(),
+        "opus" | "sonnet" | "haiku" | "fable" | "best" | "opusplan"
+    )
 }
 
 /// Managed model-restriction context threaded into the plan-mode upgrade swap

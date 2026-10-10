@@ -386,6 +386,7 @@ async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
             ));
         } else {
             s.history.push(ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: format!("reply-{i} with enough detail for compaction"),

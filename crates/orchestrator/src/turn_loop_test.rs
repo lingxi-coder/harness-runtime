@@ -409,6 +409,7 @@ mod read_file_state_tests {
     use hooks::events::HookEventType;
     use lingxi_core::host::coordinator_mode::CoordinatorModeHandle;
     use lingxi_core::host::OrchestratorHandle;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use lingxi_core::types::{ContentBlock, ConversationMessage, HookId, ToolUseId};
     use permission::{
         PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
@@ -654,6 +655,138 @@ mod read_file_state_tests {
 
     // ===== Orphaned-permission recovery (run_orphaned_permission) ===========
     // 1:1 with claude-code's handleOrphanedPermission (queryHelpers.ts:224-343).
+
+    struct ExactInputEchoTool;
+
+    #[async_trait]
+    impl Tool for ExactInputEchoTool {
+        fn name(&self) -> &str {
+            "ExactInputEcho"
+        }
+
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+                once_cell::sync::Lazy::new(|| source_fixture!({ "type": "object" }));
+            &SCHEMA
+        }
+
+        fn input_repair_metadata(&self) -> tool_api::tool_trait::ToolInputRepairMetadata {
+            tool_api::tool_trait::ToolInputRepairMetadata::Known {
+                schema: tool_api::tool_trait::ToolInputRepairSchema::Advertised,
+                schema_provenance:
+                    tool_api::tool_trait::ToolInputSchemaProvenance::GeneratedBuiltin,
+                exempt_top_level_keys: None,
+            }
+        }
+
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+
+        fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
+            true
+        }
+
+        fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
+            true
+        }
+
+        async fn check_permissions(
+            &self,
+            _input: &Utf16JsonProjection,
+            _ctx: &ToolUseContext,
+        ) -> permission::PermissionResult {
+            permission::PermissionResult::Allow {
+                reason: permission::PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: Default::default(),
+            }
+        }
+
+        async fn description(
+            &self,
+            _input: &Utf16JsonProjection,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            "exact echo".into()
+        }
+
+        async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+            String::new().into()
+        }
+
+        async fn call(
+            &self,
+            input: Utf16JsonProjection,
+            _ctx: ToolUseContext,
+            _tx: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            let input_json = input
+                .to_json_string()
+                .map_err(|error| ToolError::InvalidInput(error.to_string().into()))?;
+            let input_json = Utf16JsonProjection::root_string(
+                input_json.clone(),
+                input_json.encode_utf16().collect(),
+            )
+            .map_err(|error| ToolError::InvalidInput(error.to_string().into()))?;
+            let data = Utf16JsonProjection::object(vec![("input_json".into(), input_json)])
+                .map_err(|error| ToolError::InvalidInput(error.to_string().into()))?;
+            Ok(ToolCallResult::from_data(data))
+        }
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_preserves_utf16_updated_input_through_tool_and_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
+        let orch = orch_with_tools(dir.path().to_path_buf(), vec![Arc::new(ExactInputEchoTool)])
+            .with_jsonl_writer(writer);
+        let id = ToolUseId::new();
+        orch.session
+            .lock()
+            .await
+            .history
+            .push(assistant_with_tool_use(
+                &id,
+                "ExactInputEcho",
+                source_fixture!({}),
+            ));
+        let updated =
+            Utf16JsonProjection::parse(r#"{"text":"\udfff","\ud901":"approved"}"#).unwrap();
+        assert!(orch
+            .run_orphaned_permission(
+                &id,
+                lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                    updated_input: Some(updated.clone()),
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                }
+            )
+            .await
+            .unwrap());
+        let (content, failed) = last_tool_result(&orch.session.lock().await.history);
+        assert!(!failed);
+        let returned: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            returned["input_json"].as_str().unwrap(),
+            updated.to_json_string().unwrap()
+        );
+        let durable = tokio::fs::read_to_string(path).await.unwrap();
+        assert!(durable.contains("input_json"));
+        assert!(durable.contains("udfff"));
+        assert!(durable.contains("ud901"));
+    }
 
     fn assistant_with_tool_use(
         tuid: &ToolUseId,
@@ -6320,6 +6453,77 @@ mod pre_tool_hook_tests {
         let mut exec = HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
         exec.register_builtin(Arc::new(CtxCapturingHook { seen }));
         Arc::new(exec)
+    }
+
+    #[tokio::test]
+    async fn tool_and_lifecycle_hooks_keep_live_route_and_exact_inheritance() {
+        struct Budget;
+        #[async_trait]
+        impl lingxi_core::host::budget::BudgetEnforcerHandle for Budget {
+            async fn check_and_charge(
+                &self,
+                _: u64,
+            ) -> Result<(), lingxi_core::host::budget::BudgetError> {
+                Ok(())
+            }
+
+            async fn snapshot_total_nano_usd(&self) -> u64 {
+                0
+            }
+        }
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(EchoTool {
+            permission_checks: None,
+        }));
+        let registry = Arc::new(registry);
+        let gate = Arc::new(crate::test_support::NoOpPermissionGate);
+        let inheritance = lingxi_core::host::SubagentInheritance {
+            tool_invoker: Arc::new(
+                tool_api::RegistryToolInvoker::new(registry.clone()).with_gate(gate.clone()),
+            ),
+            budget: Arc::new(Budget),
+        };
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            registry,
+            ctx_capturing_executor(seen.clone()),
+            gate,
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+        .with_hook_agent_inheritance(inheritance.clone());
+
+        for profile in ["provider-a", "provider-b"] {
+            {
+                let mut session = orch.session.lock().await;
+                session.model = "shared-id".into();
+                session.model_profile = Some(profile.into());
+            }
+            *seen.lock().unwrap() = None;
+            let uses = vec![(ToolUseId::new(), "Echo".into(), source_fixture!({}), None)];
+            dispatch_tool_uses_tracked(&orch, &uses, None)
+                .await
+                .unwrap();
+            let captured = seen.lock().unwrap().clone().expect("PreToolUse hook fired");
+            let lifecycle = orch.expansion_hook_context().await;
+            for context in [captured, lifecycle] {
+                let selected = context.model_selection.expect("host route supplied");
+                assert_eq!(selected.model, "shared-id");
+                assert_eq!(selected.model_profile.as_deref(), Some(profile));
+                let inherited = context
+                    .inherit
+                    .expect("owning session inheritance supplied");
+                assert!(Arc::ptr_eq(
+                    &inherited.tool_invoker,
+                    &inheritance.tool_invoker
+                ));
+                assert!(Arc::ptr_eq(&inherited.budget, &inheritance.budget));
+            }
+        }
     }
 
     #[tokio::test]

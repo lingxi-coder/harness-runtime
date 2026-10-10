@@ -1,7 +1,7 @@
 use crate::mobile::{
     local_apps_host::{LocalAppsAgentExecutor, LocalAppsHostBroker},
     local_apps_llm::{ApiServiceModel, LocalAppsLlm},
-    local_apps_mcp::{LOCAL_APPS_REGISTRY_KEY, LocalAppsMcpTransport},
+    local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::profile_apps,
     mcp_transport::MobileMcpTransport,
     mobile_command_registry, register_android_ui_automation,
@@ -12,9 +12,9 @@ use client::adapter::{
     PermissionRequestSink,
 };
 use client::protocol::events::ClientEvent;
-use command_api::RegistrySlashDispatcher;
 use command_api::model::BuiltinCommandHandler;
 use command_api::parse_slash_command;
+use command_api::RegistrySlashDispatcher;
 use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream, Platform};
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
@@ -30,8 +30,8 @@ use orchestrator::{
     ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig, ProviderApiAdapter,
     StreamingApiClient,
 };
-use permission::PermissionMode;
 use permission::gate::PermissionGate;
+use permission::PermissionMode;
 use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
 use secret::CredentialManager;
 use std::collections::HashMap;
@@ -42,13 +42,9 @@ use tool_api::SessionCwd;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 
 use super::{
-    ActiveTurn, LOCAL_APPS_MCP_TIMEOUT_MS, MOBILE_CRON_HANDLES, MobileAppAgentExecutor,
-    MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle, MobileMcpReloadJob,
-    MobileMsgQueueInput, MobileOAuthManager, MobileRuntime, MobileSessionAgentObserver,
-    MobileWakeupDelivery, TurnLifecycleListener, anthropic_models, apply_mobile_profile_allowlist,
-    boot_backfill_sweep_should_run, build_mobile_runtime_environment,
-    build_mobile_subagent_env_renderer, fast_mode_preference, gate_mobile_git_ctx,
-    gate_mobile_shell_ctx, mint_app_init_session, mobile_apps_data_root,
+    anthropic_models, apply_mobile_profile_allowlist, boot_backfill_sweep_should_run,
+    build_mobile_runtime_environment, build_mobile_subagent_env_renderer, fast_mode_preference,
+    gate_mobile_git_ctx, gate_mobile_shell_ctx, mint_app_init_session, mobile_apps_data_root,
     mobile_builtin_plugin_enabled_from_settings, mobile_launch_is_interactive,
     mobile_local_app_scope_id, mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight,
     mobile_mcp_record_reload_intent, mobile_mcp_run_reload_job, mobile_provider_settings,
@@ -56,7 +52,11 @@ use super::{
     mobile_skill_listing_provider_with_settings, mobile_typescript_lsp_mode,
     mobile_typescript_lsp_ready, model_listings, model_preference, model_visible_mobile_cwd,
     permission_preference, provider_model_catalog_from_listings, resolve_default_model_ref,
-    run_app_boot_backfill_sweep, settings_commands, settle_mobile_loop_turn,
+    run_app_boot_backfill_sweep, settings_commands, settle_mobile_loop_turn, ActiveTurn,
+    MobileAppAgentExecutor, MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle,
+    MobileMcpReloadJob, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
+    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener,
+    LOCAL_APPS_MCP_TIMEOUT_MS, MOBILE_CRON_HANDLES,
 };
 
 fn source_string_projection(text: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
@@ -1339,13 +1339,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     //      - `with_prompt_runner(ApiClientHookPromptRunner)` evaluates inline
     //        single-turn `prompt` hooks over the SAME `api_client` the
     //        orchestrator drives (shared provider routing / auth / telemetry).
-    //      The `with_async_registry` + `with_agent_spawner` builders are
-    //      DELIBERATELY OMITTED: mobile has no subagent spawner, and with no
-    //      async/agent hook configured this is behavior-neutral (a non-blocking
-    //      hook falls back to running synchronously; an `agent` hook returns a
-    //      structured "not wired" error rather than spawning). The
-    //      `RuntimeSpawner` is the posix-minimal `PosixRuntime` (only the omitted
-    //      Agent/async arms consult it; the Command arm uses `process`).
+    // Agent hooks bind the real mobile spawner after the pool is assembled.
+    // Async command hooks remain synchronous because no async registry is wired.
     // Transcript sink for the per-hook-run `attachment` records claude-code
     // persists (one line per hook run). Created empty because the hook
     // executor is built BEFORE the orchestrator that owns the JSONL writer;
@@ -1356,6 +1351,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // own model), and the session does not exist yet. `attach`ed in step 8.
     let hook_prompt_runner = Arc::new(orchestrator::ApiClientHookPromptRunner::new(
         api_client.clone(),
+        model_resolution_context_provider.clone(),
     ));
     let hooks: Arc<hooks::HookExecutorImpl> = Arc::new(
         hooks::HookExecutorImpl::new(
@@ -1739,6 +1735,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     let subagent_spawner_arc = Arc::new(subagent_spawner_concrete);
     let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         subagent_spawner_arc.clone();
+    hooks.attach_agent_spawner(Arc::downgrade(&subagent_spawner));
 
     // (c) Budget enforcer over the session CostTracker (desktop parity —
     // background subagents halt at the same session ceiling as the main loop;
@@ -2341,28 +2338,27 @@ pub(super) async fn build_mobile_inner_with_ask(
     // MEM-1 ACTIVATION on mobile — the same gate as desktop,
     // `memory::auto_memory_enabled`, which claude-code defaults ON (`dLt()` ends
     // `return!0`). When active, wire the memdir-backed memory selector so
-    // relevant project memdir entries surface each turn via a Haiku-class side
-    // query (a `ProviderSideQueryClient` over the device HTTP transport +
-    // `cfg.api_key`, independent of the multi-provider turn client).
+    // relevant project memdir entries surface each turn via the same provider
+    // service and live model/profile as the session's main turn.
     //
     // Disable with `autoMemoryEnabled:false` or the `*_DISABLE_AUTO_MEMORY` /
-    // `*_SIMPLE` env killswitches. A missing/unusable key makes the side query
+    // `*_SIMPLE` env killswitches. A failed provider call makes the side query
     // fail → empty surfaced set (never breaks a turn).
     let memdir_prefetch = if memory::auto_memory_enabled(
         &memory::AutoMemoryEnv::from_process_env(),
         provider_settings.auto_memory_enabled,
     ) {
-        // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
+        // `cfg.lingxi_home` is the device config dir; the helper re-appends
         // the config-home segment, so pass its PARENT as `home`.
         let home = cfg
             .lingxi_home
             .parent()
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(|| cwd.clone());
-        Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
-            cfg.api_key.clone(),
-            Some(cfg.api_base.clone()),
-            api_service.transport(),
+        Some(orchestrator::prompt::build_memdir_prefetch(
+            Arc::new(sidequery::ProviderSideQueryClient::from_service(
+                api_service.clone(),
+            )),
             Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
                 as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             &home,
@@ -2406,6 +2402,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     let app_agent_executor: Arc<dyn LocalAppsAgentExecutor> =
         Arc::new(MobileAppAgentExecutor::new(
             orch_cfg.clone(),
+            default_model_profile.clone(),
+            model_resolution_context_provider.clone(),
             api_client.clone(),
             streaming_api.clone(),
             hooks.clone(),
@@ -2429,6 +2427,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         // `cwd` is reused below by the batch-8 registration, so clone here.
         cwd.clone(),
     )
+    .with_hook_agent_inheritance(parked_agent_restore_inheritance.clone())
     .with_dynamic_workflows_gate(dynamic_workflows_gate)
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())
     .with_instruction_user_email_provider(instruction_identity.clone())
@@ -2650,13 +2649,6 @@ pub(super) async fn build_mobile_inner_with_ask(
 
     // (8) Command registry through the mobile composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
-    // TPM-C (mobile step 2): seed the initial model_profile from a
-    // profile-qualified default_model.  SessionState::empty starts model_profile
-    // at None; this is a no-op when default_model is a bare id.
-    if let Some(profile) = default_model_profile.as_deref() {
-        orch.seed_initial_model_profile(&default_model_id, profile)
-            .await;
-    }
     orch.spawn_startup_responses_websocket_prewarm();
     // Fill the shared registry slot so batch-8, the slash dispatcher, the
     // per-turn skill listing, and the Skill tool all observe ONE command set.
@@ -3006,7 +2998,7 @@ pub fn build_mobile_engine_inner(
     // reserved address space, not resident memory.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_stack_size(8 * 1024 * 1024)
+        .thread_stack_size(crate::RUNTIME_THREAD_STACK_SIZE)
         .build()
         .map_err(|e| MobileEngineError::Internal(format!("tokio runtime build failed: {e}")))?;
 

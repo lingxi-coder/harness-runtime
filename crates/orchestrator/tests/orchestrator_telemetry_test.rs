@@ -54,7 +54,8 @@ async fn run_turn_emits_started_and_completed_in_order() {
     let resp = mock_message_response(
         vec![LlmContentBlock::Text {
             text: "hi".into(),
-            cache_control: None, citations: None,
+            cache_control: None,
+            citations: None,
         }],
         Some("end_turn"),
     );

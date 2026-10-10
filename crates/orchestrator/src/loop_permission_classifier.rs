@@ -388,7 +388,8 @@ fn report_transcript_blocks(request: &ClassifierOnlyReviewRequest) -> Vec<Utf16J
         .flat_map(|content| content.iter())
         .find_map(|block| match block {
             ContentBlock::ToolUse { name, input, .. }
-                if name == "SubagentHandback" && tool_summary(name, input) == request.action =>
+                if name == "SubagentHandback"
+                    && tool_summary(name, input).as_str() == request.action.as_str() =>
             {
                 Some(input.clone())
             }
@@ -398,7 +399,7 @@ fn report_transcript_blocks(request: &ClassifierOnlyReviewRequest) -> Vec<Utf16J
             lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
                 .expect("null is valid JSON")
         });
-    let action: Utf16JsonProjection = request.action.clone().into();
+    let action = Utf16JsonProjection::from(request.action.as_str());
     transcript_blocks_with_action(
         &request.transcript,
         "SubagentHandback",
@@ -732,6 +733,7 @@ impl Transport for ProviderTransport {
             .map_err(classifier_query_error)?;
         let len = query.blocks.len();
         let mut messages = vec![llm_runtime::Message {
+            api_output_config: None,
             role: "user".into(),
             content: query
                 .blocks
@@ -759,6 +761,7 @@ impl Transport for ProviderTransport {
             messages.insert(
                 0,
                 llm_runtime::Message {
+                    api_output_config: None,
                     role: "user".into(),
                     content: vec![llm_runtime::ContentBlock::Text {
                         text: body,
@@ -1016,6 +1019,7 @@ mod tests {
                     "actual child instructions".into(),
                 ),
                 ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolUse {
                         id: lingxi_core::types::ToolUseId::new(),
@@ -1027,6 +1031,7 @@ mod tests {
                     resumable: None,
                 },
                 ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolUse {
                         id: lingxi_core::types::ToolUseId::new(),
@@ -1140,14 +1145,14 @@ mod tests {
                             .collect()
                     };
                     if message["type"] == "assistant" {
-                        ConversationMessage::Assistant {
+                        ConversationMessage::Assistant { per_turn_effort: None,
                             id: lingxi_core::types::MessageId::new(),
                             content,
                             stop_reason: None,
                             resumable: None,
                         }
                     } else {
-                        ConversationMessage::User {
+                        ConversationMessage::User { api_message_override: None,
                             id: lingxi_core::types::MessageId::new(),
                             content,
                             is_meta: message["isMeta"].as_bool().unwrap_or(false),
@@ -1236,6 +1241,7 @@ mod tests {
             ("Bash", source_json!({"command": "./deploy.sh prod"})),
         ] {
             body.push_str(&jsonl(&ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
                     id: lingxi_core::types::ToolUseId::new(),

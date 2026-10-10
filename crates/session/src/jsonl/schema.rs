@@ -402,6 +402,7 @@ const RECOGNIZED_EXTRA: &[&str] = &[
     "isApiErrorMessage",
     "apiErrorStatus",
     "effort",
+    "perTurnEffort",
     // SC-07: emitted by the common trailer (arm h), immediately before
     // `userType`, so it must not also fall out of the unrecognized-key tail.
     SESSION_KIND_KEY,
@@ -643,6 +644,7 @@ impl Serialize for JsonlMessage {
             push_projection(&mut fields, "uuid", string_projection(&self.uuid));
             push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
             push_extra_projection(&mut fields, &self.extra, "effort");
+            push_extra_projection(&mut fields, &self.extra, "perTurnEffort");
             push_extra_projection(&mut fields, &self.extra, "supersedesUuids");
         } else if is_attachment {
             if let Some(projection) = &self.attachment_projection {
@@ -651,6 +653,8 @@ impl Serialize for JsonlMessage {
             push_projection(&mut fields, "type", string_projection(&self.message_type));
             push_projection(&mut fields, "uuid", string_projection(&self.uuid));
             push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
+            push_extra_projection(&mut fields, &self.extra, "rendered");
+            push_extra_projection(&mut fields, &self.extra, "renderedRole");
         } else if is_refusal_fallback {
             push_projection(&mut fields, "type", string_projection(&self.message_type));
             for key in REFUSAL_FALLBACK_HEAD {
@@ -747,7 +751,8 @@ impl Serialize for JsonlMessage {
                     || (is_model_fallback && MODEL_FALLBACK_HEAD.contains(&key.as_str()))
                     || (is_refusal_fallback && REFUSAL_FALLBACK_HEAD.contains(&key.as_str()))
                     || (is_compact_boundary && BOUNDARY_HEAD_EXTRA.contains(&key.as_str()))
-                    || (is_attachment && key == "attachment")
+                    || (is_attachment
+                        && ["attachment", "rendered", "renderedRole"].contains(&key.as_str()))
                     || TOOL_RESULT_HEAD_EXTRA.contains(&key.as_str())
                     || key == "origin"
                     || (is_assistant && !is_api_error && key == "supersedesUuids")
@@ -817,6 +822,25 @@ fn option_string_projection(value: Option<&str>) -> Utf16JsonProjection {
 #[cfg(test)]
 mod attachment_envelope_tests {
     use super::{JsonlMessage, Utf16JsonProjection};
+
+    #[test]
+    fn captured_queued_rendering_precedes_trailer_in_both_native_rows() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../scripts/tests/headless-fixtures/native-2.1.293-queued-command-jsonl.json"
+        ))
+        .unwrap();
+        let mut count = 0;
+        for entry in fixture["rows"].as_array().unwrap() {
+            let raw = entry["rawLine"].as_str().unwrap();
+            if !raw.contains("\"type\":\"attachment\"") {
+                continue;
+            }
+            let row: JsonlMessage = serde_json::from_str(raw).unwrap();
+            assert_eq!(serde_json::to_string(&row).unwrap(), raw);
+            count += 1;
+        }
+        assert_eq!(count, 2);
+    }
 
     /// Real 2.1.220 `attachment` lines put the `attachment` payload BEFORE the
     /// `type` discriminator — outer key order

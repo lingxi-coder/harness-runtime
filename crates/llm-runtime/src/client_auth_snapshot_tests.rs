@@ -167,7 +167,7 @@ async fn prompt_cache_subscriber_uses_the_request_credential_snapshot_scopes() {
     let overage = Arc::new(AtomicBool::new(false));
     let client = runtime(first_party, store.clone());
     let mut request = crate::LlmRequest::new("snapshot-model").with_profile("snapshot");
-    request.execution.prompt_cache = Some(crate::PromptCacheRequestContext {
+    request.execution.prompt_cache = Some(crate::PromptCacheRequestContext {native_system_prefix:None,
         system: Some(SystemPromptInput::source_vector(
             vec![PromptText::from_string("system text")],
             None,
@@ -259,6 +259,7 @@ async fn account_change_after_request_build_binds_the_current_credential_generat
     let overage = Arc::new(AtomicBool::new(false));
     let mut request = crate::LlmRequest::new("snapshot-model").with_profile("snapshot");
     request.execution.prompt_cache = Some(crate::PromptCacheRequestContext {
+        native_system_prefix: None,
         system: Some(SystemPromptInput::source_vector(
             vec![PromptText::from_string("system text")],
             None,
@@ -354,6 +355,7 @@ async fn account_change_during_credential_load_keeps_the_request_generation_sepa
     let overage = Arc::new(AtomicBool::new(true));
     let mut request = crate::LlmRequest::new("snapshot-model").with_profile("snapshot");
     request.execution.prompt_cache = Some(crate::PromptCacheRequestContext {
+        native_system_prefix: None,
         system: Some(SystemPromptInput::source_vector(
             vec![PromptText::from_string("system text")],
             None,

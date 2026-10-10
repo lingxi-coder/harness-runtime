@@ -381,6 +381,7 @@ async fn tool_result_continuations_do_not_advance_the_plan_cadence() {
         let mut s = sess.lock().await;
         for _ in 0..10 {
             s.history.push(ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::ToolResult {
                     tool_use_id: lingxi_core::types::ToolUseId::new(),

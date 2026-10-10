@@ -1316,6 +1316,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "indexmap",
+ "json-projection",
  "jsonrpc",
  "libc",
  "mobile-linux-api",
@@ -2450,6 +2451,7 @@ dependencies = [
  "base64 0.22.1",
  "branding",
  "bridge",
+ "chrono",
  "client",
  "command-api",
  "compaction",
@@ -2617,6 +2619,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "branding",
  "core",
  "fs2",
  "futures-util",
@@ -3058,6 +3061,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-projection"
+version = "0.12.0"
+dependencies = [
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "jsonrpc"
 version = "0.12.0"
 dependencies = [
@@ -3065,6 +3078,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures",
+ "json-projection",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3522,6 +3536,7 @@ name = "lsp"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "core",
  "futures",
  "jsonrpc",
@@ -6575,6 +6590,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tool-api",
  "tracing",
  "workflow",
 ]
@@ -7043,6 +7059,8 @@ name = "tool-agent"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "boon",
+ "branding",
  "core",
  "once_cell",
  "permission",
@@ -7344,6 +7362,7 @@ name = "tool-skill"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "branding",
  "command-api",
  "compaction",
  "core",
@@ -8700,6 +8719,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "workflow"
 version = "0.12.0"
 dependencies = [
+ "branding",
  "core",
  "once_cell",
  "rquickjs",

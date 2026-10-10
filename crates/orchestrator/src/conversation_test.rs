@@ -75,7 +75,7 @@ mod turn_recovery_tests;
 mod output_style_reminder_tests;
 
 // ============================================================================
-// R-P1c/R-P1d: the leading `additionalContext` (`# claudeMd` / `# userEmail` /
+// R-P1c/R-P1d: the leading `additionalContext` (`# instructions` / `# userEmail` /
 // `# currentDate`) meta message — byte-lock against claude-code `A6n`.
 // ============================================================================
 #[cfg(test)]
@@ -145,12 +145,8 @@ mod skill_listing_reminder_tests;
 // ── `agent_listing_delta`: per-turn, transient agent catalog reminder ─────────
 //
 // Proves [`ConversationOrchestrator::agent_listing_reminder_message`]:
-// - GATE OFF (default): always `None`, and the inline `AgentTool` prompt is
-//   unchanged (asserted in `tool-agent` — here we just confirm the orchestrator
-//   side stays silent).
-// - GATE ON (`LINGXI_AGENT_LIST_IN_MESSAGES=1`, guarded by a process-wide
-//   lock): turn-0 full listing + "Available agent types for the Agent tool:"
-//   header; a later turn with no new types ⇒ `None`; a newly-added type ⇒ a
+// - Turn-0 full listing + "Available agent types for the Agent tool:"
+//   header; a later turn with no new types => `None`; a newly-added type => a
 //   delta with the "New agent types are now available…" header and ONLY the new
 //   line. Also gated on the `Agent` tool's presence + a wired catalog.
 #[cfg(test)]

@@ -1261,15 +1261,14 @@ impl PermissionPolicy {
     /// equals `agent_type` exactly. When several sources match, the one with the
     /// highest citation [`PermissionRuleSource::priority`] is returned (claude
     /// cites the first source in its walk). The deny rule keys on the `"Agent"`
-    /// tool name even when the call arrives via the legacy `Task` alias.
+    /// tool name.
     #[must_use]
     pub fn agent_type_deny_source(&self, agent_type: &str) -> Option<PermissionRuleSource> {
         self.deny_rules
             .values()
             .flat_map(|rules| rules.iter())
             .filter(|r| {
-                (r.value.tool_name == "Agent" || r.value.tool_name == "Task")
-                    && r.value.rule_content_text() == Some(agent_type)
+                r.value.tool_name == "Agent" && r.value.rule_content_text() == Some(agent_type)
             })
             .map(|r| r.source)
             .max_by_key(|s| s.priority())
@@ -1283,10 +1282,7 @@ impl PermissionPolicy {
         self.deny_rules
             .values()
             .flat_map(|rules| rules.iter())
-            .filter(|r| {
-                (r.value.tool_name == "Agent" || r.value.tool_name == "Task")
-                    && r.value.rule_content.is_some()
-            })
+            .filter(|r| r.value.tool_name == "Agent" && r.value.rule_content.is_some())
             .filter_map(|r| r.value.rule_content_text().map(str::to_owned))
             .collect()
     }
@@ -3076,7 +3072,7 @@ impl PermissionPolicy {
                 if rule.value.tool_name != tool_name {
                     return RulePatternMatch::NoMatch;
                 }
-                if tool_name == "Agent" || tool_name == "Task" {
+                if tool_name == "Agent" {
                     let actual = input
                         .get_property("subagent_type")
                         .and_then(|value| value.code_units().map(|units| units.to_vec()))
@@ -4481,7 +4477,7 @@ fn cached_glob_regex(pattern: &str) -> Option<regex::Regex> {
 ///
 /// - `WebFetch` → `domain:{hostname}` from `input.url`
 ///   (`WebFetchTool.ts:50-63`).
-/// - `Agent` (and its legacy alias `Task`) → the `subagent_type`, defaulting to
+/// - `Agent` → the `subagent_type`, defaulting to
 ///   `general-purpose` when omitted (claude-code `getDenyRuleForAgent`:
 ///   `ruleContent === agentType`, with the general-purpose default).
 /// - any other tool → `None` (no content scheme ⇒ a content rule never matches).
@@ -4499,7 +4495,7 @@ fn tool_content_key_units(tool_name: &str, input: &Utf16JsonProjection) -> Optio
                     .collect(),
             )
         }
-        "Agent" | "Task" => {
+        "Agent" => {
             // TS resolves an omitted `subagent_type` to the general-purpose
             // agent's type before matching deny rules.
             Some(

@@ -397,4 +397,45 @@ mod tests {
     fn json_result(caps: EffortCapabilities) -> Value {
         serde_json::json!({"supported": caps.supported, "max":caps.max,"xhigh":caps.xhigh})
     }
+    #[test]
+    fn native_identity_keeps_effort_with_base_override_but_custom_provider_does_not_gain_it() {
+        let mut profile = lingxi_llm_client::builtin_providers()
+            .unwrap()
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .unwrap();
+        profile.base_url = "http://configured-anthropic-base.test".into();
+        let mut request = LlmRequest::new("claude-sonnet-5-5");
+        request.execution.resolve_native_effort = true;
+        let policy = prepare(
+            &request,
+            ProtocolFamily::AnthropicMessages,
+            &ProviderId::AnthropicFirstParty,
+            &profile,
+            "claude-sonnet-5-5",
+            true,
+        )
+        .unwrap();
+        assert!(policy.supported);
+        assert_eq!(
+            policy
+                .value
+                .as_ref()
+                .and_then(|value| value.string_at(""))
+                .as_deref(),
+            Some("medium")
+        );
+        let custom = ProviderId::Custom {
+            name: "custom".into(),
+        };
+        assert!(prepare(
+            &request,
+            ProtocolFamily::AnthropicMessages,
+            &custom,
+            &profile,
+            "claude-sonnet-5-5",
+            true,
+        )
+        .is_none());
+    }
 }

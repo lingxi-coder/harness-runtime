@@ -494,6 +494,7 @@ mod projection_tests {
     #[test]
     fn an_assistant_turn_contributes_its_text_and_each_tool_call() {
         let msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -551,6 +552,7 @@ mod projection_tests {
     #[test]
     fn a_user_turn_contributes_text_and_tool_results_separately() {
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::ToolResult {
@@ -585,6 +587,7 @@ mod projection_tests {
     #[test]
     fn empty_text_is_not_activity() {
         let msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "  \n".into(),
@@ -601,6 +604,7 @@ mod projection_tests {
     #[test]
     fn a_system_message_contributes_nothing() {
         let msg = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: "you are…".into(),
             subtype: None,

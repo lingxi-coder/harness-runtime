@@ -53,6 +53,7 @@ async fn transcript_append_failure_is_silent_to_the_user() {
         .await;
 
     let per_block = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             lingxi_core::types::ContentBlock::Text {
@@ -71,6 +72,7 @@ async fn transcript_append_failure_is_silent_to_the_user() {
         .await;
 
     let merged = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "merged".into(),

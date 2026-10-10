@@ -474,9 +474,9 @@ async fn children_project_the_current_roots_same_full_context_and_files() {
         .load(&caller_cwd, InstructionScope::ManagedOnly)
         .await
         .unwrap();
-    assert!(full.user_context["claudeMd"].contains("root project instructions"));
-    assert!(managed.user_context["claudeMd"].contains("managed instructions"));
-    assert!(!managed.user_context["claudeMd"].contains("root project instructions"));
+    assert!(full.user_context["instructions"].contains("root project instructions"));
+    assert!(managed.user_context["instructions"].contains("managed instructions"));
+    assert!(!managed.user_context["instructions"].contains("root project instructions"));
     assert_eq!(
         managed.user_context["currentDate"],
         full.user_context["currentDate"]
@@ -493,7 +493,7 @@ async fn children_project_the_current_roots_same_full_context_and_files() {
         .load(&caller_cwd, InstructionScope::Full)
         .await
         .unwrap();
-    assert!(next.user_context["claudeMd"].contains("current root instructions"));
+    assert!(next.user_context["instructions"].contains("current root instructions"));
     assert_eq!(source.loads.load(Ordering::SeqCst), 2);
     assert!(provider.bind(&root).is_err());
 }
@@ -640,7 +640,7 @@ impl MemoryHierarchyProvider for ReservationGateMemory {
                 released = self.release_mode.wait(released).unwrap();
             }
         }
-        InstructionFilesMode::ClaudeMd
+        InstructionFilesMode::LingxiMd
     }
 }
 
@@ -702,10 +702,10 @@ async fn root_reservation_retains_identity_through_clear_and_preserves_old_waite
         .load(dir.path(), InstructionScope::Full)
         .await
         .unwrap();
-    assert!(current.user_context["claudeMd"].contains("current session"));
+    assert!(current.user_context["instructions"].contains("current session"));
     source.release_file.notify_one();
     let retired = old_reader.await.unwrap().unwrap();
-    assert!(retired.user_context["claudeMd"].contains("original waiter"));
+    assert!(retired.user_context["instructions"].contains("original waiter"));
     assert!(root
         .prompt_runtime
         .instruction_cache

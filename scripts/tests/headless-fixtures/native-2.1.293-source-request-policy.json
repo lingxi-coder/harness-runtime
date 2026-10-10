@@ -1,0 +1,119 @@
+{
+  "version": "2.1.293",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "method": "Bounded read-only embedded native source; main print and subagent policies distinguished; not a generic all-provider policy or Harness parity proof.",
+  "excerpts": [
+    {
+      "id": "main_print_display_selection",
+      "offset": 186792486,
+      "length": 514,
+      "sha256": "55b1f9059aca3e5723e2f0f507f730b4ae08b2c6c83d3e95ed674942667d53bc",
+      "source": "wThinkingSummaries??!1}function afs(e){if(e!==void 0)return{display:e,source:\"flag\"};let n=ut().showThinkingSummaries;if(n===void 0)return;return{display:n?\"summarized\":\"omitted\",source:\"setting\"}}function Sco({explicitDisplay:e,isNonInteractive:n,outputFormat:r,verbose:s}){if(e)return e;if(!n)return rDn()?\"summarized\":void 0;if(bco({isNonInteractive:n,outputFormat:r,verbose:s}))return\"omitted\";return}function bco({isNonInteractive:e,outputFormat:n,verbose:r}){return e&&(n===\"text\"||n===\"json\"&&!r)}function l"
+    },
+    {
+      "id": "subagent_display_selection",
+      "offset": 186793330,
+      "length": 315,
+      "sha256": "3337e4ffb7c00a0e1b89b8f5fe7f6201e45e9223abc2c263ed41095554c1ba85",
+      "source": "cfs(e,{useExactTools:n,forwardSubagentText:r,isAsync:s,isNonInteractiveSession:g,sessionDisplayExplicit:h,isRemoteWorker:b}){if(!g||n||r||s||e.type===\"disabled\")return e;if(!b&&(h||e.display===\"omitted\"))return e;return{...e,display:\"omitted\",displayExplicit:!1}}function Lne(){return C(\"tengu_turtle_carbon\",!0)}fu"
+    },
+    {
+      "id": "subagent_display_caller",
+      "offset": 199917975,
+      "length": 535,
+      "sha256": "b2a3aef1ce0ced3472bb93698438027f30669a63c16af78ff24f5c1ab1600ab1",
+      "source": "],debug:n.options.debug,verbose:n.options.verbose,mainLoopModel:je,fallbackModel:n.options.fallbackModel,thinkingConfig:cfs(n.options.thinkingConfig,{useExactTools:X??!1,forwardSubagentText:n.options.forwardSubagentText??!1,isAsync:T===\"background\",isNonInteractiveSession:Ee(),sessionDisplayExplicit:D4e(),isRemoteWorker:a.CLAUDE_CODE_REMOTE===!0||Boolean(a.CLAUDE_CODE_REMOTE_SESSION_ID)||Boolean(a.CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE)}),forwardSubagentText:n.options.forwardSubagentText,mcpClients:Cr,refreshMcpClients:n.options.ref"
+    },
+    {
+      "id": "display_updates_mode_selection",
+      "offset": 194706655,
+      "length": 495,
+      "sha256": "7a22060cf7d5196c2417354fe8ba750d6d75bb556e300b3cb02a9be1149939dc",
+      "source": "active:!1})}catch(r){c(V(r))}}function Har(){return a.CLAUDE_CODE_THINKING_DISPLAY_UPDATES??!0}function LZt(e,n){if(e===\"summarized\"||e===\"highlights\")return\"thinking_and_connector_text\";if(e===\"omitted\"&&!n)return\"none\";if(e!==\"omitted\"&&rDn())return\"thinking_and_connector_text\";return Har()?\"connector_text\":\"none\"}function Wqe(e){return!T6()&&oDn(e)&&(A6()||kco(e)&&Pe()!==\"gateway\")}function Zer(e){return A6()&&Wqe(e)}function NZt(){return(_o().displayUpdatesProbeFailures??0)<2}function F"
+    },
+    {
+      "id": "api_thinking_and_display_builder",
+      "offset": 194881405,
+      "length": 1400,
+      "sha256": "f4fae3782362071a348a62930af2cd52fb2d4506930484eb9095b2008f138b61",
+      "source": "?void 0:r.display===\"highlights\"&&Qen()?\"omitted\":r.display,Kc=void 0;if(ik&&Rt.thinking.supported)if(vTt({runtimeOverride:lct(Y.model),resolvedModel:Ze,canonicalModel:vt})===\"adaptive\")Kc={type:\"adaptive\",display:T_};else{let Al=ifs(Ze);if(r.type===\"enabled\"&&r.budgetTokens!==void 0)Al=r.budgetTokens;Al=Math.max(1024,Math.min(sk-1,Al)),Kc={budget_tokens:Al,type:\"enabled\",display:T_}}else if(r.type===\"disabled\"&&Pe()===\"firstParty\"&&!iS&&Rt.thinking.supported&&!Jd())Kc={type:\"disabled\"};let Zb;if(Kg){if(!Vo.includes(aU))Vo.push(aU);if(N3(Ui,aU,Es===\"bedrock\"),Lm!==void 0&&(Kc?.type===\"adaptive\"||Kc?.type===\"enabled\")&&!(\"thinking\"in Ui))Kc={...Kc,block_binding:{prefix_mismatch_behavior:Lm}},Zb=Lm}let aA=r.type===\"disabled\"?void 0:r,ZI=aA?.display,lR=\"none\";try{lR=LZt(ZI,aA?.displayExplicit??D4e())}catch(xi){c(xi)}let Ov=()=>{let xi=Vo.indexOf(uXt);if(xi!==-1)Vo.splice(xi,1)};if(Kc&&T_)Ov();switch(lR){case\"thinking_and_connector_text\":case\"none\":break;case\"connector_text\":{if((Kc?.type===\"adaptive\"||Kc?.type===\"enabled\")&&Wqe(Ze)&&!(\"thinking\"in Ui)&&!_f(Qe,J7)&&VI===\"idle\"&&!a.CLAUDE_CODE_SIMULATE_PROXY_USAGE){if(Kc={...Kc,display:\"updates\"},!Vo.includes(J7))Vo.push(J7);N3(Ui,J7,Es===\"bedrock\"),Ov()}break}}if(rKe(Ze)&&!Vo.includes(Lqe))Vo.push(Lqe);let eO=Kc?.type===\"enabled\"||Kc?.type===\"adaptive\"||Kc===void 0&&Jd(),Dv=Y.toolChoice;if(Dv?.type===\"tool\"&&eO)t(`tool_choice {type"
+    },
+    {
+      "id": "clear_thinking_edits_constructor",
+      "offset": 192980954,
+      "length": 219,
+      "sha256": "4f8d1d975dae15b39dcd11f3e79d510fe8614505b0f3c5794ad7250a09e3dcfb",
+      "source": "nxt(e){let{hasThinking:n=!1,toolClearing:r}=e??{},s=[];if(n)s.push({type:\"clear_thinking_20251015\",keep:\"all\"});if(r)s.push(r);return s.length>0?{edits:s}:void 0}var Hoo=new Set([\"claude-sonnet-4-6\",\"claude-opus-4-6\",\"c"
+    },
+    {
+      "id": "clear_thinking_caller",
+      "offset": 194883365,
+      "length": 295,
+      "sha256": "2316d693c8b30d8ea6374ab4d58ee3eb5e73a619edd463554745cbe8a9e46615",
+      "source": "inking_disabled\",{from:d(Ya.effort),to:d(Mrt),query_source:ts(Y.querySource)});Ya.effort=Mrt}let ak=nxt({hasThinking:ik,toolClearing:f7?.edit}),dR=Y.enablePromptCaching??uee(Ut??Gn.model),cR;if(jo()&&_e(()=>kT())&&!tLe()&&_e(()=>v_(Ht))&&!!Gn.fastMode&&!U8t(Gn.model))cR=\"fast\";if(qg&&!Vo.includ"
+    },
+    {
+      "id": "context_beta_definition",
+      "offset": 185321760,
+      "length": 265,
+      "sha256": "a272683b57cf1a9d4954031a45246277b964a5d0e31118e49106ad83f8c87870",
+      "source": "h\",Zu),cXt=y(\"interleaved_thinking\",\"interleaved-thinking-2025-05-14\"),h2=y(\"long_context\",\"context-1m-2025-08-07\"),IAe=y(\"context_management\",\"context-management-2025-06-27\"),Kne=y(\"structured_outputs\",\"structured-outputs-2025-12-15\"),r_r=y(\"web_search\",\"web-searc"
+    },
+    {
+      "id": "betas_selected_flag",
+      "offset": 194867220,
+      "length": 300,
+      "sha256": "1be690f4d98fad573e02511d3822b55dea9d39b672f1e6e26c2437c156244453",
+      "source": "ut_tokens,cacheCreationTokens:nd.cache_creation_input_tokens});else if(Iz&&nd.cache_read_input_tokens>0)npr(Uj,Gn)},wl=Jfr(n,nR,{skipGlobalCacheForSystemPrompt:uo,cacheTtl:tk}),Yl=it.length>0,Qd=[...Y.extraToolSchemas??[]];if(As)Qd.push({type:Jxt,name:kve,model:As,...kr&&{defer_loading:!0}});let Xl="
+    },
+    {
+      "id": "context_management_serialization_gate",
+      "offset": 194886665,
+      "length": 415,
+      "sha256": "7f35e1fa7d44821ef3d55fafe410eec661d0f7a02e4c8ed88b77c15f9faf3c64",
+      "source": "m.tools},tool_choice:Dv,...u0&&{betas:xT(fR)},metadata:KWe({agentContext:Y.agentContext}),max_tokens:sk,thinking:Kc,...c0!==void 0&&{temperature:c0},...ak&&Yl&&Vo.includes(IAe)&&{context_management:ak},...hve&&uf!==void 0&&{safeguards:[{type:Jue,classifier_context:uf}]},...!Ly&&kp?kp:{},...!Ly&&xy?xy:{},...Ia,...Ui,...{},...Object.keys(Ya).length>0&&{output_config:Ya},...cR!==void 0&&{speed:cR},...Qh!==null&&{th"
+    },
+    {
+      "id": "per_turn_effort_marker",
+      "offset": 194766406,
+      "length": 1280,
+      "sha256": "8c0920ed7dbacad82e18e21520ea1901dfae4cb962bb44fca21eec3f0178ed50",
+      "source": "n Ttn(C(Ndr,\"\"))}function Rtn(e){return e!==void 0||Sl()}function xtn(e,n){let{levels:r,times:s}=Fdr(e,n),g=[],h,b;for(let[w,M]of e.entries()){if(b!==void 0&&M.type!==\"user\"){if(h=b.effort??h,M.type===\"api_system\"){g.push({...M,outputConfig:b}),b=void 0;continue}g.push(Ctn(b)),b=void 0}if(g.push(M),M.type===\"user\"){let G=r!==void 0&&r[w]!==h?r[w]:void 0,q=s?.[w];b=G===void 0&&q===void 0?void 0:{...G!==void 0&&{effort:G},...q!==void 0&&{timing:{type:\"now\",now:q}}}}}if(b!==void 0)g.push(Ctn(b));return g}function Fdr(e,n){let r=n.effort===void 0?void 0:Array(e.length),s=n.now===void 0?void 0:Array(e.length),{effort:g,now:h}=n;for(let b=e.length-1;b>=0;b--){let w=e[b];if(w.type===\"assistant\"&&!w.isApiErrorMessage)g=(w.perTurnEffort===void 0?w.effort:w.perTurnEffort)??g,h=w.perTurnTiming;if(r!==void 0)r[b]=g;if(s!==void 0)s[b]=h}return{levels:r,times:s}}function Dhe(e){return Atn(e,()=>{return})}function Lhe(e){return Atn(e,({timing:n,...r})=>Object.keys(r).length>0?r:void 0)}function Atn(e,n){let r=[];for(let s of e){if(s.type!==\"api_system\"||s.outputConfig===void 0){r.push(s);continue}let{outputConfig:g,...h}=s,b=n(g);if(b!==void 0)r.push({...h,outputConfig:b});else if(h.message.content.length>0||(h.toolAdditions?.length??0)>0)r.push(h)}return r}function Ctn(e){r"
+    },
+    {
+      "id": "effort_marker_call_gate",
+      "offset": 194847700,
+      "length": 1700,
+      "sha256": "9d7acb7b2d55e5b6addc33c83589dd599bfcc6dad73375b9c789df1dfe0c9323",
+      "source": "inkingStripPlan,advisorStripPlan:n.advisorStripPlan,keptReminders:n.keptReminders===!0&&n.betas.includes(_2),reminderFold:M},ke=n.midConvLatchedOff?void 0:r,Se=Pk(h,n.tools,ke,_e);Mxn(Se,Uc(n.model).maxBase64Size),Ef(\"query_message_normalization_end\"),Se=oye(Y(Se,ke),_e.echoApiBlockOrder,_e.preserveTrailingThinking);let Te=n.betas.includes(iU),Ce=Be(r),xe={effort:Te&&D8t(r,Ce)?n.perTurnEffort:void 0,now:Te&&n.betas.includes(C6)&&Bgr(r,Ce)?n.perTurnNow:void 0},Ie=(Ze)=>xe.effort===void 0&&xe.now===void 0?Ze:xtn(Ze,xe);Se=Ie(Se);let Ue=null;if(!n.midConvLatchedOff&&(n.betas.includes(pS)||Te)){let Ze=Se;Ue=Ze.some((st)=>st.type===\"api_system\")?()=>oye(Y(Pk(h,n.tools,void 0,_e),void 0),_e.echoApiBlockOrder,_e.preserveTrailingThinking):()=>Ze}let Ne=null;if((_e.surfaceLateToolAdditions||_e.advisorToolChanges)&&Se.some((Ze)=>Ze.type===\"api_system\"&&((Ze.toolAdditions?.length??0)>0||(Ze.toolRemovals?.length??0)>0)))Ne=()=>Ie(Y(Pk(h,n.tools,ke,{..._e,surfaceLateToolAdditions:!1,advisorToolChanges:!1,inlineToolDefinitions:void 0}),ke));let Ye=null;if(_e.inlineToolDefinitions!==void 0&&Se.some((Ze)=>Ze.type===\"api_system\"&&Ze.toolDefinitions!==void 0))Ye=()=>Ie(Y(Pk(h,n.tools,ke,{..._e,inlineToolDefinitions:void 0,nameOnlyAnnouncements:new Set([..._e.nameOnlyAnnouncements??[],...n.byValueAnnouncements??[]])}),ke));return{messagesPreNormalize:h,messagesForAPI:Se,accountMemoryEpoch:Ueo(h,he,$G(()=>n.tools)).epoch,midConvFallback:Ue,toolChangeFallback:Ne,inlineToolsFallback:Ye,keptForeignSignatures:b,blocksEligible:_e.surfaceLateToolAdditions===!0}}function Gfr(e,n,r){if(n)return!1;let s=e.querySource===\"web_fetch_apply\";if(s){let w=ss(e.callerAnsweredQuerySource);if(w!==\"main\"&&w!==\""
+    },
+    {
+      "id": "effort_resolution",
+      "offset": 194860120,
+      "length": 2000,
+      "sha256": "dc977c709dc15d15d6cfa514f6c48dcc7d355b4f34eef5b37f54d86d9ee7e333",
+      "source": "string\"?zo.system:[...zo.system];if(Hwe=Vo,!v7e)Gn.system=Vo}if(zo.messages!==void 0){xv=[...zo.messages];let Vo=MCt(xv,Gn.messages.length);if(nUn(Vo))try{let Es=cd(Vo);MFe(Es),Vo=Es}catch{}Gn.messages=Vo}},Wr=_f(Qe,pS),si=Wr||_f(Qe,iU),ii=si||_f(Qe,C6),er=_f(Qe,_2);if(it=it.filter((Gn)=>!_f(Qe,Gn)&&!(si&&Gn===iU)&&!(ii&&Gn===C6)),Ut!==void 0){let Gn=_e(()=>lDn(Ut,{isAgenticQuery:st})),zo=(Vo)=>{if(Gn.includes(Vo)){if(!it.includes(Vo))it.push(Vo)}else it=it.filter((Es)=>Es!==Vo)};if(!Wr)zo(pS);if(!si)zo(iU);if(!ii)zo(C6);it=_e(()=>jZo(Qe,it,Ut,Y.model)),zo(Kne)}let fs=!nL(Y.querySource)&&!er&&it.includes(pS)&&_e(()=>Uhe(Ut??Y.model));if(fs&&!it.includes(_2))it.push(_2);let Zo=_e(()=>BOn({loopEffort:Y.refusalFallbackEffort,continuesMainConversation:c2(Y.agentContext)},Ze)),wr=_e(()=>Vw(Ze,Y.effortValue,{turnEffort:Y.turnEffort,hookEffortValue:Y.hookEffortValue,carriedEffort:Zo})),Jr=Zo===null?void 0:{level:Zo,outcome:els({carried:Zo,withIt:wr,withoutIt:_e(()=>Vw(Ze,Y.effortValue??Y.effortSetAsideByHold,{turnEffort:Y.turnEffort,hookEffortValue:Y.hookEffortValue,carriedEffort:null})),isSavedSetAside:Y.effortSetAsideByHold!==void 0})},Bs=_e(()=>QE(Ze)&&wr!==void 0?N1(wr):void 0),Us=Fp(Y.agentContext)&&(Y.querySource.startsWith(\"repl_main_thread\")||Y.querySource===\"sdk\"),Fr=Y.querySource.startsWith(\"repl_main_thread\")||Y.querySource===\"sdk\",wa=Us?\"foreground\":Y.agentContext.agentId;if(Fr)don(wa,G);let sa;if(Us)try{sa=bon(e)}catch(Gn){c(V(Gn))}let Ls=(Gn)=>{if(!Us||Gn===void 0)return{};try{let zo=h7(Ze);return{isDefaultEffort:Gn===zo,defaultEffortLevel:zo}}catch(zo){return c(V(zo)),{}}},zr=typeof wr===\"string\"&&!(r.type===\"disabled\"&&r.mechanical===!0)?Bs:void 0,Ao=it.includes(C6)?Ptn(new Date,Wno()):void 0,Cr=ir.some((Gn)=>!((\"defer_loading\"in Gn)&&Gn.defer_loading===!0))||(Y.extraToolSchemas??[]).some((Gn)=>!((\"defer_loading\"in Gn)&&Gn.defer_loading===!0)),kr=Y.advisorDeferred===!0&&sn!==void 0&&it.includes(A_)&&Cr,As=Y.advisorDeferred===!0&&Y.advisorActive===!1&&!kr?vo"
+    },
+    {
+      "id": "system_wire_projection",
+      "offset": 194971900,
+      "length": 1200,
+      "sha256": "4c141b94248a224146a9ffd4a85c154a451688decfafd728b300c17bf9c321b3",
+      "source": "chingEnabled:n,skipCacheWrite:s,forkPointPinned:Ze,markerCount:Ye.size,...Se!==void 0&&!w&&{querySource:ts(Se.querySource),...Se.isMarkWanted&&{parentPromptEndMarked:st}}});let it;try{it=Tnn(e,G)}catch(Rt){c(Rt)}let vt=(it?.messages??e).map((Rt,Ft)=>{let Ut=Ye.has(Ft);if(Rt.type===\"user\")return Sfr(Rt,Ut,n,r);if(Rt.type===\"api_system\"){let Ht=Ut&&n&&xe,Gt=Rt.ephemeralSuffix?[{type:\"text\",text:Rt.ephemeralSuffix}]:[];if(Rt.toolAdditions&&Rt.toolAdditions.length>0||Rt.toolRemovals&&Rt.toolRemovals.length>0)return{role:\"system\",content:[...qZo(Rt.message.content,Rt.toolAdditions??[],Ht?zV({ttl:r}):void 0,Rt.toolRemovals??[],Rt.toolDefinitions),...Gt],...Rt.outputConfig&&{output_config:Rt.outputConfig}};let Vt=TA(Rt.message.content,Rt.ephemeralSuffix??\"\");return{role:\"system\",content:Ht?[{type:\"text\",text:Rt.message.content,cache_control:zV({ttl:r})},...Gt]:Vt||[],...Rt.outputConfig&&{output_config:Rt.outputConfig}}}return bfr(Rt,Ut,n,r,Ie)});if(it!==void 0)try{let Rt=Enn(vt,it);return q?.push(...Rt.wireIndexOf),Rt.wire}catch(Rt){c(Rt);let Ft=it.dropBase,Ut=[];return vt.forEach((Ht,Gt)=>{if(q?.push(Ut.length),!Ft.has(Gt))Ut.push(Ht)}),q?.push(Ut.length),Ut}return q?.push(...vt.keys(),v"
+    },
+    {
+      "id": "beta_selection",
+      "offset": 186801193,
+      "length": 1000,
+      "sha256": "d7f9aacf628f32366958f45a999de5e9ed83c86b25800f95e5cab30ff89aed4f",
+      "source": "function lDn(e,n){let r=[...Nne(e)];if(n?.isAgenticQuery&&!r.includes(yRt))r.push(yRt);let s=Be(e),g={model:e,canonical:s,perTurnTiming:Bgr(e,s)};for(let k of zN)if(k.when(g)&&!r.includes(k.beta))r.push(k.beta);let h=Mf();if(!h||h.length===0)return r;let b=ERt(h);if(!b)return t(\"SDK betas dropped: experimental betas are disabled by your organization's policy\",{level:\"debug\"}),r;let w=b.map(Auo);if(!nh())w=w.filter((k)=>{if(Fv.has(k))return!0;return t(`SDK beta '${k.header}' dropped on 3P`,{level:\"debug\"}),!1});return[...r,...w.filter((k)=>!r.includes(k))]}function cDn(e){return aDn(e).includes(Kne)}function y6(){let e=Nr();e.betas=ao(),e.betasCompiledOnly=ao()}var Fv=new Set([yRt,cXt,h2,IAe,Kne,r_r,Mqe,mLn,mF,gA,y2,pS,X7,aU,J7]);function Rhr(e){if(A6())return e;return e.filter((n)=>Fv.has(n))}import{join as mc}from\"path\";function Ea(e){return()=>Promise.reject(Object.assign(Error(\"this session keeps nothing on disk\"),{code:e}))}var YN={readRange:Ea(\"ENOENT\"),delete:Ea(\"ENOENT\"),mkdir:E"
+    },
+    {
+      "id": "per_turn_beta_gate",
+      "offset": 186799500,
+      "length": 1400,
+      "sha256": "3f26473bdb56830e62e67ae1e43cc82a3c4191cccca106077dace8322c7918b5",
+      "source": "en:(e)=>!a.DISABLE_INTERLEAVED_THINKING&&e.interleavedThinking},{beta:uXt,when:(e)=>e.firstPartyOnlyBetas&&e.interleavedThinking&&!Ee()&&!rDn()},{beta:X7,when:(e)=>e.interleavedThinking&&!e.experimentalBetasOff&&(e.provider===\"firstParty\"||(e.provider===\"bedrock\"||e.provider===\"mantle\")&&kco(e.model))},{beta:IAe,when:(e)=>{let n=a.USE_API_CONTEXT_MANAGEMENT&&!1,r=KN(e.model);return e.firstPartyCapabilityBetas&&(n||r)}},{beta:Kne,when:(e)=>{let n=C(\"tengu_tool_pear\",!1);return e.firstPartyCapabilityBetas&&sDn(e.model)&&n}},{beta:r_r,when:(e)=>e.provider===\"vertex\"&&vco(e.canonical)||e.provider===\"foundry\"},{beta:_Rt,when:(e)=>e.firstPartyOnlyBetas},{beta:pS,when:(e)=>B7(e.model)}],zN=[{beta:iU,when:(e)=>e.perTurnTiming||D8t(e.model,e.canonical)},{beta:C6,when:(e)=>e.perTurnTiming},{beta:A_,when:(e)=>_Mn()&&Tye(e.model)},{beta:Ky,when:(e)=>_Mn()&&Tye(e.model)&&JAt()},...[]];function aDn(e){return va((n)=>n.allModelBetas,e,()=>VN(e))}function VN(e){let n=T6(),r={model:e,canonical:Be(e),provider:Pe(),experimentalBetasOff:n,firstPartyOnlyBetas:nh(),firstPartyCapabilityBetas:k2(Mc(e))&&!n,interleavedThinking:oDn(e)},s=[];for(let h of jN)if(h.when(r))s.push(h.beta);let g=a.ANTHROPIC_BETAS;if(g)if(hF())t(\"ANTHROPIC_BETAS ignored: experimental betas are disabled by your organization's policy\",{level:\"debug\"});else s.push(...g.split(\",\").map((h)=>h.trim()).filter((h)=>h&&!wRt(h)).map(Auo"
+    }
+  ]
+}

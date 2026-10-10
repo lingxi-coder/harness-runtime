@@ -70,14 +70,14 @@ pub(crate) async fn resolve(ctx: &SubagentContext) -> Result<InstructionContext,
             original.rendering = rendering;
         }
     }
-    if !ctx.agent_definition.omit_claude_md {
+    if !ctx.agent_definition.omit_instructions {
         return Ok(original);
     }
     if matches!(
         ctx.agent_definition.source,
         AgentSource::BuiltIn | AgentSource::Settings(SettingsScope::Managed)
     ) {
-        original.user_context.remove("claudeMd");
+        original.user_context.remove("instructions");
         return Ok(original);
     }
     let Some(provider) = &ctx.instruction_provider else {
@@ -86,18 +86,18 @@ pub(crate) async fn resolve(ctx: &SubagentContext) -> Result<InstructionContext,
     let Ok(managed) = provider.load(cwd, InstructionScope::ManagedOnly).await else {
         return Ok(original);
     };
-    // Fl changes only claudeMd on the already-selected Full object. A root
+    // Fl changes only instructions on the already-selected Full object. A root
     // account/project change while the managed projection awaits must not
     // replace the other fields or their insertion order in this child.
     let managed_body = managed
         .user_context
-        .get("claudeMd")
+        .get("instructions")
         .filter(|body| !body.is_empty())
         .cloned();
     let has_managed = managed_body.is_some();
-    original.user_context.remove("claudeMd");
+    original.user_context.remove("instructions");
     if let Some(body) = managed_body {
-        original.user_context.insert("claudeMd".into(), body);
+        original.user_context.insert("instructions".into(), body);
     }
     original.sent_paths = managed.sent_paths;
     original.project_instruction_bodies = managed.project_instruction_bodies;

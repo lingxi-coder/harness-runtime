@@ -5,6 +5,7 @@ use crate::test_support::{
     StaticMemoryProvider,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
+
 use lingxi_core::types::ContentBlock;
 use serde_json::{json, Value};
 use tool_api::registry::ToolRegistry;
@@ -109,6 +110,7 @@ async fn cold_valid_session_context_freezes_missing_git_but_invalid_latest_uses_
             "type":"date",
             "date":crate::prompt::env_meta::current_date_string()
         })));
+
         let rows = payloads
             .into_iter()
             .map(|attachment| {
@@ -128,6 +130,7 @@ async fn cold_valid_session_context_freezes_missing_git_but_invalid_latest_uses_
                 row.message_type = "attachment".into();
                 row.message = Source::parse("null").unwrap();
                 row.extra = Source::object(vec![("attachment".into(), attachment)]).unwrap();
+
                 row
             })
             .collect::<Vec<_>>();
@@ -281,6 +284,7 @@ async fn prepared_main_request_and_raw_jsonl_match_native_initial_announcements(
                 row.extra.subprojection("/attachment").unwrap(),
                 source(&expected_attachment)
             );
+
             assert_eq!(row.uuid, message.id().as_uuid().to_string());
             if expected_bodies.is_empty() {
                 assert!(
@@ -487,6 +491,7 @@ async fn cold_raw_snapshot_routing_matches_native_and_invalid_latest_cannot_revi
                 row.extra =
                     Source::object(vec![("attachment".into(), source(&prior["attachment"]))])
                         .unwrap();
+
                 row
             })
             .collect::<Vec<_>>();
@@ -619,6 +624,7 @@ async fn auto_kept_tail_places_missing_native_announcements_before_summary_and_s
                 vec!["instructions", "session_context", "date"]
             );
             assert_eq!(attachments[0], source(&case["expected"][0]["attachment"]));
+
             assert!(history[1..4]
                 .iter()
                 .zip(announced.iter())

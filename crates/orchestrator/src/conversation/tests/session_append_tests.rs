@@ -143,6 +143,7 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
         },
     };
     let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             ContentBlock::Text {
@@ -215,43 +216,26 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
     let rows = read_rows(&path);
     assert_eq!(rows.len(), 1);
     assert_eq!(inputs[0]["uuid"], rows[0].uuid);
+    let disk_content = rows[0].message["content"]
+        .as_array()
+        .expect("assistant content array");
+    assert_eq!(disk_content[0]["text"], "merged-edited");
+    assert_eq!(disk_content[1]["text"], "merged-added");
+    assert_eq!(disk_content[2], serde_json::to_value(image).unwrap());
+    assert_eq!(disk_content[3], serde_json::to_value(document).unwrap());
+    assert_eq!(disk_content[4]["id"], tool_use_id.to_string());
+    assert_eq!(disk_content[4]["provider_id"], "toolu_source");
+    assert_eq!(disk_content[4]["name"], "Read");
     assert_eq!(
-        rows[0].message.string_at("/content/0/text"),
-        Some("merged-edited")
+        disk_content[4]["input"],
+        serde_json::json!({"file_path":"source.txt"})
     );
-    assert_eq!(
-        rows[0].message.string_at("/content/1/text"),
-        Some("merged-added")
-    );
-    assert_eq!(
-        rows[0].message.subprojection("/content/2").unwrap(),
-        generated_source(&serde_json::to_value(image).unwrap())
-    );
-    assert_eq!(
-        rows[0].message.subprojection("/content/3").unwrap(),
-        generated_source(&serde_json::to_value(document).unwrap())
-    );
-    assert_eq!(
-        rows[0].message.string_at("/content/4/id"),
-        Some(tool_use_id.as_str())
-    );
-    assert_eq!(
-        rows[0].message.string_at("/content/4/provider_id"),
-        Some("toolu_source")
-    );
-    assert_eq!(rows[0].message.string_at("/content/4/name"), Some("Read"));
-    assert_eq!(
-        rows[0].message.subprojection("/content/4/input").unwrap(),
-        generated_source(&serde_json::json!({"file_path":"source.txt"}))
-    );
-    assert!(
-        (0..rows[0].message.array_len("/content").unwrap()).all(|index| rows[0]
-            .message
-            .string_at(&format!("/content/{index}/text"))
-            != Some("remove this text"))
-    );
+    assert!(!disk_content
+        .iter()
+        .any(|block| block["text"] == "remove this text"));
 
     let result = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),
@@ -358,6 +342,7 @@ async fn per_block_session_append_updates_merged_history_and_jsonl_rows() {
     let (orchestrator, output) = build_orchestrator(root.path(), &path, REWRITE_MOD).await;
     let tool_use_id = ToolUseId::new();
     let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             ContentBlock::Text {
@@ -449,6 +434,7 @@ async fn duplicate_tool_use_anchors_replay_each_accepted_text_overlay() {
     let (orchestrator, output) = build_orchestrator(root.path(), &path, module).await;
     let duplicate_id = ToolUseId::new();
     let assistant = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![
             ContentBlock::ToolUse {
@@ -529,6 +515,7 @@ async fn compact_boundary_session_append_keeps_metadata_and_rewrites_disk_and_hi
     let path = root.path().join("session.jsonl");
     let (orchestrator, output) = build_orchestrator(root.path(), &path, REWRITE_MOD).await;
     let marker = ConversationMessage::System {
+        api_system: None,
         id: MessageId::new(),
         content: "Conversation compacted".into(),
         subtype: Some("compact_boundary".into()),

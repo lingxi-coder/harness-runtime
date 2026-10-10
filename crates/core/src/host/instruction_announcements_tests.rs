@@ -3,10 +3,11 @@ use crate::host::instruction_memory_sanitize::{js_trim, sanitize_memory_body};
 use serde_json::Value;
 
 fn oracle() -> Value {
-    serde_json::from_str(include_str!(
-        "../../tests/fixtures/instruction_announcements_2_1_286.json"
-    ))
-    .expect("pinned native announcement fixture")
+    // Keep the captured 2.1.286 asset immutable; only adapt its historical
+    // internal context key for this current-contract behavior regression.
+    let native = include_str!("../../tests/fixtures/instruction_announcements_2_1_286.json")
+        .replace("claudeMd", "instructions");
+    serde_json::from_str(&native).expect("pinned native announcement fixture")
 }
 
 fn projection(value: &Value) -> Utf16JsonProjection {

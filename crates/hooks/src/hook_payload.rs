@@ -921,6 +921,9 @@ pub struct AgentSpawnPayload {
     /// The requested model, when the spawn pinned one.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub model: Option<String>,
+    /// Configured provider route for the selected child model.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model_profile: Option<String>,
     /// Whether the spawn was requested as a background run.
     pub background: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]

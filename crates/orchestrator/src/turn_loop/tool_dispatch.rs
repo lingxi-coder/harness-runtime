@@ -4,7 +4,7 @@ use super::tool_results::{
 };
 use super::{
     apply_terminal_sequence, AGENT_TOOL_NAME, CANCEL_MESSAGE, ENTER_WORKTREE_TOOL_NAME,
-    LEGACY_AGENT_TOOL_NAME, PERMISSION_DENIED_RETRY_MESSAGE,
+    PERMISSION_DENIED_RETRY_MESSAGE,
 };
 use crate::autonomous_tool_scheduler::ToolDispatchPublicationFence;
 use crate::conversation::{
@@ -30,6 +30,47 @@ use tool_api::ContextModifier;
 
 #[path = "mod_agent_api.rs"]
 mod mod_agent_api;
+
+fn mod_tool_call_arguments(
+    input: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    if input.object_entries().is_none() {
+        return Utf16JsonProjection::object(Vec::new());
+    }
+    let shadowed = input
+        .subprojection("/$shadowed")
+        .ok()
+        .filter(|value| value.object_entries().is_some());
+    let mut arguments = input.clone();
+    for key in ["tool", "tool_use_id", "agentId", "consent", "$shadowed"] {
+        arguments.remove_field(key)?;
+    }
+    if let Some(shadowed) = shadowed {
+        arguments.merge_object_projection(&shadowed)?;
+    }
+    Ok(arguments)
+}
+
+#[cfg(test)]
+mod mod_tool_call_argument_source_tests {
+    use super::mod_tool_call_arguments;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    #[test]
+    fn arguments_strip_envelope_and_spread_shadowed_source_without_loss() {
+        let input = Utf16JsonProjection::parse(
+            r#"{"tool":"Read","tool_use_id":"id","agentId":"agent","consent":"ok","path":"original","$shadowed":{"path":"\ud800","extra":"\ud801"}}"#,
+        )
+        .unwrap();
+        let arguments = mod_tool_call_arguments(&input).unwrap();
+        assert_eq!(
+            arguments.to_json_string().unwrap(),
+            r#"{"path":"\ud800","extra":"\ud801"}"#
+        );
+        assert_eq!(arguments.string_units("/path"), Some(vec![0xd800]));
+        assert_eq!(arguments.string_units("/extra"), Some(vec![0xd801]));
+    }
+}
 
 fn source_from_value(value: &serde_json::Value) -> Utf16JsonProjection {
     Utf16JsonProjection::from_serde_value(value)
@@ -80,21 +121,6 @@ fn source_tool_search_reference_blocks(
         })
         .collect::<Vec<_>>();
     (!blocks.is_empty()).then_some(blocks)
-}
-
-fn mod_tool_call_arguments(input: &Utf16JsonProjection) -> Utf16JsonProjection {
-    let mut arguments = input.clone();
-    let shadowed = input.subprojection("/$shadowed").ok();
-    let _ = arguments.remove_field("$shadowed");
-    for key in ["tool", "tool_use_id", "agentId", "consent"] {
-        let _ = arguments.remove_field(key);
-    }
-    if let Some(shadowed) = shadowed.filter(|source| source.object_entries().is_some()) {
-        arguments
-            .merge_object_projection(&shadowed)
-            .expect("tool.call arguments are an object");
-    }
-    arguments
 }
 
 fn mod_tool_call_projects_consent_rejected(
@@ -1555,7 +1581,11 @@ impl ConversationOrchestrator {
         }
     }
 
-    async fn dispatch_mod_surface_event(&self, event_name: &str, input: serde_json::Value) {
+    pub(crate) async fn dispatch_mod_surface_event(
+        &self,
+        event_name: &str,
+        input: serde_json::Value,
+    ) {
         let Some(registry) = &self.lifecycle_runtime.hook_registry else {
             return;
         };
@@ -1633,6 +1663,15 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
                     .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))
             })
             .transpose()?)
+    }
+
+    async fn remote_ui_operation(
+        &self,
+        event: &str,
+        input: Utf16JsonProjection,
+        plugin: &str,
+    ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        self.remote_mod_ui_operation(event, input, plugin).await
     }
 
     async fn model_fork(
@@ -2393,7 +2432,8 @@ async fn dispatch_mod_session_tool_call(
         ));
     }
     let consent = prepared.consent().map(str::to_owned);
-    let input_args = mod_tool_call_arguments(&input);
+    let input_args = mod_tool_call_arguments(&input)
+        .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
     let tool_use_id = ToolUseId::from(context.virtual_tool_use_id.clone());
     let assistant_message_id = MessageId::parse_prefixed(&context.virtual_assistant_uuid)
         .ok_or_else(|| {
@@ -2401,13 +2441,19 @@ async fn dispatch_mod_session_tool_call(
                 "tool.call transaction has an invalid virtual assistant UUID".into(),
             )
         })?;
+    let history = { orch.session.lock().await.history.clone() };
+    let mut inherited = streaming_tool_context_base(orch, history).await;
+    inherited.tool_use_id = Some(tool_use_id.clone());
+    inherited.assistant_message_id = Some(assistant_message_id.clone());
+    inherited.agent_spawn_provenance = context.agent_spawn_provenance.clone();
+    let cancellation = context.cancellation.clone();
+    inherited.cancel = Some(cancellation.clone());
     let tool_uses = vec![(
         tool_use_id.clone(),
         prepared.canonical_tool_name().to_owned(),
         input_args,
         None,
     )];
-    let cancellation = context.cancellation.clone();
     let (dispatch, stage) = with_virtual_mod_result_stage(
         &tool_use_id,
         dispatch_tool_uses_tracked_deferred_core_with_tool(
@@ -2419,6 +2465,7 @@ async fn dispatch_mod_session_tool_call(
             consent,
             Some(context.agent_spawn_provenance.clone()),
             std::sync::Arc::clone(tool),
+            Some(inherited),
             publication_guard,
         ),
     )
@@ -2506,6 +2553,32 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
 
     async fn ui_selection(&self) -> Result<Option<Utf16JsonProjection>, hooks::mods::ModError> {
         hooks::mods::ModSessionContext::ui_selection(self.inner.as_ref()).await
+    }
+
+    async fn remote_ui_operation(
+        &self,
+        event: &str,
+        input: Utf16JsonProjection,
+        plugin: &str,
+    ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        if !self.publication_guard.is_current() {
+            return Err(hooks::mods::ModError::Unavailable(
+                "remote UI operation generation was discarded".into(),
+            ));
+        }
+        if let Some(cancellation) = self.publication_guard.generation_cancellation_token() {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => Err(hooks::mods::ModError::Unavailable(
+                    "remote UI operation generation was discarded".into(),
+                )),
+                result = self.inner.remote_mod_ui_operation(event, input, plugin) => result,
+            }
+        } else {
+            self.inner
+                .remote_mod_ui_operation(event, input, plugin)
+                .await
+        }
     }
 
     fn ui_invalidation_context(
@@ -4402,7 +4475,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
             }
             let publication = ToolResultPublication {
                 tool_use_id: id.clone(),
-                tool_use_result: Some(raw_result),
+                tool_use_result: Some(raw_result.into()),
                 mcp_meta: None,
                 turn_end: None,
                 denial_kind: None,
@@ -4666,6 +4739,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_with_tool(
     permission_consent: Option<String>,
     agent_spawn_provenance: Option<lingxi_core::host::subagent_spawn::AgentSpawnProvenance>,
     prepared_tool: std::sync::Arc<dyn tool_api::tool_trait::Tool>,
+    inherited_context: Option<ToolUseContext>,
     publication_fence: Option<std::sync::Arc<dyn HookPublicationGuard>>,
 ) -> Result<DeferredToolDispatch, OrchestratorError> {
     super::boxed_turn_future(|| {
@@ -4679,7 +4753,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_with_tool(
             permission_consent,
             agent_spawn_provenance,
             Some(prepared_tool),
-            None,
+            inherited_context,
             publication_fence,
         )
     })
@@ -4846,13 +4920,14 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // model-visible bytes, and registering a new tengu name would move the
         // parity telemetry-registry count. `CoercedInput::shape_class` carries
         // the value for a future wiring.
+        // A retained scheduler context may belong to a previous sibling call.
+        // Only an explicitly associated current-call carrier is admitted here.
         let coerced_input = tool_handle.coerce_input(input);
         let input = coerced_input
             .as_ref()
             .map_or(input, |coerced| &coerced.input);
         let normalized_input = tool_handle.parse_native_input(input).and_then(Result::ok);
         let input = normalized_input.as_ref().unwrap_or(input);
-
         // JSON-schema input gate (claude-code `toolExecution.ts:615`
         // `inputSchema.safeParse`): runs on the RAW `input` (pre-hook), AFTER the
         // unknown-tool arm and BEFORE the `validate_input` gate — the exact order
@@ -4862,7 +4937,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // malformed tool schema is treated as PASS (logged) — see
         // [`crate::schema_validation::validate_tool_input_schema`].
         if let Err(schema_error) =
-            crate::schema_validation::validate_tool_schema_detailed(tool_handle.as_ref(), input)
+            crate::schema_validation::validate_tool_schema_projected(tool_handle.as_ref(), input)
         {
             let detail = &schema_error.display;
             tool_handle
@@ -5067,6 +5142,12 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         let prompt_id = orch.prompt_runtime.current_prompt_id.lock().await.clone();
         let hook_ctx = HookContext {
             prompt_transcript: Some(orch.prompt_hook_transcript().await),
+            model_selection: Some(hooks::HookModelSelection {
+                model: ctx.options.main_loop_model.clone(),
+                model_profile: ctx.options.model_profile.clone(),
+            }),
+            inherit: orch.hook_agent_inheritance.clone(),
+            agent_depth: Some(ctx.depth),
             session_id,
             cwd: orch.current_cwd(),
             transcript_path,
@@ -6092,7 +6173,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                                 // REAL tool_use_id (so a stdio `can_use_tool` request is
                                 // byte-faithful) and applying the host's `updatedInput`
                                 // rewrite to the input the tool actually runs with.
-                                let ctx =
+                                let permission_ctx =
                                     lingxi_core::host::permission_gate::PermissionCheckContext {
                                         tool_use_id: Some(tool_use_id.to_string()),
                                         requires_user_interaction,
@@ -6121,7 +6202,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                                     || ask_reason_context.0.as_deref() == Some("hook")
                                 {
                                     orch.perms
-                                        .ask_via_transport(name, &effective_input, &ctx)
+                                        .ask_via_transport(name, &effective_input, &permission_ctx)
                                         .await
                                 } else if let Some(evaluation) =
                                     normal_tool_check_evaluation.as_ref()
@@ -6130,14 +6211,14 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                                         .ask_tool_check_via_transport(
                                             name,
                                             &effective_input,
-                                            &ctx,
+                                            &permission_ctx,
                                             evaluation,
                                             &resolution,
                                         )
                                         .await
                                 } else {
                                     orch.perms
-                                        .check_with_context(name, &effective_input, &ctx)
+                                        .check_with_context(name, &effective_input, &permission_ctx)
                                         .await
                                 };
                                 match outcome {
@@ -6593,7 +6674,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         let (execution_record, tool_outcome) = {
             // Hooks and approval may rewrite parameters after the initial
             // gates. Validate the exact input that is about to execute.
-            let final_validation = match crate::schema_validation::validate_tool_schema_detailed(
+            let final_validation = match crate::schema_validation::validate_tool_schema_projected(
                 tool_handle.as_ref(),
                 &effective_input,
             ) {
@@ -7283,57 +7364,43 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
         // SubagentStart + SubagentStop hooks (claude `executeSubagentStartHooks`
         // runAgent.ts:532; `executeStopHooks`→`SubagentStop` utils/hooks.ts:3653-3678).
         // claude fires both in `runAgent` on ONE canonical `agentId` (runAgent.ts:347).
-        // The port spawns subagents only via the dispatched `Agent`/`Task` tool, so we
-        // fire here at spawn-completion (alongside PostToolUse/WorktreeCreate). Fires on
-        // success AND failure (subagent started+stopped), NOT on pre-hook Block/deny
-        // (those `continue` before any spawn). Best-effort.
-        //
-        // #8 (real id): the Agent tool surfaces the child's REAL pool `AgentId` on
-        // `data.agentId` (C1 seam) so both events use one canonical id; a FAILED spawn
-        // (no `data`) falls back to a fresh `AgentId::new()` — the single residual.
+        // The Agent tool surfaces the allocated child's identity on success and
+        // in a typed terminal error. Admission failures have no child, so they
+        // must not manufacture lifecycle events or evaluate parent history.
         //
         // SINGLE-FIRE (R7): the real tool's runner ALREADY fires SubagentStart
         // (runAgent.ts:530-555) + the child's frontmatter SubagentStop, marking
         // `data.subagentHooksFired`. So: skip the chokepoint SubagentStart when the
-        // runner fired it (else fire — FakeAgentTool/failure); fire only the COMPLEMENT
+        // runner fired it; fire only the COMPLEMENT
         // SubagentStop via `execute_excluding_agent(child_id)` (omits the re-fired
         // frontmatter bucket, race-free vs `clear_agent_hooks`).
-        if name == AGENT_TOOL_NAME || name == LEGACY_AGENT_TOOL_NAME {
+        if name == AGENT_TOOL_NAME
+            && emit_payload
+                .at_pointer("/isAsync")
+                .and_then(JsonValueView::as_bool)
+                != Some(true)
+            && emit_payload
+                .at_pointer("/subagentStopHooksOwned")
+                .and_then(JsonValueView::as_bool)
+                != Some(true)
+        {
             let subagent_type = effective_input
                 .string_at("/subagent_type")
                 .unwrap_or_default()
                 .to_string();
-            // #8: recover the REAL child id surfaced on the success result's
-            // `data.agentId`. Absent (the failure path carries `ToolError`, no
-            // `data`) → fresh fallback id, the single residual divergence.
             let real_agent_id = emit_payload
                 .string_at("/agentId")
                 .and_then(lingxi_core::types::AgentId::parse_prefixed);
-            let child_id = real_agent_id.unwrap_or_else(lingxi_core::types::AgentId::new);
-            // R7: did the child runner already fire the canonical SubagentStart
-            // (+ its own frontmatter SubagentStop)? Only the REAL Agent tool sets
-            // this; FakeAgentTool fixtures and the failure path leave it absent.
+            // Completed results report the start lifecycle already owned by the
+            // runner. A failed allocated child may have stopped before startup;
+            // never manufacture a start event after that terminal failure.
             let runner_fired_start = emit_payload
                 .at_pointer("/subagentHooksFired")
                 .and_then(JsonValueView::as_bool)
                 .unwrap_or(false);
-            // G008: `fusion_tool_result` also stamps `subagentHooksFired: true`
-            // (a Fusion run's panels already fired their own hooks — or, for
-            // `fusion-panel`, none at all, by runner-side design) but NEVER an
-            // `agentId` — a Fusion run is N panels, not one child with a
-            // canonical id. That combination (`subagentHooksFired` true, no real
-            // `agentId`) can only be a Fusion result: an ordinary failed Agent
-            // spawn also lacks `agentId` but never sets `subagentHooksFired`
-            // either. Skip BOTH SubagentStart and SubagentStop here instead of
-            // firing a phantom `"fusion"` pair on a freshly-minted id that has
-            // no transcript and no real child behind it.
-            let is_fusion_result = runner_fired_start && real_agent_id.is_none();
-            if is_fusion_result {
-                tracing::debug!(
-                    tool_name = %name,
-                    "skipped chokepoint Subagent hooks for a Fusion tool result (no single child agent id)",
-                );
-            } else {
+            // Fusion results describe multiple panels and also lack one child
+            // identity; each panel owns its lifecycle hooks.
+            if let Some(child_id) = real_agent_id {
                 // Carry the dispatched `subagent_type` as the hook context's
                 // `agent_type` so the wire payload's `agent_type` is faithful
                 // (claude-code passes the subagent's `agentType` into the hooks).
@@ -7344,8 +7411,8 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     ..hook_ctx.clone()
                 };
                 // SubagentStart FIRST (claude start-then-stop), with the canonical id.
-                // SKIP when the runner already fired it (no production double-fire).
-                if !runner_fired_start {
+                // A failed startup never reaches the runner's start hook.
+                if !runner_fired_start && !is_error {
                     let start_event = HookEvent::SubagentStart {
                         agent_id: child_id,
                         agent_type: subagent_type,
@@ -7393,7 +7460,7 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     status,
                     runner_fired_start,
                     duration_ms = sa_dur_ms,
-                    "fired chokepoint SubagentStart (if runner didn't) + session/plugin SubagentStop after Agent/Task tool completed",
+                    "fired chokepoint SubagentStart (if runner didn't) + session/plugin SubagentStop after Agent tool completed",
                 );
             }
         }
@@ -7581,7 +7648,23 @@ pub(crate) async fn dispatch_tool_uses_tracked(
     ),
     OrchestratorError,
 > {
-    let mut dispatched = dispatch_tool_uses_tracked_deferred(orch, tool_uses, cancel, None).await?;
+    let dispatched = dispatch_tool_uses_tracked_deferred(orch, tool_uses, cancel, None).await?;
+    finish_direct_tool_dispatch(orch, dispatched).await
+}
+
+/// Complete direct dispatch and orphan replay through the same batch hook owner.
+pub(crate) async fn finish_direct_tool_dispatch(
+    orch: &ConversationOrchestrator,
+    mut dispatched: DeferredToolDispatch,
+) -> Result<
+    (
+        Vec<ContentBlock>,
+        bool,
+        Vec<(ConversationMessage, ToolUseId)>,
+        Vec<ContextModifier>,
+    ),
+    OrchestratorError,
+> {
     if !dispatched.prevent_continuation {
         let batch_outcome = run_post_tool_batch_hooks(
             orch,
@@ -8009,7 +8092,7 @@ mod native_tool_check_metadata_tests {
         let roots = permission::FsRoots {
             cwd: dir.path().to_path_buf(),
             home: Some(dir.path().to_path_buf()),
-            lingxi_home: dir.path().join(".lingxi"),
+            lingxi_home: dir.path().join(branding::DOT_DIR),
         };
         let policy = Arc::new(
             PermissionPolicy::from_rules(

@@ -118,10 +118,25 @@ async fn output_accounting_failure_blocks_peer_after_awaited_listing() {
     let scope = WorkflowOutputScope::new(probe.clone());
     let run = run_workflow_script_with_live_updates_recorded(
         "return await parallel([() => agent('A', {agentType:'probe'}), () => agent('B', {agentType:'probe'})]);",
-        DEFAULT_WORKFLOW_SUBAGENT, "workflow", probe.clone(), probe.clone(), probe.clone(),
-        None, None, None, None, None, None, 0, NestedConfig::default(),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(AnalyticsBus::new()),
-        None, None, None, Some(scope),
+        DEFAULT_WORKFLOW_SUBAGENT,
+        "workflow",
+        probe.clone(),
+        probe.clone(),
+        probe.clone(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+        Some(scope),
     );
     let release = async {
         probe.accounting_failed.acquire().await.unwrap().forget();

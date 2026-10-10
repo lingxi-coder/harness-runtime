@@ -587,7 +587,7 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
         tool_ui::send_message::truncate_preview,
     )
     .with_spawn_seam(fixture.spawn_seam.clone());
-    let mut context = tool_api::ToolUseContext::model_seed("scripted".into());
+    let mut context = tool_api::ToolUseContext::model_seed("scripted".into(), None);
     context.agent_id = Some(worker.agent_id);
     let (progress, _events) = tool_api::progress_channel();
     let error = approval

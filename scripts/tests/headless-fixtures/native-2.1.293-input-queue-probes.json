@@ -1,0 +1,2132 @@
+{
+  "version": "2.1.293",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "captureRoot": "/tmp/headless-baseline-293-input-queue-live",
+  "scope": "Two native repetitions per research case; no Harness execution or byte parity claim",
+  "cases": {
+    "probe-input-burst": [
+      {
+        "side": "native-a",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--verbose",
+            "--session-id",
+            "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+            "--input-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--replay-user-messages"
+          ],
+          "sessionId": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+          "primarySessionId": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+          "sessionIds": [
+            "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+          ],
+          "pid": 40280,
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 2,
+          "resultSubtypes": [
+            "success",
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-input-queue-live-probe-input-burst-workspace/f37e8432-c4c0-4b46-85da-bd5eb7087881.jsonl",
+              "bytes": 5938,
+              "sha256": "4c8596add7590cd7c738cf76ad5d68e74eae4dc1b4d7f172600a8330e9e64628"
+            }
+          ],
+          "channels": {
+            "stdin": {
+              "bytes": 516,
+              "sha256": "0c6bbd72d77432c03b40ff29b24edf2344c936a4a55af8e3875d03477a919381"
+            },
+            "stdout": {
+              "bytes": 31110,
+              "sha256": "84bdf1a273416e5f75edc55327d5eddfae7074640d1b46f4120d33850c335952"
+            },
+            "stderr": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          }
+        },
+        "stdin": "{\"type\":\"control_request\",\"request_id\":\"fixture-initialize\",\"request\":{\"subtype\":\"initialize\",\"hooks\":{},\"sdkMcpServers\":[]}}\n{\"type\":\"user\",\"session_id\":\"f37e8432-c4c0-4b46-85da-bd5eb7087881\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000031\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_BATCH_A\"}}\n{\"type\":\"user\",\"session_id\":\"f37e8432-c4c0-4b46-85da-bd5eb7087881\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000032\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_BATCH_B\"}}\n",
+        "providerMessages": [
+          [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_BATCH_A",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "system",
+              "content": [],
+              "output_config": {
+                "effort": "medium"
+              }
+            }
+          ],
+          [
+            {
+              "role": "user",
+              "content": "HEADLESS_BATCH_A"
+            },
+            {
+              "role": "system",
+              "content": [],
+              "output_config": {
+                "effort": "medium"
+              }
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_BATCH_RESPONSE"
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_BATCH_B",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            }
+          ]
+        ],
+        "notableFrames": [
+          {
+            "ordinal": 2,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000031",
+              "state": "queued",
+              "uuid": "abce7913-6553-4262-94b3-0bb01ce02440",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 3,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000031",
+              "state": "started",
+              "uuid": "fcf32e2a-ede1-4931-80d9-492df81ef289",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 4,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000032",
+              "state": "queued",
+              "uuid": "362b2a79-af51-4e87-bade-3b9c148a47cb",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 6,
+            "row": {
+              "type": "system",
+              "subtype": "status",
+              "status": "requesting",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "uuid": "d63b1eb5-3ff3-4c0d-a5e5-d5af96420257",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000031"
+              ]
+            }
+          },
+          {
+            "ordinal": 7,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "HEADLESS_BATCH_A"
+              },
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "parent_tool_use_id": null,
+              "uuid": "00000000-0000-4000-8000-000000000031",
+              "timestamp": "2026-10-08T06:46:19.063Z",
+              "isReplay": true
+            }
+          },
+          {
+            "ordinal": 8,
+            "row": {
+              "type": "stream_event",
+              "event": {
+                "type": "message_start",
+                "message": {
+                  "id": "msg_headless_1",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "claude-sonnet-5-5",
+                  "content": [],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 0
+                  }
+                }
+              },
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "parent_tool_use_id": null,
+              "uuid": "4889d0de-b114-41b0-8fb5-8d2cbecc904a",
+              "ttft_ms": 6,
+              "thinking_display": "updates",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000031",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000031"
+              ]
+            }
+          },
+          {
+            "ordinal": 11,
+            "row": {
+              "type": "assistant",
+              "message": {
+                "id": "msg_headless_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HEADLESS_BATCH_RESPONSE"
+                  }
+                ],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                },
+                "context_management": null
+              },
+              "parent_tool_use_id": null,
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "uuid": "c4c3605e-676c-430c-bdf0-ea112fd93962",
+              "timestamp": "2026-10-08T06:46:19.083Z",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000031",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000031"
+              ]
+            }
+          },
+          {
+            "ordinal": 15,
+            "row": {
+              "duration_api_ms": 10,
+              "stop_reason": "end_turn",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "total_cost_usd": 2.2e-05,
+              "usage": {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 2,
+                "output_tokens_details": {
+                  "thinking_tokens": 0
+                },
+                "server_tool_use": {
+                  "web_search_requests": 0,
+                  "web_fetch_requests": 0
+                },
+                "service_tier": "standard",
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "inference_geo": "",
+                "iterations": [],
+                "speed": "standard",
+                "fallback_credit": null
+              },
+              "modelUsage": {
+                "claude-sonnet-5-5": {
+                  "inputTokens": 1,
+                  "outputTokens": 2,
+                  "cacheReadInputTokens": 0,
+                  "cacheCreationInputTokens": 0,
+                  "webSearchRequests": 0,
+                  "costUSD": 2.2e-05,
+                  "contextWindow": 1000000,
+                  "maxOutputTokens": 128000,
+                  "thinkingTokens": 0,
+                  "canonicalModel": "claude-sonnet-5-5",
+                  "provider": "firstParty",
+                  "costBasis": "list"
+                }
+              },
+              "permission_denials": [],
+              "terminal_reason": "completed",
+              "fast_mode_state": "off",
+              "fast_mode_disabled_reason": "sdk_opt_in_required",
+              "subagent_stats": {
+                "spawned": 0,
+                "requested": {
+                  "background": 0,
+                  "foreground": 0,
+                  "unset": 0
+                },
+                "started_in_background": 0,
+                "max_depth": 0,
+                "spawned_by_subagents": 0,
+                "completed": 0,
+                "failed": 0,
+                "killed": {
+                  "parent": 0,
+                  "user": 0,
+                  "system": 0
+                },
+                "refused": {
+                  "depth_limit": 0,
+                  "concurrency_limit": 0,
+                  "budget": 0
+                },
+                "by_type": {}
+              },
+              "safety_stops": 0,
+              "is_error": false,
+              "num_turns": 1,
+              "subtype": "success",
+              "api_error_status": null,
+              "result": "HEADLESS_BATCH_RESPONSE",
+              "ttft_ms": 22,
+              "type": "result",
+              "duration_ms": 25,
+              "uuid": "24bf9e5a-b835-45bd-857f-2dc2b0e8da51",
+              "ttft_stream_ms": 22,
+              "time_to_request_ms": 16,
+              "first_content_frame_ms": 22,
+              "user_message_uuid": "00000000-0000-4000-8000-000000000031",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000031"
+              ],
+              "request_sent_wall_ms": 1791441979077,
+              "first_request_input_tokens": 1,
+              "queued_turn_count": 0,
+              "result_index": 0
+            }
+          },
+          {
+            "ordinal": 16,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000031",
+              "state": "completed",
+              "uuid": "1c33a4e3-1fc0-414f-9264-2d3695c46985",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 17,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000032",
+              "state": "started",
+              "uuid": "9340725f-27e5-44b0-b366-469c0045d421",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 19,
+            "row": {
+              "type": "system",
+              "subtype": "status",
+              "status": "requesting",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "uuid": "b87f4340-fd16-40a6-85ed-97e430fcf91f",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000032"
+              ]
+            }
+          },
+          {
+            "ordinal": 20,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "HEADLESS_BATCH_B"
+              },
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "parent_tool_use_id": null,
+              "uuid": "00000000-0000-4000-8000-000000000032",
+              "timestamp": "2026-10-08T06:46:19.089Z",
+              "isReplay": true
+            }
+          },
+          {
+            "ordinal": 21,
+            "row": {
+              "type": "stream_event",
+              "event": {
+                "type": "message_start",
+                "message": {
+                  "id": "msg_headless_2",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "claude-sonnet-5-5",
+                  "content": [],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 0
+                  }
+                }
+              },
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "parent_tool_use_id": null,
+              "uuid": "7281d1f9-bd88-4974-8be8-b0f3c752fba0",
+              "ttft_ms": 2,
+              "thinking_display": "updates",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000032",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000032"
+              ]
+            }
+          },
+          {
+            "ordinal": 24,
+            "row": {
+              "type": "assistant",
+              "message": {
+                "id": "msg_headless_2",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HEADLESS_BATCH_SECOND_RESPONSE"
+                  }
+                ],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                },
+                "context_management": null
+              },
+              "parent_tool_use_id": null,
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "uuid": "894e2a75-b3e8-4f9f-b364-7de7023fc270",
+              "timestamp": "2026-10-08T06:46:19.094Z",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000032",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000032"
+              ]
+            }
+          },
+          {
+            "ordinal": 28,
+            "row": {
+              "duration_api_ms": 13,
+              "stop_reason": "end_turn",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "total_cost_usd": 4.4e-05,
+              "usage": {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 2,
+                "output_tokens_details": {
+                  "thinking_tokens": 0
+                },
+                "server_tool_use": {
+                  "web_search_requests": 0,
+                  "web_fetch_requests": 0
+                },
+                "service_tier": "standard",
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "inference_geo": "",
+                "iterations": [],
+                "speed": "standard",
+                "fallback_credit": null
+              },
+              "modelUsage": {
+                "claude-sonnet-5-5": {
+                  "inputTokens": 2,
+                  "outputTokens": 4,
+                  "cacheReadInputTokens": 0,
+                  "cacheCreationInputTokens": 0,
+                  "webSearchRequests": 0,
+                  "costUSD": 4.4e-05,
+                  "contextWindow": 1000000,
+                  "maxOutputTokens": 128000,
+                  "thinkingTokens": 0,
+                  "canonicalModel": "claude-sonnet-5-5",
+                  "provider": "firstParty",
+                  "costBasis": "list"
+                }
+              },
+              "permission_denials": [],
+              "terminal_reason": "completed",
+              "fast_mode_state": "off",
+              "fast_mode_disabled_reason": "sdk_opt_in_required",
+              "subagent_stats": {
+                "spawned": 0,
+                "requested": {
+                  "background": 0,
+                  "foreground": 0,
+                  "unset": 0
+                },
+                "started_in_background": 0,
+                "max_depth": 0,
+                "spawned_by_subagents": 0,
+                "completed": 0,
+                "failed": 0,
+                "killed": {
+                  "parent": 0,
+                  "user": 0,
+                  "system": 0
+                },
+                "refused": {
+                  "depth_limit": 0,
+                  "concurrency_limit": 0,
+                  "budget": 0
+                },
+                "by_type": {}
+              },
+              "safety_stops": 0,
+              "is_error": false,
+              "num_turns": 1,
+              "subtype": "success",
+              "api_error_status": null,
+              "result": "HEADLESS_BATCH_SECOND_RESPONSE",
+              "ttft_ms": 5,
+              "type": "result",
+              "duration_ms": 6,
+              "uuid": "6d354402-3558-4443-9fe5-bf6a6ed09d7f",
+              "ttft_stream_ms": 5,
+              "time_to_request_ms": 3,
+              "first_content_frame_ms": 5,
+              "user_message_uuid": "00000000-0000-4000-8000-000000000032",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000032"
+              ],
+              "request_sent_wall_ms": 1791441979092,
+              "first_request_input_tokens": 1,
+              "queued_turn_count": 0,
+              "result_index": 1
+            }
+          },
+          {
+            "ordinal": 29,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000032",
+              "state": "completed",
+              "uuid": "27578708-e70b-4da8-922b-644755b0b25a",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          }
+        ]
+      },
+      {
+        "side": "native-b",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--verbose",
+            "--session-id",
+            "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+            "--input-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--replay-user-messages"
+          ],
+          "sessionId": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+          "primarySessionId": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+          "sessionIds": [
+            "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+          ],
+          "pid": 40347,
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 2,
+          "resultSubtypes": [
+            "success",
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-input-queue-live-probe-input-burst-workspace/f37e8432-c4c0-4b46-85da-bd5eb7087881.jsonl",
+              "bytes": 5937,
+              "sha256": "240b4d77062ce4405a42b42e4e81d7f7ebb9a0ce54e83cd9f05d8cbae6f4a688"
+            }
+          ],
+          "channels": {
+            "stdin": {
+              "bytes": 516,
+              "sha256": "0c6bbd72d77432c03b40ff29b24edf2344c936a4a55af8e3875d03477a919381"
+            },
+            "stdout": {
+              "bytes": 31109,
+              "sha256": "cc43d2a648819dcfc7d16fce66073ce4106ebee57cfdbda9431fe729c494032d"
+            },
+            "stderr": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          }
+        },
+        "stdin": "{\"type\":\"control_request\",\"request_id\":\"fixture-initialize\",\"request\":{\"subtype\":\"initialize\",\"hooks\":{},\"sdkMcpServers\":[]}}\n{\"type\":\"user\",\"session_id\":\"f37e8432-c4c0-4b46-85da-bd5eb7087881\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000031\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_BATCH_A\"}}\n{\"type\":\"user\",\"session_id\":\"f37e8432-c4c0-4b46-85da-bd5eb7087881\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000032\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_BATCH_B\"}}\n",
+        "providerMessages": [
+          [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_BATCH_A",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "system",
+              "content": [],
+              "output_config": {
+                "effort": "medium"
+              }
+            }
+          ],
+          [
+            {
+              "role": "user",
+              "content": "HEADLESS_BATCH_A"
+            },
+            {
+              "role": "system",
+              "content": [],
+              "output_config": {
+                "effort": "medium"
+              }
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_BATCH_RESPONSE"
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_BATCH_B",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            }
+          ]
+        ],
+        "notableFrames": [
+          {
+            "ordinal": 2,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000031",
+              "state": "queued",
+              "uuid": "5b3513a1-a071-4af7-99ae-8f2e14ccb4f4",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 3,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000031",
+              "state": "started",
+              "uuid": "850a78ab-a42e-4111-92fe-8e14b17e1479",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 4,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000032",
+              "state": "queued",
+              "uuid": "feed04d6-61c1-4bd2-8aed-94c4caec2108",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 6,
+            "row": {
+              "type": "system",
+              "subtype": "status",
+              "status": "requesting",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "uuid": "d3ed1d6f-399f-4b81-b961-c1b2e668723a",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000031"
+              ]
+            }
+          },
+          {
+            "ordinal": 7,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "HEADLESS_BATCH_A"
+              },
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "parent_tool_use_id": null,
+              "uuid": "00000000-0000-4000-8000-000000000031",
+              "timestamp": "2026-10-08T06:46:19.279Z",
+              "isReplay": true
+            }
+          },
+          {
+            "ordinal": 8,
+            "row": {
+              "type": "stream_event",
+              "event": {
+                "type": "message_start",
+                "message": {
+                  "id": "msg_headless_1",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "claude-sonnet-5-5",
+                  "content": [],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 0
+                  }
+                }
+              },
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "parent_tool_use_id": null,
+              "uuid": "fa6ecfbb-e046-4a98-a4f7-839a72a332c2",
+              "ttft_ms": 3,
+              "thinking_display": "updates",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000031",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000031"
+              ]
+            }
+          },
+          {
+            "ordinal": 11,
+            "row": {
+              "type": "assistant",
+              "message": {
+                "id": "msg_headless_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HEADLESS_BATCH_RESPONSE"
+                  }
+                ],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                },
+                "context_management": null
+              },
+              "parent_tool_use_id": null,
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "uuid": "10bdeee3-c4c2-4fe7-9236-92d05040d68d",
+              "timestamp": "2026-10-08T06:46:19.294Z",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000031",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000031"
+              ]
+            }
+          },
+          {
+            "ordinal": 15,
+            "row": {
+              "duration_api_ms": 7,
+              "stop_reason": "end_turn",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "total_cost_usd": 2.2e-05,
+              "usage": {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 2,
+                "output_tokens_details": {
+                  "thinking_tokens": 0
+                },
+                "server_tool_use": {
+                  "web_search_requests": 0,
+                  "web_fetch_requests": 0
+                },
+                "service_tier": "standard",
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "inference_geo": "",
+                "iterations": [],
+                "speed": "standard",
+                "fallback_credit": null
+              },
+              "modelUsage": {
+                "claude-sonnet-5-5": {
+                  "inputTokens": 1,
+                  "outputTokens": 2,
+                  "cacheReadInputTokens": 0,
+                  "cacheCreationInputTokens": 0,
+                  "webSearchRequests": 0,
+                  "costUSD": 2.2e-05,
+                  "contextWindow": 1000000,
+                  "maxOutputTokens": 128000,
+                  "thinkingTokens": 0,
+                  "canonicalModel": "claude-sonnet-5-5",
+                  "provider": "firstParty",
+                  "costBasis": "list"
+                }
+              },
+              "permission_denials": [],
+              "terminal_reason": "completed",
+              "fast_mode_state": "off",
+              "fast_mode_disabled_reason": "sdk_opt_in_required",
+              "subagent_stats": {
+                "spawned": 0,
+                "requested": {
+                  "background": 0,
+                  "foreground": 0,
+                  "unset": 0
+                },
+                "started_in_background": 0,
+                "max_depth": 0,
+                "spawned_by_subagents": 0,
+                "completed": 0,
+                "failed": 0,
+                "killed": {
+                  "parent": 0,
+                  "user": 0,
+                  "system": 0
+                },
+                "refused": {
+                  "depth_limit": 0,
+                  "concurrency_limit": 0,
+                  "budget": 0
+                },
+                "by_type": {}
+              },
+              "safety_stops": 0,
+              "is_error": false,
+              "num_turns": 1,
+              "subtype": "success",
+              "api_error_status": null,
+              "result": "HEADLESS_BATCH_RESPONSE",
+              "ttft_ms": 17,
+              "type": "result",
+              "duration_ms": 20,
+              "uuid": "93779c9e-9b09-4a45-8f61-362e6d1890e9",
+              "ttft_stream_ms": 17,
+              "time_to_request_ms": 14,
+              "first_content_frame_ms": 17,
+              "user_message_uuid": "00000000-0000-4000-8000-000000000031",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000031"
+              ],
+              "request_sent_wall_ms": 1791441979290,
+              "first_request_input_tokens": 1,
+              "queued_turn_count": 0,
+              "result_index": 0
+            }
+          },
+          {
+            "ordinal": 16,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000031",
+              "state": "completed",
+              "uuid": "6b4f274a-972a-4eed-9373-ac520f5e1c60",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 17,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000032",
+              "state": "started",
+              "uuid": "b9ccece6-31e1-4b20-810f-ce5ca48e7da5",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          },
+          {
+            "ordinal": 19,
+            "row": {
+              "type": "system",
+              "subtype": "status",
+              "status": "requesting",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "uuid": "7509c910-ca9f-4782-bc47-18bb0489873a",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000032"
+              ]
+            }
+          },
+          {
+            "ordinal": 20,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "HEADLESS_BATCH_B"
+              },
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "parent_tool_use_id": null,
+              "uuid": "00000000-0000-4000-8000-000000000032",
+              "timestamp": "2026-10-08T06:46:19.299Z",
+              "isReplay": true
+            }
+          },
+          {
+            "ordinal": 21,
+            "row": {
+              "type": "stream_event",
+              "event": {
+                "type": "message_start",
+                "message": {
+                  "id": "msg_headless_2",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "claude-sonnet-5-5",
+                  "content": [],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 0
+                  }
+                }
+              },
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "parent_tool_use_id": null,
+              "uuid": "f0bea170-1914-4268-8d55-1791931b9259",
+              "ttft_ms": 3,
+              "thinking_display": "updates",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000032",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000032"
+              ]
+            }
+          },
+          {
+            "ordinal": 24,
+            "row": {
+              "type": "assistant",
+              "message": {
+                "id": "msg_headless_2",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HEADLESS_BATCH_SECOND_RESPONSE"
+                  }
+                ],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                },
+                "context_management": null
+              },
+              "parent_tool_use_id": null,
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "uuid": "3552f50e-1990-4882-a34b-d83723fa5288",
+              "timestamp": "2026-10-08T06:46:19.305Z",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000032",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000032"
+              ]
+            }
+          },
+          {
+            "ordinal": 28,
+            "row": {
+              "duration_api_ms": 11,
+              "stop_reason": "end_turn",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881",
+              "total_cost_usd": 4.4e-05,
+              "usage": {
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 2,
+                "output_tokens_details": {
+                  "thinking_tokens": 0
+                },
+                "server_tool_use": {
+                  "web_search_requests": 0,
+                  "web_fetch_requests": 0
+                },
+                "service_tier": "standard",
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "inference_geo": "",
+                "iterations": [],
+                "speed": "standard",
+                "fallback_credit": null
+              },
+              "modelUsage": {
+                "claude-sonnet-5-5": {
+                  "inputTokens": 2,
+                  "outputTokens": 4,
+                  "cacheReadInputTokens": 0,
+                  "cacheCreationInputTokens": 0,
+                  "webSearchRequests": 0,
+                  "costUSD": 4.4e-05,
+                  "contextWindow": 1000000,
+                  "maxOutputTokens": 128000,
+                  "thinkingTokens": 0,
+                  "canonicalModel": "claude-sonnet-5-5",
+                  "provider": "firstParty",
+                  "costBasis": "list"
+                }
+              },
+              "permission_denials": [],
+              "terminal_reason": "completed",
+              "fast_mode_state": "off",
+              "fast_mode_disabled_reason": "sdk_opt_in_required",
+              "subagent_stats": {
+                "spawned": 0,
+                "requested": {
+                  "background": 0,
+                  "foreground": 0,
+                  "unset": 0
+                },
+                "started_in_background": 0,
+                "max_depth": 0,
+                "spawned_by_subagents": 0,
+                "completed": 0,
+                "failed": 0,
+                "killed": {
+                  "parent": 0,
+                  "user": 0,
+                  "system": 0
+                },
+                "refused": {
+                  "depth_limit": 0,
+                  "concurrency_limit": 0,
+                  "budget": 0
+                },
+                "by_type": {}
+              },
+              "safety_stops": 0,
+              "is_error": false,
+              "num_turns": 1,
+              "subtype": "success",
+              "api_error_status": null,
+              "result": "HEADLESS_BATCH_SECOND_RESPONSE",
+              "ttft_ms": 7,
+              "type": "result",
+              "duration_ms": 8,
+              "uuid": "f6f7ec60-0d1b-41a2-9fc9-ce27ce9ac7b2",
+              "ttft_stream_ms": 6,
+              "time_to_request_ms": 4,
+              "first_content_frame_ms": 6,
+              "user_message_uuid": "00000000-0000-4000-8000-000000000032",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000032"
+              ],
+              "request_sent_wall_ms": 1791441979302,
+              "first_request_input_tokens": 1,
+              "queued_turn_count": 0,
+              "result_index": 1
+            }
+          },
+          {
+            "ordinal": 29,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000032",
+              "state": "completed",
+              "uuid": "5ef37c85-8ae8-43d5-95b9-493a34943413",
+              "session_id": "f37e8432-c4c0-4b46-85da-bd5eb7087881"
+            }
+          }
+        ]
+      }
+    ],
+    "probe-input-midtool": [
+      {
+        "side": "native-a",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "Bash",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--verbose",
+            "--session-id",
+            "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+            "--input-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--replay-user-messages",
+            "--allowedTools=Bash"
+          ],
+          "sessionId": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+          "primarySessionId": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+          "sessionIds": [
+            "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+          ],
+          "pid": 40418,
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-input-queue-live-probe-input-midtool-workspace/0e68f4f3-7799-4b4b-83b0-91608da1fc17.jsonl",
+              "bytes": 8833,
+              "sha256": "bf977b4b0e6f2bbeca523e12ca369f7e3e26f1a1aa4a93928915463a27228a30"
+            }
+          ],
+          "channels": {
+            "stdin": {
+              "bytes": 520,
+              "sha256": "669f154c39d97479df66dc46434822776f799cf203b92c06b5b5bc44c2466428"
+            },
+            "stdout": {
+              "bytes": 28015,
+              "sha256": "864d8f840d54a714ee1baacc233f654feb3aff70ede28120195456eaff0edb9f"
+            },
+            "stderr": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          }
+        },
+        "stdin": "{\"type\":\"control_request\",\"request_id\":\"fixture-initialize\",\"request\":{\"subtype\":\"initialize\",\"hooks\":{},\"sdkMcpServers\":[]}}\n{\"type\":\"user\",\"session_id\":\"0e68f4f3-7799-4b4b-83b0-91608da1fc17\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000041\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MIDTOOL_A\"}}\n{\"type\":\"user\",\"session_id\":\"0e68f4f3-7799-4b4b-83b0-91608da1fc17\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000042\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MIDTOOL_B\"}}\n",
+        "providerMessages": [
+          [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_MIDTOOL_A",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "system",
+              "content": [],
+              "output_config": {
+                "effort": "medium"
+              }
+            }
+          ],
+          [
+            {
+              "role": "user",
+              "content": "HEADLESS_MIDTOOL_A"
+            },
+            {
+              "role": "system",
+              "content": [],
+              "output_config": {
+                "effort": "medium"
+              }
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "tool_headless_1",
+                  "name": "Bash",
+                  "input": {
+                    "command": "sleep 0.2; printf HEADLESS_TOOL",
+                    "description": "Controlled local queue window"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "tool_use_id": "tool_headless_1",
+                  "type": "tool_result",
+                  "content": "HEADLESS_TOOL",
+                  "is_error": false
+                }
+              ]
+            },
+            {
+              "role": "system",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The user sent a new message while you were working:\nHEADLESS_MIDTOOL_B\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            }
+          ]
+        ],
+        "notableFrames": [
+          {
+            "ordinal": 2,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000041",
+              "state": "queued",
+              "uuid": "dcd74895-504d-4308-8a4e-9191540ece14",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 3,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000041",
+              "state": "started",
+              "uuid": "428a27cc-3ede-4c9b-ba0e-6645a06cd967",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 5,
+            "row": {
+              "type": "system",
+              "subtype": "status",
+              "status": "requesting",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "711d6462-45fa-48c3-abce-b894c85614a4",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041"
+              ]
+            }
+          },
+          {
+            "ordinal": 6,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "HEADLESS_MIDTOOL_A"
+              },
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "parent_tool_use_id": null,
+              "uuid": "00000000-0000-4000-8000-000000000041",
+              "timestamp": "2026-10-08T06:46:19.555Z",
+              "isReplay": true
+            }
+          },
+          {
+            "ordinal": 7,
+            "row": {
+              "type": "stream_event",
+              "event": {
+                "type": "message_start",
+                "message": {
+                  "id": "msg_headless_1",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "claude-sonnet-5-5",
+                  "content": [],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 0
+                  }
+                }
+              },
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "parent_tool_use_id": null,
+              "uuid": "b67e4823-2d54-403d-a209-082983ca04ea",
+              "ttft_ms": 5,
+              "thinking_display": "updates",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000041",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041"
+              ]
+            }
+          },
+          {
+            "ordinal": 10,
+            "row": {
+              "type": "assistant",
+              "message": {
+                "id": "msg_headless_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [
+                  {
+                    "type": "tool_use",
+                    "id": "tool_headless_1",
+                    "name": "Bash",
+                    "input": {
+                      "command": "sleep 0.2; printf HEADLESS_TOOL",
+                      "description": "Controlled local queue window"
+                    }
+                  }
+                ],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                },
+                "context_management": null
+              },
+              "parent_tool_use_id": null,
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "93b12b59-3271-4682-957b-aa24196a5757",
+              "timestamp": "2026-10-08T06:46:19.574Z",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000041",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041"
+              ]
+            }
+          },
+          {
+            "ordinal": 14,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000042",
+              "state": "queued",
+              "uuid": "40e71e7d-feb6-4c6f-9416-98b1620f9917",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 15,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": [
+                  {
+                    "tool_use_id": "tool_headless_1",
+                    "type": "tool_result",
+                    "content": "HEADLESS_TOOL",
+                    "is_error": false
+                  }
+                ]
+              },
+              "parent_tool_use_id": null,
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "d29e1ba1-b49b-484c-927d-4f8d39d9e2c2",
+              "timestamp": "2026-10-08T06:46:19.819Z",
+              "tool_use_result": {
+                "stdout": "HEADLESS_TOOL",
+                "stderr": "",
+                "interrupted": false,
+                "isImage": false,
+                "noOutputExpected": false
+              },
+              "tool_result_meta": [
+                {
+                  "id": "tool_headless_1",
+                  "permission_decision": {
+                    "decision": "accept",
+                    "source": "config",
+                    "reason_type": "rule"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "ordinal": 16,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "HEADLESS_MIDTOOL_B"
+              },
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "parent_tool_use_id": null,
+              "uuid": "00000000-0000-4000-8000-000000000042",
+              "timestamp": "2026-10-08T06:46:19.587Z",
+              "isReplay": true
+            }
+          },
+          {
+            "ordinal": 17,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000042",
+              "state": "started",
+              "uuid": "116e229c-f225-4eab-a48e-3ef5a2cb4557",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 18,
+            "row": {
+              "type": "system",
+              "subtype": "status",
+              "status": "requesting",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "4063d623-02fd-4392-b233-da3ab2151003",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041",
+                "00000000-0000-4000-8000-000000000042"
+              ]
+            }
+          },
+          {
+            "ordinal": 22,
+            "row": {
+              "type": "assistant",
+              "message": {
+                "id": "msg_headless_2",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HEADLESS_MIDTOOL_RESPONSE"
+                  }
+                ],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                },
+                "context_management": null
+              },
+              "parent_tool_use_id": null,
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "46e4a40b-07ff-4614-b645-98f3afcc69a4",
+              "timestamp": "2026-10-08T06:46:19.827Z"
+            }
+          },
+          {
+            "ordinal": 26,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000042",
+              "state": "completed",
+              "uuid": "305100af-2c19-4cc9-aca1-99b17d4c4993",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 27,
+            "row": {
+              "duration_api_ms": 22,
+              "stop_reason": "end_turn",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "total_cost_usd": 4.4e-05,
+              "usage": {
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 4,
+                "output_tokens_details": {
+                  "thinking_tokens": 0
+                },
+                "server_tool_use": {
+                  "web_search_requests": 0,
+                  "web_fetch_requests": 0
+                },
+                "service_tier": "standard",
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "inference_geo": "",
+                "iterations": [],
+                "speed": "standard",
+                "fallback_credit": null
+              },
+              "modelUsage": {
+                "claude-sonnet-5-5": {
+                  "inputTokens": 2,
+                  "outputTokens": 4,
+                  "cacheReadInputTokens": 0,
+                  "cacheCreationInputTokens": 0,
+                  "webSearchRequests": 0,
+                  "costUSD": 4.4e-05,
+                  "contextWindow": 1000000,
+                  "maxOutputTokens": 128000,
+                  "thinkingTokens": 0,
+                  "canonicalModel": "claude-sonnet-5-5",
+                  "provider": "firstParty",
+                  "costBasis": "list"
+                }
+              },
+              "permission_denials": [],
+              "terminal_reason": "completed",
+              "fast_mode_state": "off",
+              "fast_mode_disabled_reason": "sdk_opt_in_required",
+              "subagent_stats": {
+                "spawned": 0,
+                "requested": {
+                  "background": 0,
+                  "foreground": 0,
+                  "unset": 0
+                },
+                "started_in_background": 0,
+                "max_depth": 0,
+                "spawned_by_subagents": 0,
+                "completed": 0,
+                "failed": 0,
+                "killed": {
+                  "parent": 0,
+                  "user": 0,
+                  "system": 0
+                },
+                "refused": {
+                  "depth_limit": 0,
+                  "concurrency_limit": 0,
+                  "budget": 0
+                },
+                "by_type": {}
+              },
+              "safety_stops": 0,
+              "is_error": false,
+              "num_turns": 2,
+              "subtype": "success",
+              "api_error_status": null,
+              "result": "HEADLESS_MIDTOOL_RESPONSE",
+              "ttft_ms": 22,
+              "type": "result",
+              "duration_ms": 276,
+              "uuid": "ed67abb8-3529-4f47-a41e-90b7748c1287",
+              "ttft_stream_ms": 21,
+              "time_to_request_ms": 16,
+              "first_content_frame_ms": 21,
+              "user_message_uuid": "00000000-0000-4000-8000-000000000041",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041",
+                "00000000-0000-4000-8000-000000000042"
+              ],
+              "request_sent_wall_ms": 1791441979569,
+              "first_request_input_tokens": 1,
+              "queued_turn_count": 0,
+              "result_index": 0
+            }
+          },
+          {
+            "ordinal": 28,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000041",
+              "state": "completed",
+              "uuid": "c98d2f9f-aa98-4b2c-aa38-811cc17577f9",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          }
+        ]
+      },
+      {
+        "side": "native-b",
+        "observation": {
+          "argv": [
+            "--bare",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--model",
+            "claude-sonnet-5-5",
+            "--system-prompt",
+            "You are a local deterministic headless fixture.",
+            "--tools",
+            "Bash",
+            "--permission-mode",
+            "dontAsk",
+            "--permission-prompts",
+            "none",
+            "--verbose",
+            "--session-id",
+            "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+            "--input-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--replay-user-messages",
+            "--allowedTools=Bash"
+          ],
+          "sessionId": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+          "primarySessionId": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+          "sessionIds": [
+            "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+          ],
+          "pid": 40505,
+          "exit": {
+            "code": 0,
+            "signal": null
+          },
+          "timedOut": false,
+          "resultCount": 1,
+          "resultSubtypes": [
+            "success"
+          ],
+          "permissionRequests": 0,
+          "controlResponses": [],
+          "initialized": true,
+          "interruptSent": false,
+          "sessions": [
+            {
+              "path": "projects/-private-tmp-headless-baseline-293-input-queue-live-probe-input-midtool-workspace/0e68f4f3-7799-4b4b-83b0-91608da1fc17.jsonl",
+              "bytes": 8833,
+              "sha256": "b61ae46cbfdd70f52f86ff8f76eeef732b87c16b7e6756a2a8c2d75a885a78db"
+            }
+          ],
+          "channels": {
+            "stdin": {
+              "bytes": 520,
+              "sha256": "669f154c39d97479df66dc46434822776f799cf203b92c06b5b5bc44c2466428"
+            },
+            "stdout": {
+              "bytes": 28015,
+              "sha256": "5e405c2cae0107db56e2b4f5df8ed9e0835de1938ef637f2b294c4afa6c6b31b"
+            },
+            "stderr": {
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          }
+        },
+        "stdin": "{\"type\":\"control_request\",\"request_id\":\"fixture-initialize\",\"request\":{\"subtype\":\"initialize\",\"hooks\":{},\"sdkMcpServers\":[]}}\n{\"type\":\"user\",\"session_id\":\"0e68f4f3-7799-4b4b-83b0-91608da1fc17\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000041\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MIDTOOL_A\"}}\n{\"type\":\"user\",\"session_id\":\"0e68f4f3-7799-4b4b-83b0-91608da1fc17\",\"parent_tool_use_id\":null,\"uuid\":\"00000000-0000-4000-8000-000000000042\",\"message\":{\"role\":\"user\",\"content\":\"HEADLESS_MIDTOOL_B\"}}\n",
+        "providerMessages": [
+          [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "HEADLESS_MIDTOOL_A",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "system",
+              "content": [],
+              "output_config": {
+                "effort": "medium"
+              }
+            }
+          ],
+          [
+            {
+              "role": "user",
+              "content": "HEADLESS_MIDTOOL_A"
+            },
+            {
+              "role": "system",
+              "content": [],
+              "output_config": {
+                "effort": "medium"
+              }
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "tool_headless_1",
+                  "name": "Bash",
+                  "input": {
+                    "command": "sleep 0.2; printf HEADLESS_TOOL",
+                    "description": "Controlled local queue window"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "tool_use_id": "tool_headless_1",
+                  "type": "tool_result",
+                  "content": "HEADLESS_TOOL",
+                  "is_error": false
+                }
+              ]
+            },
+            {
+              "role": "system",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The user sent a new message while you were working:\nHEADLESS_MIDTOOL_B\n\nThis is how Claude Code surfaces messages the user sends mid-turn — within the running turn, often alongside the next tool result, rather than as a separate conversation turn. Address the message above as you continue this turn.",
+                  "cache_control": {
+                    "type": "ephemeral"
+                  }
+                }
+              ]
+            }
+          ]
+        ],
+        "notableFrames": [
+          {
+            "ordinal": 2,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000041",
+              "state": "queued",
+              "uuid": "26dced3e-3b8e-4a47-a489-88f6492f8d06",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 3,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000041",
+              "state": "started",
+              "uuid": "22b6b009-ae53-403d-943a-4a2e42261a61",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 5,
+            "row": {
+              "type": "system",
+              "subtype": "status",
+              "status": "requesting",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "7783dc20-404a-4b30-bd84-27772a4dab2f",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041"
+              ]
+            }
+          },
+          {
+            "ordinal": 6,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "HEADLESS_MIDTOOL_A"
+              },
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "parent_tool_use_id": null,
+              "uuid": "00000000-0000-4000-8000-000000000041",
+              "timestamp": "2026-10-08T06:46:20.001Z",
+              "isReplay": true
+            }
+          },
+          {
+            "ordinal": 7,
+            "row": {
+              "type": "stream_event",
+              "event": {
+                "type": "message_start",
+                "message": {
+                  "id": "msg_headless_1",
+                  "type": "message",
+                  "role": "assistant",
+                  "model": "claude-sonnet-5-5",
+                  "content": [],
+                  "stop_reason": null,
+                  "stop_sequence": null,
+                  "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 0
+                  }
+                }
+              },
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "parent_tool_use_id": null,
+              "uuid": "39262b12-25b2-472a-b682-d2d86e4e572c",
+              "ttft_ms": 3,
+              "thinking_display": "updates",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000041",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041"
+              ]
+            }
+          },
+          {
+            "ordinal": 10,
+            "row": {
+              "type": "assistant",
+              "message": {
+                "id": "msg_headless_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [
+                  {
+                    "type": "tool_use",
+                    "id": "tool_headless_1",
+                    "name": "Bash",
+                    "input": {
+                      "command": "sleep 0.2; printf HEADLESS_TOOL",
+                      "description": "Controlled local queue window"
+                    }
+                  }
+                ],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                },
+                "context_management": null
+              },
+              "parent_tool_use_id": null,
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "1aef2613-7e5a-412b-b65a-8d931f695daf",
+              "timestamp": "2026-10-08T06:46:20.018Z",
+              "user_message_uuid": "00000000-0000-4000-8000-000000000041",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041"
+              ]
+            }
+          },
+          {
+            "ordinal": 14,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000042",
+              "state": "queued",
+              "uuid": "59c43e73-5ec0-41a2-9d6a-94ce652214b4",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 15,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": [
+                  {
+                    "tool_use_id": "tool_headless_1",
+                    "type": "tool_result",
+                    "content": "HEADLESS_TOOL",
+                    "is_error": false
+                  }
+                ]
+              },
+              "parent_tool_use_id": null,
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "d56156df-83ce-4749-ab2a-1ff881efe34b",
+              "timestamp": "2026-10-08T06:46:20.259Z",
+              "tool_use_result": {
+                "stdout": "HEADLESS_TOOL",
+                "stderr": "",
+                "interrupted": false,
+                "isImage": false,
+                "noOutputExpected": false
+              },
+              "tool_result_meta": [
+                {
+                  "id": "tool_headless_1",
+                  "permission_decision": {
+                    "decision": "accept",
+                    "source": "config",
+                    "reason_type": "rule"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "ordinal": 16,
+            "row": {
+              "type": "user",
+              "message": {
+                "role": "user",
+                "content": "HEADLESS_MIDTOOL_B"
+              },
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "parent_tool_use_id": null,
+              "uuid": "00000000-0000-4000-8000-000000000042",
+              "timestamp": "2026-10-08T06:46:20.030Z",
+              "isReplay": true
+            }
+          },
+          {
+            "ordinal": 17,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000042",
+              "state": "started",
+              "uuid": "4447c1d5-6174-4de7-ac3a-6dfefe454758",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 18,
+            "row": {
+              "type": "system",
+              "subtype": "status",
+              "status": "requesting",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "b0c5f6e4-e000-4ca0-bda3-51f9183c6527",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041",
+                "00000000-0000-4000-8000-000000000042"
+              ]
+            }
+          },
+          {
+            "ordinal": 22,
+            "row": {
+              "type": "assistant",
+              "message": {
+                "id": "msg_headless_2",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-5-5",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "HEADLESS_MIDTOOL_RESPONSE"
+                  }
+                ],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                  "input_tokens": 1,
+                  "output_tokens": 0
+                },
+                "context_management": null
+              },
+              "parent_tool_use_id": null,
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "uuid": "4dfc8569-7b50-44e3-8ed9-499b42d2627f",
+              "timestamp": "2026-10-08T06:46:20.266Z"
+            }
+          },
+          {
+            "ordinal": 26,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000042",
+              "state": "completed",
+              "uuid": "2577cff4-0696-43db-aede-33b13d52f7ca",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          },
+          {
+            "ordinal": 27,
+            "row": {
+              "duration_api_ms": 19,
+              "stop_reason": "end_turn",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17",
+              "total_cost_usd": 4.4e-05,
+              "usage": {
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 4,
+                "output_tokens_details": {
+                  "thinking_tokens": 0
+                },
+                "server_tool_use": {
+                  "web_search_requests": 0,
+                  "web_fetch_requests": 0
+                },
+                "service_tier": "standard",
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "inference_geo": "",
+                "iterations": [],
+                "speed": "standard",
+                "fallback_credit": null
+              },
+              "modelUsage": {
+                "claude-sonnet-5-5": {
+                  "inputTokens": 2,
+                  "outputTokens": 4,
+                  "cacheReadInputTokens": 0,
+                  "cacheCreationInputTokens": 0,
+                  "webSearchRequests": 0,
+                  "costUSD": 4.4e-05,
+                  "contextWindow": 1000000,
+                  "maxOutputTokens": 128000,
+                  "thinkingTokens": 0,
+                  "canonicalModel": "claude-sonnet-5-5",
+                  "provider": "firstParty",
+                  "costBasis": "list"
+                }
+              },
+              "permission_denials": [],
+              "terminal_reason": "completed",
+              "fast_mode_state": "off",
+              "fast_mode_disabled_reason": "sdk_opt_in_required",
+              "subagent_stats": {
+                "spawned": 0,
+                "requested": {
+                  "background": 0,
+                  "foreground": 0,
+                  "unset": 0
+                },
+                "started_in_background": 0,
+                "max_depth": 0,
+                "spawned_by_subagents": 0,
+                "completed": 0,
+                "failed": 0,
+                "killed": {
+                  "parent": 0,
+                  "user": 0,
+                  "system": 0
+                },
+                "refused": {
+                  "depth_limit": 0,
+                  "concurrency_limit": 0,
+                  "budget": 0
+                },
+                "by_type": {}
+              },
+              "safety_stops": 0,
+              "is_error": false,
+              "num_turns": 2,
+              "subtype": "success",
+              "api_error_status": null,
+              "result": "HEADLESS_MIDTOOL_RESPONSE",
+              "ttft_ms": 20,
+              "type": "result",
+              "duration_ms": 270,
+              "uuid": "67868490-e238-4e58-856a-b5f6ddb33034",
+              "ttft_stream_ms": 19,
+              "time_to_request_ms": 16,
+              "first_content_frame_ms": 19,
+              "user_message_uuid": "00000000-0000-4000-8000-000000000041",
+              "user_message_uuids": [
+                "00000000-0000-4000-8000-000000000041",
+                "00000000-0000-4000-8000-000000000042"
+              ],
+              "request_sent_wall_ms": 1791441980014,
+              "first_request_input_tokens": 1,
+              "queued_turn_count": 0,
+              "result_index": 0
+            }
+          },
+          {
+            "ordinal": 28,
+            "row": {
+              "type": "command_lifecycle",
+              "command_uuid": "00000000-0000-4000-8000-000000000041",
+              "state": "completed",
+              "uuid": "ecb88067-f4ba-4041-884a-1107a1d8d508",
+              "session_id": "0e68f4f3-7799-4b4b-83b0-91608da1fc17"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -448,6 +448,13 @@ fn model_betas_in(
     {
         betas.push(MID_CONVERSATION_SYSTEM);
     }
+    if first_party
+        && ctx.effort
+        && ctx.request_kind == Default::default()
+        && lingxi_llm_client::providers::anthropic::supports_per_message_effort(model)
+    {
+        betas.push(PER_TURN_CONTROL);
+    }
     // (ANTHROPIC_BETAS env append is honored by apply_beta_header's merge.)
     // Per-feature: fast-mode when the request sets speed:"fast".
     if ctx.fast_mode {
@@ -544,6 +551,22 @@ pub fn apply_beta_header(
     endpoint: Endpoint,
     ctx: &BetaContext,
 ) {
+    // The SDK discovers this token from typed message controls. The native
+    // host owns its position in the model-beta vector, rather than prepending
+    // an encoder-discovered token before the ordinary model gates.
+    let native_per_turn = provider == Provider::Anthropic
+        && ctx.effort
+        && ctx.request_kind == Default::default()
+        && lingxi_llm_client::providers::anthropic::supports_per_message_effort(&ctx.model);
+    if native_per_turn {
+        if let Some(existing) = request.headers.get_mut("anthropic-beta") {
+            *existing = existing
+                .split(',')
+                .filter(|value| value.trim() != PER_TURN_CONTROL)
+                .collect::<Vec<_>>()
+                .join(",");
+        }
+    }
     lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
         &mut request.headers,
         &[assemble_beta_header(provider, endpoint, ctx)],
@@ -1161,5 +1184,39 @@ mod tests {
             req.headers.get("anthropic-beta").map(String::as_str),
             Some(expected.as_str())
         );
+    }
+}
+
+#[cfg(test)]
+mod native_per_turn_beta_tests {
+    use super::*;
+    #[test]
+    fn encoder_discovered_per_turn_beta_keeps_native_model_order() {
+        let mut request = crate::ProviderRequest::post_json(
+            "http://configured-base.test/v1/messages",
+            serde_json::json!({}),
+        );
+        request
+            .headers
+            .insert("anthropic-beta".into(), PER_TURN_CONTROL.into());
+        apply_beta_header(
+            &mut request,
+            Provider::Anthropic,
+            Endpoint::MessagesCreate,
+            &BetaContext::for_model("claude-sonnet-5-5").with_effort(true),
+        );
+        let betas: Vec<_> = request.headers["anthropic-beta"].split(',').collect();
+        let at = |name| betas.iter().position(|value| *value == name).unwrap();
+        assert!(at(MID_CONVERSATION_SYSTEM) < at(PER_TURN_CONTROL));
+        assert!(at(PER_TURN_CONTROL) < at(EFFORT));
+        assert_eq!(
+            betas
+                .iter()
+                .filter(|value| **value == PER_TURN_CONTROL)
+                .count(),
+            1
+        );
+        let side=BetaContext::for_model("claude-sonnet-5-5").with_effort(true).with_request_kind(lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::SideQuery);
+        assert!(!model_betas(Provider::Anthropic, &side).contains(&PER_TURN_CONTROL));
     }
 }

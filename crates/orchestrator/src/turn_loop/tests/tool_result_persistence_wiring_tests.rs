@@ -341,6 +341,30 @@ async fn process_output_persistence_reuses_task_file_without_duplicate_write() {
 }
 
 #[test]
+fn process_output_file_from_source_accepts_legacy_and_2_1_263_names() {
+    let legacy = Utf16JsonProjection::from_serde_value(&json!({
+        "outputTaskId": "legacy-id",
+        "outputFilePath": "/tmp/legacy.out",
+        "outputFileSize": 12,
+    }))
+    .expect("legacy fixture is valid JSON");
+    let file = super::process_output_file_from_source(&legacy).expect("legacy alias");
+    assert_eq!(file.task_id, "legacy-id");
+    assert_eq!(file.path, "/tmp/legacy.out");
+    assert_eq!(file.size, 12);
+
+    let current = Utf16JsonProjection::from_serde_value(&json!({
+        "persistedOutputPath": "/tmp/current.out",
+        "persistedOutputSize": 34,
+    }))
+    .expect("current fixture is valid JSON");
+    let file = super::process_output_file_from_source(&current).expect("current fields");
+    assert_eq!(file.task_id, "current");
+    assert_eq!(file.path, "/tmp/current.out");
+    assert_eq!(file.size, 34);
+}
+
+#[test]
 fn process_output_file_from_source_retains_native_metadata() {
     let current = json!({
         "persistedOutputPath": "/tmp/current.out",

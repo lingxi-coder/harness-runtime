@@ -25,7 +25,7 @@ pub const TURN_STARTED: &str = "tengu_agent_turn_started";
 pub const TURN_COMPLETED: &str = "tengu_agent_turn_completed";
 /// `tengu_agent_turn_failed` — turn ended in an error (tool or API failure).
 pub const TURN_FAILED: &str = "tengu_agent_turn_failed";
-/// `tengu_agent_subagent_dispatched` — Task tool spawned a subagent.
+/// `tengu_agent_subagent_dispatched` — Agent tool spawned a subagent.
 pub const SUBAGENT_DISPATCHED: &str = "tengu_agent_subagent_dispatched";
 /// `tengu_agent_subagent_completed` — dispatched subagent returned successfully.
 pub const SUBAGENT_COMPLETED: &str = "tengu_agent_subagent_completed";
@@ -239,7 +239,7 @@ pub(crate) const NAMES: &[&str] = &[
 pub enum AgentKind {
     /// User-facing top-level agent.
     Main,
-    /// Subagent dispatched via the Task tool.
+    /// Subagent dispatched via the Agent tool.
     Subagent,
     /// Forked agent (compaction or side-quest).
     Forked,
@@ -251,7 +251,7 @@ pub enum AgentKind {
 pub struct StartedPayload {
     /// Stable identifier for this agent instance.
     pub agent_id: Verified,
-    /// Whether this is a main agent, a Task-spawned subagent, or a fork.
+    /// Whether this is a main agent, a subagent spawned by Agent, or a fork.
     pub agent_kind: AgentKind,
     /// Parent agent id for [`AgentKind::Subagent`] / [`AgentKind::Forked`].
     pub parent_agent_id: Option<Verified>,
@@ -333,7 +333,7 @@ pub struct SubagentDispatchedPayload {
     pub parent_agent_id: Verified,
     /// Stable identifier for the spawned subagent.
     pub subagent_id: Verified,
-    /// Tool that did the dispatching (typically `Task`).
+    /// Tool that did the dispatching (typically `Agent`).
     pub tool: Verified,
 }
 

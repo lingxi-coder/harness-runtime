@@ -21,6 +21,7 @@ pub(super) enum ForegroundResult {
     Finished(
         Result<SubagentResult, SubagentSpawnError>,
         Option<(String, String)>,
+        bool,
     ),
     Backgrounded(AsyncLaunch, String),
 }
@@ -212,6 +213,9 @@ impl SubagentSpawnObserver for Observer {
             {
                 Ok(handle) => {
                     let id = handle.task_id.clone();
+                    if let Some(token) = request.agent_spawn_token.clone() {
+                        self.0.registry.bind_agent_spawn_token(&id, token);
+                    }
                     self.0
                         .registry
                         .set_agent_display(
@@ -320,11 +324,15 @@ impl SubagentSpawnObserver for Observer {
 struct CancelOnDrop(
     Option<tokio::task::AbortHandle>,
     Arc<std::sync::atomic::AtomicBool>,
+    Option<lingxi_core::host::agent_statistics::AgentSpawnToken>,
 );
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         if let Some(handle) = self.0.take() {
             self.1.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(token) = &self.2 {
+                token.cancelled_after_completion();
+            }
             handle.abort();
         }
     }
@@ -342,6 +350,19 @@ pub(super) async fn run(
     start_receipt: Option<oneshot::Sender<StartReceipt>>,
 ) -> ForegroundResult {
     let worktree = request.worktree.clone();
+    let spawner_owns_stop =
+        spawner.owns_subagent_stop_hooks(false, request.origin_session_id, request.stop_hook_scope);
+    let stop_firer = (!spawner_owns_stop
+        && request.stop_hook_scope
+            == lingxi_core::host::subagent_spawn::SubagentStopScope::Session)
+        .then(|| request.origin_session_id)
+        .flatten()
+        .and_then(|session_id| {
+            ctx.task_lifecycle_hooks
+                .as_ref()
+                .and_then(|hooks| hooks.subagent_stop_firer(session_id))
+        });
+    let terminal_hooks_owned = spawner_owns_stop || stop_firer.is_some();
     let (signal, mut changed) = watch::channel(false);
     let control = Arc::new(Control {
         registry: registry.clone(),
@@ -368,7 +389,11 @@ pub(super) async fn run(
             .spawn_with_observer(request, inherit, Some(progress), Some(observer))
             .await
     });
-    let mut guard = CancelOnDrop(Some(worker.abort_handle()), control.stop_requested.clone());
+    let mut guard = CancelOnDrop(
+        Some(worker.abort_handle()),
+        control.stop_requested.clone(),
+        control.request.agent_spawn_token.clone(),
+    );
     *control.abort.lock().unwrap() = Some(worker.abort_handle());
     let _ = release_worker.send(());
     let completion_control = control.clone();
@@ -395,6 +420,28 @@ pub(super) async fn run(
             }) if state.active => registry.agent_waiting_on_owned_work(*agent_id).await,
             _ => false,
         };
+        if let Some(firer) = stop_firer.as_ref() {
+            let terminal = match &outcome {
+                Ok(SubagentResult::Completed { agent_id, .. }) => Some((
+                    *agent_id,
+                    lingxi_core::host::subagent_spawn::SubagentStopStatus::Completed,
+                )),
+                Ok(SubagentResult::Failed { agent_id, .. }) => Some((
+                    *agent_id,
+                    lingxi_core::host::subagent_spawn::SubagentStopStatus::Failed,
+                )),
+                _ => None,
+            };
+            if let Some((agent_id, status)) = terminal {
+                let agent_type = completion_control
+                    .allocated_agent_type
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| completion_control.request.subagent_type.clone());
+                firer.fire(agent_id, &agent_type, status).await;
+            }
+        }
         let worktree_result = match (worktree, retains_owned_work) {
             (Some(handle), false) => {
                 lingxi_core::host::worktree::agent_worktree_result(ctx.worktree.as_ref(), &handle)
@@ -483,7 +530,7 @@ pub(super) async fn run(
                 let _ = registry.set_status(&handle.task_id, status).await;
             }
         }
-        (outcome, worktree_result)
+        (outcome, worktree_result, terminal_hooks_owned)
     });
     tokio::select! {
         biased;
@@ -498,13 +545,13 @@ pub(super) async fn run(
                     }
                 }
             }
-            let (outcome, worktree) = completion.await.expect("foreground supervisor remains alive");
-            ForegroundResult::Finished(outcome, worktree)
+            let (outcome, worktree, hooks_owned) = completion.await.expect("foreground supervisor remains alive");
+            ForegroundResult::Finished(outcome, worktree, hooks_owned)
         }
         result = &mut completion => {
             guard.0 = None;
-            let (outcome, worktree) = result.expect("foreground supervisor remains alive");
-            ForegroundResult::Finished(outcome, worktree)
+            let (outcome, worktree, hooks_owned) = result.expect("foreground supervisor remains alive");
+            ForegroundResult::Finished(outcome, worktree, hooks_owned)
         }
     }
 }
@@ -518,6 +565,7 @@ mod tests {
         id: lingxi_core::types::AgentId,
         ready: tokio::sync::Notify,
         release: tokio::sync::Notify,
+        terminal: Mutex<Option<SubagentResult>>,
     }
     #[async_trait]
     impl SubagentSpawner for ControlledSpawner {
@@ -560,11 +608,16 @@ mod tests {
             observer.on_started(&allocation);
             self.ready.notify_one();
             self.release.notified().await;
-            Ok(SubagentResult::Failed {
-                agent_id: self.id,
-                reason: "test terminal result".into(),
-                usage: Default::default(),
-            })
+            Ok(self
+                .terminal
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(SubagentResult::Failed {
+                    agent_id: self.id,
+                    reason: "test terminal result".into(),
+                    usage: Default::default(),
+                }))
         }
     }
     fn setup() -> (
@@ -578,6 +631,7 @@ mod tests {
             id: lingxi_core::types::AgentId::new(),
             ready: Default::default(),
             release: Default::default(),
+            terminal: Default::default(),
         });
         let registry = crate::agent_test_support::arc_mock_task_registry();
         let ctx = tool_api::test_support::ctx_for_file_tools(
@@ -641,7 +695,7 @@ mod tests {
         spawner.release.notify_one();
         assert!(matches!(
             call.await.unwrap(),
-            ForegroundResult::Finished(_, _)
+            ForegroundResult::Finished(_, _, _)
         ));
     }
 
@@ -704,7 +758,7 @@ mod tests {
             "a rejected startup has no start receipt"
         );
         match result {
-            ForegroundResult::Finished(Err(SubagentSpawnError::Internal(reason)), _) => {
+            ForegroundResult::Finished(Err(SubagentSpawnError::Internal(reason)), _, _) => {
                 assert!(reason.contains("resume recipe rejected"))
             }
             _ => panic!("model startup proceeded after resume recipe registration failed"),
@@ -718,11 +772,16 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_background_signal_returns_before_worker_completion_without_cancelling() {
-        let (spawner, registry, ctx, inherit) = setup();
+        let (spawner, registry, mut ctx, inherit) = setup();
+        let (session, firer) = bind_stop_owner(&mut ctx);
         let (progress, _rx) = mpsc::channel(8);
         let call = tokio::spawn(run(
             spawner.clone(),
-            SubagentSpawnRequest::default(),
+            SubagentSpawnRequest {
+                origin_session_id: Some(session),
+                stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
+                ..Default::default()
+            },
             inherit,
             progress,
             tool_api::test_support::fresh_tx(),
@@ -783,14 +842,26 @@ mod tests {
         })
         .await
         .expect("detached worker publishes its actual terminal result");
+        assert_eq!(
+            *firer.seen.lock().unwrap(),
+            vec![(
+                spawner.id,
+                lingxi_core::host::subagent_spawn::SubagentStopStatus::Failed
+            )]
+        );
     }
     #[tokio::test]
     async fn stopped_backgrounded_foreground_worker_publishes_killed_not_crashed() {
-        let (spawner, registry, ctx, inherit) = setup();
+        let (spawner, registry, mut ctx, inherit) = setup();
+        let (session, firer) = bind_stop_owner(&mut ctx);
         let (progress, _rx) = mpsc::channel(8);
         let call = tokio::spawn(run(
             spawner.clone(),
-            SubagentSpawnRequest::default(),
+            SubagentSpawnRequest {
+                origin_session_id: Some(session),
+                stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
+                ..Default::default()
+            },
             inherit,
             progress,
             tool_api::test_support::fresh_tx(),
@@ -824,6 +895,10 @@ mod tests {
         })
         .await
         .unwrap();
+        assert!(
+            firer.seen.lock().unwrap().is_empty(),
+            "Killed never fires Stop"
+        );
     }
 
     #[tokio::test]
@@ -845,12 +920,243 @@ mod tests {
         spawner.release.notify_one();
         assert!(matches!(
             call.await.unwrap(),
-            ForegroundResult::Finished(Ok(SubagentResult::Failed { .. }), _)
+            ForegroundResult::Finished(Ok(SubagentResult::Failed { .. }), _, _)
         ));
         assert!(registry
             .list(TaskListFilter::default())
             .await
             .unwrap()
             .is_empty());
+    }
+    struct RecordingStopOwner {
+        epoch: lingxi_core::types::MessageId,
+        current: std::sync::atomic::AtomicBool,
+        seen: Mutex<
+            Vec<(
+                lingxi_core::types::AgentId,
+                lingxi_core::host::subagent_spawn::SubagentStopStatus,
+            )>,
+        >,
+        must_exist: Option<std::path::PathBuf>,
+    }
+    #[async_trait]
+    impl lingxi_core::host::subagent_spawn::SubagentStopHookFirer for RecordingStopOwner {
+        fn epoch_id(&self) -> lingxi_core::types::MessageId {
+            self.epoch
+        }
+        fn retire(&self) {
+            self.current
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn is_current(&self) -> bool {
+            self.current.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        async fn fire(
+            &self,
+            id: lingxi_core::types::AgentId,
+            _: &str,
+            status: lingxi_core::host::subagent_spawn::SubagentStopStatus,
+        ) {
+            if !self.is_current() {
+                return;
+            }
+            if let Some(path) = &self.must_exist {
+                assert!(path.exists(), "Stop command cwd must still exist");
+            }
+            self.seen.lock().unwrap().push((id, status));
+        }
+    }
+    struct StopCapability {
+        session: lingxi_core::types::SessionId,
+        firer: Arc<RecordingStopOwner>,
+    }
+    #[async_trait]
+    impl tool_api::TaskLifecycleHookFirer for StopCapability {
+        fn subagent_stop_firer(
+            &self,
+            session: lingxi_core::types::SessionId,
+        ) -> Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>> {
+            (session == self.session).then(|| {
+                self.firer.clone()
+                    as Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>
+            })
+        }
+    }
+    fn bind_stop_owner(
+        ctx: &mut tool_api::BuiltinToolContext,
+    ) -> (lingxi_core::types::SessionId, Arc<RecordingStopOwner>) {
+        let session = lingxi_core::types::SessionId::new();
+        let firer = Arc::new(RecordingStopOwner {
+            epoch: lingxi_core::types::MessageId::new(),
+            current: std::sync::atomic::AtomicBool::new(true),
+            seen: Mutex::new(Vec::new()),
+            must_exist: None,
+        });
+        ctx.task_lifecycle_hooks = Some(Arc::new(StopCapability {
+            session,
+            firer: firer.clone(),
+        }));
+        (session, firer)
+    }
+    fn completed(id: lingxi_core::types::AgentId) -> SubagentResult {
+        SubagentResult::Completed {
+            agent_id: id,
+            handback: None,
+            content: serde_json::json!("done"),
+            usage: Default::default(),
+            cumulative_usage: Default::default(),
+            usage_complete: true,
+            total_tokens: 0,
+            total_tool_use_count: 0,
+            total_duration_ms: 0,
+            assistant_message_count: 1,
+            response_char_count: 1,
+            last_request_id: None,
+        }
+    }
+    #[tokio::test]
+    async fn bound_foreground_completion_and_failure_each_fire_once_and_return_owned_receipt() {
+        for success in [true, false] {
+            let (spawner, registry, mut ctx, inherit) = setup();
+            let (session, firer) = bind_stop_owner(&mut ctx);
+            if success {
+                *spawner.terminal.lock().unwrap() = Some(completed(spawner.id));
+            }
+            let (progress, _rx) = mpsc::channel(8);
+            let call = tokio::spawn(run(
+                spawner.clone(),
+                SubagentSpawnRequest {
+                    origin_session_id: Some(session),
+                    stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
+                    ..Default::default()
+                },
+                inherit,
+                progress,
+                tool_api::test_support::fresh_tx(),
+                None,
+                registry,
+                ctx,
+                None,
+            ));
+            spawner.ready.notified().await;
+            assert!(firer.seen.lock().unwrap().is_empty());
+            spawner.release.notify_one();
+            assert!(matches!(
+                call.await.unwrap(),
+                ForegroundResult::Finished(Ok(_), _, true)
+            ));
+            let status = if success {
+                lingxi_core::host::subagent_spawn::SubagentStopStatus::Completed
+            } else {
+                lingxi_core::host::subagent_spawn::SubagentStopStatus::Failed
+            };
+            assert_eq!(*firer.seen.lock().unwrap(), vec![(spawner.id, status)]);
+        }
+    }
+    struct CleanWorktree(Arc<RecordingStopOwner>);
+    #[async_trait]
+    impl lingxi_core::host::worktree::WorktreeManager for CleanWorktree {
+        async fn create_worktree(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: &[std::path::PathBuf],
+        ) -> Result<
+            lingxi_core::host::worktree::WorktreeHandle,
+            lingxi_core::host::worktree::WorktreeError,
+        > {
+            Err(lingxi_core::host::worktree::WorktreeError::Unsupported)
+        }
+        async fn remove_worktree(
+            &self,
+            handle: &lingxi_core::host::worktree::WorktreeHandle,
+        ) -> Result<(), lingxi_core::host::worktree::WorktreeError> {
+            assert_eq!(
+                self.0.seen.lock().unwrap().len(),
+                1,
+                "Stop precedes clean worktree removal"
+            );
+            std::fs::remove_dir(&handle.path).unwrap();
+            Ok(())
+        }
+        async fn list_worktrees(
+            &self,
+        ) -> Result<
+            Vec<lingxi_core::host::worktree::WorktreeInfo>,
+            lingxi_core::host::worktree::WorktreeError,
+        > {
+            Ok(Vec::new())
+        }
+        async fn cleanup_stale(
+            &self,
+            _: std::time::Duration,
+        ) -> Result<Vec<std::path::PathBuf>, lingxi_core::host::worktree::WorktreeError> {
+            Ok(Vec::new())
+        }
+        fn is_supported(&self) -> bool {
+            true
+        }
+        async fn worktree_change_summary(
+            &self,
+            _: &lingxi_core::host::worktree::WorktreeHandle,
+        ) -> Result<
+            Option<lingxi_core::host::worktree::WorktreeChangeSummary>,
+            lingxi_core::host::worktree::WorktreeError,
+        > {
+            Ok(Some(lingxi_core::host::worktree::WorktreeChangeSummary {
+                changed_files: 0,
+                commits: 0,
+            }))
+        }
+    }
+    #[tokio::test]
+    async fn owned_stop_finishes_before_clean_worktree_cleanup() {
+        let (spawner, registry, mut ctx, inherit) = setup();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("child-cwd");
+        std::fs::create_dir(&path).unwrap();
+        let (session, mut firer) = bind_stop_owner(&mut ctx);
+        // Replace the binding with a callback that checks its command cwd.
+        let checker = Arc::new(RecordingStopOwner {
+            epoch: firer.epoch,
+            current: std::sync::atomic::AtomicBool::new(true),
+            seen: Mutex::new(Vec::new()),
+            must_exist: Some(path.clone()),
+        });
+        firer = checker;
+        ctx.task_lifecycle_hooks = Some(Arc::new(StopCapability {
+            session,
+            firer: firer.clone(),
+        }));
+        ctx.worktree = Arc::new(CleanWorktree(firer.clone()));
+        let (progress, _rx) = mpsc::channel(8);
+        let call = tokio::spawn(run(
+            spawner.clone(),
+            SubagentSpawnRequest {
+                origin_session_id: Some(session),
+                stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
+                worktree: Some(lingxi_core::host::worktree::WorktreeHandle {
+                    path: path.clone(),
+                    branch_name: "child-branch".into(),
+                    base_commit: Some("base".into()),
+                }),
+                ..Default::default()
+            },
+            inherit,
+            progress,
+            tool_api::test_support::fresh_tx(),
+            None,
+            registry,
+            ctx,
+            None,
+        ));
+        spawner.ready.notified().await;
+        spawner.release.notify_one();
+        assert!(matches!(
+            call.await.unwrap(),
+            ForegroundResult::Finished(Ok(_), None, true)
+        ));
+        assert_eq!(firer.seen.lock().unwrap().len(), 1);
+        assert!(!path.exists());
     }
 }

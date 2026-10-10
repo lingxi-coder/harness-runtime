@@ -196,6 +196,7 @@ mod tests {
 
     fn assistant_text(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(),

@@ -539,6 +539,7 @@ fn discovery_and_rpc_error_decisions_match_pinned_upstream_execution() {
         }
         let source = Utf16JsonProjection::from_serde_value(&case["result"]).unwrap();
         let result = parse_modern_discovery(source);
+
         match case["expected"]["kind"].as_str().unwrap() {
             "modern" => {
                 let result = result.unwrap_or_else(|| panic!("{}", case["name"]));

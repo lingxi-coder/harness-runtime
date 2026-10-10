@@ -296,6 +296,7 @@ mod tests {
 
     fn silent_assistant() -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
@@ -313,6 +314,7 @@ mod tests {
 
     fn speaking_assistant() -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "Here is what I found.".into(),
@@ -325,6 +327,7 @@ mod tests {
 
     fn tool_result_user() -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
@@ -415,6 +418,7 @@ mod tests {
     fn a_user_facing_tool_call_counts_as_speaking() {
         for name in ["AskUserQuestion", "Brief", "ExitPlanMode", "SendUserFile"] {
             let asked = ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
                     id: ToolUseId::new(),
@@ -440,6 +444,7 @@ mod tests {
     fn no_content_and_no_response_requested_do_not_count_as_speaking() {
         for sentinel in [NO_CONTENT_SENTINEL, NO_RESPONSE_REQUESTED_SENTINEL, "  "] {
             let quiet = ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: sentinel.into(),

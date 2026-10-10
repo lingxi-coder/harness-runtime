@@ -311,6 +311,7 @@ where
     .expect("Fusion-generated analyst prompt is a valid root string");
     let mut spawn = lingxi_core::host::subagent_spawn::SubagentSpawnRequest {
         parent_native_query_depth: None,
+        stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
         subagent_type: FUSION_ANALYST_TYPE.to_string(),
         prompt,
         model: Some(analyst.model.clone()),

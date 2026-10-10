@@ -180,6 +180,7 @@ pub struct TaskRegistry {
     /// Spawn tokens retained with task lifecycle owners for exactly-once receipts.
     agent_spawn_tokens:
         std::sync::Mutex<HashMap<String, lingxi_core::host::agent_statistics::AgentSpawnToken>>,
+
     /// Session-wide WebSearch call counter — the `taskRegistry` `n` behind
     /// `getWebSearchCalls`/`incrementWebSearchCalls`/`resetWebSearchCalls` (parity
     /// 2.1.212). Session-global (shared across the main loop and its subagents,
@@ -727,6 +728,7 @@ impl TaskRegistry {
         let statistics = clear_previous
             .and_then(|previous| sessions.get(&previous).cloned())
             .unwrap_or_default();
+
         statistics.reset();
         sessions.insert(session_id, statistics);
     }
@@ -3393,6 +3395,30 @@ impl TaskRegistry {
             agent.outcome.effort = effort;
         }
     }
+    /// Publish a terminal-pane worker's admitted route in its parent task row.
+    pub async fn publish_teammate_model_selection(
+        &self,
+        id: &str,
+        selection: lingxi_core::host::team_spawn::TeammateModelSelection,
+    ) -> Result<(), TeamSpawnError> {
+        if selection.model.is_empty() {
+            return Err(TeamSpawnError::Internal(
+                "teammate admitted an empty model selection".into(),
+            ));
+        }
+        let id = self.canonical_or_raw(id).await;
+        match self.tasks.write().await.get_mut(&id) {
+            Some(TaskState::InProcessTeammate(teammate)) => {
+                teammate.child_model = Some(selection.model);
+                teammate.child_model_profile = selection.model_profile;
+                Ok(())
+            }
+            Some(_) => Err(TeamSpawnError::Unsupported(
+                "task is not an in-process teammate".into(),
+            )),
+            None => Err(TeamSpawnError::NotFound(id)),
+        }
+    }
     pub async fn completed_agent_visible(&self, id: &str) -> bool {
         let map = self.tasks.read().await;
         let Some(TaskState::LocalAgent(agent)) = map.get(id) else {
@@ -3601,6 +3627,7 @@ impl TaskRegistry {
                                     a.outcome.killed_by.as_deref().unwrap_or("user"),
                                 ),
                             ),
+
                             _ => {}
                         }
                     }
@@ -3731,6 +3758,7 @@ impl TaskRegistry {
         &self,
         task_id: &str,
         result: Option<Utf16JsonProjection>,
+
         usage: Option<lingxi_core::host::task_registry::AgentRunUsage>,
         agent_id: Option<lingxi_core::types::AgentId>,
         agent_name: Option<String>,
@@ -6009,6 +6037,32 @@ impl TeamSpawnSeam for TaskRegistry {
             tracing::warn!(%error, "in-process teammate startup failed");
             TeamSpawnError::Internal("Failed to spawn in-process teammate".into())
         })
+    }
+
+    async fn resolved_model_selection(
+        &self,
+        task_id: &str,
+    ) -> Result<lingxi_core::host::team_spawn::TeammateModelSelection, TeamSpawnError> {
+        match self.get(task_id).await {
+            Some(TaskState::InProcessTeammate(teammate)) => {
+                let model = teammate
+                    .child_model
+                    .filter(|model| !model.is_empty())
+                    .ok_or_else(|| {
+                        TeamSpawnError::Internal(
+                            "teammate model route was not resolved at admission".into(),
+                        )
+                    })?;
+                Ok(lingxi_core::host::team_spawn::TeammateModelSelection {
+                    model,
+                    model_profile: teammate.child_model_profile,
+                })
+            }
+            Some(_) => Err(TeamSpawnError::Unsupported(
+                "task is not an in-process teammate".into(),
+            )),
+            None => Err(TeamSpawnError::NotFound(task_id.into())),
+        }
     }
 
     async fn apply_plan_approval(

@@ -381,6 +381,13 @@ mod tests {
                 return next({ ...e, description: `${e.description}:\udfff:${call}`, isHidden: true,
                   argumentHint: `${e.argumentHint}:\ud800` });
               });
+              let cancelCalls = 0;
+              on('command.describe', { command: 'cancel' }, async ($, e, next) => {
+                const call = ++cancelCalls;
+                await $.session.messages({});
+                await $.clock.sleep(30);
+                return next({ ...e, description: `cancel:${call}`, isHidden: true });
+              });
             }"#,
         )
         .unwrap();
@@ -453,8 +460,46 @@ mod tests {
         hooks::mods::ModSessionContext::invalidate_command_describe(&*orch)
             .await
             .unwrap();
-        let second = orch.apply_mod_command_description(input).await;
+        let second = orch.apply_mod_command_description(input.clone()).await;
         assert!(second.string_at("/description").unwrap().ends_with(":2"));
+
+        let mut changed_input = input;
+        changed_input
+            .set_field("description", string_value("other"))
+            .unwrap();
+        let changed = orch.apply_mod_command_description(changed_input).await;
+        assert!(changed
+            .string_at("/description")
+            .unwrap()
+            .starts_with("other:"));
+
+        let cancel_input = projection(
+            r#"{"command":"cancel","description":"base","isHidden":false,"immediate":false,"provider":{"plugin":"engine","tier":"core"}}"#,
+        );
+        let first_orch = orch.clone();
+        let first_input = cancel_input.clone();
+        let first_caller =
+            tokio::spawn(
+                async move { first_orch.apply_mod_command_description(first_input).await },
+            );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            session_context.dispatch_started.notified(),
+        )
+        .await
+        .expect("bound dispatch should start before its caller is canceled");
+        first_caller.abort();
+        assert!(first_caller.await.unwrap_err().is_cancelled());
+        session_context.release_dispatch.notify_one();
+
+        let resumed = orch
+            .apply_mod_command_description(cancel_input.clone())
+            .await;
+        assert_eq!(resumed.string_at("/description"), Some("cancel:1"));
+        assert!(orch
+            .apply_mod_command_description(cancel_input)
+            .await
+            .semantically_eq(&resumed));
     }
 
     #[tokio::test]
@@ -580,5 +625,60 @@ mod tests {
             Some("retried")
         );
         let _ = string_value("generated test helper remains explicit");
+    }
+
+    #[tokio::test]
+    async fn failed_command_description_cannot_evict_a_newer_generation() {
+        let cache = Arc::new(tokio::sync::Mutex::new(ModCommandDescribeCache::default()));
+        let identity = (7, 11);
+        let key = "command.describe failure";
+        let old_generation = cache.lock().await.generation;
+        let (result, _) = tokio::sync::watch::channel(None);
+        let stale_entry = Arc::new(ModCommandDescribeEntry {
+            result,
+            inline_init: tokio::sync::Mutex::new(()),
+        });
+        cache
+            .lock()
+            .await
+            .answers
+            .insert(key.to_owned(), (identity, stale_entry.clone()));
+
+        {
+            let mut cache = cache.lock().await;
+            cache.generation = cache.generation.wrapping_add(1);
+            cache.answers.clear();
+        }
+        let current_generation = cache.lock().await.generation;
+        let (result, _) = tokio::sync::watch::channel(None);
+        let current_entry = Arc::new(ModCommandDescribeEntry {
+            result,
+            inline_init: tokio::sync::Mutex::new(()),
+        });
+        cache
+            .lock()
+            .await
+            .answers
+            .insert(key.to_owned(), (identity, current_entry.clone()));
+
+        complete_command_description(
+            &cache,
+            old_generation,
+            key,
+            identity,
+            &stale_entry,
+            ModCommandDescribeAnswer {
+                value: projection(r#"{"description":"stale","isHidden":false}"#),
+                cacheable: false,
+            },
+        )
+        .await;
+
+        let cache = cache.lock().await;
+        assert_eq!(cache.generation, current_generation);
+        assert!(cache
+            .answers
+            .get(key)
+            .is_some_and(|(_, entry)| Arc::ptr_eq(entry, &current_entry)));
     }
 }

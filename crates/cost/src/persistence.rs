@@ -45,6 +45,9 @@ pub enum CostMutationSource {
     LegacyImportEvaluated,
     /// The one-time legacy opening balance import.
     LegacyOpeningBalance,
+    /// A captured session's display/budget opening state, imported once into
+    /// a fresh target ledger. This is not a new provider response or receipt.
+    SessionOpeningState,
     /// A reset or line/tool counter mutation.
     Administrative,
 }

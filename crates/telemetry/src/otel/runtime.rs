@@ -1,23 +1,22 @@
 use std::collections::HashMap;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
+use std::sync::{mpsc, Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use opentelemetry::Context;
-use opentelemetry::KeyValue;
 use opentelemetry::logs::{AnyValue, LogRecord as _, Logger as _, LoggerProvider as _};
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry::trace::{
     FutureExt as _, Span as _, TraceContextExt, Tracer as _, TracerProvider as _,
 };
+use opentelemetry::Context;
+use opentelemetry::KeyValue;
 use opentelemetry_otlp::{
     Compression, Protocol as OtlpWireProtocol, WithExportConfig, WithHttpConfig,
 };
 use opentelemetry_prometheus::exporter as prometheus_exporter;
-use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::{
     BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider,
 };
@@ -26,13 +25,14 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{
     BatchConfigBuilder as TraceBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider,
 };
+use opentelemetry_sdk::Resource;
 use prometheus::{Encoder, Registry, TextEncoder};
 
 use super::code_language::language_for_path;
 use super::config::{ExporterKind, OtelConfig, OtlpExporterConfig, OtlpProtocol};
 use super::git_ops::git_counter_hits;
 use super::metrics;
-use super::record::{AttrValue, Attributes, truncate_content};
+use super::record::{truncate_content, AttrValue, Attributes};
 use crate::sink::{AnalyticsValue, LogEventMetadata};
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 
@@ -760,7 +760,7 @@ fn tool_parameters(tool_name: &str, input: Option<&Utf16JsonProjection>) -> Opti
         "Skill" => {
             copy_string(&mut out, "skill_name", "skill");
         }
-        "Agent" | "Task" => {
+        "Agent" => {
             copy_string(&mut out, "subagent_type", "subagent_type");
         }
         _ => {}
@@ -1258,7 +1258,7 @@ fn metric_updates_for_event(name: &str, metadata: &LogEventMetadata) -> Vec<Metr
                 tool_name_for_event(name, metadata)
                     .as_ref()
                     .and_then(attr_str)
-                    .unwrap_or("Task"),
+                    .unwrap_or("Agent"),
                 name,
                 metadata,
             ));
@@ -1357,7 +1357,7 @@ fn tool_name_for_event(event_name: &str, metadata: &LogEventMetadata) -> Option<
     } else if event_name.contains("_mcp_") {
         "Mcp"
     } else if event_name.contains("_task_") {
-        "Task"
+        "Agent"
     } else if event_name.contains("_agent_") {
         "Agent"
     } else if event_name.contains("_edit_") {
@@ -2560,12 +2560,10 @@ mod tests {
         assert!(debug.histograms.iter().any(|sample| {
             sample.instrument == metrics::LLM_REQUEST && (sample.value - 250.0).abs() < f64::EPSILON
         }));
-        assert!(
-            debug
-                .logs
-                .iter()
-                .any(|sample| sample.event_name == "tengu_api_success")
-        );
+        assert!(debug
+            .logs
+            .iter()
+            .any(|sample| sample.event_name == "tengu_api_success"));
         clear_runtime();
     }
 
@@ -2597,12 +2595,10 @@ mod tests {
         Runtime::new().unwrap().block_on(task);
 
         let debug = snapshot(&runtime);
-        assert!(
-            debug
-                .counters
-                .iter()
-                .any(|sample| { sample.instrument == metrics::TOOL_BLOCKED_ON_USER })
-        );
+        assert!(debug
+            .counters
+            .iter()
+            .any(|sample| { sample.instrument == metrics::TOOL_BLOCKED_ON_USER }));
         assert!(debug.counters.iter().any(|sample| {
             sample.instrument == metrics::BASH_SUBPROCESS
                 && sample.attributes.get("status") == Some(&AttrValue::from("completed"))
@@ -2610,12 +2606,11 @@ mod tests {
         assert!(debug.histograms.iter().any(|sample| {
             sample.instrument == metrics::MCP_RPC && (sample.value - 77.0).abs() < f64::EPSILON
         }));
-        assert!(
-            debug
-                .counters
-                .iter()
-                .any(|sample| sample.instrument == metrics::SUBAGENT_SPAWN)
-        );
+        assert!(debug
+            .counters
+            .iter()
+            .any(|sample| sample.instrument == metrics::SUBAGENT_SPAWN
+                && sample.attributes.get("tool_name") == Some(&AttrValue::from("Agent"))));
         clear_runtime();
     }
 
@@ -2639,12 +2634,10 @@ mod tests {
         };
         Runtime::new().unwrap().block_on(task);
         let debug_off = snapshot(&runtime_off);
-        assert!(
-            debug_off
-                .logs
-                .iter()
-                .all(|sample| !sample.attributes.contains_key("prompt"))
-        );
+        assert!(debug_off
+            .logs
+            .iter()
+            .all(|sample| !sample.attributes.contains_key("prompt")));
         clear_runtime();
 
         let runtime_on = install_test_runtime(local_runtime_with_logs(true));
@@ -2780,12 +2773,10 @@ mod tests {
             Some(&AttrValue::from("sdk"))
         );
         // The tengu passthrough record is still emitted alongside.
-        assert!(
-            debug
-                .logs
-                .iter()
-                .any(|sample| sample.event_name == "tengu_api_success")
-        );
+        assert!(debug
+            .logs
+            .iter()
+            .any(|sample| sample.event_name == "tengu_api_success"));
         clear_runtime();
     }
 

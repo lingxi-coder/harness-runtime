@@ -257,15 +257,15 @@ mod tests {
         let home = temp.path().join("home");
         let project = temp.path().join("project");
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(project.join(".lingxi")).unwrap();
+        std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
         std::fs::write(home.join("settings.json"), r#"{"custom":"user"}"#).unwrap();
         std::fs::write(
-            project.join(".lingxi/settings.json"),
+            project.join(branding::DOT_DIR).join("settings.json"),
             r#"{"custom":"project"}"#,
         )
         .unwrap();
         std::fs::write(
-            project.join(".lingxi/settings.local.json"),
+            project.join(branding::DOT_DIR).join("settings.local.json"),
             r#"{"custom":"local"}"#,
         )
         .unwrap();

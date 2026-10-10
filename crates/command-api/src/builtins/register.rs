@@ -1216,7 +1216,7 @@ mod batch_8_tests {
     fn agent_view_env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("CLAUDE_CODE_DISABLE_AGENT_VIEW");
+        std::env::remove_var(branding::DISABLE_AGENT_VIEW_ENV);
         g
     }
 
@@ -1269,7 +1269,7 @@ mod batch_8_tests {
     #[tokio::test]
     async fn legacy_fork_only_when_agent_view_disabled() {
         let _g = agent_view_env_lock();
-        std::env::set_var("CLAUDE_CODE_DISABLE_AGENT_VIEW", "1");
+        std::env::set_var(branding::DISABLE_AGENT_VIEW_ENV, "1");
 
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
@@ -1285,7 +1285,7 @@ mod batch_8_tests {
         let subtask = subtask_display(&reg).await;
 
         // Restore the env before asserting so a failure never leaks the override.
-        std::env::remove_var("CLAUDE_CODE_DISABLE_AGENT_VIEW");
+        std::env::remove_var(branding::DISABLE_AGENT_VIEW_ENV);
 
         assert_eq!(
             fork_desc,

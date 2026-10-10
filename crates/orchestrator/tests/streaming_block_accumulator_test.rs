@@ -35,6 +35,7 @@ fn tool_use_partial_json_reassembles() {
     acc.start_block(
         1,
         BlockKind::ToolUse {
+            initial_input: None,
             id: tu_id.clone(),
             name: "Read".into(),
             provider_id: Some("toolu_01ACC".into()),
@@ -58,6 +59,7 @@ fn tool_use_partial_json_reassembles() {
             name,
             input,
             provider_id,
+            ..
         } => {
             assert_eq!(id, tu_id);
             assert_eq!(name, "Read");
@@ -81,6 +83,7 @@ fn empty_tool_use_input_parses_as_empty_object() {
     acc.start_block(
         0,
         BlockKind::ToolUse {
+            initial_input: None,
             id: ToolUseId::new(),
             name: "NoArgs".into(),
             provider_id: None,
@@ -152,6 +155,7 @@ fn malformed_tool_use_json_errors_at_stop() {
     acc.start_block(
         0,
         BlockKind::ToolUse {
+            initial_input: None,
             id: ToolUseId::new(),
             name: "Bad".into(),
             provider_id: None,

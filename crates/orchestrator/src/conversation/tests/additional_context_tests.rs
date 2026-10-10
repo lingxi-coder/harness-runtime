@@ -1320,6 +1320,7 @@ async fn mod_turn_step_batched_dispatches_an_earlier_tool_before_the_final_respo
         dir.path().to_path_buf(),
     )
     .with_hook_registry(Arc::new(tokio::sync::RwLock::new(hooks)));
+    let orch = ConversationOrchestrator::into_shared(orch);
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         orch.run_turn("question"),
@@ -2131,9 +2132,9 @@ async fn mod_turn_complete_sums_response_usage_and_keeps_last_model() {
         ),
         ..Default::default()
     };
-    let question: Utf16JsonProjection = "question".into();
-    orch.fire_mod_turn_start(&question, "turn-usage").await;
+    orch.fire_mod_turn_start("question", "turn-usage").await;
     let first = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "first".into(),
@@ -2151,6 +2152,7 @@ async fn mod_turn_complete_sums_response_usage_and_keeps_last_model() {
         None,
     );
     let last = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: "last".into(),
@@ -2931,7 +2933,7 @@ async fn prompt_context_mod_instruction_files_reach_the_model_reminder() {
             .await
             .expect("context message"),
     );
-    assert!(body.contains("# claudeMd\nCodebase and user instructions are shown below."));
+    assert!(body.contains("# instructions\nCodebase and user instructions are shown below."));
     assert!(body.contains("Contents of /project/AGENTS.md (project instructions, checked into the codebase):\n\nFOLLOW AGENT RULES"));
     assert!(body.contains("# currentDate\nToday's date is "));
     let announcements = orch.context_announcement_messages().await;
@@ -3038,8 +3040,8 @@ async fn prompt_context_mod_sees_import_source_and_can_remove_all_blocks() {
 
 #[tokio::test]
 async fn all_three_keys_byte_exact_order_and_wrapper() {
-    // claudeMd + userEmail present; currentDate always present. Insertion
-    // order (claude-code `pS`): claudeMd, userEmail, currentDate.
+    // instructions + userEmail present; currentDate always present. Insertion
+    // order (claude-code `pS`): instructions, userEmail, currentDate.
     let mem = Arc::new(StaticMemoryProvider::with_files(vec![MemoryFile {
         parent: None,
         source_content: None,
@@ -3065,16 +3067,16 @@ async fn all_three_keys_byte_exact_order_and_wrapper() {
     assert!(body.ends_with(&format!("\n\n      {} attached this context automatically; it isn't part of the user's message. It describes the user's own account and workspace, so they don't need it reported back.\n</system-reminder>\n", branding::PRODUCT_NAME)));
 
     // Keys in order, each `# key\nvalue`, joined by `\n`.
-    let i_md = body.find("# claudeMd\n").expect("claudeMd key");
+    let i_md = body.find("# instructions\n").expect("instructions key");
     let i_email = body.find("# userEmail\n").expect("userEmail key");
     let i_date = body.find("# currentDate\n").expect("currentDate key");
     assert!(
         i_md < i_email && i_email < i_date,
-        "key order claudeMd<userEmail<currentDate"
+        "key order instructions<userEmail<currentDate"
     );
 
-    // claudeMd value = the assembled memory block (preamble + Contents).
-    assert!(body.contains("# claudeMd\nCodebase and user instructions are shown below."));
+    // instructions value = the assembled memory block (preamble + Contents).
+    assert!(body.contains("# instructions\nCodebase and user instructions are shown below."));
     assert!(body.contains("Contents of /proj/LINGXI.md"));
     assert!(body.contains("MD BODY"));
     // userEmail value.
@@ -3093,7 +3095,7 @@ async fn omits_lingxi_md_and_email_when_absent_keeps_date() {
         .await
         .expect("date always present");
     let body = text(&msg);
-    assert!(!body.contains("# claudeMd"));
+    assert!(!body.contains("# instructions"));
     assert!(!body.contains("# userEmail"));
     assert!(body.contains("# currentDate\nToday's date is "));
     // The body between the header and the IMPORTANT line is exactly the one
@@ -3458,7 +3460,7 @@ fn date_change_re_seeds_the_session_start_date_on_a_new_session() {
 }
 
 // ------------------------------------------------------------------
-// PathAtlas S3 (mobile-linux): the `claudeMd` memory block must be
+// PathAtlas S3 (mobile-linux): the `instructions` memory block must be
 // probed at the HOST directory backing the guest session cwd.
 //
 // `additional_context_message` is the ONLY render path for the memory

@@ -118,6 +118,7 @@ impl ServerFallbackApiErrorRow {
             id: self.uuid,
             content: self.message.content.clone(),
             stop_reason: Some(self.message.stop_reason.clone()),
+            per_turn_effort: None,
             resumable: None,
         }
     }

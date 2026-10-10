@@ -1,0 +1,142 @@
+{
+  "version": "2.1.293",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "method": "Bounded native embedded source byte ranges, not a fabricated capability list. Implementation/source evidence does not establish Harness behavior or byte parity.",
+  "capabilities": [
+    "interrupt_send_now_v1",
+    "request_marker_lists_v1"
+  ],
+  "excerpts": [
+    {
+      "id": "native_capability_set",
+      "offset": 199085635,
+      "length": 330,
+      "sha256": "d6da266e692b2ada1c71981d10b1d7b77d06e3a46e70b38e3c82512afd41262b",
+      "source": "pt_receipt_v1\",JOr=\"msg_lifecycle_v1\",y=\"request_marker_lists_v1\",S=\"interrupt_cancel_queued_v1\",I=\"interrupt_send_now_v1\",mHo=\"task_list_restore_v1\",gHo=\"task_list_restored_v1\";var hHo=\"mcp_read_resource_v1\",yHo=\"mcp_tool_ui_meta_v1\",_Ho=\"ui_surface_v1\",SHo=[XOr,S,I,JOr,y];function Izn(e){let r=Yce(e.manifest.version);return{na"
+    },
+    {
+      "id": "send_now_input_schema",
+      "offset": 185620788,
+      "length": 2920,
+      "sha256": "bf3c0828ecbc0c38e89dcc7c858741e372873107df3a0b26d906ef257e389b31",
+      "source": "send_now:H().optional().describe(\"@internal True when the request is a client's Send now on a message that is waiting, not its Stop: it asks that the waiting messages reach the model now, as the terminal's send-now key does. It is not a Stop: it makes no later turn start aborted, cancels nothing that is queued, and ends no background task, subscription or other thing outside the running turn that a Stop ends. What it does depends on what the CLI holds when it reads the request, and the response's send_now says which. Without message_uuid every waiting user message counts, which may be another than the one pressed. With no user message waiting at the CLI it does nothing: a message the running turn has already taken in, or was started for, is being answered. With one waiting that is not in the queue yet (received and still being admitted, or already taken for the next turn), that the running turn is taking in at that moment, or with no turn under way, it also does nothing: the message runs when its place comes. With a person's message in the queue behind a turn under way, the CLI chooses how that turn makes way: it moves what the turn waits on to the background so that the turn takes the message in (and, if that fails, stops the turn later as a priority 'now' message does, without a marker), or it aborts that turn at once as a plain interrupt does (running tools are ended, the interruption marker is written, the result is an error_during_execution); what was queued ahead of the message still runs before it. Either way a sender learns that the turn has ended from the turn's result, not from this response. The message must already be at the CLI, or the request finds nothing waiting: a sender that still holds it delivers it first, or sends it with priority 'now', or sends a plain interrupt instead. Only the boolean true counts, and with cancel_queued:true the request is a Stop. Advertised by interrupt_send_now_v1 on system/init; a CLI without it handles the request as a plain interrupt.\"),message_uuid:o().optional().describe(\"@internal Read only beside send_now:true: the uuid of the user message that Send now was pressed on, in the very form in which that message reached the CLI (a session service may deliver it in lower case): it is compared as an exact string, as cancel_async_message compares. With it only that message counts as waiting. If the running turn has already taken it in or was started for it, or the CLI does not know it or does not count it as a person's, the request does nothing and answers 'nothing_waiting', whatever else waits. Once the request acts, it acts as without the name: everything queued decides between the move to the background and the abort, and goes along with the named message. An empty string is read as no name, and so is a null, which this schema does not admit but an encoder may write; any other value that is no string names nothing.\"),for_"
+    },
+    {
+      "id": "send_now_response_schema",
+      "offset": 185629841,
+      "length": 994,
+      "sha256": "e0682ce910056bf72a73ccd211fbd05ba3a3172d5987161ab57d30d65445d7f2",
+      "source": "send_now:W([\"stopped\",\"delivering\",\"nothing_waiting\"]).optional().describe(\"@internal Present only when a CLI that advertises interrupt_send_now_v1 itself answers a send_now (a client that relays to a hosted session answers without it). 'nothing_waiting': no user message waited (with message_uuid, the named one did not), and nothing was done. 'delivering': one waits and this request stopped no turn, for one of these reasons: no turn is under way and the message runs when its place comes; the message is not in the queue yet, or the running turn is just taking it in; the CLI is moving what the turn waits on to the background, and may still stop the turn later if that fails; the turn is already being stopped; or the process is on its way out, and the message will not run in it. 'stopped': the running turn was aborted for what waits, and its result follows.\"),turn:W([\"stopped\",\"idle\",\"spared\"]).optional().describe(\"@internal Present only when the answering CLI read the request's for_"
+    },
+    {
+      "id": "send_now_boolean_precedence",
+      "offset": 190347651,
+      "length": 147,
+      "sha256": "95441342923aef81643462f3955f752f1f8a42cb380b03d72a549883250f5228",
+      "source": "omUUID as s}from\"crypto\";function ylt(e){return e.send_now===!0&&e.cancel_queued!==!0}var u=8;function Hws(e){let n=e.for_user_message_uuids;if(e.c"
+    },
+    {
+      "id": "send_now_runtime",
+      "offset": 208935813,
+      "length": 989,
+      "sha256": "200e412bcf926f0e3ac9762dba3d37dbb16a990f23e9294c0d1db1c3e39b673b",
+      "source": "US({messageQueue:e,drain:r,prewaitLatch:n,frameIntake:s,io:g,pressed:w,standsFor:h,deliver:P}){let k=w!==void 0&&w!==null&&w!==\"\",b=r.pendingDispatchUuids.filter((fe)=>!e.hasCancelPendingAcked(fe)),F=e.getCommandQueueSnapshot().filter((fe)=>{let ae=fe.uuid&&h?.(fe.uuid);return ae?!k||ae===w:Ume(fe)&&!fe.isMeta&&qy(fe.origin)&&fe.shouldQuery!==!1&&fe.passive!==!0&&(!k||fe.uuid===w)}),N=r.abortController,M;if(F.length===0)M=(k?b.some((fe)=>(h?.(fe)??fe)===w)||s.parkedUuids().some((fe)=>fe===w):b.length>0&&r.intentBatchInFlight||s.hasParked())?\"delivering\":\"nothing_waiting\";else if(!r.turnUnderWay||N===void 0||N.signal.aborted||r.endSessionRequested||fr()||F.every(({uuid:fe})=>fe!==void 0&&e.isFoldInFlight(fe))||P?.()===!0)M=\"delivering\";else Est(),N.abort(cc(\"remote-cancel\")),M=\"stopped\";let{receipt:Y}=Ru({cancelQueued:!1,messageQueue:e,drain:r,prewaitLatch:n,frameIntake:s,io:g});return{still_queued:Y.still_queued,send_now:M}}function LS({drain:e,prewaitLatch:r,aim:n}){if(n==="
+    },
+    {
+      "id": "send_now_control_dispatch",
+      "offset": 209269730,
+      "length": 550,
+      "sha256": "8bdad1725ec22238decef193fb0e04217119122199adaf3aa02d09aa15d2e00a",
+      "source": "ength()>0?\"commands_queued\":!He.running&&r.sessionState.getState()===\"requires_action\"?\"prompt_pending\":\"turn_running\",Ze=(I,Un)=>{if(ylt(Un)){let zo=US({messageQueue:ee,drain:He,prewaitLatch:Nr,frameIntake:ln,io:r,pressed:Un.message_uuid,deliver:()=>ti.pressWaiting()});rt(I,zo),y(\"headless_interrupt_send_now\",{outcome:d(zo.send_now)});return}let En=Hws(Un);if(LS({drain:He,prewaitLatch:Nr,aim:En})){let{receipt:zo}=Ru({cancelQueued:!1,turn:\"spared\",messageQueue:ee,drain:He,prewaitLatch:Nr,io:r});rt(I,zo);return}let ri=HS({drain:He,prewaitLatch:N"
+    },
+    {
+      "id": "assistant_marker_list_schema",
+      "offset": 185420045,
+      "length": 871,
+      "sha256": "b370ab9c36fe77d62e634a9a7436d0e68618b2f39de29514193d2d05d6c5c7d2",
+      "source": "user_message_uuids:A(o()).optional().describe(\"Client uuids of every user message whose prompt this turn has consumed so far, in consumption order \\u2014 all members of a prompt batch the host merged into this one turn (several messages sent close together run as one turn whose user_message_uuid is the LAST member's), then any user message folded into the turn before this frame \\u2014 so a consumer that sent any of them can bind this reply to its own send by finding its uuid anywhere in the list. Always contains user_message_uuid; at most 64 entries. Present exactly when user_message_uuid is, on the same frames; absent from older producers (fall back to user_message_uuid).\"),resume_reason:o().optional().describe(\"Why this frame's turn continues one that a worker restart interrupted. Such a turn is the automatic re-run of the interrupted turn (CLAUDE_CODE_RESU"
+    },
+    {
+      "id": "result_marker_list_schema",
+      "offset": 185474047,
+      "length": 854,
+      "sha256": "b605661ba821109a52a123fddae8b41783c01f8492ae76906e95bc4bad9e48df",
+      "source": "user_message_uuids:A(o()).optional().describe(\"Client uuids of every user message whose prompt this turn consumed, in consumption order \\u2014 all members of a prompt batch the host merged into this one turn (several messages sent close together run as one turn whose user_message_uuid is the LAST member's), then any queued user message folded into the running turn between tool rounds, once taken off the queue \\u2014 so a consumer that sent any of them can bind this result to its own send by finding its uuid anywhere in the list. Always contains user_message_uuid; at most 64 entries; can be longer than the list on the turn's first reply frame. Present when a headless turn that ran echoes user_message_uuid; absent on delivery-failure and zeroed results and from older producers (fall back to user_message_uuid).\"),resume_reason:o().optional().des"
+    },
+    {
+      "id": "partial_marker_list_schema",
+      "offset": 185499659,
+      "length": 881,
+      "sha256": "c622dc0c3a14cdccebb091f770d5994c037bc75c0f6521aa45944f39e80b208b",
+      "source": "user_message_uuids:A(o()).optional().describe(\"Client uuids of every user message whose prompt this turn has consumed so far, in consumption order \\u2014 all members of a prompt batch the host merged into this one turn (several messages sent close together run as one turn whose user_message_uuid is the LAST member's), then any user message folded into the turn before this frame \\u2014 so a consumer that sent any of them can bind this reply to its own send by finding its uuid anywhere in the list. Always contains user_message_uuid; at most 64 entries. Present exactly when user_message_uuid is, on the same frames; absent from older producers (fall back to user_message_uuid).\"),resume_reason:o().optional().describe(\"Why this frame's turn continues one that a worker restart interrupted. Such a turn is the automatic re-run of the interrupted turn (CLAUDE_CODE_RESUME_INTERRU"
+    },
+    {
+      "id": "batch_primary_merge",
+      "offset": 208801279,
+      "length": 726,
+      "sha256": "02567cc18b75bf2ac5aa01e4219e30b34b87f8e921fca5300935c323f2e7baf5",
+      "source": "function uC(e){if(e.length===1)return e[0];if(e.every((r)=>typeof r===\"string\"))return e.join(`\n`);return e.flatMap(lC)}function iu(e){let r=e[0];if(e.length===1)return r;let n=qLo(e),s=e.findLast((g)=>g.uuid)??r;return{...r,value:uC(e.map((g)=>g.value)),uuid:s.uuid,frameTiming:s.frameTiming,turnAttributionKey:ydo(e),traceContext:n.parent,linkedTraceContexts:n.linked,attachmentSourceUuid:void 0,deliveryId:void 0,fileAttachments:e.flatMap((g)=>g.fileAttachments??[]),clientPlatform:e.find((g)=>g.clientPlatform)?.clientPlatform??r.clientPlatform,ccrTurnId:nVo(e),...e.some((g)=>g.stampThreadState)&&{stampThreadState:!0},...e.some((g)=>g.textNotTyped)&&{textNotTyped:!0}}}function Tm(e){return e.uuid!==void 0&&(e.turnAttri"
+    },
+    {
+      "id": "admission_batch_markers",
+      "offset": 208913970,
+      "length": 575,
+      "sha256": "e03b44e5b406e6145a5b2b716db9f04cb26b29e232c5484363944c84f2358358",
+      "source": "yS(e,r){return{uuid:e.uuid,userMessageUuids:r.flatMap((n)=>Tm(n)?[n.uuid]:n.resumedTurnUserMessageUuid!==void 0?[n.resumedTurnUserMessageUuid]:[]),isMeta:e.isMeta,resumeReason:r.find((n)=>n.resumeReason!==void 0)?.resumeReason,uuidIsClientEventUuid:(r.findLast((n)=>n.uuid)??e).turnAttributionKey!==void 0,shouldQuery:e.shouldQuery,queryHeldForNextTurn:e.queryHeldForNextTurn,skipAttachments:$ht(e)||void 0,pollEventDelivery:e.mode===\"poll-event\"||void 0,pollEventProvenance:e.mode===\"poll-event\"?[e.pollEvent?.provenance??null]:void 0,pollEventDeclared:Rtt([e]),...!1,skipSk"
+    },
+    {
+      "id": "marker_tracker_full",
+      "offset": 209023403,
+      "length": 808,
+      "sha256": "ad52e90ffeb5eba54c82585670bf4bf3c70261c789abdbd4605d26a41454b071",
+      "source": "function yv(e,r,{primaryIsMeta:n=!1}={}){let s=[],g=new Set,w,h=e===void 0||n,P=(b)=>{if(b===\"\"||s.includes(b))return;if(s.length<64)s.push(b);else if(h)s[63]=b};for(let b of r??[])P(b);if(e!==void 0){if(!s.includes(e))if(s.length>=64)s[63]=e;else s.push(e)}let k=()=>{let b=s.at(-1);if(b===void 0)return;return{user_message_uuid:e!==void 0&&!(n&&w!==void 0)?e:w??b,user_message_uuids:[...s]}};return{fields:k,errorVariantFields:()=>k()??{user_message_uuid:void 0},noteAttachment:(b)=>{if(b.type===\"queued_command\"&&b.commandMode===\"prompt\"&&b.isMeta!==!0&&b.source_uuid!==void 0&&g.size<64)g.add(b.source_uuid)},noteCommandStarted:(b)=>{if(g.delete(b)){if(P(b),s.includes(b))w=b;return!0}return!1}}}function _v({answers:e,stored:r,refuseAdoption:n,toolUseID:s,canUseTool:g}){let w=!1;return async(h,P,k,b,F,"
+    },
+    {
+      "id": "marker_tracker_admission",
+      "offset": 209042790,
+      "length": 343,
+      "sha256": "6886ecef90dcd911ed31bb19bdf63fd475e95c86367da0d3f2ee9fd597953394",
+      "source": "moryKick)}catch(xe){t(`memory snapshot kick failed: ${xe instanceof Error?xe.message:String(xe)}`)}}let Is=Ue?.uuid&&(Ue.uuidIsClientEventUuid||!Ue.isMeta)?Ue.uuid:void 0,ln=yv(Is,Ue?.userMessageUuids,{primaryIsMeta:Ue?.isMeta===!0}),bo=Ue?.resumeReason!==void 0?{resume_reason:Ue.resumeReason}:void 0,Lo={},{permissionDenials:cn,recordDenial:"
+    },
+    {
+      "id": "marker_consumption_on_started",
+      "offset": 209056036,
+      "length": 364,
+      "sha256": "a55f89af6688d8cfe0edae5a44a164ad9155303617214c7ea3dfce78ea9b029e",
+      "source": ".tt,activeGoal:xe.value});break;case\"command_lifecycle\":if(xe.state===\"started\"){let tt=ln.noteCommandStarted(xe.command_uuid);try{Ue?.onCommandTakenIn?.(xe.command_uuid,tt)}catch(tn){c(tn)}}break;case\"result\":{ps=!0,fs=!0,Ko.end(xe.terminal_reason),Fo(Ur,Mr);let tt=Ce();if(tt!==void 0)throw yield*ds.closeAtTurnEnd(Ot),tt.error;xe.permission_denials.unshift(...c"
+    },
+    {
+      "id": "result_marker_stamp_prefix",
+      "offset": 209057682,
+      "length": 573,
+      "sha256": "a5aa10acd4951f9cdb8c3cb87268c4c4f795dab1aee39473341b611fa96197c4",
+      "source": "isHostRow(Jn)),Il=qa?.type===\"assistant\"&&!(qa.isApiErrorMessage&&!xe.is_error)?L1o(qa,Sd.get(qa)):void 0,Vt=ln.fields(),ao=Mv(Lr,Yr,Qs),Vs=Mv(Lr,Yr,Vo);Eo={...xe,usage:mr,duration_ms:vs(Yr,performance.now()),...xe.subtype===\"error_during_execution\"&&{errors:kar(e.session,xe.errors[0]??\"\",yA(xe.errors.slice(1),d$r(Oa)),\"first\")},...xe.subtype!==\"success\"&&Vt,...xe.subtype!==\"success\"&&bo,...xe.subtype===\"success\"&&{...Il!==void 0&&{result:Il},ttft_ms:Lr&&so?vs(Yr,so):void 0,ttft_stream_ms:Lr&&Co?vs(Yr,Co):void 0,time_to_request_ms:Cn,...Zr&&{time_to_request_phases_ms"
+    },
+    {
+      "id": "success_result_marker_stamp_tail",
+      "offset": 209058900,
+      "length": 630,
+      "sha256": "888ae18a9341afe1fea8b8aeed59087fcc294d4cb7b87dc9db0428643e1b0ee0",
+      "source": "&Qs?.ackedAtMs?vs(Yr,Qs.ackedAtMs):void 0,first_stream_post_queue_wait_ms:ao.queueWaitMs,first_stream_post_queued_behind:ao.queuedBehind,first_text_post_ms:Vs.postMs,first_text_post_queue_wait_ms:Vs.queueWaitMs,first_text_post_queued_behind:Vs.queuedBehind,...Vt,...bo,...Lr&&Fn&&Vt!==void 0&&Vt.user_message_uuid===Is&&{request_sent_wall_ms:Fn,...ha>0&&{first_request_input_tokens:ha},...Ue?.frameTiming?.serverReceivedWallMs!==void 0&&{user_message_server_received_wall_ms:Ue.frameTiming.serverReceivedWallMs},...Qs?.postedWallMs!==void 0&&{first_stream_post_wall_ms:Qs.postedWallMs},...Vo?.postedWallMs!==void 0&&{first_text_po"
+    },
+    {
+      "id": "reply_kind_scalar_change_predicate",
+      "offset": 209060825,
+      "length": 795,
+      "sha256": "17a6bc90d226c1a61ee63c72d9bf0d74aabae6750d4edc72dfee2afd68d5dd9d",
+      "source": "l&&!Nme(tt.event))Qs=e.trackFirstFrameUpload(tt.uuid);let tn=tt.type===\"assistant\"&&tt.parent_tool_use_id==null?\"assistant\":tt.type===\"stream_event\"&&tt.parent_tool_use_id==null&&!Nme(tt.event)?\"stream_event\":void 0,Lr=tn===void 0?void 0:ln.fields();if(tn!==void 0&&Lr!==void 0&&Lr.user_message_uuid!==Lo[tn])Lo[tn]=Lr.user_message_uuid,yield{...tt,...Lr,...bo};else if(tt.type===\"system\"&&tt.subtype===\"thinking_tokens\"){let Gn=ln.fields();yield Gn===void 0?tt:{...tt,user_message_uuid:Gn.user_message_uuid}}else if(tt.type===\"system\"&&tt.subtype===\"status\"&&tt.status===\"requesting\"){let Gn=ln.fields();yield Gn===void 0?tt:{...tt,user_message_uuids:Gn.user_message_uuids}}else yield tt}if(wd)yield*as(\"served\");if(ps)return;if(xe.type===\"user\"&&no!==void 0&&!e1(e.maxBudgetUsd)){let tt=a.MAX_"
+    },
+    {
+      "id": "non_ping_predicate",
+      "offset": 196480064,
+      "length": 50,
+      "sha256": "764f8241d73ff28b8c24e8ce6d5c6dacafc1ade125a5a24063a9043353e3f0c6",
+      "source": "function Nme(e){return e.type===\"ping\"}function b5"
+    }
+  ],
+  "unverified": [
+    "Send-now background move and fallback stop live branches",
+    "Marker64 overflow and meta folding live cases",
+    "Harness implementation equality"
+  ]
+}

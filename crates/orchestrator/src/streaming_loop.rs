@@ -142,6 +142,7 @@ pub(crate) fn joined_visible_text_projection(blocks: &[ContentBlock]) -> Utf16Js
 /// were current when the block completed.
 #[derive(Debug, Clone)]
 pub(crate) struct CompletedAssistantRow {
+    pub(crate) per_turn_effort: Option<Utf16JsonProjection>,
     /// Monotonic pump arrival order; provider block indexes may be reused by
     /// later accepted fallback responses in the same host turn.
     pub(crate) stream_order: u64,
@@ -199,6 +200,7 @@ pub(crate) fn native_server_fallback_supersedes_enabled(query_source: &str) -> b
 /// Outcome of consuming one stream.
 #[derive(Debug, Default)]
 pub struct PumpedTurn {
+    pub per_turn_effort: Option<Utf16JsonProjection>,
     /// Host-owned sweeps of exact live executor ids. These are runtime control
     /// facts and never become provider events or synthetic tool-result rows.
     pub tool_use_removals: Vec<lingxi_core::host::tool_use_lifecycle::ToolUseRemoval>,
@@ -1908,6 +1910,7 @@ async fn pump_stream_inner(
         // Capture MessageStart usage before dispatching (dispatch consumes the event).
         if let HistoryEvent::MessageStart { ref response } = event {
             message_start_usage = Some(response.usage.clone());
+            turn.per_turn_effort = response.per_turn_effort();
         }
         // `Hr` (binary @219640711): a non-thinking `content_block_start` flips
         // `real_content_started`, disqualifying the mid-stream transient retry.
@@ -1988,6 +1991,7 @@ async fn pump_stream_inner(
                 turn.assistant_blocks.insert(position, block.clone());
                 assistant_block_row_ids.insert(position, row_id);
                 let row = CompletedAssistantRow {
+                    per_turn_effort: turn.per_turn_effort.clone(),
                     stream_order: next_row_order,
                     row_id,
                     provider_message_id: provider_message_id.clone(),
@@ -2079,6 +2083,7 @@ async fn pump_stream_inner(
                 };
                 let row_id = MessageId::new();
                 let mut row = CompletedAssistantRow {
+                    per_turn_effort: turn.per_turn_effort.clone(),
                     stream_order: next_row_order,
                     row_id,
                     provider_message_id: provider_message_id.clone(),
@@ -2131,6 +2136,7 @@ async fn pump_stream_inner(
                         native_query_depth: p.executor.native_query_depth(),
                         query_history: p.query_history.clone(),
                         assistant_message: ConversationMessage::Assistant {
+                            per_turn_effort: turn.per_turn_effort.clone(),
                             id: row.row_id,
                             content: row.content.clone(),
                             stop_reason: None,
@@ -2371,53 +2377,6 @@ mod tests {
 
     fn boxed(events: Vec<HistoryEvent>) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
         stream::iter(events.into_iter().map(Ok)).boxed()
-    }
-
-    #[tokio::test]
-    async fn timing_observations_use_event_receipt_and_wait_for_row_acceptance() {
-        let capture = Arc::new(crate::conversation::TurnTimingCapture::new());
-        // Model Native's external-turn pre-dispatch work; the request mark
-        // starts after this gap rather than at process startup.
-        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
-        capture.observe_first_request_dispatch();
-
-        let events = vec![
-            message_start("m1", "model"),
-            content_block_start_thinking(0),
-            thinking_delta(0, "reasoning"),
-            content_block_stop(0),
-            message_delta_stop("end_turn"),
-            message_stop(),
-        ];
-        let stream = stream::iter(events.into_iter().map(Ok))
-            .then(|event| async move {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-                event
-            })
-            .boxed();
-        let output: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
-        let (turn, _remaining) =
-            pump_stream_inner(stream, &output, None, Some(Arc::clone(&capture)))
-                .await
-                .expect("stream completes");
-
-        let before_acceptance = capture.snapshot();
-        assert!(before_acceptance.time_to_request_ms.is_some());
-        assert!(before_acceptance.ttft_stream_ms.is_some());
-        assert!(before_acceptance.first_content_frame_ms.is_some());
-        assert_eq!(before_acceptance.ttft_ms, None);
-
-        // Session append may be delayed after the first frame; TTFT reflects
-        // accepted-row visibility, not the earlier ContentBlockStop receipt.
-        tokio::time::sleep(std::time::Duration::from_millis(12)).await;
-        turn.commit_accepted_assistant_timing();
-        let after_acceptance = capture.snapshot();
-        let request = after_acceptance.time_to_request_ms.unwrap();
-        let stream_start = after_acceptance.ttft_stream_ms.unwrap();
-        let first_frame = after_acceptance.first_content_frame_ms.unwrap();
-        let ttft = after_acceptance.ttft_ms.unwrap();
-        assert!(request < stream_start && stream_start < first_frame && first_frame < ttft);
-        assert!(ttft.saturating_sub(first_frame) >= 8);
     }
 
     #[test]
@@ -2742,6 +2701,53 @@ mod tests {
                 .iter()
                 .any(|frame| frame == "{\"type\":\"message_stop\"}"));
         }
+    }
+
+    #[tokio::test]
+    async fn timing_observations_use_event_receipt_and_wait_for_row_acceptance() {
+        let capture = Arc::new(crate::conversation::TurnTimingCapture::new());
+        // Model Native's external-turn pre-dispatch work; the request mark
+        // starts after this gap rather than at process startup.
+        tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+        capture.observe_first_request_dispatch();
+
+        let events = vec![
+            message_start("m1", "model"),
+            content_block_start_thinking(0),
+            thinking_delta(0, "reasoning"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ];
+        let stream = stream::iter(events.into_iter().map(Ok))
+            .then(|event| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                event
+            })
+            .boxed();
+        let output: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let (turn, _remaining) =
+            pump_stream_inner(stream, &output, None, Some(Arc::clone(&capture)))
+                .await
+                .expect("stream completes");
+
+        let before_acceptance = capture.snapshot();
+        assert!(before_acceptance.time_to_request_ms.is_some());
+        assert!(before_acceptance.ttft_stream_ms.is_some());
+        assert!(before_acceptance.first_content_frame_ms.is_some());
+        assert_eq!(before_acceptance.ttft_ms, None);
+
+        // Session append may be delayed after the first frame; TTFT reflects
+        // accepted-row visibility, not the earlier ContentBlockStop receipt.
+        tokio::time::sleep(std::time::Duration::from_millis(12)).await;
+        turn.commit_accepted_assistant_timing();
+        let after_acceptance = capture.snapshot();
+        let request = after_acceptance.time_to_request_ms.unwrap();
+        let stream_start = after_acceptance.ttft_stream_ms.unwrap();
+        let first_frame = after_acceptance.first_content_frame_ms.unwrap();
+        let ttft = after_acceptance.ttft_ms.unwrap();
+        assert!(request < stream_start && stream_start < first_frame && first_frame < ttft);
+        assert!(ttft.saturating_sub(first_frame) >= 8);
     }
 
     #[tokio::test]

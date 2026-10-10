@@ -105,6 +105,7 @@ fn report() -> PreparedHandbackReport {
             warning: None,
         },
         body: handback_frame("persisted report pointer").into(),
+
         sender_name: "worker".into(),
         sender_id: "worker".into(),
         sender_task_id: "model-forged-task".into(),

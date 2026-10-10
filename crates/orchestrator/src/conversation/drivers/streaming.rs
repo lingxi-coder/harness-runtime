@@ -30,6 +30,26 @@ use crate::turn_loop::{
 };
 use hooks::attachment::HookPublicationGuard;
 
+fn observe_main_dispatch(
+    observer: Option<llm_runtime::RequestDispatchObserver>,
+    output: &Arc<dyn lingxi_core::host::OutputStream>,
+) -> Option<llm_runtime::RequestDispatchObserver> {
+    if !output.wants_response_timing() {
+        return observer;
+    }
+    let output = output.clone();
+    Some(llm_runtime::RequestDispatchObserver::new(move || {
+        let at = std::time::Instant::now();
+        if let Some(observer) = &observer {
+            observer.mark_dispatched();
+        }
+        output.note_response_timing(
+            lingxi_core::host::orchestrator::ResponseTimingEvent::RequestStarted,
+            at,
+        );
+    }))
+}
+
 pub(super) struct StreamingTurnDriver<'a> {
     pub(super) orch: &'a ConversationOrchestrator,
     pub(super) prompt: &'a str,
@@ -40,6 +60,7 @@ pub(super) struct StreamingTurnDriver<'a> {
     pub(super) in_human_turn: bool,
     pub(super) queued_inputs: Option<Vec<QueuedPromptInput>>,
     pub(super) row_token: Option<String>,
+    pub(super) projected_content: Option<super::projected_content::ProjectedUserContent>,
 }
 
 struct PreparedStreamingIteration {
@@ -254,127 +275,130 @@ fn mod_turn_step_stream(
     let worker_decoder = decoder.clone();
     let worker_model = effective_model.clone();
     let worker_error = physical_error.clone();
-    tokio::spawn(async move {
-        let finish_wire = worker_wire.clone();
-        let requested_model = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let source_requested = requested_model.clone();
-        let pending_output = Arc::new(StdMutex::new(Vec::<PendingModStepOutput>::new()));
-        let fallback_api = api.clone();
-        let fallback_model = model.clone();
-        let fallback_profile = model_profile.clone();
-        let fallback_system = system_prompt.clone();
-        let fallback_snapshot = snapshot.clone();
-        let fallback_tool_result_reminder_suffixes = tool_result_reminder_suffixes.clone();
-        let fallback_publication_guards = publication_guards.clone();
-        let fallback_query_source = query_source.clone();
-        let fallback_observation = observation.clone();
-        let fallback_output = output.clone();
-        let fallback_retry_scope = retry_scope.clone();
-        let fallback_request_capture = request_capture.clone();
-        let source_retry_scope = retry_scope.clone();
-        let source_request_capture = request_capture.clone();
-        let source_tool_result_reminder_suffixes = tool_result_reminder_suffixes.clone();
-        let source_dispatch_observer = request_dispatch_observer.clone();
-        let source = move |forwarded: Utf16JsonProjection| {
-            let api = api.clone();
-            let main_api = main_api.clone();
-            let model_policy = model_policy.clone();
-            let original_model = model.clone();
-            let original_effort = original_effort.clone();
-            let model_profile = model_profile.clone();
-            let system_prompt = system_prompt.clone();
-            let snapshot = snapshot.clone();
-            let publication_guards = publication_guards.clone();
-            let tools = tools.clone();
-            let query_source = query_source.clone();
-            let observation = observation.clone();
-            let wire = worker_wire.clone();
-            let effective_model = worker_model.clone();
-            let physical_error = worker_error.clone();
-            let requested_model = source_requested.clone();
-            let retry_scope = source_retry_scope.clone();
-            let request_capture = source_request_capture.clone();
-            let request_dispatch_observer = source_dispatch_observer.clone();
-            let tool_result_reminder_suffixes = source_tool_result_reminder_suffixes.clone();
-            async move {
-                let requested = forwarded.string_at("/model").unwrap_or_default().to_owned();
-                let resolved = main_api
-                    .resolve_media_route(&requested, model_profile.as_deref())
-                    .or_else(|_| main_api.resolve_media_route(&requested, None))
-                    .ok();
-                let resolved_model = resolved.as_ref().map_or(requested.as_str(), |route| {
-                    route.main.request_model.as_str()
-                });
-                let denied = if let Some(policy) = model_policy.as_ref() {
-                    policy.model_allowed(resolved_model).await? == Some(false)
-                } else {
-                    false
-                };
-                let model = if denied {
-                    tracing::warn!(requested, "turn.step model rewrite denied by policy");
-                    original_model
-                } else {
-                    requested
-                };
-                let profile = if denied {
-                    model_profile
-                } else {
-                    resolved
-                        .map(|route| route.main.profile_name)
-                        .or(model_profile)
-                };
-                let effort_override = forwarded
-                    .string_at("/effort")
-                    .filter(|effort| Some(*effort) != original_effort.as_deref());
-                *effective_model.lock().unwrap() = Some((model.clone(), profile.clone()));
-                requested_model.store(true, std::sync::atomic::Ordering::Release);
-                let mut snapshot = snapshot;
-                let mut turn_reminders = Vec::new();
-                let mut guarded_reminders = publication_guards
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone();
-                crate::prompt::async_hook_response::retain_current_async_hook_reminders(
-                    &mut snapshot,
-                    &mut turn_reminders,
-                    &mut guarded_reminders,
-                );
-                let request_dispatch_admission =
-                    crate::prompt::async_hook_response::request_dispatch_admission(
-                        &snapshot,
-                        &guarded_reminders,
+    tokio::spawn(lingxi_core::host::model_safety::bind_current_model_safety(
+        async move {
+            let finish_wire = worker_wire.clone();
+            let requested_model = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let source_requested = requested_model.clone();
+            let pending_output = Arc::new(StdMutex::new(Vec::<PendingModStepOutput>::new()));
+            let fallback_api = api.clone();
+            let fallback_model = model.clone();
+            let fallback_profile = model_profile.clone();
+            let fallback_system = system_prompt.clone();
+            let fallback_snapshot = snapshot.clone();
+            let fallback_tool_result_reminder_suffixes = tool_result_reminder_suffixes.clone();
+            let fallback_publication_guards = publication_guards.clone();
+            let fallback_query_source = query_source.clone();
+            let fallback_observation = observation.clone();
+            let fallback_output = output.clone();
+            let fallback_retry_scope = retry_scope.clone();
+            let fallback_request_capture = request_capture.clone();
+            let source_retry_scope = retry_scope.clone();
+            let source_request_capture = request_capture.clone();
+            let source_tool_result_reminder_suffixes = tool_result_reminder_suffixes.clone();
+            let source_dispatch_observer = request_dispatch_observer.clone();
+            let source_output = output.clone();
+            let source = move |forwarded: Utf16JsonProjection| {
+                let api = api.clone();
+                let main_api = main_api.clone();
+                let model_policy = model_policy.clone();
+                let original_model = model.clone();
+                let original_effort = original_effort.clone();
+                let model_profile = model_profile.clone();
+                let system_prompt = system_prompt.clone();
+                let snapshot = snapshot.clone();
+                let publication_guards = publication_guards.clone();
+                let tools = tools.clone();
+                let query_source = query_source.clone();
+                let observation = observation.clone();
+                let wire = worker_wire.clone();
+                let effective_model = worker_model.clone();
+                let physical_error = worker_error.clone();
+                let requested_model = source_requested.clone();
+                let retry_scope = source_retry_scope.clone();
+                let request_capture = source_request_capture.clone();
+                let request_dispatch_observer =
+                    observe_main_dispatch(source_dispatch_observer.clone(), &source_output);
+                let tool_result_reminder_suffixes = source_tool_result_reminder_suffixes.clone();
+                async move {
+                    let requested = forwarded.string_at("/model").unwrap_or_default().to_owned();
+                    let resolved = main_api
+                        .resolve_media_route(&requested, model_profile.as_deref())
+                        .or_else(|_| main_api.resolve_media_route(&requested, None))
+                        .ok();
+                    let resolved_model = resolved.as_ref().map_or(requested.as_str(), |route| {
+                        route.main.request_model.as_str()
+                    });
+                    let denied = if let Some(policy) = model_policy.as_ref() {
+                        policy.model_allowed(resolved_model).await? == Some(false)
+                    } else {
+                        false
+                    };
+                    let model = if denied {
+                        tracing::warn!(requested, "turn.step model rewrite denied by policy");
+                        original_model
+                    } else {
+                        requested
+                    };
+                    let profile = if denied {
+                        model_profile
+                    } else {
+                        resolved
+                            .map(|route| route.main.profile_name)
+                            .or(model_profile)
+                    };
+                    let effort_override = forwarded
+                        .string_at("/effort")
+                        .filter(|effort| Some(*effort) != original_effort.as_deref());
+                    *effective_model.lock().unwrap() = Some((model.clone(), profile.clone()));
+                    requested_model.store(true, std::sync::atomic::Ordering::Release);
+                    let mut snapshot = snapshot;
+                    let mut turn_reminders = Vec::new();
+                    let mut guarded_reminders = publication_guards
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone();
+                    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                        &mut snapshot,
+                        &mut turn_reminders,
+                        &mut guarded_reminders,
                     );
-                let stream = retry_scope
-                    .run(request_capture.scope(api.stream_with_effort_override(
-                        &model,
-                        profile.as_deref(),
-                        system_prompt.as_ref(),
-                        snapshot,
-                        tools,
-                        effort_override,
-                        tool_result_reminder_suffixes,
-                        &query_source,
-                        skip_global_cache_for_system_prompt,
-                        request_dispatch_admission,
-                        request_dispatch_observer.clone(),
-                    )))
-                    .await
-                    .map_err(|error| {
-                        *physical_error.lock().unwrap() = Some(error.clone());
-                        hooks::mods::ModError::Hook(error.to_string())
-                    })?;
-                let observation = observation
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(output_accounting_impl::MainOutputObservation::fork);
-                let stream = output_accounting_impl::account_stream(stream, observation);
-                let chunk_wire = wire.clone();
-                let result_wire = wire.clone();
-                let source_refs = Arc::new(StdMutex::new(Vec::new()));
-                let chunk_refs = source_refs.clone();
-                let response_events = Arc::new(StdMutex::new(Vec::new()));
-                let stream = stream.then(move |item| {
+                    let request_dispatch_admission =
+                        crate::prompt::async_hook_response::request_dispatch_admission(
+                            &snapshot,
+                            &guarded_reminders,
+                        );
+                    let stream = retry_scope
+                        .run(request_capture.scope(api.stream_with_effort_override(
+                            &model,
+                            profile.as_deref(),
+                            system_prompt.as_ref(),
+                            snapshot,
+                            tools,
+                            effort_override,
+                            tool_result_reminder_suffixes,
+                            &query_source,
+                            skip_global_cache_for_system_prompt,
+                            request_dispatch_admission,
+                            request_dispatch_observer.clone(),
+                        )))
+                        .await
+                        .map_err(|error| {
+                            *physical_error.lock().unwrap() = Some(error.clone());
+                            hooks::mods::ModError::Hook(error.to_string())
+                        })?;
+                    let observation = observation
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(output_accounting_impl::MainOutputObservation::fork);
+                    let stream = output_accounting_impl::account_stream(stream, observation);
+                    let chunk_wire = wire.clone();
+                    let result_wire = wire.clone();
+                    let source_refs = Arc::new(StdMutex::new(Vec::new()));
+                    let chunk_refs = source_refs.clone();
+                    let response_events = Arc::new(StdMutex::new(Vec::new()));
+                    let stream = stream.then(move |item| {
                     let response_events = response_events.clone();
                     let chunk_wire = chunk_wire.clone();
                     let chunk_refs = chunk_refs.clone();
@@ -417,170 +441,175 @@ fn mod_turn_step_stream(
                         }
                     }
                 });
-                let turn_id = forwarded
-                    .string_at("/turnId")
-                    .unwrap_or_default()
-                    .to_owned();
-                let index = forwarded
-                    .number_at("/index")
-                    .filter(|index| {
-                        index.is_finite()
-                            && *index >= 0.0
-                            && index.fract() == 0.0
-                            && *index <= u64::MAX as f64
-                    })
-                    .map(|index| index as u64 as u32)
-                    .unwrap_or_default();
-                Ok(hooks::mods::ModStreamSource::new(stream, move || {
-                    let references = source_refs.lock().unwrap().clone();
-                    let result = result_wire.lock().unwrap().result_for_references(
-                        &turn_id,
-                        index,
-                        &references,
-                    );
-                    Ok(result)
-                }))
-            }
-        };
-        let output_requested = requested_model.clone();
-        let output_pending = pending_output.clone();
-        let on_chunk = move |chunk: Utf16JsonProjection| {
-            let wire = wire.clone();
-            let decoder = worker_decoder.clone();
-            let sender = worker_sender.clone();
-            let output = output.clone();
-            let requested_model = output_requested.clone();
-            let pending_output = output_pending.clone();
-            async move {
-                let mut actions = Vec::new();
-                if chunk.string_at("/kind") == Some("thinking") {
-                    if let Some(text) = chunk.string_at("/text") {
-                        actions.push(PendingModStepOutput::Thinking(text.to_owned()));
-                    }
+                    let turn_id = forwarded
+                        .string_at("/turnId")
+                        .unwrap_or_default()
+                        .to_owned();
+                    let index = forwarded
+                        .number_at("/index")
+                        .filter(|index| {
+                            index.is_finite()
+                                && *index >= 0.0
+                                && index.fract() == 0.0
+                                && *index <= u64::MAX as f64
+                        })
+                        .map(|index| index as u64 as u32)
+                        .unwrap_or_default();
+                    Ok(hooks::mods::ModStreamSource::new(stream, move || {
+                        let references = source_refs.lock().unwrap().clone();
+                        let result = result_wire.lock().unwrap().result_for_references(
+                            &turn_id,
+                            index,
+                            &references,
+                        );
+                        Ok(result)
+                    }))
                 }
-                let events = {
-                    let wire = wire.lock().unwrap();
-                    decoder.lock().unwrap().consume(&chunk, &wire)
-                };
-                actions.extend(events.into_iter().map(PendingModStepOutput::Event));
-                if !requested_model.load(std::sync::atomic::Ordering::Acquire) {
-                    let mut immediate = Vec::new();
-                    for action in actions {
-                        if matches!(
-                            action,
-                            PendingModStepOutput::Event(HistoryEvent::Completed { .. })
-                        ) {
-                            pending_output.lock().unwrap().push(action);
-                        } else {
-                            immediate.push(action);
+            };
+            let output_requested = requested_model.clone();
+            let output_pending = pending_output.clone();
+            let on_chunk = move |chunk: Utf16JsonProjection| {
+                let wire = wire.clone();
+                let decoder = worker_decoder.clone();
+                let sender = worker_sender.clone();
+                let output = output.clone();
+                let requested_model = output_requested.clone();
+                let pending_output = output_pending.clone();
+                async move {
+                    let mut actions = Vec::new();
+                    if chunk.string_at("/kind") == Some("thinking") {
+                        if let Some(text) = chunk.string_at("/text") {
+                            actions.push(PendingModStepOutput::Thinking(text.to_owned()));
                         }
                     }
-                    return send_mod_step_output(&sender, &output, immediate).await;
-                }
-                let mut ready = std::mem::take(&mut *pending_output.lock().unwrap());
-                ready.extend(actions);
-                send_mod_step_output(&sender, &output, ready).await
-            }
-        };
-        let outcome = host
-            .dispatch_turn_step_stream(input_projection, source, on_chunk)
-            .await;
-        match outcome {
-            Ok(_) => {
-                let tail = {
-                    let wire = finish_wire.lock().unwrap();
-                    decoder.lock().unwrap().finish(&wire)
-                };
-                let mut ready = std::mem::take(&mut *pending_output.lock().unwrap());
-                ready.extend(tail.into_iter().map(PendingModStepOutput::Event));
-                let _ = send_mod_step_output(&sender, &fallback_output, ready).await;
-            }
-            Err(error) => {
-                if !requested_model.load(std::sync::atomic::Ordering::Acquire) {
-                    // Native `Jn` holds only complete assistant records before
-                    // a request; stream events already reached the consumer.
-                    // A failed chain without a request drops those held records.
-                    pending_output.lock().unwrap().clear();
-                    let mut fallback_snapshot = fallback_snapshot;
-                    let mut fallback_reminders = Vec::new();
-                    let mut fallback_guards = fallback_publication_guards
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .clone();
-                    crate::prompt::async_hook_response::retain_current_async_hook_reminders(
-                        &mut fallback_snapshot,
-                        &mut fallback_reminders,
-                        &mut fallback_guards,
-                    );
-                    let request_dispatch_admission =
-                        crate::prompt::async_hook_response::request_dispatch_admission(
-                            &fallback_snapshot,
-                            &fallback_guards,
-                        );
-                    let stream = fallback_retry_scope
-                        .run(fallback_request_capture.scope(
-                            fallback_api.stream_with_effort_override(
-                                &fallback_model,
-                                fallback_profile.as_deref(),
-                                fallback_system.as_ref(),
-                                fallback_snapshot,
-                                fallback_tools,
-                                None,
-                                fallback_tool_result_reminder_suffixes,
-                                &fallback_query_source,
-                                skip_global_cache_for_system_prompt,
-                                request_dispatch_admission,
-                                request_dispatch_observer.clone(),
-                            ),
-                        ))
-                        .await;
-                    match stream {
-                        Ok(stream) => {
-                            let observation = fallback_observation
-                                .lock()
-                                .unwrap()
-                                .as_ref()
-                                .map(output_accounting_impl::MainOutputObservation::fork);
-                            let mut stream =
-                                output_accounting_impl::account_stream(stream, observation);
-                            while let Some(item) = stream.next().await {
-                                let terminal = matches!(
-                                    item,
-                                    Ok(HistoryEvent::MessageStop | HistoryEvent::Completed { .. })
-                                );
-                                let (ack, received) = tokio::sync::oneshot::channel();
-                                if sender.send((item, ack)).await.is_err() {
-                                    return;
-                                }
-                                if !terminal && received.await.is_err() {
-                                    return;
-                                }
+                    let events = {
+                        let wire = wire.lock().unwrap();
+                        decoder.lock().unwrap().consume(&chunk, &wire)
+                    };
+                    actions.extend(events.into_iter().map(PendingModStepOutput::Event));
+                    if !requested_model.load(std::sync::atomic::Ordering::Acquire) {
+                        let mut immediate = Vec::new();
+                        for action in actions {
+                            if matches!(
+                                action,
+                                PendingModStepOutput::Event(HistoryEvent::Completed { .. })
+                            ) {
+                                pending_output.lock().unwrap().push(action);
+                            } else {
+                                immediate.push(action);
                             }
                         }
-                        Err(error) => {
-                            let (ack, _) = tokio::sync::oneshot::channel();
-                            let _ = sender.send((Err(error), ack)).await;
+                        return send_mod_step_output(&sender, &output, immediate).await;
+                    }
+                    let mut ready = std::mem::take(&mut *pending_output.lock().unwrap());
+                    ready.extend(actions);
+                    send_mod_step_output(&sender, &output, ready).await
+                }
+            };
+            let outcome = host
+                .dispatch_turn_step_stream(input_projection, source, on_chunk)
+                .await;
+            match outcome {
+                Ok(_) => {
+                    let tail = {
+                        let wire = finish_wire.lock().unwrap();
+                        decoder.lock().unwrap().finish(&wire)
+                    };
+                    let mut ready = std::mem::take(&mut *pending_output.lock().unwrap());
+                    ready.extend(tail.into_iter().map(PendingModStepOutput::Event));
+                    let _ = send_mod_step_output(&sender, &fallback_output, ready).await;
+                }
+                Err(error) => {
+                    if !requested_model.load(std::sync::atomic::Ordering::Acquire) {
+                        // Native `Jn` holds only complete assistant records before
+                        // a request; stream events already reached the consumer.
+                        // A failed chain without a request drops those held records.
+                        pending_output.lock().unwrap().clear();
+                        let mut fallback_snapshot = fallback_snapshot;
+                        let mut fallback_reminders = Vec::new();
+                        let mut fallback_guards = fallback_publication_guards
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .clone();
+                        crate::prompt::async_hook_response::retain_current_async_hook_reminders(
+                            &mut fallback_snapshot,
+                            &mut fallback_reminders,
+                            &mut fallback_guards,
+                        );
+                        let request_dispatch_admission =
+                            crate::prompt::async_hook_response::request_dispatch_admission(
+                                &fallback_snapshot,
+                                &fallback_guards,
+                            );
+                        let stream = fallback_retry_scope
+                            .run(fallback_request_capture.scope(
+                                fallback_api.stream_with_effort_override(
+                                    &fallback_model,
+                                    fallback_profile.as_deref(),
+                                    fallback_system.as_ref(),
+                                    fallback_snapshot,
+                                    fallback_tools,
+                                    None,
+                                    fallback_tool_result_reminder_suffixes,
+                                    &fallback_query_source,
+                                    skip_global_cache_for_system_prompt,
+                                    request_dispatch_admission,
+                                    observe_main_dispatch(
+                                        request_dispatch_observer.clone(),
+                                        &fallback_output,
+                                    ),
+                                ),
+                            ))
+                            .await;
+                        match stream {
+                            Ok(stream) => {
+                                let observation = fallback_observation
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .map(output_accounting_impl::MainOutputObservation::fork);
+                                let mut stream =
+                                    output_accounting_impl::account_stream(stream, observation);
+                                while let Some(item) = stream.next().await {
+                                    let terminal = matches!(
+                                        item,
+                                        Ok(HistoryEvent::MessageStop
+                                            | HistoryEvent::Completed { .. })
+                                    );
+                                    let (ack, received) = tokio::sync::oneshot::channel();
+                                    if sender.send((item, ack)).await.is_err() {
+                                        return;
+                                    }
+                                    if !terminal && received.await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let (ack, _) = tokio::sync::oneshot::channel();
+                                let _ = sender.send((Err(error), ack)).await;
+                            }
                         }
+                        return;
                     }
-                    return;
-                }
-                let pending = std::mem::take(&mut *pending_output.lock().unwrap());
-                if send_mod_step_output(&sender, &fallback_output, pending)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                let typed = physical_error.lock().unwrap().take().unwrap_or_else(|| {
-                    LlmError::StreamInterrupted {
-                        message: error.to_string(),
+                    let pending = std::mem::take(&mut *pending_output.lock().unwrap());
+                    if send_mod_step_output(&sender, &fallback_output, pending)
+                        .await
+                        .is_err()
+                    {
+                        return;
                     }
-                });
-                let (ack, _) = tokio::sync::oneshot::channel();
-                let _ = sender.send((Err(typed), ack)).await;
+                    let typed = physical_error.lock().unwrap().take().unwrap_or_else(|| {
+                        LlmError::StreamInterrupted {
+                            message: error.to_string(),
+                        }
+                    });
+                    let (ack, _) = tokio::sync::oneshot::channel();
+                    let _ = sender.send((Err(typed), ack)).await;
+                }
             }
-        }
-    });
+        },
+    ));
     let stream = futures::stream::unfold(
         (receiver, None::<tokio::sync::oneshot::Sender<()>>),
         |(mut receiver, previous_ack)| async move {
@@ -1028,7 +1057,7 @@ impl StreamingTurnDriver<'_> {
                         crate::config::sanitize_query_source(&orch.config.query_source),
                         skip_global_cache_for_system_prompt,
                         request_dispatch_admission,
-                        orch.turn_request_dispatch_observer(),
+                        observe_main_dispatch(orch.turn_request_dispatch_observer(), &orch.output),
                     ),
                 ))
                 .await
@@ -1118,8 +1147,21 @@ impl StreamingTurnDriver<'_> {
                     Err(error) => {
                         let env = classify_api_error(&error);
                         let text = crate::turn_loop::orchestrator_error_text_source(&error, &model);
+                        let provider_status = match &error {
+                            OrchestratorError::ApiCall(inner)
+                            | OrchestratorError::Streaming(inner)
+                                if !matches!(
+                                    inner.classification_source(),
+                                    LlmError::RequestTooLarge
+                                ) =>
+                            {
+                                inner.http_status()
+                            }
+                            _ => None,
+                        };
                         let message_id =
-                            crate::turn_loop::surface_model_error(orch, text, env).await;
+                            crate::turn_loop::surface_model_error(orch, text, env, provider_status)
+                                .await;
                         let cost = orch.snapshot_cost_real().await;
                         orch.mark_mod_turn_error();
                         orch.emit_turn_terminal("model_error", &cost).await;
@@ -1371,7 +1413,13 @@ impl StreamingTurnDriver<'_> {
                 // surface — so the classifier sees the inner `LlmError`.
                 let env = classify_api_error(&OrchestratorError::Streaming(other.clone()));
                 let error_text = orch.model_error_source(&other).await;
-                let id = crate::turn_loop::surface_model_error(orch, error_text, env).await;
+                let id = crate::turn_loop::surface_model_error(
+                    orch,
+                    error_text,
+                    env,
+                    other.http_status(),
+                )
+                .await;
                 let cost = orch.snapshot_cost_real().await;
                 orch.mark_mod_turn_error();
                 orch.emit_turn_terminal("model_error", &cost).await;
@@ -1523,6 +1571,8 @@ impl StreamingTurnDriver<'_> {
                                     skip_global_cache_for_system_prompt;
                                 request.opts.request_dispatch_admission =
                                     request_dispatch_admission;
+                                request.opts.request_dispatch_observer =
+                                    observe_main_dispatch(None, &orch.output);
                                 request.opts.query_source = Some(
                                     crate::config::sanitize_query_source(&orch.config.query_source)
                                         .to_string(),
@@ -1614,7 +1664,7 @@ impl StreamingTurnDriver<'_> {
 
         // Emit text blocks from the non-streaming response to the output
         // stream, mirroring the batched path (turn_loop.rs step 4:
-        // `orch.output.emit_text(text).await`).  In the normal streaming
+        // `orch.output.emit_text(text, units).await`).  In the normal streaming
         // path `pump_stream` calls `dispatch_event` → `emit_text` for each
         // `TextDelta`; the non-streaming path has no SSE events, so we
         // replicate the whole-body emit here.
@@ -2084,7 +2134,10 @@ impl StreamingTurnDriver<'_> {
                                             ),
                                             skip_global_cache_for_system_prompt,
                                             request_dispatch_admission,
-                                            orch.turn_request_dispatch_observer(),
+                                            observe_main_dispatch(
+                                                orch.turn_request_dispatch_observer(),
+                                                &orch.output,
+                                            ),
                                         ),
                                     ),
                                 )
@@ -2463,10 +2516,14 @@ impl StreamingTurnDriver<'_> {
                         // Classify the typed mid-stream error (`Flp`/`KNn`) into the
                         // api-error envelope; the message text stays verbatim.
                         let env = classify_api_error(&other);
+                        let provider_status = match &other {
+                            OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => inner.http_status(),
+                            _ => None,
+                        };
                         let error_text =
                             crate::turn_loop::orchestrator_error_text_source(&other, &model);
                         let id =
-                            crate::turn_loop::surface_model_error(orch, error_text, env).await;
+                            crate::turn_loop::surface_model_error(orch, error_text, env, provider_status).await;
                         crate::server_fallback::flush_pending_notice(orch).await;
                         let cost = orch.snapshot_cost_real().await;
                         orch.mark_mod_turn_error();
@@ -3097,6 +3154,7 @@ impl StreamingTurnDriver<'_> {
             fallback_model: next.model,
         };
         let notice = ConversationMessage::System {
+            api_system: None,
             id,
             content: content_projection.clone(),
             subtype: Some("model_fallback".into()),
@@ -3468,6 +3526,7 @@ impl StreamingTurnDriver<'_> {
             in_human_turn,
             queued_inputs,
             row_token,
+            mut projected_content,
         } = self;
 
         // Startup Responses WebSocket prewarm is strictly opportunistic. A real
@@ -3533,7 +3592,10 @@ impl StreamingTurnDriver<'_> {
                 }
                 None => {
                     let origin = crate::mod_prompt_origin::current();
-                    let original = super::source_string_projection(prompt);
+                    let original = projected_content
+                        .as_ref()
+                        .map(|content| content.text.clone())
+                        .unwrap_or_else(|| super::source_string_projection(prompt));
                     let mut received = original.clone();
                     if let Some(kind) = external_receive_kind(&origin) {
                         let Some(text) =
@@ -3546,11 +3608,17 @@ impl StreamingTurnDriver<'_> {
                         };
                         received = text;
                     }
+                    if let Some(content) = &mut projected_content {
+                        content.rewrite_text(received.clone())?;
+                    }
                     match orch
-                        .screen_mod_prompt_submit(&received, &images, None)
+                        .screen_mod_prompt_submit_projected(&received, &images, None)
                         .await
                     {
                         ModPromptScreen::Admit { text, context } => {
+                            if let Some(content) = &mut projected_content {
+                                content.rewrite_text(text.clone())?;
+                            }
                             screened_prompt = Some(text);
                             mod_contexts.push(context);
                         }
@@ -3587,12 +3655,17 @@ impl StreamingTurnDriver<'_> {
                 })
                 .collect(),
             None => {
-                let message = super::user_message_from_projection(
+                let mut message = super::user_message_from_projection(
                     message_id.unwrap_or_default(),
                     &prompt_projection,
                     !in_human_turn,
                     images,
                 );
+                if let (Some(projected), ConversationMessage::User { content, .. }) =
+                    (projected_content, &mut message)
+                {
+                    *content = projected.blocks;
+                }
                 vec![(
                     QueuedPromptInput {
                         goal_retry_id: None,
@@ -3657,8 +3730,9 @@ impl StreamingTurnDriver<'_> {
                 if input.is_meta {
                     continue;
                 }
+                let prompt_projection = super::projected_content::exact_message_text(message);
                 if orch
-                    .fire_user_prompt_submit(&input.text, message.id())
+                    .fire_user_prompt_submit_projected(&prompt_projection, message.id())
                     .await
                 {
                     return Ok(ConversationOutcome::StopHookPrevented {
@@ -3692,6 +3766,7 @@ impl StreamingTurnDriver<'_> {
                 .await
             {
                 loop_state::GuardVerdict::Proceed => {}
+                loop_state::GuardVerdict::StructuredOutputRetries(error) => return Err(error),
                 loop_state::GuardVerdict::MaxTurns => {
                     return Err(OrchestratorError::MaxTurnsReached {
                         max_turns: orch.config.max_turns,

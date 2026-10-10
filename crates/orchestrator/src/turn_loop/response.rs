@@ -176,6 +176,7 @@ pub(super) async fn handle_malformed_tool_use(
         );
         orch.output.emit_text(&message).await;
         let failed_msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: MALFORMED_TOOL_USE_RETRY_FAILED.to_string(),

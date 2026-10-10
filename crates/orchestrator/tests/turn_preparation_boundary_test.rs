@@ -282,6 +282,7 @@ async fn seed_rounds(orch: &ConversationOrchestrator, rounds: usize) {
             format!("round-{i} user message with filler text to give the round a token estimate"),
         ));
         s.history.push(ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: format!("round-{i} assistant reply with filler text to give it weight"),

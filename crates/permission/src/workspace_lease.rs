@@ -776,11 +776,7 @@ mod tests {
         let registry = WorkspacePermissionLeaseRegistry::new();
         let _lease = registry.begin("app", root.clone());
         let fs = roots(&root);
-        assert!(registry.allows(
-            "Write",
-            &source_json!({"file_path":"src/App.jsx"}),
-            &fs
-        ));
+        assert!(registry.allows("Write", &source_json!({"file_path":"src/App.jsx"}), &fs));
         assert!(!registry.allows("Write", &source_json!({"file_path":"../secret"}), &fs));
         assert!(!registry.allows(
             "Write",
@@ -809,11 +805,7 @@ mod tests {
                 "host-managed build infrastructure must not be writable: {path}"
             );
         }
-        assert!(registry.allows(
-            "Write",
-            &source_json!({"file_path":"app/main.jsx"}),
-            &fs
-        ));
+        assert!(registry.allows("Write", &source_json!({"file_path":"app/main.jsx"}), &fs));
     }
 
     #[test]
@@ -887,11 +879,7 @@ mod tests {
         assert!(!registry.active().is_empty());
         drop(lease);
         assert!(registry.active().is_empty());
-        assert!(!registry.allows(
-            "Write",
-            &source_json!({"file_path":"src/App.jsx"}),
-            &fs
-        ));
+        assert!(!registry.allows("Write", &source_json!({"file_path":"src/App.jsx"}), &fs));
     }
 
     #[test]
@@ -902,16 +890,8 @@ mod tests {
         let registry = WorkspacePermissionLeaseRegistry::new();
         let _lease = registry.begin("app", root.clone());
         let fs = roots(&root);
-        assert!(!registry.allows(
-            "Bash",
-            &source_json!({"command":"echo ok > out.txt"}),
-            &fs
-        ));
-        assert!(registry.allows(
-            "Bash",
-            &source_json!({"command":"cat src/App.jsx"}),
-            &fs
-        ));
+        assert!(!registry.allows("Bash", &source_json!({"command":"echo ok > out.txt"}), &fs));
+        assert!(registry.allows("Bash", &source_json!({"command":"cat src/App.jsx"}), &fs));
         assert!(!registry.allows("Bash", &source_json!({"command":"npm install"}), &fs));
         assert!(!registry.allows(
             "Bash",
@@ -1091,11 +1071,7 @@ mod tests {
         let _lease = registry.begin("app-a", root.clone());
         let fs = roots(&root);
         assert!(registry.allows("LocalAppBuild", &source_json!({"app_id":"app-a"}), &fs));
-        assert!(!registry.allows(
-            "LocalAppDeleteApp",
-            &source_json!({"app_id":"app-a"}),
-            &fs
-        ));
+        assert!(!registry.allows("LocalAppDeleteApp", &source_json!({"app_id":"app-a"}), &fs));
         assert!(!registry.allows("LocalAppBuild", &source_json!({"app_id":"app-b"}), &fs));
     }
 
@@ -1453,11 +1429,7 @@ mod tests {
         let registry = WorkspacePermissionLeaseRegistry::new();
         let _lease = registry.begin("app", root.clone());
         let fs = roots(&root);
-        assert!(!registry.allows(
-            "Write",
-            &source_json!({"file_path":"link/new.txt"}),
-            &fs
-        ));
+        assert!(!registry.allows("Write", &source_json!({"file_path":"link/new.txt"}), &fs));
     }
 
     #[cfg(target_os = "macos")]

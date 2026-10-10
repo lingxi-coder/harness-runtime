@@ -57,11 +57,13 @@ struct ApiCatalogTool {
     aliases: &'static [&'static str],
     marker: &'static str,
     schema: JsonSource,
+
     wrapper: WrapperShape,
     deny_permission: bool,
     permission_checks: Arc<std::sync::atomic::AtomicUsize>,
     calls: Arc<std::sync::atomic::AtomicUsize>,
     observed_inputs: Arc<std::sync::Mutex<Vec<JsonSource>>>,
+
     observed_permission_messages:
         Arc<std::sync::Mutex<Vec<Vec<lingxi_core::types::ConversationMessage>>>>,
     observed_tool_use_ids: Arc<std::sync::Mutex<Vec<Option<lingxi_core::types::ToolUseId>>>>,
@@ -77,6 +79,7 @@ impl ApiCatalogTool {
             aliases,
             marker,
             schema: generated_json_source(&serde_json::json!({"type":"object"})),
+
             wrapper: WrapperShape::default(),
             deny_permission: false,
             permission_checks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -142,6 +145,7 @@ impl tool_api::Tool for ApiCatalogTool {
     async fn check_permissions(
         &self,
         _: &JsonSource,
+
         context: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         self.permission_checks
@@ -169,6 +173,7 @@ impl tool_api::Tool for ApiCatalogTool {
                 explanation: Some(
                     format!("Permission to use {} has been denied.", self.name).into(),
                 ),
+
                 metadata: permission::result::PermissionMetadata::default(),
             };
         }
@@ -196,6 +201,7 @@ impl tool_api::Tool for ApiCatalogTool {
     async fn call(
         &self,
         input: JsonSource,
+
         _: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
@@ -249,6 +255,7 @@ impl tool_api::Tool for AsyncAgentTool {
     async fn check_permissions(
         &self,
         _: &JsonSource,
+
         _: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -275,6 +282,7 @@ impl tool_api::Tool for AsyncAgentTool {
     async fn call(
         &self,
         _: JsonSource,
+
         context: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
@@ -462,6 +470,7 @@ impl tool_api::Tool for SignalAwareTool {
     async fn check_permissions(
         &self,
         _: &JsonSource,
+
         _: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -488,6 +497,7 @@ impl tool_api::Tool for SignalAwareTool {
     async fn call(
         &self,
         input: JsonSource,
+
         context: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
@@ -500,6 +510,7 @@ impl tool_api::Tool for SignalAwareTool {
         *self.received_cancellation.lock().unwrap() = Some(cancellation.clone());
         std::fs::write(self.cwd.join(marker), "started")
             .map_err(|error| tool_api::ToolError::Io(error.to_string().into()))?;
+
         cancellation.cancelled().await;
         Err(tool_api::ToolError::Aborted)
     }
@@ -541,6 +552,7 @@ impl tool_api::Tool for NativeEffectsTool {
     async fn check_permissions(
         &self,
         _: &JsonSource,
+
         _: &tool_api::ToolUseContext,
     ) -> permission::PermissionResult {
         permission::PermissionResult::Allow {
@@ -571,6 +583,7 @@ impl tool_api::Tool for NativeEffectsTool {
     async fn call(
         &self,
         input: JsonSource,
+
         _: tool_api::ToolUseContext,
         _: tool_api::ToolProgressSender,
     ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
@@ -659,6 +672,7 @@ async fn mod_agent_api_launch_returns_before_fresh_infinite_settlement() {
     )
     .await
     .unwrap();
+
     let gate = Arc::new(tokio::sync::Notify::new());
     let entered = Arc::new(tokio::sync::Notify::new());
     let registry = Arc::new(AgentWaitRegistry {
@@ -840,6 +854,7 @@ async fn dispatch_preflight_case(
         input["hasConsent"] = serde_json::Value::Bool(true);
     }
     let input = generated_json_source(&input);
+
     let dispatched = crate::turn_loop::dispatch_tool_uses_tracked_deferred(
         orch,
         &[(outer_id.clone(), "Caller".into(), input, None)],
@@ -970,6 +985,7 @@ async fn tool_call_api_preflight_matches_native_order_and_mx_catalog_filter() {
     assert_eq!(
         projects_alias.string_at("/error"),
         Some("tool-call-preflight: $.tool.call: WebFetch does not accept `consent` in a Projects session. Call it without `consent`, and the normal permission check will decide."),
+
         "Projects consent uses the resolved canonical tool name, even for an empty string"
     );
 
@@ -1112,6 +1128,7 @@ async fn tool_call_api_keeps_the_prepared_arc_across_catalog_replacement() {
         "properties":{"replacement_only":{"type":"string"}},
         "required":["replacement_only"]
     }));
+
     let replacement = Arc::new(replacement);
     let registry_to_replace = tools.clone();
     let replacement_for_swap = replacement.clone();
@@ -1201,6 +1218,7 @@ async fn tool_call_api_keeps_the_prepared_arc_across_catalog_replacement() {
                 "value":"after-shadow"
             })))
         ));
+
     let virtual_ids = original
         .observed_tool_use_ids
         .lock()
@@ -1317,6 +1335,7 @@ async fn tool_call_api_projects_agent_terminal_results_from_native_transcript_fa
                 task_id: "task-failed".into(),
                 native_transcript_text: "must not be used".into(),
                 error: Some(String::new().into()),
+
             }),
             "tool-call-agent-projection: $.agent.spawn: the subagent failed",
             true,
@@ -1357,6 +1376,7 @@ async fn tool_call_api_projects_agent_terminal_results_from_native_transcript_fa
             "empty evicted transcript uses the Native record error",
             AgentTerminalWaitOutcome::Evicted {
                 native_transcript_text: Some(String::new().into()),
+
             },
             "tool-call-agent-projection: $.agent.spawn: the subagent's record was evicted before its answer was read",
             true,
@@ -1404,6 +1424,7 @@ async fn tool_call_api_projects_agent_terminal_results_from_native_transcript_fa
                 outer_id,
                 "Agent".into(),
                 generated_json_source(&serde_json::json!({
+
                     "expectedText": expected_text,
                     "expectedError": expected_error,
                     "expectResult": expect_result,
@@ -1515,6 +1536,7 @@ async fn tool_call_api_uses_permissioned_executor_without_publishing_virtual_row
         .get(outer_id.as_str())
         .is_some_and(|result| result
             .semantically_eq(&generated_json_source(&serde_json::json!({"ok":true})))));
+
     drop(stored_results);
 
     let events = output.snapshot().await;
@@ -1716,6 +1738,7 @@ async fn tool_call_api_projects_only_native_promise_fields_and_drops_virtual_fra
             results.get(outer_id.as_str()).unwrap().string_at("/raw"),
             Some("structured")
         );
+
         drop(results);
 
         let events = output.snapshot().await;

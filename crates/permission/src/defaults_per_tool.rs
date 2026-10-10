@@ -5,9 +5,9 @@
 //! to [`PromptDefault::DenyByDefault`] (fail-closed).
 //!
 //! Aggregate, oracle-parity set: 14 `DenyByDefault` (destructive / external
-//! side-effects), 32 `AllowByDefault` (read-only, agent-local, or — the 2.1.270
+//! side-effects), 31 `AllowByDefault` (read-only, agent-local, or — the 2.1.270
 //! re-audit — a tool whose oracle object declares no `checkPermissions` and so
-//! defaults to `{behavior:"allow"}`) = 46 tools, plus one synthetic
+//! defaults to `{behavior:"allow"}`) = 45 tools, plus one synthetic
 //! `<unknown>` fallback.
 //!
 //! LINGXI DIVERGENCE: 37 further rows with no oracle counterpart, reported by
@@ -64,16 +64,13 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // answers Allow — but a tool ABSENT from this table falls to the
     // fail-closed `DenyByDefault`, which makes `read_only_default_auto_allows`
     // false and raises a prompt on every call. It was missed when the registry
-    // count went 42 -> 43: the oracle side of that count still balanced only
-    // because the legacy `Task` alias below occupies a slot the registry does
-    // not have.
+    // count went 42 -> 43; the current table includes the discovery tool.
     m.insert("ListAgents", AllowByDefault);
     m.insert("Read", AllowByDefault);
     m.insert("SendUserMessage", AllowByDefault); // wire name of BriefTool (Brief alias)
     m.insert("Skill", AllowByDefault);
     m.insert("Sleep", AllowByDefault);
     m.insert("StructuredOutput", AllowByDefault);
-    m.insert("Task", AllowByDefault); // legacy alias of Agent
     m.insert("TaskGet", AllowByDefault);
     m.insert("TaskList", AllowByDefault);
     m.insert("TaskOutput", AllowByDefault);
@@ -261,9 +258,9 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 46 oracle-parity tools + 37 LingXi divergence rows (36 local-app
+    // 45 current oracle tools + 37 LingXi divergence rows (36 local-app
     // builtins + `Workflow`).
-    debug_assert_eq!(m.len(), 83, "tool defaults table must list all 83 tools");
+    debug_assert_eq!(m.len(), 82, "tool defaults table must list all 82 tools");
     m
 }
 
@@ -300,12 +297,12 @@ pub fn tool_default_row(name: &str) -> Option<PromptDefault> {
 /// could answer "does this ROW name a tool that still exists", because
 /// `TOOL_DEFAULTS` is a private `static` and only single-key lookups were
 /// exported. THREE guards do constrain this table's composition, not one:
-/// `init_defaults`'s own `debug_assert_eq!(m.len(), 83, "tool defaults table
-/// must list all 83 tools")`, the test
+/// `init_defaults`'s own `debug_assert_eq!(m.len(), 82, "tool defaults table
+/// must list all 82 tools")`, the test
 /// `table_splits_into_the_parity_set_and_the_mobile_divergence`'s
-/// `oracle == 46` / `divergence == 37`, and the test
+/// `oracle == 45` / `divergence == 37`, and the test
 /// `the_counts_in_this_module_doc_are_the_counts_in_the_table`'s four
-/// hand-bumped bucket counts (14/32/14/23). NONE of those seven numbers moves
+/// hand-bumped bucket counts (14/31/14/23). NONE of those seven numbers moves
 /// for the orphan this function exists for, because every one of them counts
 /// `TOOL_DEFAULTS` alone: delete a tool from a CONSUMER crate's table, leave
 /// its row here, and all seven still hold. They also fail by naming a NUMBER
@@ -535,6 +532,7 @@ mod tests {
 
     #[test]
     fn unknown_tool_defaults_to_deny() {
+        assert_eq!(tool_default("Task"), PromptDefault::DenyByDefault);
         assert_eq!(tool_default("DoesNotExist"), PromptDefault::DenyByDefault);
         assert_eq!(tool_default(""), PromptDefault::DenyByDefault);
     }
@@ -547,7 +545,7 @@ mod tests {
         // without being recorded as a divergence, which a single total hides.
         let oracle = m.keys().filter(|k| !is_divergence_tool(k)).count();
         let divergence = m.keys().filter(|k| is_divergence_tool(k)).count();
-        assert_eq!(oracle, 46, "oracle-parity tool count changed");
+        assert_eq!(oracle, 45, "oracle-parity tool count changed");
         assert_eq!(divergence, 37, "divergence row count changed");
         assert_eq!(m.len(), oracle + divergence);
         // `Workflow` must be booked as a divergence, never as oracle parity:
@@ -573,7 +571,7 @@ mod tests {
         );
         assert_eq!(
             count(false, PromptDefault::AllowByDefault),
-            32,
+            31,
             "oracle allow"
         );
         assert_eq!(

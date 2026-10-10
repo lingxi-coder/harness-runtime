@@ -79,6 +79,7 @@ mod tests {
             id: MessageId::new(),
             content: "abc".into(),
             subtype: None,
+            api_system: None,
             compact_metadata: None,
             model_fallback: None,
             refusal_fallback: None,
@@ -92,6 +93,7 @@ mod tests {
             id: MessageId::new(),
             content: Utf16JsonProjection::parse(r#""a\ud800b""#).unwrap(),
             subtype: None,
+            api_system: None,
             compact_metadata: None,
             model_fallback: None,
             refusal_fallback: None,
@@ -116,6 +118,7 @@ mod tests {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         };
         assert_eq!(text_byte_size(&m), 4); // "YWJj".len()
     }
@@ -133,6 +136,7 @@ mod tests {
             }],
             stop_reason: Some("tool_use".into()),
             resumable: None,
+            per_turn_effort: None,
         };
         // {"path":"/a"} → 13 bytes
         assert_eq!(text_byte_size(&m), 13);
@@ -169,6 +173,7 @@ mod tests {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         };
         assert_eq!(text_byte_size(&message), expected);
     }

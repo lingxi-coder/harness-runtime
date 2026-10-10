@@ -27,6 +27,52 @@ pub const SUBSCRIPTION_TYPE_ENV: &str = "LINGXI_SUBSCRIPTION_TYPE";
 /// Rate-limit metadata accompanying an environmental OAuth token.
 pub const RATE_LIMIT_TIER_ENV: &str = "LINGXI_RATE_LIMIT_TIER";
 
+/// Disable the agent-view command surface.
+pub const DISABLE_AGENT_VIEW_ENV: &str = "LINGXI_DISABLE_AGENT_VIEW";
+/// Time to retain an API-key helper result before refreshing it.
+pub const API_KEY_HELPER_TTL_MS_ENV: &str = "LINGXI_API_KEY_HELPER_TTL_MS";
+/// Number of substantive user turns between Ultracode reminders.
+pub const ULTRACODE_CADENCE_ENV: &str = "LINGXI_ULTRACODE_CADENCE";
+/// Override for the Bun executable used by the Mods worker.
+pub const MOD_BUN_EXECUTABLE_ENV: &str = "LINGXI_MOD_BUN_EXECUTABLE";
+/// Disable the Git instructions supplied to shell tools.
+pub const DISABLE_GIT_INSTRUCTIONS_ENV: &str = "LINGXI_DISABLE_GIT_INSTRUCTIONS";
+/// Disable the permission-prompt notification hook.
+pub const DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS_ENV: &str =
+    "LINGXI_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS";
+/// Disable nonessential background traffic.
+pub const DISABLE_NONESSENTIAL_TRAFFIC_ENV: &str = "LINGXI_DISABLE_NONESSENTIAL_TRAFFIC";
+/// Disable background task execution.
+pub const DISABLE_BACKGROUND_TASKS_ENV: &str = "LINGXI_DISABLE_BACKGROUND_TASKS";
+
+/// Maximum simultaneously running subagents in one session.
+pub const MAX_CONCURRENT_SUBAGENTS_ENV: &str = "LINGXI_MAX_CONCURRENT_SUBAGENTS";
+/// Maximum recursive subagent spawn depth.
+pub const MAX_SUBAGENT_SPAWN_DEPTH_ENV: &str = "LINGXI_MAX_SUBAGENT_SPAWN_DEPTH";
+/// Maximum cumulative subagent launches in one session.
+pub const MAX_SUBAGENTS_PER_SESSION_ENV: &str = "LINGXI_MAX_SUBAGENTS_PER_SESSION";
+/// Maximum simultaneous agent calls within a Workflow run.
+pub const WORKFLOW_MAX_CONCURRENT_AGENTS_ENV: &str = "LINGXI_WORKFLOW_MAX_CONCURRENT_AGENTS";
+/// Disable per-call model and provider-profile overrides for subagents.
+pub const SUBAGENT_MODEL_FORCE_ENV: &str = "LINGXI_SUBAGENT_MODEL_FORCE";
+/// Default model preference for subagents without a per-call override.
+pub const SUBAGENT_MODEL_ENV: &str = "LINGXI_SUBAGENT_MODEL";
+/// Enable the reduced feature set for a product session.
+pub const SIMPLE_ENV: &str = "LINGXI_SIMPLE";
+/// Disable automatic attachment handling for agent prompts.
+pub const DISABLE_ATTACHMENTS_ENV: &str = "LINGXI_DISABLE_ATTACHMENTS";
+/// Withdraw the Explore and Plan agents from the catalog and planning phases.
+pub const DISABLE_EXPLORE_PLAN_AGENTS_ENV: &str = "LINGXI_DISABLE_EXPLORE_PLAN_AGENTS";
+/// Number of Explore agents proposed by the planning reminder.
+pub const PLAN_EXPLORE_AGENT_COUNT_ENV: &str = "LINGXI_PLAN_V2_EXPLORE_AGENT_COUNT";
+/// Number of Plan agents proposed by the planning reminder.
+pub const PLAN_AGENT_COUNT_ENV: &str = "LINGXI_PLAN_V2_AGENT_COUNT";
+/// Maximum in-flight tool-use blocks in one model turn.
+pub const MAX_TOOL_USE_CONCURRENCY_ENV: &str = "LINGXI_MAX_TOOL_USE_CONCURRENCY";
+/// Require coordinator workers to inherit the session's model and profile.
+pub const COORDINATOR_FORCE_WORKER_INHERIT_MODEL_ENV: &str =
+    "LINGXI_COORDINATOR_FORCE_WORKER_INHERIT_MODEL";
+
 /// Branded counterpart of the native global Fast-mode disable switch.
 pub const DISABLE_FAST_MODE_ENV: &str = "LINGXI_DISABLE_FAST_MODE";
 /// Native JavaScript-truthy switch disabling 1M model alias parsing.
@@ -60,6 +106,11 @@ pub const DOT_DIR: &str = ".lingxi";
 
 /// Global config file, a sibling of [`DOT_DIR`] in `$HOME` (e.g. `~/.lingxi.json`).
 pub const GLOBAL_CONFIG_FILE: &str = ".lingxi.json";
+
+/// Append-only sidecar suffix holding durable session-message identities.
+pub const SESSION_MESSAGE_IDENTITY_LOG_SUFFIX: &str = ".lingxi-message-identities";
+/// Cross-process lock suffix guarding the session-message identity sidecar.
+pub const SESSION_MESSAGE_IDENTITY_LOCK_SUFFIX: &str = ".lingxi-message-identities.lock";
 
 /// Legacy global-config filename checked *inside* the config-home before
 /// [`GLOBAL_CONFIG_FILE`] (e.g. `<config-home>/.config.json`). The filename
@@ -132,6 +183,27 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     MODEL_CAPABILITIES_ENV,
     SUBSCRIPTION_TYPE_ENV,
     RATE_LIMIT_TIER_ENV,
+    DISABLE_AGENT_VIEW_ENV,
+    API_KEY_HELPER_TTL_MS_ENV,
+    ULTRACODE_CADENCE_ENV,
+    MOD_BUN_EXECUTABLE_ENV,
+    DISABLE_GIT_INSTRUCTIONS_ENV,
+    DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS_ENV,
+    DISABLE_NONESSENTIAL_TRAFFIC_ENV,
+    DISABLE_BACKGROUND_TASKS_ENV,
+    MAX_CONCURRENT_SUBAGENTS_ENV,
+    WORKFLOW_MAX_CONCURRENT_AGENTS_ENV,
+    MAX_SUBAGENT_SPAWN_DEPTH_ENV,
+    MAX_SUBAGENTS_PER_SESSION_ENV,
+    SUBAGENT_MODEL_FORCE_ENV,
+    SUBAGENT_MODEL_ENV,
+    SIMPLE_ENV,
+    DISABLE_ATTACHMENTS_ENV,
+    DISABLE_EXPLORE_PLAN_AGENTS_ENV,
+    PLAN_EXPLORE_AGENT_COUNT_ENV,
+    PLAN_AGENT_COUNT_ENV,
+    MAX_TOOL_USE_CONCURRENCY_ENV,
+    COORDINATOR_FORCE_WORKER_INHERIT_MODEL_ENV,
     DISABLE_FAST_MODE_ENV,
     DISABLE_1M_CONTEXT_ENV,
     DISABLE_LEGACY_MODEL_REMAP_ENV,
@@ -146,6 +218,8 @@ pub const NAMESPACE_VALUES: &[&str] = &[
     SKIP_FAST_MODE_NETWORK_ERRORS_ENV,
     DOT_DIR,
     GLOBAL_CONFIG_FILE,
+    SESSION_MESSAGE_IDENTITY_LOG_SUFFIX,
+    SESSION_MESSAGE_IDENTITY_LOCK_SUFFIX,
     CONFIG_DIR_ENV,
     MEMORY_FILE,
     MEMORY_LOCAL_FILE,
@@ -206,6 +280,23 @@ mod tests {
         assert_eq!(MEMORY_FILE, "LINGXI.md");
         assert_eq!(MEMORY_LOCAL_FILE, "LINGXI.local.md");
         assert_eq!(PLUGIN_MANIFEST_DIR, ".lingxi-plugin");
+        assert_eq!(MOD_BUN_EXECUTABLE_ENV, "LINGXI_MOD_BUN_EXECUTABLE");
+        assert_eq!(
+            DISABLE_GIT_INSTRUCTIONS_ENV,
+            "LINGXI_DISABLE_GIT_INSTRUCTIONS"
+        );
+        assert_eq!(
+            DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS_ENV,
+            "LINGXI_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS"
+        );
+        assert_eq!(
+            DISABLE_NONESSENTIAL_TRAFFIC_ENV,
+            "LINGXI_DISABLE_NONESSENTIAL_TRAFFIC"
+        );
+        assert_eq!(
+            DISABLE_BACKGROUND_TASKS_ENV,
+            "LINGXI_DISABLE_BACKGROUND_TASKS"
+        );
         assert_eq!(PLUGIN_ROOT_ENV, "LINGXI_PLUGIN_ROOT");
         assert_eq!(PLUGIN_DATA_ENV, "LINGXI_PLUGIN_DATA");
         assert_eq!(PROJECT_DIR_ENV, "LINGXI_PROJECT_DIR");

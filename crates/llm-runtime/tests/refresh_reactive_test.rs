@@ -12,8 +12,8 @@ use lingxi_core::types::Secret;
 use lingxi_llm_client::auth::oauth::anthropic::ClaudeAiOAuthConfig;
 use lingxi_llm_client::{HttpRequest, StreamResponse, Transport};
 use llm_runtime::auth::anthropic::refresh::{AuthState, RefreshDriver};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Counting HTTP transport: every `send()` increments `calls`. Always returns

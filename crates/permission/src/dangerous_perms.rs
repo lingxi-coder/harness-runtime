@@ -221,7 +221,7 @@ pub fn is_dangerous_powershell_permission(
 ///
 /// Any Agent allow rule would auto-approve sub-agent spawns before the auto-mode
 /// classifier can evaluate the sub-agent's prompt, defeating delegation-attack
-/// prevention. The tool name is normalized (`Task` → `Agent`) first.
+/// prevention.
 #[must_use]
 pub fn is_dangerous_task_permission(
     tool_name: &str,
@@ -669,8 +669,7 @@ mod tests {
             AGENT_TOOL_NAME,
             &content("general-purpose")
         ));
-        // Legacy `Task` normalizes to `Agent`.
-        assert!(is_dangerous_task_permission("Task", &content("anything")));
+        assert!(!is_dangerous_task_permission("Task", &content("anything")));
     }
 
     #[test]

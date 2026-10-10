@@ -145,7 +145,7 @@ impl InstructionContext {
     #[must_use]
     pub fn reminder(&self) -> Option<String> {
         let mut keys = self.user_context_order.clone();
-        for key in ["Environment", "claudeMd", "userEmail", "currentDate"] {
+        for key in ["Environment", "instructions", "userEmail", "currentDate"] {
             if !keys.iter().any(|existing| existing == key) {
                 keys.push(key.into());
             }

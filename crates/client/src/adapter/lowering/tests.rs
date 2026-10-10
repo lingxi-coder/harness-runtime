@@ -494,6 +494,7 @@ mod regressions {
                         citations: None,
                     },
                     ContentBlock::ToolUse {
+                        input_projection: None,
                         id: tu.clone(),
                         name: "Read".to_string(),
                         input: generated_source(&serde_json::json!({"file_path": "/tmp/x"})),
@@ -585,8 +586,10 @@ mod regressions {
         });
         let history = vec![
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
+                    input_projection: None,
                     id: tu.clone(),
                     name: "Edit".to_string(),
                     input: generated_source(&input),
@@ -596,8 +599,10 @@ mod regressions {
                 resumable: None,
             },
             ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: tu.clone(),
                     content: "edited".into(),
                     is_error: Some(false),
@@ -658,8 +663,10 @@ mod regressions {
         let read = ToolUseId::new();
         let text = "Async agent launched successfully.";
         let call = |tu: &ToolUseId, tool: &str| ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolUse {
+                input_projection: None,
                 id: tu.clone(),
                 name: tool.to_string(),
                 input: generated_source(&serde_json::json!({ "description": "review" })),
@@ -669,8 +676,10 @@ mod regressions {
             resumable: None,
         };
         let returned = |tu: &ToolUseId, content: &str| ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: tu.clone(),
                 content: content.to_string().into(),
                 is_error: Some(false),
@@ -768,8 +777,10 @@ mod regressions {
 
         let call =
             |tu: &ToolUseId, tool: &str, input: serde_json::Value| ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
+                    input_projection: None,
                     id: tu.clone(),
                     name: tool.to_string(),
                     input: generated_source(&input),
@@ -779,8 +790,10 @@ mod regressions {
                 resumable: None,
             };
         let persisted = |tu: &ToolUseId, content: &str| ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: tu.clone(),
                 content: content.to_string().into(),
                 is_error: Some(false),
@@ -839,8 +852,10 @@ mod regressions {
     fn lower_transcript_tolerates_a_tool_result_with_no_paired_call() {
         use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
         let history = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                content_projection: None,
                 tool_use_id: ToolUseId::new(),
                 content: "orphaned".into(),
                 is_error: Some(false),
@@ -876,6 +891,7 @@ mod regressions {
         let tick = "Internal scheduled tick".to_string();
         let tool_id = ToolUseId::new();
         let meta = |content| ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content,
             is_meta: true,
@@ -893,8 +909,10 @@ mod regressions {
             }]),
             ConversationMessage::user(MessageId::new(), tick.clone()),
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
+                    input_projection: None,
                     id: tool_id.clone(),
                     name: "Bash".to_string(),
                     input: generated_source(&serde_json::json!({"command": "pwd"})),
@@ -909,6 +927,7 @@ mod regressions {
                     citations: None,
                 },
                 ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: tool_id,
                     content: "/tmp".into(),
                     is_error: Some(false),
@@ -968,6 +987,7 @@ mod regressions {
     fn lower_conversation_message_system_lowers_to_single_text_block() {
         use lingxi_core::types::MessageId;
         let msg = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: "you are a helpful assistant".into(),
             subtype: None,
@@ -1043,6 +1063,7 @@ mod regressions {
         // An image block has no MessageBlockDto analog, so it is projected to a
         // durable URL-shaped message media entry while text stays in blocks.
         let msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -1083,7 +1104,7 @@ mod regressions {
 #[cfg(test)]
 #[test]
 fn loop_wakeup_lowering_preserves_structured_metadata_without_text_matching() {
-    let message = ConversationMessage::System {
+    let message = ConversationMessage::System { api_system: None,
         id: lingxi_core::types::MessageId::new(),
         content: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
             &serde_json::json!({"message":"任意文案", "companion":"healthy", "streak":2, "since_ms":123}),

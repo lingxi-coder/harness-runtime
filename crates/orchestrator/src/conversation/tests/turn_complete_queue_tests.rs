@@ -78,6 +78,7 @@ async fn build_orchestrator(
     )
     .await
     .unwrap();
+
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let session_trait: Arc<dyn hooks::mods::ModSessionContext> = session.clone();
@@ -134,6 +135,7 @@ async fn mod_logs(output: &MockOutputStream, plugin: &str) -> Vec<String> {
                 plugin: event_plugin,
                 text,
             } if event_plugin == plugin => Some(text.string_at("").unwrap_or_default().to_owned()),
+
             _ => None,
         })
         .collect()
@@ -220,6 +222,7 @@ async fn turn_complete_queue_is_fifo_nonblocking_and_emits_once() {
             id: cancelled_turn_id.to_owned(),
             started_at: std::time::Instant::now(),
             answer: String::new().into(),
+
             usage: None,
             refusal: None,
             error: false,
@@ -269,6 +272,7 @@ async fn turn_complete_queue_is_fifo_nonblocking_and_emits_once() {
         event,
         lingxi_core::host::OutputEvent::SystemNotice { body, .. }
             if body.string_at("") == Some("queue-mod: queued summary")
+
     )));
     let history = format!("{:?}", orchestrator.session.lock().await.history);
     assert!(history.contains("first answer"));

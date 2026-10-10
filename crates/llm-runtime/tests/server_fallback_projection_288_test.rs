@@ -1,18 +1,18 @@
 //! Server fallback response projection across the SDK transport and ApiService.
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 use lingxi_llm_client::{
-    HttpRequest, HttpResponse, StreamResponse, protocol::LlmError as SdkError,
+    protocol::LlmError as SdkError, HttpRequest, HttpResponse, StreamResponse,
 };
 use llm_runtime::history::{ContentBlock, HistoryEvent};
 use llm_runtime::model::user_agent::UserAgentEnv;
 use llm_runtime::{
-    ApiService, ClientConfig, CostEstimator, LlmRequest, ModelRuntime, NonStreamingRequestClass,
-    NonStreamingRetryOptions, PricingCatalog, PricingPolicy, SubscriberState, Transport,
-    stream_accumulator::accumulate_stream_salvaging,
+    stream_accumulator::accumulate_stream_salvaging, ApiService, ClientConfig, CostEstimator,
+    LlmRequest, ModelRuntime, NonStreamingRequestClass, NonStreamingRetryOptions, PricingCatalog,
+    PricingPolicy, SubscriberState, Transport,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 fn metadata_value(payload: &lingxi_llm_client::protocol::JsonPayload) -> Value {
@@ -1036,15 +1036,13 @@ async fn incomplete_native_quote_suppresses_aggregate_fallback_cost_and_plain_ar
         )["completeness"],
         "incomplete"
     );
-    assert!(
-        unknown_stream
-            .usage
-            .provider_metadata
-            .payload_at("/stream")
-            .as_ref()
-            .and_then(llm_runtime::history::server_fallback_cost_quote)
-            .is_some()
-    );
+    assert!(unknown_stream
+        .usage
+        .provider_metadata
+        .payload_at("/stream")
+        .as_ref()
+        .and_then(llm_runtime::history::server_fallback_cost_quote)
+        .is_some());
     assert_eq!(unknown_stream_transport.requests().len(), 1);
 
     let transport = FixtureTransport::new(

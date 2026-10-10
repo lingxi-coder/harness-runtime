@@ -151,6 +151,7 @@ fn agent_task_facts(state: &TaskState, source_order: usize) -> AgentTaskFacts {
         source_order,
         parent_id: optional_json_string(base.creator_agent_id.map(|id| id.as_uuid().to_string())),
         row_description: FieldPresence::Value(base.description.clone()),
+
         ..AgentTaskFacts::default()
     };
     match state {
@@ -162,6 +163,7 @@ fn agent_task_facts(state: &TaskState, source_order: usize) -> AgentTaskFacts {
                 .spawned_description
                 .clone()
                 .map_or(FieldPresence::Missing, FieldPresence::Value);
+
             facts.spawned_by = agent.agent_spawn_provenance.hook_caller.clone();
             facts.hook_origin = agent.agent_spawn_provenance.hook_origin.clone();
             facts.is_idle = agent.agent_list_lifecycle.is_idle.clone();
@@ -194,6 +196,7 @@ fn agent_task_facts(state: &TaskState, source_order: usize) -> AgentTaskFacts {
                 .spawned_description
                 .clone()
                 .map_or(FieldPresence::Missing, FieldPresence::Value);
+
             facts.spawned_by = teammate.agent_spawn_provenance.hook_caller.clone();
             facts.hook_origin = teammate.agent_spawn_provenance.hook_origin.clone();
             facts.is_idle = FieldPresence::Value(teammate.is_idle);
@@ -748,6 +751,9 @@ impl TaskRegistryHandle for TaskRegistry {
         )
     }
 
+    // Per-session subagent-spawn counter (claude 2.1.212 `getTotalAgentSpawns` /
+    // `incrementTotalAgentSpawns`) — delegate the trait surface the `Agent` tool
+    // reads to the concrete registry's atomic counter.
     fn agent_session_statistics(
         &self,
         session_id: lingxi_core::types::SessionId,
@@ -778,9 +784,6 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::bind_agent_spawn_token(self, task_id, token);
     }
 
-    // Per-session subagent-spawn counter (claude 2.1.212 `getTotalAgentSpawns` /
-    // `incrementTotalAgentSpawns`) — delegate the trait surface the `Agent` tool
-    // reads to the concrete registry's atomic counter.
     fn get_total_agent_spawns(&self) -> u64 {
         TaskRegistry::total_agent_spawns(self)
     }
@@ -888,6 +891,7 @@ impl TaskRegistryHandle for TaskRegistry {
         let mut deadline = agent_wait_deadline(timeout)?;
         let mut observed_task_id: Option<String> = None;
         let mut last_transcript: Option<Utf16JsonProjection> = None;
+
         let mut active_claim: Option<AgentWaitNotificationClaim> = None;
         loop {
             let state = TaskRegistry::list(self)

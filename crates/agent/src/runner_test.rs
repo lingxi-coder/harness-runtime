@@ -110,6 +110,7 @@ fn tool_invocation_carries_native_query_depth_separately_from_spawn_depth() {
 #[test]
 fn completed_result_keeps_exact_utf16_text_from_the_final_agent_row() {
     let exact_text = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::TextJsUtf16 {
             text: "�".into(),
@@ -117,6 +118,7 @@ fn completed_result_keeps_exact_utf16_text_from_the_final_agent_row() {
             citations: None,
         }],
         stop_reason: Some("end_turn".into()),
+        per_turn_effort: None,
         resumable: None,
     };
 
@@ -170,6 +172,7 @@ struct MockSubagentApiClient {
 struct CapturedSubagentCall {
     request: crate::api::SubagentApiRequest,
     response: Option<llm_runtime::HistoryResponse>,
+    fallback_target: Option<lingxi_core::host::refusal_driver::FallbackTargetContext>,
 }
 
 impl MockSubagentApiClient {
@@ -610,13 +613,14 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
                     turn_origin: None,
                 },
                 ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: MessageId::new(),
                     content: vec![ContentBlock::Text {
                         text: format!("executor assistant context {tool_use_id}"),
                         citations: None,
                     }],
                     stop_reason: None,
-
+                    per_turn_effort: None,
                     resumable: None,
                 },
                 ConversationMessage::System {
@@ -1228,7 +1232,7 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
             citations: None,
         }],
         stop_reason: None,
-
+        per_turn_effort: None,
         resumable: None,
     };
     let retained = ConversationMessage::Assistant {
@@ -1238,13 +1242,14 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
             citations: None,
         }],
         stop_reason: None,
-
+        per_turn_effort: None,
         resumable: None,
     };
     let result_a_id = MessageId::new();
     let note_a_id = MessageId::new();
     let result_b_id = MessageId::new();
     let je_a = ConversationMessage::User {
+        api_message_override: None,
         id: result_a_id,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu-result-a".to_string()),
@@ -1267,6 +1272,7 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
     };
     let note_a = ConversationMessage::user(note_a_id, "attachment/user note A".into());
     let je_b = ConversationMessage::User {
+        api_message_override: None,
         id: result_b_id,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu-result-b".to_string()),
@@ -2012,7 +2018,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         agent_name: None,
         team_name: None,
         agent_definition: AgentDefinition {
-            omit_claude_md: false,
+            omit_instructions: false,
             cache_ttl: None,
             agent_type: "test".into(),
             when_to_use: String::new(),
@@ -2081,6 +2087,8 @@ fn fresh_subagent_ctx() -> SubagentContext {
         budget: None,
         hook_executor: None,
         agent_spawn_token: None,
+        stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
+        subagent_stop_firer: None,
         strict_plugin_only_hooks: false,
         skill_loader: None,
         hook_session_id: lingxi_core::types::SessionId::nil(),
@@ -2164,6 +2172,233 @@ async fn failed_input_cleanup_never_reports_success_or_parks_a_persistent_agent(
             .any(|event| matches!(event, SubagentEvent::Completed { .. })));
         assert!(invoker.cleanups.lock().unwrap().len() >= 3);
     }
+}
+
+fn attach_failure_hook_executor(ctx: &mut SubagentContext) -> Arc<hooks::HookExecutorImpl> {
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new())),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    ctx.hook_executor = Some(executor.clone());
+    ctx.hook_session_id = lingxi_core::types::SessionId::new();
+    ctx.agent_definition.model = AgentModel::Explicit("failure-child-model".into());
+    ctx.model_profile = Some("failure-child-profile".into());
+    executor
+}
+
+#[tokio::test]
+async fn startup_instruction_failure_publishes_child_route_and_retained_history() {
+    struct StartupPromptRecorder(Mutex<Vec<hooks::PromptHookRequest>>);
+    #[async_trait]
+    impl hooks::HookPromptRunner for StartupPromptRecorder {
+        async fn run(
+            &self,
+            request: hooks::PromptHookRequest,
+        ) -> Result<String, hooks::PromptHookError> {
+            self.0.lock().unwrap().push(request);
+            Ok(r#"{"ok":true}"#.into())
+        }
+    }
+    struct UnavailableInstructions;
+    #[async_trait]
+    impl lingxi_core::host::instructions::InstructionContextProvider for UnavailableInstructions {
+        async fn load(
+            &self,
+            _: &std::path::Path,
+            _: lingxi_core::host::instructions::InstructionScope,
+        ) -> Result<lingxi_core::host::instructions::InstructionContext, String> {
+            Err("initial instruction load failed".into())
+        }
+    }
+    for resumed in [false, true] {
+        let api = MockSubagentApiClient::new(Vec::new());
+        let mut ctx = loop_ctx(api.clone(), None, 1);
+        ctx.instruction_provider = Some(Arc::new(UnavailableInstructions));
+        if resumed {
+            ctx.resumed_history = Some(vec![ConversationMessage::user(
+                MessageId::new(),
+                "retained child evidence".into(),
+            )]);
+        }
+        attach_failure_hook_executor(&mut ctx);
+        let prompt_runner = Arc::new(StartupPromptRecorder(Mutex::new(Vec::new())));
+        let executor = Arc::new(
+            hooks::HookExecutorImpl::new(
+                Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new())),
+                Arc::new(test_harness::mocks::MockHttpTransport::new()),
+                Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+            )
+            .with_prompt_runner(prompt_runner.clone()),
+        );
+        ctx.hook_executor = Some(executor.clone());
+        let mut stop_hook = frontmatter_stop_hook("startup-retained-prompt-stop");
+        stop_hook.executor = hooks::definition::HookExecutor::Prompt {
+            prompt: "Inspect the retained child evidence. $ARGUMENTS".into(),
+            model: None,
+            continue_on_block: false,
+        };
+        ctx.agent_definition.frontmatter_hooks = vec![stop_hook];
+        let transcript_dir = tempfile::tempdir().unwrap();
+        ctx.transcript_subdir = transcript_dir.path().to_path_buf();
+        let session_id = ctx.hook_session_id;
+        let agent_id = ctx.agent_id;
+        let expected_history = ctx.resumed_history.clone().unwrap_or_default();
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+        assert!(
+            matches!(out_rx.recv().await, Some(SubagentEvent::Failed { error, .. })
+            if error == "initial instruction load failed")
+        );
+        let (route, transcript) = executor
+            .take_agent_prompt_transcript(session_id, agent_id)
+            .expect("the child's snapshot precedes its Failed event");
+        assert_eq!(route.model, "failure-child-model");
+        assert_eq!(
+            route.model_profile.as_deref(),
+            Some("failure-child-profile")
+        );
+        assert_eq!(transcript.messages, expected_history);
+        assert_eq!(api.call_count(), 0);
+        runner.await.unwrap();
+        assert!(
+            out_rx.recv().await.is_none(),
+            "startup failure must emit no synthetic rows"
+        );
+        let requests = prompt_runner.0.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the actual scoped prompt Stop fired once"
+        );
+        assert_eq!(
+            requests[0].transcript.as_ref().unwrap().messages,
+            expected_history
+        );
+        assert_eq!(
+            requests[0].model_selection.as_ref().unwrap().model,
+            "failure-child-model"
+        );
+        assert_eq!(
+            requests[0]
+                .model_selection
+                .as_ref()
+                .unwrap()
+                .model_profile
+                .as_deref(),
+            Some("failure-child-profile")
+        );
+        assert_eq!(
+            std::fs::read_dir(transcript_dir.path()).unwrap().count(),
+            0,
+            "instruction failure must not create transcript rows"
+        );
+    }
+}
+
+struct RouteChangingCleanupInvoker;
+
+#[async_trait]
+impl lingxi_core::host::ToolInvoker for RouteChangingCleanupInvoker {
+    async fn invoke(
+        &self,
+        _: &str,
+        _: Utf16JsonProjection,
+        _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Ok(Utf16JsonProjection::parse("null").unwrap())
+    }
+    async fn invoke_detailed(
+        &self,
+        _: &str,
+        _: Utf16JsonProjection,
+        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
+        _: Option<u64>,
+    ) -> Result<
+        lingxi_core::host::tool_invoker::ToolInvocationResult,
+        lingxi_core::host::tool_invoker::ToolInvokerError,
+    > {
+        let mut context = tool_api::test_support::fresh_ctx();
+        context.options.main_loop_model = ctx.parent_model.unwrap();
+        context.options.model_profile = ctx.parent_model_profile;
+        Ok(lingxi_core::host::tool_invoker::ToolInvocationResult {
+            is_error: false,
+            data: Utf16JsonProjection::parse("null").unwrap(),
+            model_content: None,
+            new_messages: Vec::new(),
+            context_modifier: Some(nested_route_modifier(
+                "failure-live-model",
+                Some("failure-live-profile"),
+            )),
+            mcp_meta: None,
+            turn_end: None,
+            context: lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!(
+                []
+            )),
+            context_state: Some(
+                lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(context)),
+            ),
+        })
+    }
+    async fn cleanup_computer_inputs(
+        &self,
+        _: AgentId,
+        _: Option<lingxi_core::types::SessionId>,
+    ) -> Result<(), lingxi_core::host::tool_invoker::ToolInvokerError> {
+        Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
+            "key release failed".into(),
+        ))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn cleanup_failure_publishes_live_skill_route_before_failed_terminal() {
+    let api = MockSubagentApiClient::new(vec![
+        Ok(tool_use_response("Skill", Some("tool_use"))),
+        Ok(text_response("done on the new route", Some("end_turn"))),
+    ]);
+    let mut ctx = loop_ctx(api.clone(), Some(Arc::new(RouteChangingCleanupInvoker)), 2);
+    let executor = attach_failure_hook_executor(&mut ctx);
+    ctx.model_resolution_context_provider = Some(Arc::new(|model: &str, profile: Option<&str>| {
+        Ok(crate::model_resolution::ModelResolutionContext {
+            route: crate::model_resolution::ModelRouteFacts {
+                model: model.to_string(),
+                profile: profile.map(str::to_string),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    }));
+    let session_id = ctx.hook_session_id;
+    let agent_id = ctx.agent_id;
+    let (_event_tx, event_rx) = mpsc::channel(1);
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    let runner = tokio::spawn(run_subagent(ctx, event_rx, out_tx));
+    loop {
+        match out_rx.recv().await.expect("a terminal event") {
+            SubagentEvent::Failed { error, .. } => {
+                assert!(error.contains("desktop remains reserved"));
+                break;
+            }
+            SubagentEvent::Completed { .. } => panic!("cleanup failure cannot complete"),
+            _ => {}
+        }
+    }
+    let (route, transcript) = executor
+        .take_agent_prompt_transcript(session_id, agent_id)
+        .expect("cleanup failure publishes before Failed");
+    assert_eq!(route.model, "failure-live-model");
+    assert_eq!(route.model_profile.as_deref(), Some("failure-live-profile"));
+    assert!(transcript
+        .messages
+        .iter()
+        .any(|message| message.text_content() == "done on the new route"));
+    assert_eq!(api.call_count(), 2);
+    runner.await.unwrap();
 }
 
 #[tokio::test]
@@ -3550,13 +3785,14 @@ async fn workflow_watchdog_retries_five_times_then_fails_without_partial_salvage
 /// Build a minimal assistant message with a single text block.
 fn assistant_text(text: &str) -> ConversationMessage {
     ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             citations: None,
         }],
         stop_reason: Some("end_turn".into()),
-
+        per_turn_effort: None,
         resumable: None,
     }
 }
@@ -6681,17 +6917,9 @@ fn companion_note_absent_for_non_nke_tools() {
 }
 
 #[test]
-fn companion_note_workflow_absent_for_ant() {
-    // Workflow is in nke only for non-ant (HDd ant-gate).
-    assert!(
-        companion_note_for_disallowed_tool("Workflow", /*is_ant=*/ true).is_none(),
-        "Workflow must NOT get the companion note for ant users"
-    );
-    // TaskOutput (base set) is still in nke for ant.
-    assert!(
-        companion_note_for_disallowed_tool("TaskOutput", /*is_ant=*/ true).is_some(),
-        "TaskOutput must get the companion note for ant users"
-    );
+fn companion_note_workflow_follows_tool_permissions() {
+    assert!(companion_note_for_disallowed_tool("Workflow").is_none());
+    assert!(companion_note_for_disallowed_tool("TaskOutput").is_some());
 }
 
 #[tokio::test]
@@ -6813,7 +7041,7 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
     ctx.budget = Some(Arc::new(MockBudget { exceeded: true }));
     let statistics =
         Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
-    let token = statistics.prepare_spawn("general-purpose".into(), Some(false), false, 1);
+    let token = statistics.prepare_spawn("worker".into(), None, true, 1);
     token.started();
     ctx.agent_spawn_token = Some(token);
 
@@ -6821,6 +7049,8 @@ async fn loop_budget_exhausted_stops_before_any_round_trip() {
     let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
     run_subagent(ctx, event_rx, out_tx).await;
     let evs = drain(out_rx).await;
+    assert_eq!(statistics.snapshot().killed.system, 1);
+    assert_eq!(statistics.snapshot().failed, 0);
 
     assert_eq!(
         api.call_count(),
@@ -8196,6 +8426,35 @@ fn frontmatter_stop_hook(handler_id: &str) -> hooks::definition::HookDefinition 
         rewake_message: None,
         on_failure: None,
     }
+}
+
+#[tokio::test]
+async fn scoped_only_child_fires_frontmatter_stop_without_global_snapshot_buffer() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let api = MockSubagentApiClient::new(vec![Ok(text_response("done", Some("end_turn")))]);
+    let mut ctx = loop_ctx(api, None, 1);
+    ctx.stop_hook_scope = lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped;
+    ctx.agent_definition.frontmatter_hooks =
+        vec![frontmatter_stop_hook("record-subagent-stop-in-runner")];
+    let executor = exec_recording_stop(seen.clone());
+    ctx.hook_executor = Some(executor.clone());
+    let session = ctx.hook_session_id;
+    let child = ctx.agent_id;
+    let (events, input) = mpsc::channel(8);
+    drop(events);
+    let (output, results) = mpsc::channel(32);
+    run_subagent(ctx, input, output).await;
+    assert!(drain(results)
+        .await
+        .iter()
+        .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+    assert_eq!(*seen.lock().unwrap(), vec!["completed".to_string()]);
+    assert!(
+        executor
+            .take_agent_prompt_transcript(session, child)
+            .is_none(),
+        "a child without a global consumer cannot retain a global snapshot"
+    );
 }
 
 #[tokio::test]
@@ -10406,6 +10665,7 @@ async fn oversized_mandatory_prompt_is_rejected_before_provider_call() {
 /// Build an assistant message whose only content block is a `ToolUse`.
 fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
     ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolUse {
             id,
@@ -10415,7 +10675,7 @@ fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
             provider_id: None,
         }],
         stop_reason: Some("tool_use".into()),
-
+        per_turn_effort: None,
         resumable: None,
     }
 }
@@ -10423,6 +10683,7 @@ fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
 /// Build a user message whose only content block is the matching `ToolResult`.
 fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
     ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
             tool_use_id,
@@ -11452,6 +11713,122 @@ async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {
 }
 
 #[tokio::test]
+async fn skill_selection_of_the_serving_model_clears_the_refusal_target() {
+    for second_tool in [
+        Some("NestedMutateSecond"),
+        Some("NestedReselectInitial"),
+        None,
+    ] {
+        let mut registry = tool_api::ToolRegistry::new();
+        for name in std::iter::once("Skill").chain(second_tool) {
+            registry.register_builtin(Arc::new(NestedToolEffectsProbe {
+                name,
+                schema: serde_json::json!({"type":"object","additionalProperties":true}),
+                snapshots: Arc::new(Mutex::new(Vec::new())),
+                modifier_order: Arc::new(Mutex::new(Vec::new())),
+                meta_seen: Arc::new(AtomicUsize::new(0)),
+                modifier_calls: Arc::new(AtomicUsize::new(0)),
+            }));
+        }
+        let invoker: Arc<dyn lingxi_core::host::ToolInvoker> =
+            Arc::new(tool_api::RegistryToolInvoker::new(Arc::new(registry)));
+        let mut picked = tool_use_response("Skill", Some("tool_use"));
+        if let Some(name) = second_tool {
+            picked.content.push(llm_runtime::ContentBlock::ToolCall {
+                id: ToolUseId::new().to_string(),
+                name: name.into(),
+                input: serde_json::json!({}),
+            });
+        }
+        let api = MockSubagentApiClient::new(vec![
+            Ok(text_response("", Some("refusal"))),
+            Ok(picked),
+            Ok(text_response("done", Some("end_turn"))),
+        ]);
+        let mut ctx = loop_ctx(api.clone(), Some(invoker), 4);
+        ctx.agent_definition.model = AgentModel::Explicit("initial".into());
+        ctx.model_profile = Some("origin-provider".into());
+        ctx.refusal_fallback_chain = vec!["nested-model-final".into()];
+        ctx.model_resolution_context_provider =
+            Some(Arc::new(|model: &str, profile: Option<&str>| {
+                Ok(crate::model_resolution::ModelResolutionContext {
+                    route: crate::model_resolution::ModelRouteFacts {
+                        model: model.to_string(),
+                        profile: profile.or(Some("origin-provider")).map(str::to_string),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            }));
+        let transcript_dir = tempfile::tempdir().unwrap();
+        ctx.transcript_subdir = transcript_dir.path().to_path_buf();
+        ctx.transcript_fs = Some(Arc::new(platform_posix::PosixFileSystem::new(
+            transcript_dir.path().to_path_buf(),
+        )));
+        let transcript_path = transcript_dir
+            .path()
+            .join(format!("agent-{}.jsonl", ctx.agent_id));
+        let (event_tx, event_rx) = mpsc::channel(1);
+        drop(event_tx);
+        let (out_tx, out_rx) = mpsc::channel(64);
+        run_subagent(ctx, event_rx, out_tx).await;
+        assert!(drain(out_rx)
+            .await
+            .iter()
+            .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+        let calls = api.physical_calls();
+        let physical_model = if second_tool == Some("NestedReselectInitial") {
+            "initial"
+        } else {
+            "nested-model-final"
+        };
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.request.model.as_str())
+                .collect::<Vec<_>>(),
+            ["initial", "nested-model-final", physical_model]
+        );
+        let serving = calls[1].fallback_target.as_ref().unwrap();
+        assert_eq!(serving.user_model, "initial");
+        assert!(serving.is_target("nested-model-final", str::to_string));
+        let selected = calls[2].fallback_target.as_ref().unwrap();
+        if second_tool.is_some() {
+            assert_eq!(selected.user_model, physical_model);
+            assert_eq!(selected.turn_override, None);
+            assert!(!selected.is_target(physical_model, str::to_string));
+        } else {
+            assert_eq!(selected.user_model, "initial");
+            assert_eq!(
+                selected.turn_override.as_deref(),
+                Some("nested-model-final")
+            );
+            assert!(
+                selected.is_target(physical_model, str::to_string),
+                "a prompt-only modifier retains the serving refusal route"
+            );
+        }
+        let expected_profile = if second_tool == Some("NestedMutateSecond") {
+            "nested-profile-final"
+        } else {
+            "origin-provider"
+        };
+        assert_eq!(calls[2].request.profile.as_deref(), Some(expected_profile));
+        let transcript = tokio::fs::read_to_string(transcript_path).await.unwrap();
+        let selections: Vec<serde_json::Value> = transcript
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["type"] == "model-selection")
+            .collect();
+        assert_eq!(selections.len(), usize::from(second_tool.is_some()));
+        if let Some(selection) = selections.first() {
+            assert_eq!(selection["model"], physical_model);
+            assert_eq!(selection["model_profile"], expected_profile);
+        }
+    }
+}
+
+#[tokio::test]
 async fn local_refusal_serving_model_does_not_rewrite_tool_context() {
     struct ModelScopeInvoker {
         route: Mutex<Option<(Option<String>, Option<String>)>>,
@@ -11693,13 +12070,14 @@ async fn a_subagent_that_never_refused_carries_no_note() {
 #[test]
 fn retracted_messages_are_dropped_but_notices_survive() {
     let assistant = |text: &str| ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: text.to_string(),
             citations: None,
         }],
         stop_reason: None,
-
+        per_turn_effort: None,
         resumable: None,
     };
     let doomed = assistant("superseded output");
@@ -11849,6 +12227,9 @@ async fn tool_reported_error_and_context_reach_model_history() {
         message.is_meta()
             && message.text_content()
                 == "<system-reminder>\ntool.call hook additional context: Contents of /tmp/AGENTS.md:\n\nNested rule\n</system-reminder>"
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(event, SubagentEvent::Message { message, .. } if message["content"].as_array().is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result" && block["is_error"] == true && block["content"] == "Contract unavailable")))
     }));
     assert!(events.iter().any(|event| {
         matches!(event, SubagentEvent::Message { message, .. }
@@ -12857,6 +13238,130 @@ struct NestedToolEffectsProbe {
     modifier_calls: Arc<AtomicUsize>,
 }
 
+struct RecordingChildHookRoute {
+    seen: Arc<Mutex<Vec<(hooks::HookEventType, hooks::HookContext)>>>,
+}
+
+#[async_trait]
+impl hooks::executor::BuiltinHookHandler for RecordingChildHookRoute {
+    fn id(&self) -> &str {
+        "record-child-hook-route"
+    }
+
+    async fn handle(
+        &self,
+        event: &hooks::HookEvent,
+        ctx: &hooks::HookContext,
+    ) -> hooks::HookResult {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((event.event_type(), ctx.clone()));
+        hooks::HookResult {
+            outcome: hooks::HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: None,
+        }
+    }
+}
+
+fn nested_route_modifier(
+    model: &'static str,
+    profile: Option<&'static str>,
+) -> lingxi_core::host::tool_invoker::ToolInvocationContextModifier {
+    lingxi_core::host::tool_invoker::ToolInvocationContextModifier::new(
+        move |mut context: tool_api::ToolUseContext| {
+            context.options.main_loop_model = model.into();
+            context.options.model_profile = profile.map(str::to_string);
+            context
+        },
+    )
+}
+
+#[test]
+fn nested_model_modifiers_resolve_in_order_without_mutating_original_state() {
+    use crate::model_resolution::{ModelResolutionContext, ModelResolutionError, ModelRouteFacts};
+    let provider = |model: &str, profile: Option<&str>| {
+        let (model, profile) = match (model, profile) {
+            ("start", Some("a")) => ("start", "a"),
+            ("b/shared", _) | ("shared", Some("b")) => ("shared", "b"),
+            ("balanced", Some("b")) | ("balanced-b", Some("b")) => ("balanced-b", "b"),
+            _ => {
+                return Err(ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: profile.map(str::to_string),
+                    reason: "not configured".into(),
+                });
+            }
+        };
+        Ok(ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: model.into(),
+                profile: Some(profile.into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+    };
+    let state = Some(
+        lingxi_core::host::tool_invoker::ToolInvocationContextState::new(Arc::new(
+            tool_api::ToolUseContext::model_seed("start".into(), Some("a".into())),
+        )),
+    );
+    let prepared = apply_nested_tool_context_modifiers(
+        &state,
+        vec![],
+        vec![
+            nested_route_modifier("b/shared", None),
+            nested_route_modifier("balanced", None),
+        ],
+        "start",
+        Some("a"),
+        Some(&provider),
+    )
+    .unwrap();
+    assert_eq!(prepared.model, "balanced-b");
+    assert_eq!(prepared.model_profile.as_deref(), Some("b"));
+    let original = state
+        .as_ref()
+        .unwrap()
+        .downcast_arc::<tool_api::ToolUseContext>()
+        .unwrap();
+    assert_eq!(original.options.main_loop_model, "start");
+    assert_eq!(original.options.model_profile.as_deref(), Some("a"));
+
+    let rejected = apply_nested_tool_context_modifiers(
+        &state,
+        vec![],
+        vec![
+            nested_route_modifier("b/shared", None),
+            nested_route_modifier("missing", None),
+        ],
+        "start",
+        Some("a"),
+        Some(&provider),
+    );
+    assert!(rejected.is_err());
+    let original = state
+        .as_ref()
+        .unwrap()
+        .downcast_arc::<tool_api::ToolUseContext>()
+        .unwrap();
+    assert_eq!(original.options.main_loop_model, "start");
+    assert_eq!(original.options.model_profile.as_deref(), Some("a"));
+    assert!(apply_nested_tool_context_modifiers(
+        &state,
+        vec![],
+        vec![nested_route_modifier("balanced", None)],
+        "start",
+        Some("a"),
+        None,
+    )
+    .is_err());
+}
+
 #[async_trait]
 impl tool_api::Tool for NestedToolEffectsProbe {
     fn name(&self) -> &str {
@@ -13035,6 +13540,18 @@ impl tool_api::Tool for NestedToolEffectsProbe {
                     subagent_hooks_fired: false,
                 })
             }
+            "NestedReselectInitial" => Ok(tool_api::ToolCallResult {
+                data: test_projection(&serde_json::json!({"selected":"initial"})),
+                model_content: None,
+                new_messages: Vec::new(),
+                context_modifier: Some(Box::new(|mut context| {
+                    context.options.main_loop_model = "initial".into();
+                    context.options.model_profile = None;
+                    context
+                })),
+                mcp_meta: None,
+                is_error: false,
+            }),
             _ => Ok(tool_api::ToolCallResult::from_data(
                 tool_api::tool_trait::generated_builtin_result(
                     &serde_json::json!({"observed":true}),

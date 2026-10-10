@@ -183,6 +183,7 @@ impl ConversationOrchestrator {
                 Some(context.provenance.clone()),
                 tool,
                 None,
+                None,
             ),
         )
         .await;

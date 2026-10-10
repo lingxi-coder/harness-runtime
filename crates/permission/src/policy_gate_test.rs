@@ -383,7 +383,7 @@ mod tests {
     /// The whole justification for moving these off `mcp__local_apps__*` was
     /// that a builtin can be content-matched, so a user can grant one app
     /// without granting every app on the device. `tool_content_key` only knew
-    /// WebFetch/Agent/Task, so `LocalAppBuild(app-a)` silently matched nothing
+    /// WebFetch/Agent, so `LocalAppBuild(app-a)` silently matched nothing
     /// and the only working grant was the tool-wide one — exactly the
     /// limitation the move was supposed to remove.
     #[tokio::test]
@@ -3455,7 +3455,11 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         let outcome = gate
             .consume_auto_outcome(
                 PermissionOutcome::AllowAuto {
-                    updated_input: Some(json!({"command": "echo hi"})),
+                    updated_input: Some(
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+                            json!({"command": "echo hi"}),
+                        ),
+                    ),
                 },
                 &PermissionCheckContext::default(),
             )
@@ -4167,7 +4171,7 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
                 "type": "addRules",
                 "rules": [
                     {"toolName": "Write"},
-                    {"toolName": "Task", "ruleContent": "reviewer"}
+                    {"toolName": "Agent", "ruleContent": "reviewer"}
                 ],
                 "behavior": "deny",
                 "destination": "session"

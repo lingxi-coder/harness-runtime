@@ -89,9 +89,10 @@ const PHASE2_NO_SUBAGENT: &str = "### Phase 2: Design\nGoal: Design an implement
 // ─── count / availability helpers ────────────────────────────────────────────
 
 /// 206 `Ykp()` — Explore-agent count `n`. Env override
-/// `CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT` (1..=10) else `3`.
+/// `branding::PLAN_EXPLORE_AGENT_COUNT_ENV` selects a count from 1 through 10,
+/// with a default of 3.
 fn explore_agent_count() -> u32 {
-    if let Ok(v) = std::env::var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT") {
+    if let Ok(v) = std::env::var(branding::PLAN_EXPLORE_AGENT_COUNT_ENV) {
         // 206 uses parseInt(v, 10); a bare `parse` is close enough for the
         // env-override path (which is the byte-faithful part). Parsing as u32
         // means non-positive values fall through to the default, matching the
@@ -106,14 +107,10 @@ fn explore_agent_count() -> u32 {
 }
 
 /// 206 `Kkp()` — Plan-agent count `r`. Env override
-/// `CLAUDE_CODE_PLAN_V2_AGENT_COUNT` (1..=10) else the subscription-tier default.
-///
-/// TODO tier: 206 then inspects `Fs()`/`x5()`
-/// (`(max && default_claude_max_20x) → 3`, `(enterprise|team) → 3`) before
-/// falling back to `1`. Those tier fns have no Rust home yet; the env override
-/// above is the byte-faithful part, so this returns the DEFAULT `1`.
+/// `branding::PLAN_AGENT_COUNT_ENV` selects a count from 1 through 10,
+/// with a default of 1 independent of provider or subscription tier.
 fn plan_agent_count() -> u32 {
-    if let Ok(v) = std::env::var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT") {
+    if let Ok(v) = std::env::var(branding::PLAN_AGENT_COUNT_ENV) {
         if let Ok(n) = v.trim().parse::<u32>() {
             if n > 0 && n <= 10 {
                 return n;
@@ -123,20 +120,15 @@ fn plan_agent_count() -> u32 {
     1
 }
 
-/// 2.1.266 `fTs`'s `o = d8() && zx()==="default"` — whether the Explore/Plan
-/// subagent phases are used.
-///
-/// `zx()==="default"` is the caller's `output_style_is_default`. `d8()` is
-/// `Fto.of(B().host).isEnabled()`, a host-scoped feature object with no Rust
-/// home; the port keeps 206's stand-in for it — TRUE unless
-/// `CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS` is set to a non-empty value (JS
-/// truthiness). Documented divergence: the host feature gate itself is not
-/// modelled, only its env-var escape hatch.
+/// Whether the main planning reminder can propose Explore and Plan phases.
+/// The agent catalog uses the same product flag and boolean interpretation.
 fn subagents_available(output_style_is_default: bool) -> bool {
     output_style_is_default
-        && !std::env::var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false)
+        && !lingxi_core::host::env::is_env_truthy(
+            std::env::var(branding::DISABLE_EXPLORE_PLAN_AGENTS_ENV)
+                .ok()
+                .as_deref(),
+        )
 }
 
 // ─── renderers ───────────────────────────────────────────────────────────────
@@ -390,9 +382,9 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Force the subagent-available path + deterministic counts.
-        std::env::set_var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT", "3");
-        std::env::set_var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT", "1");
-        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS");
+        std::env::set_var(branding::PLAN_EXPLORE_AGENT_COUNT_ENV, "3");
+        std::env::set_var(branding::PLAN_AGENT_COUNT_ENV, "1");
+        std::env::remove_var(branding::DISABLE_EXPLORE_PLAN_AGENTS_ENV);
         let p = base("/tmp/plan.md");
         let out = render_full(&p);
 
@@ -417,8 +409,8 @@ mod tests {
         // Tail is byte-exact.
         assert!(out.ends_with(FULL_NOTE_TAIL));
 
-        std::env::remove_var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT");
-        std::env::remove_var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT");
+        std::env::remove_var(branding::PLAN_EXPLORE_AGENT_COUNT_ENV);
+        std::env::remove_var(branding::PLAN_AGENT_COUNT_ENV);
     }
 
     #[test]
@@ -426,14 +418,14 @@ mod tests {
         let _g = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT", "4");
-        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS");
+        std::env::set_var(branding::PLAN_AGENT_COUNT_ENV, "4");
+        std::env::remove_var(branding::DISABLE_EXPLORE_PLAN_AGENTS_ENV);
         let p = base("/tmp/plan.md");
         let out = render_full(&p);
         assert!(out.contains("You can launch up to 4 agent(s) in parallel."));
         assert!(out.contains("- **Multiple agents**: Use up to 4 agents for complex tasks"));
         assert!(out.contains("- Refactoring: minimal change vs clean architecture\n"));
-        std::env::remove_var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT");
+        std::env::remove_var(branding::PLAN_AGENT_COUNT_ENV);
     }
 
     #[test]
@@ -441,7 +433,7 @@ mod tests {
         let _g = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS", "1");
+        std::env::set_var(branding::DISABLE_EXPLORE_PLAN_AGENTS_ENV, "1");
         let p = base("/tmp/plan.md");
         let out = render_full(&p);
         // No-subagent Phase 1 + Phase 2 variants.
@@ -452,7 +444,7 @@ mod tests {
         assert!(!out.contains("Explore subagent type"));
         assert!(!out.contains("Launch Plan agent(s)"));
         phase_headers_in_order(&out);
-        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPLORE_PLAN_AGENTS");
+        std::env::remove_var(branding::DISABLE_EXPLORE_PLAN_AGENTS_ENV);
     }
 
     // ─── dispatch ───────────────────────────────────────────────────────────
@@ -486,18 +478,18 @@ mod tests {
         let _g = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT", "0"); // out of range
+        std::env::set_var(branding::PLAN_EXPLORE_AGENT_COUNT_ENV, "0"); // out of range
         assert_eq!(explore_agent_count(), 3);
-        std::env::set_var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT", "7");
+        std::env::set_var(branding::PLAN_EXPLORE_AGENT_COUNT_ENV, "7");
         assert_eq!(explore_agent_count(), 7);
-        std::env::set_var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT", "99"); // out of range
+        std::env::set_var(branding::PLAN_EXPLORE_AGENT_COUNT_ENV, "99"); // out of range
         assert_eq!(explore_agent_count(), 3);
-        std::env::remove_var("CLAUDE_CODE_PLAN_V2_EXPLORE_AGENT_COUNT");
+        std::env::remove_var(branding::PLAN_EXPLORE_AGENT_COUNT_ENV);
 
-        std::env::remove_var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT");
+        std::env::remove_var(branding::PLAN_AGENT_COUNT_ENV);
         assert_eq!(plan_agent_count(), 1); // tier default
-        std::env::set_var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT", "5");
+        std::env::set_var(branding::PLAN_AGENT_COUNT_ENV, "5");
         assert_eq!(plan_agent_count(), 5);
-        std::env::remove_var("CLAUDE_CODE_PLAN_V2_AGENT_COUNT");
+        std::env::remove_var(branding::PLAN_AGENT_COUNT_ENV);
     }
 }

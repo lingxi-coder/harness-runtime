@@ -91,6 +91,7 @@ mod tests {
             usage_limit_note: Some(Some(UsageLimitNote::NearLimit)),
             origin: Some(origin.clone()),
             turn_origin: Some(turn_origin.clone()),
+            api_message_override: None,
         };
         let assistant = ConversationMessage::Assistant {
             id: MessageId::nil(),
@@ -100,6 +101,7 @@ mod tests {
             }],
             stop_reason: Some("max_tokens".into()),
             resumable: Some(resumable.clone()),
+            per_turn_effort: None,
         };
         let mut session = SessionState::empty(SessionId::nil(), "claude-opus-4-6".into());
         session.history = vec![user, assistant];

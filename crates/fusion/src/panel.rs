@@ -1531,6 +1531,7 @@ fn spawn_request(
     .expect("Fusion-generated panel prompt is a valid root string");
     SubagentSpawnRequest {
         parent_native_query_depth: None,
+        stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
         subagent_type: FUSION_PANEL_TYPE.to_string(),
         prompt,
         model: Some(panel.model.clone()),

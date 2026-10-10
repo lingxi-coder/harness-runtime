@@ -68,11 +68,17 @@ impl UserAgentEnv {
     /// async context if workload tagging is needed.
     #[must_use]
     pub fn from_process_env() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// Build the same native UA snapshot from an embedding-owned lookup.
+    #[must_use]
+    pub fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
         Self {
-            user_type: std::env::var("USER_TYPE").ok(),
-            entrypoint: std::env::var("CLAUDE_CODE_ENTRYPOINT").ok(),
-            agent_sdk_version: std::env::var("CLAUDE_AGENT_SDK_VERSION").ok(),
-            client_app: std::env::var("CLAUDE_AGENT_SDK_CLIENT_APP").ok(),
+            user_type: lookup("USER_TYPE"),
+            entrypoint: lookup("CLAUDE_CODE_ENTRYPOINT"),
+            agent_sdk_version: lookup("CLAUDE_AGENT_SDK_VERSION"),
+            client_app: lookup("CLAUDE_AGENT_SDK_CLIENT_APP"),
             workload: None,
         }
     }

@@ -1,46 +1,20 @@
-//! The auto-memory feature gate — port of claude-code `ra()` / `dLt()`
-//! (2.1.270 `src_166572870.js`).
+//! Product auto-memory gate shared by prompt injection and memory prefetch.
 //!
-//! ```js
-//! function ra(){ if(Zy())return!1; return dLt() }
-//! function dLt(){
-//!   if(Ar())return!1;
-//!   if(FA())return!1;
-//!   let e=process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY;
-//!   if(Ie(e))return!1;           // truthy  -> disabled
-//!   if(fo(e))return!0;           // falsy   -> force ENABLED
-//!   if(a.CLAUDE_CODE_SIMPLE)return!1;
-//!   if(a.CLAUDE_CODE_REMOTE && !CLAUDE_CODE_REMOTE_MEMORY_DIR && !CLAUDE_COWORK_MEMORY_PATH_OVERRIDE)return!1;
-//!   if(EIe())return!1;
-//!   let n=Ge();
-//!   if(n.autoMemoryEnabled!==void 0)return n.autoMemoryEnabled;
-//!   return!0                     // DEFAULT ON
-//! }
-//! ```
+//! `LINGXI_DISABLE_AUTO_MEMORY` and `LINGXI_SIMPLE` disable memory when true.
+//! False flags leave the `autoMemoryEnabled` setting in control. With no flag
+//! or setting the feature is enabled.
 //!
-//! 🚨 The port previously gated the `# Memory` prompt section and the memdir
-//! prefetch on `LINGXI_MEMDIR_PREFETCH` and attributed that to the flag
-//! `tengu_moth_copse`. That attribution was WRONG: at the oracle
-//! `tengu_moth_copse` (`X$()`) guards `CLAUDE_MEMORY_STORES` — the memory-stores
-//! feature — and has nothing to do with auto-memory. The real gate is the one
-//! above, whose last statement is `return!0`. So the port shipped the feature
-//! OFF by default on a mis-mapped flag.
-//!
-//! Env is read at the EDGE ([`auto_memory_env`]) and the decision itself is a
-//! pure function of its inputs, so tests never need `set_var` — an env-reading
-//! gate plus `set_var` makes the parallel suite flake, and the failure looks
-//! like another session's fault.
+//! Environment is captured once at the composition root. The decision remains
+//! a pure function so ordinary tests do not mutate process-global variables.
 
-/// The env inputs `dLt()` consults, captured once at the composition root.
+/// Product environment inputs captured once at the composition root.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutoMemoryEnv {
-    /// `CLAUDE_CODE_DISABLE_AUTO_MEMORY` / `LINGXI_DISABLE_AUTO_MEMORY`, as
-    /// written. `None` = unset.
-    ///
-    /// Three-valued at the oracle: truthy DISABLES, **explicitly falsy FORCES
-    /// ON** (overriding the settings key below), unset falls through.
+    /// `LINGXI_DISABLE_AUTO_MEMORY`, as written. `None` = unset.
+    /// `1`, `true`, `yes`, or `on` disable memory.
+    /// A false flag leaves the simple-mode and settings gates in control.
     pub disable_auto_memory: Option<String>,
-    /// `CLAUDE_CODE_SIMPLE` / `LINGXI_SIMPLE` set to anything non-empty.
+    /// Whether `LINGXI_SIMPLE` is truthy.
     pub simple_mode: bool,
 }
 
@@ -50,49 +24,32 @@ impl AutoMemoryEnv {
     /// Call this ONCE, at the composition root, and pass the result down.
     #[must_use]
     pub fn from_process_env() -> Self {
-        let first_set = |names: [&str; 2]| -> Option<String> {
-            names
-                .into_iter()
-                .find_map(|n| std::env::var(n).ok().filter(|v| !v.trim().is_empty()))
-        };
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
         Self {
-            disable_auto_memory: first_set([
-                "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
-                "LINGXI_DISABLE_AUTO_MEMORY",
-            ]),
-            simple_mode: first_set(["CLAUDE_CODE_SIMPLE", "LINGXI_SIMPLE"]).is_some(),
+            disable_auto_memory: lookup("LINGXI_DISABLE_AUTO_MEMORY")
+                .filter(|value| !value.trim().is_empty()),
+            simple_mode: lingxi_core::host::env::is_env_truthy(lookup("LINGXI_SIMPLE").as_deref()),
         }
     }
 }
 
-fn is_truthy(v: &str) -> bool {
-    let v = v.trim().to_ascii_lowercase();
-    matches!(v.as_str(), "1" | "true" | "yes" | "on")
-}
-
-fn is_falsy(v: &str) -> bool {
-    let v = v.trim().to_ascii_lowercase();
-    matches!(v.as_str(), "0" | "false" | "no" | "off")
-}
-
-/// Is auto-memory active? Port of `dLt()`.
+/// Is auto-memory active? Product flags use the same semantics as agent tools.
 ///
 /// `settings_enabled` is the `autoMemoryEnabled` settings key (`None` = unset).
 ///
 /// Precedence, highest first:
 /// 1. `disable_auto_memory` truthy  → OFF
-/// 2. `disable_auto_memory` falsy   → ON (beats the settings key, as upstream)
-/// 3. `simple_mode`                 → OFF
-/// 4. `settings_enabled`            → whatever it says
-/// 5. otherwise                     → **ON**
+/// 2. `simple_mode`                 → OFF
+/// 3. `settings_enabled`            → whatever it says
+/// 4. otherwise                     → **ON**
 #[must_use]
 pub fn auto_memory_enabled(env: &AutoMemoryEnv, settings_enabled: Option<bool>) -> bool {
     if let Some(raw) = env.disable_auto_memory.as_deref() {
-        if is_truthy(raw) {
+        if lingxi_core::host::env::is_env_truthy(Some(raw)) {
             return false;
-        }
-        if is_falsy(raw) {
-            return true;
         }
     }
     if env.simple_mode {
@@ -112,7 +69,7 @@ mod tests {
         }
     }
 
-    /// The whole point of the fix: nothing set ⇒ ON. `dLt()` ends `return!0`.
+    /// Nothing set defaults to enabled.
     #[test]
     fn a_clean_environment_enables_auto_memory() {
         assert!(auto_memory_enabled(&env(None, false), None));
@@ -128,17 +85,12 @@ mod tests {
         }
     }
 
-    /// `if(fo(e))return!0` — an explicitly FALSY killswitch forces the feature
-    /// on, ahead of the settings key. Dropping this arm would make
-    /// `DISABLE_AUTO_MEMORY=0` plus `autoMemoryEnabled:false` resolve OFF, where
-    /// upstream resolves ON.
     #[test]
-    fn an_explicitly_falsy_killswitch_forces_it_on_over_the_setting() {
+    fn false_disable_flag_leaves_other_gates_in_control() {
         for raw in ["0", "false", "OFF"] {
-            assert!(
-                auto_memory_enabled(&env(Some(raw), false), Some(false)),
-                "{raw:?} must force ON"
-            );
+            assert!(!auto_memory_enabled(&env(Some(raw), false), Some(false)));
+            assert!(!auto_memory_enabled(&env(Some(raw), true), Some(true)));
+            assert!(auto_memory_enabled(&env(Some(raw), false), None));
         }
     }
 
@@ -154,8 +106,7 @@ mod tests {
         assert!(auto_memory_enabled(&env(None, false), Some(true)));
     }
 
-    /// An unrecognised killswitch value is neither truthy nor falsy, so it falls
-    /// through rather than being read as "disable" — matching `Ie`/`fo`.
+    /// Unrecognized values are not truthy and leave settings in control.
     #[test]
     fn an_unrecognised_killswitch_value_falls_through() {
         assert!(auto_memory_enabled(&env(Some("maybe"), false), None));
@@ -163,5 +114,60 @@ mod tests {
             &env(Some("maybe"), false),
             Some(false)
         ));
+    }
+
+    #[test]
+    fn process_env_uses_only_current_product_flags() {
+        const EXPECTED: &str = "LINGXI_TEST_MEMORY_GATE_EXPECTED";
+        const SETTING: &str = "LINGXI_TEST_MEMORY_GATE_SETTING";
+        if let Ok(expected) = std::env::var(EXPECTED) {
+            let setting = std::env::var(SETTING).ok().map(|value| value == "true");
+            assert_eq!(
+                auto_memory_enabled(&AutoMemoryEnv::from_process_env(), setting),
+                expected == "true"
+            );
+            return;
+        }
+
+        // Each case runs in a fresh process so unrelated parallel tests never
+        // observe these environment changes.
+        let cases = [
+            (None, None, None, true),
+            (Some("false"), None, Some(false), false),
+            (Some("false"), Some("true"), Some(true), false),
+            (None, Some("false"), None, true),
+            (Some("yes"), Some("false"), Some(true), false),
+        ];
+        for (disable, simple, setting, expected) in cases {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "gate::tests::process_env_uses_only_current_product_flags",
+                ])
+                .env(EXPECTED, expected.to_string())
+                .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "true")
+                .env("CLAUDE_CODE_SIMPLE", "true")
+                .env_remove("LINGXI_DISABLE_AUTO_MEMORY")
+                .env_remove("LINGXI_SIMPLE")
+                .env_remove(SETTING);
+            if let Some(value) = disable {
+                command.env("LINGXI_DISABLE_AUTO_MEMORY", value);
+            }
+            if let Some(value) = simple {
+                command.env("LINGXI_SIMPLE", value);
+            }
+            if let Some(value) = setting {
+                command.env(SETTING, value.to_string());
+            }
+            let output = command.output().expect("run isolated memory gate test");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "gate case {disable:?}/{simple:?}/{setting:?} failed: {} {}",
+                stdout,
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
     }
 }

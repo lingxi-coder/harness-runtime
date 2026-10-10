@@ -212,6 +212,7 @@ mod tests {
         blocks: Vec<lingxi_core::types::ContentBlock>,
     ) -> lingxi_core::types::ConversationMessage {
         lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: blocks,
             stop_reason: None,

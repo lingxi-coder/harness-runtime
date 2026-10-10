@@ -17,18 +17,18 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{Value, json};
-use telemetry::AnalyticsBus;
+use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{BRIEF_COMPLETED, BRIEF_FAILED, BRIEF_STARTED};
+use telemetry::AnalyticsBus;
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
-    ValidationError, generated_builtin_result, generated_builtin_schema, source_text_projection,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
+    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
 
 /// Tool name byte-lock. The model addresses this tool by its wire name

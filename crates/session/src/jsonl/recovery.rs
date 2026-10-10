@@ -110,9 +110,7 @@ fn batch_member(message: &JsonlMessage, id: Option<&str>) -> bool {
                 || has_block(message, "tool_result")
         }
         "attachment" => true,
-        "system" => {
-            message.extra.string_at("/subtype") != Some("compact_boundary")
-        }
+        "system" => message.extra.string_at("/subtype") != Some("compact_boundary"),
         _ => false,
     }
 }
@@ -120,9 +118,7 @@ fn batch_member(message: &JsonlMessage, id: Option<&str>) -> bool {
 fn metadata(message: &JsonlMessage) -> bool {
     match message.message_type.as_str() {
         "attachment" => true,
-        "system" => {
-            message.extra.string_at("/subtype") != Some("compact_boundary")
-        }
+        "system" => message.extra.string_at("/subtype") != Some("compact_boundary"),
         "user" => {
             message
                 .extra

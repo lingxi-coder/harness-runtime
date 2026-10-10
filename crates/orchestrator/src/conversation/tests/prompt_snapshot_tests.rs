@@ -254,6 +254,7 @@ fn prompt_snapshot_reads_only_current_native_fields() {
 async fn snapshot_persists_the_native_marker_as_its_own_source_block() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     std::env::remove_var("CLAUDE_CODE_SIMPLE");
+
     lingxi_core::host::session_flags::set_system_prompt_snapshot(None);
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
@@ -346,7 +347,7 @@ fn prompt_snapshot_resume_uses_last_valid_attachment() {
 #[tokio::test]
 async fn prompt_snapshot_appends_only_new_inline_tools_after_success() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    std::env::remove_var("CLAUDE_CODE_SIMPLE");
+    std::env::remove_var(branding::SIMPLE_ENV);
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
@@ -392,7 +393,7 @@ async fn prompt_snapshot_appends_only_new_inline_tools_after_success() {
 #[tokio::test]
 async fn resumed_session_without_snapshot_never_creates_one() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    std::env::remove_var("CLAUDE_CODE_SIMPLE");
+    std::env::remove_var(branding::SIMPLE_ENV);
     let orch = ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
@@ -427,7 +428,7 @@ fn the_snapshot_gate_matches_the_oracle_truth_table() {
     // An explicit `on` forces it even in simple mode.
     assert!(O::snapshot_gate(Some(true), false, true));
 
-    // Absent: `SESSION_KIND === "bg" || !CLAUDE_CODE_SIMPLE`.
+    // Absent: `SESSION_KIND === "bg" || !LINGXI_SIMPLE`.
     assert!(O::snapshot_gate(None, true, true), "bg wins over simple");
     assert!(
         !O::snapshot_gate(None, false, true),
@@ -447,7 +448,7 @@ fn the_snapshot_gate_matches_the_oracle_truth_table() {
 #[tokio::test]
 async fn a_plain_session_records_its_prompt_without_any_env_opt_in() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    std::env::remove_var("CLAUDE_CODE_SIMPLE");
+    std::env::remove_var(branding::SIMPLE_ENV);
     std::env::remove_var("CLAUDE_CODE_CARVED_SLATE");
     std::env::remove_var("LINGXI_SESSION_KIND");
     lingxi_core::host::session_flags::set_system_prompt_snapshot(None);
@@ -481,7 +482,7 @@ async fn a_plain_session_records_its_prompt_without_any_env_opt_in() {
 #[tokio::test]
 async fn the_off_flag_stops_recording_a_session_that_would_otherwise_record() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-    std::env::remove_var("CLAUDE_CODE_SIMPLE");
+    std::env::remove_var(branding::SIMPLE_ENV);
     std::env::remove_var("LINGXI_SESSION_KIND");
     lingxi_core::host::session_flags::set_system_prompt_snapshot(Some(false));
 
@@ -700,6 +701,7 @@ async fn prompt_snapshot_writer_rendering_survives_disk_cold_resume_and_actual_r
                     .cloned()
                     .expect("announced policy retains its typed attachment");
                 assert_eq!(raw_attachment.string_at("/type"), Some("instructions"));
+
                 assert_eq!(
                     lingxi_core::host::instruction_announcements::render_instruction_attachment(
                         &raw_attachment,
@@ -782,6 +784,7 @@ async fn provider_prompt_keeps_live_git_context_after_app_agent_profile() {
     let _restore =
         RestoreSnapshotChoice(lingxi_core::host::session_flags::system_prompt_snapshot());
     std::env::remove_var("CLAUDE_CODE_SIMPLE");
+
     std::env::remove_var("LINGXI_SESSION_KIND");
     lingxi_core::host::session_flags::set_system_prompt_snapshot(None);
 
@@ -876,6 +879,7 @@ async fn prompt_snapshot_keeps_raw_utf16_on_disk_but_cold_domain_uses_native_dis
     .with_jsonl_writer(Arc::new(JsonlWriter::new(path.clone(), fs.clone())));
     let units = vec![0xd800, 0x03a9, 0xdc00];
     let tool_units = vec![b'R' as u16, 0xd800, 0x03a9, 0xdc00];
+
     let prompt_text =
         lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_utf16(
             units.clone(),
@@ -928,6 +932,7 @@ async fn prompt_snapshot_keeps_raw_utf16_on_disk_but_cold_domain_uses_native_dis
         .unwrap();
     let attachment = snapshot_row.extra.subprojection("/attachment").unwrap();
     assert_eq!(attachment.string_at("/systemPrompt/0"), Some("�Ω�"));
+
     assert_eq!(
         exact_json::message_utf16_overrides(snapshot_row)["/attachment/systemPrompt/0"],
         units

@@ -42,6 +42,11 @@ pub struct HookContext {
     pub model_safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
     /// Current logical route of the immediate agent.
     pub model_selection: Option<HookModelSelection>,
+    /// Captured terminal-owner epoch. An old callback or dispatch must not
+    /// consume a newer restored run's snapshot under the same child id.
+    pub subagent_stop_epoch: Option<lingxi_core::types::MessageId>,
+    /// Owning agent's spawn depth; absent for a root/session hook.
+    pub agent_depth: Option<u32>,
     /// Optional lease for visible side effects produced by this hook dispatch.
     /// Tool dispatches set it to their executor generation; lifecycle and
     /// standalone hook calls leave it absent.
@@ -2180,10 +2185,11 @@ mod match_event_matcher_tests {
     /// acceptance test ignored by default because the corpus belongs to the
     /// integration acceptance workspace, not this standalone crate.
     #[test]
-    #[ignore = "run with LINGXI_HOOK_MATCHER_CORPUS pointing at the shared acceptance corpus"]
+    #[ignore = "run with the shared Native matcher corpus configured"]
     fn shared_native_matcher_corpus_matches_through_hook_registry() {
-        let path = std::env::var_os("LINGXI_HOOK_MATCHER_CORPUS")
-            .expect("set LINGXI_HOOK_MATCHER_CORPUS to the shared acceptance corpus");
+        const CORPUS_ENV: &str = concat!(branding::ENV_PREFIX, "HOOK_MATCHER_CORPUS");
+        let path = std::env::var_os(CORPUS_ENV)
+            .expect("set the shared Native matcher corpus environment value");
         let source = std::fs::read_to_string(path).expect("read shared Native matcher corpus");
         let corpus: NativeMatcherCorpus =
             serde_json::from_str(&source).expect("parse shared Native matcher corpus");

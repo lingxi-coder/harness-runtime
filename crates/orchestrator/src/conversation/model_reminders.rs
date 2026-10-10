@@ -110,6 +110,7 @@ impl ConversationOrchestrator {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         })
     }
 
@@ -504,6 +505,7 @@ mod tests {
                     compaction::BOUNDARY_CONTENT.into()
                 },
                 subtype: typed.then(|| "compact_boundary".into()),
+                api_system: None,
                 compact_metadata: None,
                 model_fallback: None,
                 refusal_fallback: None,

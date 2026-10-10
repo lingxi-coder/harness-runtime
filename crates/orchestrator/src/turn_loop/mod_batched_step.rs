@@ -113,9 +113,12 @@ impl PhysicalStepResponse {
                 crate::cost_wiring::has_native_fallback_quote(&response.provider_metadata);
             let (quoted_model, pricing) =
                 crate::cost_wiring::response_pricing(response.cost.as_ref(), native_quote);
-            let billing_model =
+            let billing_model = if native_quote {
                 crate::cost_wiring::native_fallback_cost_model(&response.provider_metadata)
-                    .unwrap_or_else(|| model.clone());
+                    .unwrap_or_else(|| model.clone())
+            } else {
+                model.clone()
+            };
             let model_ref = quoted_model.unwrap_or_else(|| {
                 crate::cost_wiring::model_ref_from_string(&billing_model, profile.as_deref())
             });

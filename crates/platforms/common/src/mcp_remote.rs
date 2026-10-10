@@ -395,6 +395,7 @@ impl RemoteMcpTransport {
                 .await
             {
                 Ok(reply) => return Ok(parse_modern_discovery(projection_from_payload(reply)?)),
+
                 Err(ConnectionError::Router(RouterError::Remote(error))) => {
                     if matches!(http_status(&error.data), Some(401 | 403)) {
                         return Err(handshake_error(&ConnectionError::Router(
@@ -455,6 +456,7 @@ impl RemoteMcpTransport {
             .await
             .map_err(|error| (handshake_error(&error), handshake_http(&error)))?;
         let result = projection_from_payload(result).map_err(|error| (error, None))?;
+
         let (dto, selected_version, metadata) =
             parse_legacy_initialize(result).map_err(|error| (error, None))?;
         if let Ok(mut map) = self.negotiated.lock() {
@@ -475,6 +477,7 @@ impl RemoteMcpTransport {
                     None,
                 )
             })?;
+
         Ok(dto)
     }
 
@@ -972,6 +975,7 @@ impl McpTransport for RemoteMcpTransport {
             .to_json_string()
             .map_err(|error| McpError::Internal(error.to_string().into()))?;
         let parsed: ToolCallResult = serde_json::from_str(&raw).map_err(internal_decode)?;
+
         Ok(McpToolResultDto {
             content: parsed.content,
             is_error: parsed.is_error,
@@ -1213,6 +1217,7 @@ fn normalize_capabilities(value: &Utf16JsonProjection) -> Option<Utf16JsonProjec
         return None;
     }
     let mut result = empty_source_object();
+
     for key in [
         "experimental",
         "logging",

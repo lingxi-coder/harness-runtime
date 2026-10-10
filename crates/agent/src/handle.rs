@@ -158,9 +158,9 @@ pub struct PoolSubagentSpawner {
     /// names into [`SubagentContext::allowed_tools`] (the runner's dispatch
     /// allow-list). Even under `AgentToolPolicy::All` the resolver strips the
     /// always-disallowed agent-tool set (`Agent`/`TaskOutput`/`ExitPlanMode`/
-    /// `EnterPlanMode`/`AskUserQuestion`/`TaskStop`, gated by `USER_TYPE !==
-    /// 'ant'`) plus the definition's own `disallowed_tools`, so a
-    /// general-purpose child no longer inherits `Agent`/`Task`; it narrows
+    /// `EnterPlanMode`/`AskUserQuestion`/`TaskStop`) plus the definition's own
+    /// `disallowed_tools`, so a
+    /// general-purpose child no longer inherits `Agent`; it narrows
     /// further once the spawn path loads real per-agent definitions.
     tool_registry: Arc<RuntimeLink<Arc<ToolRegistry>>>,
     task_registry: std::sync::OnceLock<
@@ -1448,6 +1448,20 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
 
 #[async_trait]
 impl SubagentSpawner for PoolSubagentSpawner {
+    fn owns_subagent_stop_hooks(
+        &self,
+        persistent: bool,
+        session_id: Option<lingxi_core::types::SessionId>,
+        scope: lingxi_core::host::subagent_spawn::SubagentStopScope,
+    ) -> bool {
+        scope == lingxi_core::host::subagent_spawn::SubagentStopScope::Session
+            && persistent
+            && self.hook_executor.get().is_some_and(|executor| {
+                executor
+                    .subagent_stop_firer(session_id.unwrap_or(self.hook_session_id))
+                    .is_some()
+            })
+    }
     async fn resume_foreground(
         &self,
         agent_id: &AgentId,
@@ -1916,6 +1930,15 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // either one produced no terminal event from either producer (a
         // Fusion panel's `panel_total_timeout`, or the panel-bar
         // `join_set.abort_all()`, racing a subagent that already finished).
+        if let Some(token) = &request.agent_spawn_token {
+            match &result {
+                SubagentResult::Completed { .. } => token.completed(),
+                SubagentResult::Failed { .. } => token.failed(),
+                SubagentResult::Killed { .. } => {
+                    token.killed(lingxi_core::host::agent_statistics::AgentKillReason::User)
+                }
+            }
+        }
         match &result {
             SubagentResult::Completed {
                 content,
@@ -2278,6 +2301,10 @@ impl PoolSubagentSpawner {
         };
         let resolved_model = crate::runner::resolve_model(&ctx);
         let resolved_model_profile = ctx.model_profile.clone();
+        let stop_firer = (ctx.stop_hook_scope
+            == lingxi_core::host::subagent_spawn::SubagentStopScope::Session)
+            .then(|| ctx.subagent_stop_firer.clone())
+            .flatten();
         let initial_message_index = observer_initial_message_index(ctx.resumed_history.as_deref());
         // Publish persistent allocations through the same synchronous receipt
         // used by one-shot spawns.  The async observer wrapper below remains
@@ -2305,6 +2332,11 @@ impl PoolSubagentSpawner {
                 .join(format!("agent-{agent_id}.jsonl"))
         });
         let origin_session_id = ctx.origin_session_id;
+        let safety_observer = ctx
+            .budget
+            .as_ref()
+            .and_then(|budget| budget.model_safety_observer())
+            .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
         let allocation_receipt = (!observers.is_empty() || transcript_path.is_some()).then(|| {
             let allocated_transcript_paths = self.allocated_transcript_paths.clone();
             let allocation_event = allocation_event.clone();
@@ -2398,7 +2430,12 @@ impl PoolSubagentSpawner {
         let query_source_label = request.query_source_label.clone();
         let should_record_usage = usage_recorder.is_some()
             && query_source_label.as_deref() != Some(FUSION_PANEL_QUERY_SOURCE);
-        if observers.is_empty() && !should_record_usage {
+        let agent_spawn_token = request.agent_spawn_token.clone();
+        if observers.is_empty()
+            && !should_record_usage
+            && stop_firer.is_none()
+            && agent_spawn_token.is_none()
+        {
             return Ok((agent_id, rx));
         }
         let observer_events =
@@ -2411,12 +2448,38 @@ impl PoolSubagentSpawner {
         if let Some(observer_events) = observer_events.as_ref() {
             observer_events.try_emit(allocation_event);
         }
-        tokio::spawn(async move {
+        let forwarding = async move {
             let mut forwarding = true;
             let mut terminal_death_seen = false;
             let mut recorded_cumulative = SubagentUsage::default();
             let mut recorded_duration_ms = 0_u64;
             while let Some(event) = rx.recv().await {
+                if let Some(token) = &agent_spawn_token {
+                    match &event {
+                        SubagentEvent::Completed { .. } => token.completed(),
+                        SubagentEvent::Failed { .. } => token.failed(),
+                        SubagentEvent::Killed { .. } => {
+                            token.killed(lingxi_core::host::agent_statistics::AgentKillReason::User)
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(firer) = stop_firer.as_ref() {
+                    let status = match &event {
+                        SubagentEvent::Completed { .. } => {
+                            Some(lingxi_core::host::subagent_spawn::SubagentStopStatus::Completed)
+                        }
+                        SubagentEvent::Failed { .. } => {
+                            Some(lingxi_core::host::subagent_spawn::SubagentStopStatus::Failed)
+                        }
+                        _ => None,
+                    };
+                    if let Some(status) = status {
+                        firer
+                            .fire(forward_agent_id, &resolved_agent_type, status)
+                            .await;
+                    }
+                }
                 match &event {
                     SubagentEvent::Message {
                         message,
@@ -2576,12 +2639,22 @@ impl PoolSubagentSpawner {
                 }
             }
             if !terminal_death_seen {
+                if let Some(token) = &agent_spawn_token {
+                    token.failed();
+                }
                 if let Some(observer_events) = observer_events.as_ref() {
                     observer_events.emit_terminal(SubagentObservation::Failed {
                         agent_id: forward_agent_id,
                         error: "persistent subagent channel closed unexpectedly".to_string(),
                     });
                 }
+            }
+        };
+        tokio::spawn(async move {
+            if let Some(observer) = safety_observer {
+                lingxi_core::host::model_safety::scope_model_safety(observer, forwarding).await;
+            } else {
+                forwarding.await;
             }
         });
         Ok((agent_id, forwarded_rx))

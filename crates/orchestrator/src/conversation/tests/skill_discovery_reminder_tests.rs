@@ -69,6 +69,7 @@ fn orch_with_seed(seed: Vec<DiscoveredSkill>) -> ConversationOrchestrator {
 /// reports a write pivot and the prefetch fires.
 async fn push_write_pivot(orch: &ConversationOrchestrator) {
     let msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::new(),

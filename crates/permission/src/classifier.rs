@@ -178,7 +178,7 @@ pub fn classify_tool_call(
         // It does not establish the child permissions (the deprecated `mode` input
         // is ignored). Let the contextual classifier or user prompt decide; never
         // infer either approval or denial from words inside the task description.
-        "Agent" | "Task" => AutoModeClassifierVerdict::Pass {
+        "Agent" => AutoModeClassifierVerdict::Pass {
             reason: "Subagent request needs transcript-aware approval".to_string(),
         },
         _ => AutoModeClassifierVerdict::Pass {

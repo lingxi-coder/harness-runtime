@@ -1,12 +1,12 @@
 //! recorded the response's token usage and computed a non-zero cost.
 #![allow(clippy::field_reassign_with_default)]
 
-use cost::CostTracker;
 use cost::pricing::PricingCatalog;
+use cost::CostTracker;
 use lingxi_core::types::SessionId;
 use llm_runtime::{ContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;

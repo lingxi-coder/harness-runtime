@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 /// Default number of non-meta user turns between sparse reminders.
 pub const DEFAULT_ULTRACODE_CADENCE: u32 = 10;
-/// Environment override used by Claude Code's `bop()` resolution.
-pub const ULTRACODE_CADENCE_ENV: &str = "CLAUDE_CODE_JUNIPER_SUNDIAL";
+/// Product environment override for the reminder cadence.
+pub const ULTRACODE_CADENCE_ENV: &str = branding::ULTRACODE_CADENCE_ENV;
 
 const ENTER_TEXT: &str = "Ultracode is on. Use the Workflow tool on every substantive task and keep orchestration aligned with the user's request.";
 const SPARSE_TEXT: &str = "Ultracode is still on. Continue using Workflow for substantive tasks.";
@@ -228,16 +228,12 @@ mod tests {
         assert_eq!(enter[0].kind, UltracodeAttachmentKind::UltraEffortEnter);
         assert_eq!(enter[0].reminder_type.as_deref(), Some("full"));
 
-        assert!(
-            state
-                .advance(active_gate(), config, "/status", true)
-                .is_empty()
-        );
-        assert!(
-            state
-                .advance(active_gate(), config, "one", false)
-                .is_empty()
-        );
+        assert!(state
+            .advance(active_gate(), config, "/status", true)
+            .is_empty());
+        assert!(state
+            .advance(active_gate(), config, "one", false)
+            .is_empty());
         let sparse = state.advance(active_gate(), config, "two", false);
         assert_eq!(sparse[0].kind, UltracodeAttachmentKind::UltraEffortSparse);
 
@@ -312,15 +308,11 @@ mod tests {
             state.advance(gate, on, "use ULTRACODE please", false)[0].kind,
             UltracodeAttachmentKind::WorkflowKeywordRequest
         );
-        assert!(
-            state
-                .advance(gate, on, "ultracoder is different", false)
-                .is_empty()
-        );
-        assert!(
-            state
-                .advance(gate, UltracodeConfig::default(), "ultracode", false)
-                .is_empty()
-        );
+        assert!(state
+            .advance(gate, on, "ultracoder is different", false)
+            .is_empty());
+        assert!(state
+            .advance(gate, UltracodeConfig::default(), "ultracode", false)
+            .is_empty());
     }
 }

@@ -496,6 +496,7 @@ mod tests {
         sink.try_emit(SubagentObservation::Message {
             agent_id,
             message: lingxi_core::types::ConversationMessage::System {
+                api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: "idle".into(),
                 subtype: Some("agent_idle".into()),

@@ -3234,7 +3234,7 @@ async fn modern_listener_remote_network_named_error_keeps_live_connection_genera
     );
 
     let listener = tokio::spawn({
-        let registry = registry.clone();
+        let registry = Arc::clone(&registry);
         let connection = connection.clone();
         async move {
             registry

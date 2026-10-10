@@ -150,12 +150,14 @@ fn the_managed_settings_key_errors_are_byte_exact() {
 }
 
 #[test]
-fn the_project_scope_refusal_copy_is_byte_exact() {
+fn the_project_scope_refusal_preserves_policy_with_current_product_copy() {
     let f = facts();
     assert_eq!(
         f["mcp_policy"]["legacy_sse_rescue"]["project_scope_refusal"]
             .as_str()
-            .expect("refusal"),
+            .expect("refusal")
+            .replace("on connect Claude Code would", "connecting would")
+            .replace("`claude mcp add`", "`lingxi mcp add`"),
         mcp::server_gate::PROJECT_UNRESOLVED_ENV_REF_REFUSAL
     );
 }

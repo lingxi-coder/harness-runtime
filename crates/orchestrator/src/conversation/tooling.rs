@@ -322,6 +322,7 @@ impl ConversationOrchestrator {
                         name,
                         input,
                         provider_id,
+                        ..
                     } if id == tool_use_id => {
                         Some((name.clone(), input.clone(), provider_id.clone()))
                     }
@@ -396,7 +397,7 @@ impl ConversationOrchestrator {
                 decision_classification: _,
             } => (
                 crate::test_support::PermissionDecision::Allow,
-                updated_input.unwrap_or(input),
+                updated_input.unwrap_or_else(|| input.clone()),
                 permission_updates,
             ),
             lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
@@ -411,7 +412,7 @@ impl ConversationOrchestrator {
                 }
                 (
                     crate::test_support::PermissionDecision::Allow,
-                    updated_input.unwrap_or(input),
+                    updated_input.unwrap_or_else(|| input.clone()),
                     Vec::new(),
                 )
             }
@@ -441,20 +442,37 @@ impl ConversationOrchestrator {
             .lock()
             .await
             .insert(tool_use_id.clone(), forced);
+        let history = { self.session.lock().await.model_context_history() };
+        let mut invocation = crate::turn_loop::streaming_tool_context_base(self, history).await;
+        invocation.tool_use_id = Some(tool_use_id.clone());
         let tool_uses = vec![(tool_use_id.clone(), name, final_input, provider_id)];
         let dispatch_result =
-            crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, cancel).await;
+            crate::turn_loop::tool_dispatch::dispatch_tool_uses_tracked_deferred_with_facts(
+                self,
+                &tool_uses,
+                cancel,
+                Some(assistant_msg.id()),
+                None,
+                None,
+                Some(invocation),
+                None,
+                None,
+            )
+            .await;
         self.orphan_forced_decisions
             .lock()
             .await
             .remove(tool_use_id);
-        let (tool_results, _prevent, injected_messages, context_modifiers) = dispatch_result?;
+        let (tool_results, _prevent, injected_messages, context_modifiers) =
+            crate::turn_loop::tool_dispatch::finish_direct_tool_dispatch(self, dispatch_result?)
+                .await?;
 
         // 6. Append + persist the `tool_result` user message and any
         //    tool-injected follow-ups — mirroring the batched turn loop's
         //    post-dispatch block (`execute_one_turn`), the `recordTranscript`
         //    per-result twin (queryHelpers.ts:328-332).
         let tool_results_msg = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: tool_results,
             is_meta: false,
@@ -475,7 +493,7 @@ impl ConversationOrchestrator {
         // renderings (see the batched driver in `turn_loop.rs`).
         self.flush_hook_attachments(tool_use_id).await;
         crate::turn_loop::append_tool_injected_messages(self, injected_messages, None).await;
-        crate::turn_loop::apply_model_context_modifiers(self, context_modifiers).await;
+        crate::turn_loop::apply_model_context_modifiers(self, context_modifiers).await?;
 
         Ok(true)
     }
@@ -622,6 +640,17 @@ impl ConversationOrchestrator {
             };
         let bash_precommit_session_generation = self.tools.bash_precommit_session_generation();
         let cache_key = WireToolSchemaCacheKey {
+            exact_schema_identities: tools
+                .iter()
+                .map(|tool| {
+                    (
+                        tool.name().to_owned(),
+                        tool.input_schema()
+                            .to_json_string()
+                            .unwrap_or_else(|error| format!("invalid:{error}")),
+                    )
+                })
+                .collect(),
             tool_names: tools.iter().map(|t| t.name().to_string()).collect(),
             dynamic_schema_revisions: tools
                 .iter()
@@ -1192,7 +1221,9 @@ impl ConversationOrchestrator {
     /// `tools/list` shape. This deliberately reuses the normal model-facing
     /// schema builder so tool enablement, permission-wide denies, active-agent
     /// restrictions, descriptions, and ordering cannot drift between hosts.
-    pub async fn mcp_tool_definitions(&self) -> Vec<serde_json::Value> {
+    pub async fn mcp_tool_definitions(
+        &self,
+    ) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
         self.build_wire_tools()
             .await
             .0
@@ -1244,7 +1275,7 @@ impl ConversationOrchestrator {
         let tool_uses = vec![(tool_use_id, name, input, None)];
         let (mut results, _prevent_continuation, _injected, modifiers) =
             crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, cancel).await?;
-        crate::turn_loop::apply_model_context_modifiers(self, modifiers).await;
+        crate::turn_loop::apply_model_context_modifiers(self, modifiers).await?;
         // O3: this host-driven path writes NO transcript line at all (the block
         // is handed back to the caller), so a queued hook attachment would be a
         // chain orphan. Drain it rather than leaving the entry in the map for

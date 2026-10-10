@@ -145,6 +145,7 @@ mod tests {
     /// A fresh-id assistant message carrying a tool-use block (starts a group).
     fn assistant(tool: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
@@ -162,6 +163,7 @@ mod tests {
 
     fn user_result() -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),

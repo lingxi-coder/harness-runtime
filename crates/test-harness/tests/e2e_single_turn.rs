@@ -64,6 +64,7 @@ async fn single_turn_conversation_against_mock_http() {
         .any(|e| matches!(e, Effect::RenderStreamDelta { .. })));
 
     let final_message = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "Hello!".into(),

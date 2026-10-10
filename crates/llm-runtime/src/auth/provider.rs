@@ -35,6 +35,26 @@ impl CredentialScope {
     }
 }
 
+/// Redacted source of the selected credential. This contains no key material.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// The route does not use a credential, or its selected source is absent.
+    None,
+    /// This provider cannot establish its source without executing authentication.
+    #[default]
+    Unknown,
+    /// The exact environment variable selected by the credential resolver.
+    Environment { variable: String },
+    /// A credential in the host's persistent or process-local credential store.
+    Stored,
+    /// An explicitly supplied host configuration value.
+    Configured,
+    /// The configured API-key helper, without executing or refreshing it.
+    ApiKeyHelper,
+    /// An existing OAuth credential, without refreshing its token.
+    OAuth,
+}
+
 /// Secret material loaded by a credential provider.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Credential {
@@ -141,6 +161,16 @@ impl AnthropicAuthSnapshot {
 /// `load` is async so implementations can refresh expiring material
 /// (e.g. OAuth) inside the lookup.
 pub trait CredentialProvider: fmt::Debug + Send + Sync {
+    /// Inspect the scoped credential source without helper execution, token
+    /// exchange, refresh or network requests. Unsupported providers return
+    /// `Unknown`; this is distinct from proving that no credential exists.
+    fn source<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<CredentialSource, LlmError>> {
+        Box::pin(async { Ok(CredentialSource::Unknown) })
+    }
+
     /// Load credential material for a scope.
     fn load<'a>(
         &'a self,
@@ -182,6 +212,13 @@ impl StaticCredentialProvider {
 }
 
 impl CredentialProvider for StaticCredentialProvider {
+    fn source<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<CredentialSource, LlmError>> {
+        Box::pin(async { Ok(CredentialSource::Configured) })
+    }
+
     fn anthropic_auth_snapshot<'a>(
         &'a self,
         scope: &'a CredentialScope,
@@ -220,6 +257,21 @@ impl EnvCredentialProvider {
 }
 
 impl CredentialProvider for EnvCredentialProvider {
+    fn source<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<CredentialSource, LlmError>> {
+        Box::pin(async move {
+            Ok(if std::env::var(&self.variable_name).is_ok() {
+                CredentialSource::Environment {
+                    variable: self.variable_name.clone(),
+                }
+            } else {
+                CredentialSource::None
+            })
+        })
+    }
+
     fn anthropic_auth_snapshot<'a>(
         &'a self,
         scope: &'a CredentialScope,
@@ -307,6 +359,13 @@ impl fmt::Debug for CopilotExchangeCredentialProvider {
 }
 
 impl CredentialProvider for CopilotExchangeCredentialProvider {
+    fn source<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<CredentialSource, LlmError>> {
+        self.inner.source(scope)
+    }
+
     fn anthropic_auth_snapshot<'a>(
         &'a self,
         scope: &'a CredentialScope,

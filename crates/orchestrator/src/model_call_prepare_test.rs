@@ -285,6 +285,7 @@ async fn thinking_strip_persistence_ignores_worker_only_rejections() {
         .await
         .history
         .push(ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: main,
             content: vec![ContentBlock::Thinking {
                 thinking: "main".into(),
@@ -309,6 +310,7 @@ async fn query_fallback_route_reaches_preparer_and_resets_after_scope() {
             _: &ConversationOrchestrator,
             _: ModelCallPath,
             _: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+
             _: Option<&tokio_util::sync::CancellationToken>,
             draft: PreparedModelCall,
         ) -> Result<PreparedModelCall, OrchestratorError> {

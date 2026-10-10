@@ -418,7 +418,6 @@ use hooks::events::HookEventType;
 use hooks::executor::BuiltinHookHandler;
 use hooks::registry::HookRegistry;
 use hooks::response::{HookDecision, HookOutcome, HookResponse, HookResult};
-use hooks::HookExecutorImpl;
 use lingxi_core::host::{HttpError, HttpTransport, OutputEvent, RuntimeError, RuntimeSpawner};
 use lingxi_core::types::{HookId, HttpRequest, HttpResponse};
 use llm_runtime::ContentBlock as LlmContentBlock;
@@ -523,6 +522,7 @@ impl OrchestratorApiClient for BlockingPrewarmApiClient {
         _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         _messages: Vec<ConversationMessage>,
         _tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
+
         _skip_global_cache_for_system_prompt: bool,
     ) -> Result<(), LlmError> {
         self.active.store(true, Ordering::SeqCst);
@@ -943,6 +943,7 @@ impl crate::conversation::StreamingApiClient for ResetAtStreamAdmission {
         _system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
         messages: Vec<ConversationMessage>,
         _tools: Vec<llm_runtime::ToolDeclaration>,
+
         _query_source: &str,
         _skip_global_cache_for_system_prompt: bool,
         request_dispatch_admission: Option<llm_runtime::RequestDispatchAdmission>,
@@ -1102,6 +1103,7 @@ async fn async_hook_rewake_runs_without_persisting_a_synthetic_user_prompt() {
             r#"{"type":"session_context","context":{}}"#.to_string(),
             format!(r#"{{"type":"date","date":"{date}"}}"#),
             r#"{"type":"total_tokens_reminder","text":"<total_tokens>15000000 tokens left</total_tokens>"}"#.to_string(),
+
         ]
     );
     assert_eq!(
@@ -1127,6 +1129,7 @@ async fn async_hook_rewake_runs_without_persisting_a_synthetic_user_prompt() {
             Some("session_context") => assert!(matches!(message,
                 ConversationMessage::System { content, subtype, .. }
                     if content.string_at("") == Some("") && subtype.as_deref() == Some("model_reminder_attachment")
+
             )),
             Some("date") => assert_eq!(
                 message.text_content(),
@@ -1158,6 +1161,7 @@ async fn reset_after_async_hook_prompt_preparation_blocks_stream_dispatch() {
             Arc::new(tokio::sync::Mutex::new(())),
         ),
     );
+
     let streaming = Arc::new(ResetAtStreamAdmission {
         generation,
         admission_received: std::sync::atomic::AtomicBool::new(false),
@@ -1216,6 +1220,7 @@ async fn reset_after_async_hook_prompt_preparation_blocks_main_request_dispatch(
             Arc::new(tokio::sync::Mutex::new(())),
         ),
     );
+
     let api = Arc::new(ResetAtMainRequestAdmission {
         generation,
         admission_received: std::sync::atomic::AtomicBool::new(false),
@@ -2141,6 +2146,7 @@ async fn mod_can_omit_session_start_attachment_without_erasing_history() {
         .history
         .iter()
         .any(|message| message.text_content().contains("PRIVATE CONTEXT")));
+
     let prepared = orch
         .prepare_turn_step(ModelCallPath::Batched, None, true, false, None)
         .await
@@ -2685,6 +2691,7 @@ async fn completed_thinking_stream_failures_follow_current_cause_counters() {
             .history
             .iter()
             .any(|m| m.text_content() == crate::turn_loop::TRUNCATED_RESPONSE_RECOVERY_NUDGE_MAIN));
+
         assert_eq!(
             output
                 .text_events()

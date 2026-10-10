@@ -28,8 +28,7 @@ const FUSION_ARGUMENT_HINT: &str = "[--quality|--fast] [--same-provider|--cross-
 /// "setup". Naming the surfaces that can actually configure it is the only
 /// honest answer a handler with no UI of its own can give.
 const FUSION_SETUP_ELSEWHERE: &str = "`/fusion setup` opens an interactive wizard, which this surface cannot show.\n     In the terminal UI run `/fusion setup`; on the desktop open Settings → Fusion 多模型合议.\n     Either way it writes fusion.panelModels / fusion.analystModel to settings.json, which you can also edit by hand.";
-const FUSION_PERSISTENCE_REQUIRED: &str =
-    "durable session storage is disabled; /fusion requires session persistence (remove --no-session-persistence)";
+const FUSION_PERSISTENCE_REQUIRED: &str = "durable session storage is disabled; /fusion requires session persistence (remove --no-session-persistence)";
 
 /// Idempotent parent-history sink for Fusion results.
 pub struct DesktopFusionCompletionSink {

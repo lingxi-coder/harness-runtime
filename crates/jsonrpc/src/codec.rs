@@ -380,10 +380,7 @@ mod lsp_codec_tests {
         let Message::Response(decoded) = decoded else {
             panic!("expected response");
         };
-        assert_eq!(
-            decoded.result.unwrap().as_json(),
-            r#"{"content":"\udfff"}"#
-        );
+        assert_eq!(decoded.result.unwrap().as_json(), r#"{"content":"\udfff"}"#);
     }
 
     #[test]

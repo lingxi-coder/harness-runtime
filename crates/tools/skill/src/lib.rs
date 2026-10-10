@@ -15,7 +15,6 @@
     clippy::manual_let_else
 )]
 pub mod fork;
-pub mod model_override;
 // Shared prompt `!`cmd`` shell-expansion provider (host runner + policy-backed
 // gate). Relocated here from `tool-api` (parity 2.1.207 §8.1): it bridges
 // `tool_api::BuiltinToolContext` with `command_api`'s shell-expansion traits, so

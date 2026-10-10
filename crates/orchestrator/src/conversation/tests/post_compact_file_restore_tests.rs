@@ -302,6 +302,7 @@ async fn preserved_read_tool_use_prevents_file_restore() {
     let sink = Arc::new(telemetry::InMemorySink::new());
     let orch = orch_with_bus(dir.path().to_path_buf(), map, sink.clone()).await;
     let boundary = lingxi_core::types::ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::new(),
@@ -366,6 +367,7 @@ async fn preserved_unchanged_read_stub_does_not_hide_the_missing_file_content() 
     .await;
     let id = lingxi_core::types::ToolUseId::new();
     let call = lingxi_core::types::ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         stop_reason: None,
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
@@ -378,6 +380,7 @@ async fn preserved_unchanged_read_stub_does_not_hide_the_missing_file_content() 
         resumable: None,
     };
     let result = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         is_meta: false,
         is_compact_summary: false,
@@ -495,6 +498,7 @@ async fn only_meta_text_bodies_suppress_skill_registry_truncation() {
         .await;
         register_invoked_skill(&orch, "large", std::path::Path::new("/skill"), &body, None).await;
         let message = lingxi_core::types::ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             is_meta,
             is_compact_summary: false,
@@ -989,7 +993,8 @@ async fn cancelled_compact_keeps_model_visible_read_state_untouched() {
         media_analysis_to_preserve: Vec::new(),
         compaction_usage: None,
         compaction_model: None,
-        raw_summary_text: "test summary".into(),
+        compaction_profile: None,
+        raw_summary_text: "test summary".to_string(),
     };
 
     let applied = orch
@@ -1043,7 +1048,8 @@ async fn apply_post_compact_clears_cached_git_status() {
         media_analysis_to_preserve: Vec::new(),
         compaction_usage: None,
         compaction_model: None,
-        raw_summary_text: "test summary".into(),
+        compaction_profile: None,
+        raw_summary_text: "test summary".to_string(),
     };
 
     let applied = orch
@@ -1220,6 +1226,46 @@ async fn invoked_skill_split_surrogate_reaches_attachment_with_exact_utf16() {
         &name,
         std::path::Path::new("/skills/utf16"),
         &content,
+        None,
+    )
+    .await;
+
+    let restored = orch.restore_post_compact_attachments().await;
+
+    assert_eq!(restored.len(), 1);
+    let lingxi_core::types::ConversationMessage::User { content, .. } = &restored[0] else {
+        panic!("post-compact attachment must be a user message");
+    };
+    let lingxi_core::types::ContentBlock::TextJsUtf16 {
+        utf16_code_units, ..
+    } = &content[0]
+    else {
+        panic!("split surrogate attachment must retain its UTF-16 sidecar");
+    };
+    assert!(
+        utf16_code_units
+            .windows(2)
+            .any(|window| window == [0xD83D, 0x000A]),
+        "exact attachment must retain the high surrogate before the truncation marker"
+    );
+}
+
+#[tokio::test]
+async fn invoked_skill_split_surrogate_reaches_attachment_with_exact_utf16_sidecar() {
+    let _rg = registry_guard();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let orch = orch_with_bus(
+        dir.path().to_path_buf(),
+        tool_api::read_file_state::new_read_file_state_map(),
+        Arc::new(telemetry::InMemorySink::new()),
+    )
+    .await;
+    let body = format!("{}😀{}", "x".repeat(19_899), "y".repeat(200));
+    register_invoked_skill(
+        &orch,
+        "utf16",
+        std::path::Path::new("/skills/utf16"),
+        &body,
         None,
     )
     .await;

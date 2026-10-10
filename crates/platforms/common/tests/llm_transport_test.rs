@@ -7,6 +7,7 @@ async fn configured_provider_transport_supports_responses_without_a_host_bridge(
     let transport = platform_common::provider_transport().unwrap();
     let error = transport
         .connect_websocket(sdk::HttpRequest {
+            http1_header_layout: None,
             method: "GET".into(),
             url: "file:///invalid".into(),
             headers: vec![],

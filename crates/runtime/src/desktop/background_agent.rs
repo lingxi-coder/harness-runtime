@@ -44,6 +44,7 @@ use lingxi_core::types::AgentId;
 use tasks::registry::TaskRegistry;
 use tasks::task_trait::TaskSpawnInput;
 use tasks::TaskType;
+use tasks::TaskType;
 use tokio::sync::RwLock;
 
 struct DesktopModSpawnStart(ModAgentSpawnStart);
@@ -998,6 +999,7 @@ mod tests {
             depth: 0,
             origin_session_id: None,
             parent_model_override: None,
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,

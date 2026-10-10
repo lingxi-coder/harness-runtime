@@ -29,6 +29,9 @@
 // which records two near-misses where it said "dead" about live code.
 #![allow(dead_code)]
 
+pub mod remote_ui;
+pub use remote_ui::{ModRemoteUiAnswer, ModRemoteUiClient, ModRemoteUiHost};
+
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
@@ -313,7 +316,7 @@ pub use orchestrator::{
     ReasoningControlSpec, ReasoningSelection, RecapOutcome, RefusalContinuationJoin,
     RefusalContinuationPhase, RegisterRepoRootOutcome, RegisterRepoRootRequest,
     ResumeRuntimeSnapshot, RewindRowData, ServerFallbackTombstoneMessage, SkillInfo,
-    StatusSnapshot, SummarizeDirection, TurnOutcome,
+    StatusSnapshot, SummarizeDirection, ToolResultProjection, TurnOutcome,
 };
 pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{

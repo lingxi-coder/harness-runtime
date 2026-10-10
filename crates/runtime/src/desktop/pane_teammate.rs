@@ -10,8 +10,11 @@ use coordinator::{CoordinatorStatusSink, SendMessageTool, TeamRegistry};
 use lingxi_core::host::runtime::RuntimeSpawner;
 use lingxi_core::host::subagent_spawn::{SubagentInheritance, SubagentSpawnRequest};
 use lingxi_core::host::swarm::{PaneId, PanePosition, SwarmBackend};
-use lingxi_core::host::team_spawn::{PaneLaunchMetadata, TeamSpawnError, TeamSpawnSeam};
+use lingxi_core::host::team_spawn::{
+    PaneLaunchMetadata, TeamSpawnError, TeamSpawnSeam, TeammateModelSelection,
+};
 use lingxi_core::host::teammate_worker::{PaneTeammateManifest, ParentToWorker, WorkerToParent};
+use lingxi_core::host::OutputStream;
 use lingxi_core::host::OutputStream;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{AgentId, SessionId};
@@ -73,7 +76,7 @@ impl<R: AsyncBufRead + Unpin> WorkerReader<R> {
 async fn authenticate_until_ready<R: AsyncBufRead + Unpin>(
     reader: &mut WorkerReader<R>,
     token: &str,
-) -> Result<VecDeque<WorkerToParent>, TeamSpawnError> {
+) -> Result<(VecDeque<WorkerToParent>, TeammateModelSelection), TeamSpawnError> {
     match reader.next_frame().await? {
         Some(WorkerToParent::Hello { token: received }) if received == token => {}
         _ => return Err(internal("Teammate authentication failed")),
@@ -86,7 +89,12 @@ async fn authenticate_until_ready<R: AsyncBufRead + Unpin>(
             .await?
             .ok_or_else(|| internal("Teammate closed before Ready"))?;
         match message {
-            WorkerToParent::Ready { .. } => return Ok(early),
+            WorkerToParent::Ready { selection, .. } => {
+                if selection.model.is_empty() {
+                    return Err(internal("Teammate Ready has an empty model selection"));
+                }
+                return Ok((early, selection));
+            }
             WorkerToParent::Hello { .. } => {
                 return Err(internal("Repeated teammate authentication"));
             }
@@ -490,11 +498,12 @@ impl PaneTeammateSpawner {
                     let (stream, _) = listener.accept().await.map_err(internal)?;
                     let (read, write) = stream.into_split();
                     let mut reader = WorkerReader::new(BufReader::new(read));
-                    let early = authenticate_until_ready(&mut reader, &token).await?;
-                    Ok((reader, write, early))
+                    let (early, selection) = authenticate_until_ready(&mut reader, &token).await?;
+                    Ok((reader, write, early, selection))
                 };
-                let (mut reader, write, mut early) = tokio::time::timeout(Duration::from_secs(30), handshake)
+                let (mut reader, write, mut early, selection) = tokio::time::timeout(Duration::from_secs(30), handshake)
                     .await.map_err(|_| internal("Teammate did not become ready within 30 seconds"))??;
+                self.registry.publish_teammate_model_selection(&task_id, selection.clone()).await?;
                 let writer = Arc::new(ControlWriter::new(write));
                 let stopping = Arc::new(AtomicBool::new(false));
                 self.tasks.lock().await.insert(task_id.clone(), PaneTask {
@@ -509,7 +518,7 @@ impl PaneTeammateSpawner {
                     let sink = CoordinatorStatusSink::new(owner.team.clone(), owner.output.clone());
                     sink.set_status(&watched_id, TaskStatus::Running).await;
                     let tool = SendMessageTool::new(owner.team.clone(), tool_ui::send_message::truncate_preview).with_spawn_seam(Arc::new(owner.clone()));
-                    let mut ctx = ToolUseContext::model_seed(request.model.clone().unwrap_or_default());
+                    let mut ctx = ToolUseContext::model_seed(selection.model, selection.model_profile);
                     ctx.agent_id = Some(agent_id); ctx.agent_name = Some(name);
                     ctx.team_name = Some(team_name); ctx.origin_session_id = Some(owner.session_id);
                     let mut ended = false;
@@ -858,6 +867,10 @@ mod tests {
             },
             WorkerToParent::Ready {
                 task_id: "child-id".into(),
+                selection: TeammateModelSelection {
+                    model: "gpt-4o".into(),
+                    model_profile: Some("openai".into()),
+                },
             },
             WorkerToParent::State {
                 status: "running".into(),
@@ -866,9 +879,11 @@ mod tests {
             },
         ]);
         let mut reader = WorkerReader::new(BufReader::new(bytes.as_slice()));
-        let mut early = authenticate_until_ready(&mut reader, "secret")
+        let (mut early, selection) = authenticate_until_ready(&mut reader, "secret")
             .await
             .unwrap();
+        assert_eq!(selection.model, "gpt-4o");
+        assert_eq!(selection.model_profile.as_deref(), Some("openai"));
         assert!(
             matches!(early.pop_front(), Some(WorkerToParent::SendMessage { id:7, input }) if input.get_property("message").and_then(|value| value.as_str()) == Some("early"))
         );
@@ -1139,6 +1154,10 @@ mod tests {
                     },
                     WorkerToParent::Ready {
                         task_id: "child-task".into(),
+                        selection: TeammateModelSelection {
+                            model: "gpt-4o".into(),
+                            model_profile: Some("openai".into()),
+                        },
                     },
                 ]))
                 .await
@@ -1245,6 +1264,9 @@ mod tests {
             .await
             .unwrap();
         assert!(text.contains("before Ready"));
+        let selected = spawner.resolved_model_selection(&task_id).await.unwrap();
+        assert_eq!(selected.model, "gpt-4o");
+        assert_eq!(selected.model_profile.as_deref(), Some("openai"));
         TeamSpawnSeam::kill(&spawner, &task_id).await.unwrap();
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
@@ -1817,7 +1839,7 @@ mod tests {
             .unwrap();
         let tool = SendMessageTool::new(team.clone(), tool_ui::send_message::truncate_preview)
             .with_spawn_seam(spawner.clone());
-        let mut context = ToolUseContext::model_seed("test-model".into());
+        let mut context = ToolUseContext::model_seed("test-model".into(), None);
         context.agent_id = Some(agent_id);
         let (progress, _events) = tool_api::progress::progress_channel();
         let error = tool

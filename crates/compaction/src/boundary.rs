@@ -354,6 +354,7 @@ mod tests {
     fn is_boundary_distinguishes_system_marker_from_plain_system() {
         assert!(is_compact_boundary(&boundary()));
         let plain = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: "some other system text".into(),
             subtype: None,
@@ -368,6 +369,7 @@ mod tests {
     #[test]
     fn matching_body_without_typed_subtype_is_an_ordinary_system_message() {
         let ordinary = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: BOUNDARY_CONTENT.into(),
             subtype: None,
@@ -397,6 +399,7 @@ mod tests {
                     let content = row["content"].as_str().unwrap().to_owned();
                     if row["type"] == "system" {
                         ConversationMessage::System {
+                            api_system: None,
                             id: MessageId::new(),
                             content: content.into(),
                             subtype: row

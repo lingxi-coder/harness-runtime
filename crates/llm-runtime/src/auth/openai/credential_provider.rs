@@ -41,6 +41,20 @@ impl fmt::Debug for OpenAiOAuthCredentialProvider {
 }
 
 impl CredentialProvider for OpenAiOAuthCredentialProvider {
+    fn source<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<crate::CredentialSource, LlmError>> {
+        Box::pin(async move {
+            let token = self.driver.state.token.read().await;
+            Ok(if token.access_token.expose_secret().is_empty() {
+                crate::CredentialSource::None
+            } else {
+                crate::CredentialSource::OAuth
+            })
+        })
+    }
+
     fn load<'a>(
         &'a self,
         _scope: &'a CredentialScope,
@@ -100,6 +114,31 @@ mod credential_provider_tests {
     use lingxi_core::types::Secret;
     use lingxi_llm_client::auth::oauth::openai::OpenAiOAuthConfig;
     use std::time::{Duration, SystemTime};
+
+    #[tokio::test]
+    async fn credential_source_does_not_refresh_expired_oauth() {
+        let http = MockHttp::new(vec![]);
+        let state = AuthState::new(
+            OpenAiOAuthConfig::default(),
+            Secret::new("expired-access".into()),
+            Some(Secret::new("refresh-token".into())),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            None,
+            false,
+            None,
+            http.clone() as Arc<dyn lingxi_llm_client::Transport>,
+            TestClock::new(100) as Arc<dyn lingxi_core::host::Clock>,
+            None,
+            None,
+        );
+        let provider = OpenAiOAuthCredentialProvider::new(Arc::new(RefreshDriver::new(state)));
+        let scope = CredentialScope::new(crate::ProviderId::OpenAI, "chatgpt");
+        assert_eq!(
+            provider.source(&scope).await.unwrap(),
+            crate::CredentialSource::OAuth
+        );
+        assert_eq!(http.call_count(), 0);
+    }
 
     #[tokio::test]
     async fn returns_chatgpt_oauth_credential_when_not_expired() {

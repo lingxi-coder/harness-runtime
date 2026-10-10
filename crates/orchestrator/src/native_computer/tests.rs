@@ -889,6 +889,7 @@ impl Fixture {
     ) -> Result<(), OrchestratorError> {
         let blocks = self.bind(response).await?;
         let message = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: blocks,
             stop_reason: response.stop_reason.clone(),
@@ -940,6 +941,7 @@ impl Fixture {
             existing
                 .clone()
                 .unwrap_or_else(|| ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: MessageId::new(),
                     content: blocks.clone(),
                     stop_reason: Some("tool_use".into()),
@@ -988,6 +990,7 @@ impl Fixture {
                     name,
                     input,
                     provider_id,
+                    ..
                 } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
                 _ => None,
             })
@@ -1052,6 +1055,7 @@ impl Fixture {
         for content in messages {
             final_model_result(&self.orch, &content).await.unwrap();
             let message = ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content,
                 is_meta: false,
@@ -1108,6 +1112,7 @@ fn claude_screenshot() -> llm_runtime::HistoryResponse {
         NativeComputerProvider::Anthropic,
         vec![
             llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: "call-1".into(),
                 name: "screenshot".into(),
                 input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
@@ -1139,6 +1144,7 @@ async fn ordinary_batch_images_use_the_existing_turn_driver_and_final_hook_outpu
         let request = response(
             NativeComputerProvider::OpenAi,
             vec![llm_runtime::ContentBlock::ToolCall {
+                input_projection: None,
                 id: "batch-1".into(),
                 name: "computer".into(),
                 input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
@@ -1689,6 +1695,7 @@ async fn live_unfinished_native_outputs_abandon_the_old_call_without_replaying_i
             // old unfinished audit facts cannot continually revoke it.
             let observed = fixture
                 .dispatch(vec![ContentBlock::ToolUse {
+                    input_projection: None,
                     id: ToolUseId::new(),
                     name: "computer".into(),
                     input: core_source!({"action":"screenshot"}),
@@ -1742,6 +1749,7 @@ async fn native_members_keep_their_position_among_ordinary_calls() {
     response.content.insert(
         0,
         llm_runtime::ContentBlock::ToolCall {
+            input_projection: None,
             id: "click-1".into(),
             name: "left_click".into(),
             input: llm_runtime::services::sdk::protocol::JsonPayload::from_generated_value(
@@ -1902,6 +1910,7 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
         .is_none());
     let function = fixture
         .dispatch(vec![ContentBlock::ToolUse {
+            input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: core_source!({"action":"request_access"}),
@@ -1923,6 +1932,7 @@ async fn function_native_function_switch_uses_registered_catalog_and_final_histo
         .unwrap();
     blocks.extend(
         ["Read", "mcp__computer-use__click"].map(|name| ContentBlock::ToolUse {
+            input_projection: None,
             id: ToolUseId::new(),
             name: name.into(),
             input: core_source!({}),
@@ -1997,6 +2007,7 @@ async fn partial_backend_keeps_working_function_tools_without_native_declaration
         .unwrap();
     let dispatched = fixture
         .dispatch(vec![ContentBlock::ToolUse {
+            input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: core_source!({"action":"screenshot"}),
@@ -2290,6 +2301,7 @@ async fn old_unknown_call_id_does_not_invalidate_a_new_successful_response_scope
 
     let observed = fixture
         .dispatch(vec![ContentBlock::ToolUse {
+            input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: core_source!({"action":"screenshot"}),
@@ -2392,6 +2404,7 @@ async fn compacted_unknown_input_uses_its_durable_binding_without_replaying_or_r
     )));
     let observed = fixture
         .dispatch(vec![ContentBlock::ToolUse {
+            input_projection: None,
             id: ToolUseId::new(),
             name: "computer".into(),
             input: core_source!({"action":"screenshot"}),
@@ -2825,6 +2838,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 let later_id = later.id();
                 fixture.orch.session.lock().await.history.push(later);
                 let exact = ConversationMessage::User {
+                    api_message_override: None,
                     id: MessageId::new(),
                     is_meta: false,
                     is_compact_summary: false,
@@ -2843,6 +2857,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 fixture.orch.persist_message_to_jsonl(&exact).await;
                 fixture.orch.session.lock().await.history.push(exact);
                 let derived = ConversationMessage::User {
+                    api_message_override: None,
                     id: MessageId::new(),
                     is_meta: true,
                     is_compact_summary: false,
@@ -2865,12 +2880,16 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 let row = prepare_stored_row(&fixture.orch, &derived).await.unwrap();
                 let writer = fixture.orch.transcript.jsonl_writer.as_ref().unwrap();
                 let session_id = fixture.orch.session.lock().await.session_id;
+                let row_bytes = session::jsonl::exact_json::native_message_bytes(&row).unwrap();
+                let row_source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                    std::str::from_utf8(&row_bytes).expect("native JSONL bytes are UTF-8"),
+                )
+                .expect("prepared JSONL row is valid source JSON");
                 writer
-                    .append_json_once_durable_for_session_with_tip_exact(
+                    .append_native_json_once_durable_for_session_with_tip(
                         session_id,
                         &format!("fixture-identity-only:{}", row.uuid),
-                        serde_json::to_value(&row).unwrap(),
-                        session::jsonl::exact_json::message_utf16_overrides(&row),
+                        row_source,
                     )
                     .await
                     .unwrap();
@@ -2885,8 +2904,9 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                     .collect();
                 std::fs::write(&fixture.transcript_path, filtered).unwrap();
                 let identity_path = std::path::PathBuf::from(format!(
-                    "{}.lingxi-message-identities",
-                    fixture.transcript_path.display()
+                    "{}{}",
+                    fixture.transcript_path.display(),
+                    branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX
                 ));
                 assert!(
                     std::fs::read_to_string(identity_path)
@@ -2924,6 +2944,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                             media_analysis_to_preserve: vec![],
                             compaction_usage: None,
                             compaction_model: None,
+                            compaction_profile: None,
                         },
                         compaction::CompactTrigger::Auto,
                         100,

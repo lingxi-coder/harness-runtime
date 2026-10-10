@@ -200,6 +200,7 @@ async fn assert_diagnostics(streaming: bool) {
             serde_json::from_str(requests[2].body_json.as_json_source()).unwrap();
         let previous_user = &previous_body["messages"][2]["content"];
         let current_user = &current_body["messages"][2]["content"];
+
         assert_eq!(previous_user[0]["text"], "continue\n");
         assert!(previous_user[1]["text"]
             .as_str()
@@ -218,6 +219,7 @@ async fn assert_diagnostics(streaming: bool) {
             .remove("cache_control");
         assert_eq!(current_user, &prior_without_checkpoint);
         let new_tail = current_body["messages"].as_array().unwrap().last().unwrap();
+
         assert_eq!(
             new_tail["content"].as_array().unwrap().last().unwrap()["cache_control"],
             old_checkpoint,
@@ -324,6 +326,7 @@ impl lingxi_core::host::instructions::InstructionContextProvider for ChildInstru
         let body = self.0.lock().unwrap().clone();
         Ok(InstructionContext {
             user_context: BTreeMap::from([("claudeMd".into(), body.clone())]),
+
             eager_instructions: Some(vec![InstructionFile {
                 path: "/managed/LINGXI.md".into(),
                 kind: InstructionFileType::Managed,
@@ -412,6 +415,7 @@ async fn child_announcements_reach_prepared_wire_and_cold_resume_reloads_policy(
     definition.agent_type = "policy-worker".into();
     definition.source = agent::AgentSource::Plugin;
     definition.omit_claude_md = true;
+
     definition.max_turns = 1;
     let spawner = agent::PoolSubagentSpawner::new(Arc::new(agent::StateMachinePool::new(
         Arc::new(platform_posix::PosixRuntime::new()),
@@ -513,6 +517,7 @@ async fn child_announcements_reach_prepared_wire_and_cold_resume_reloads_policy(
     assert_eq!(text.matches("CURRENT MANAGED POLICY").count(), 1);
     assert!(text.contains("Instruction files were re-read when this session started; these differ from their earlier copies"));
     assert!(!text.contains("# claudeMd"));
+
     let saved =
         std::fs::read_to_string(directory.path().join(format!("agent-{restored_id}.jsonl")))
             .unwrap();

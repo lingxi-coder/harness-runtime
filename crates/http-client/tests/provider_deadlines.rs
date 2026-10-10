@@ -27,6 +27,7 @@ async fn provider_http_keeps_reading_past_the_sdk_default_idle_limit() {
     let mut response = http_client::provider_transport()
         .unwrap()
         .send(HttpRequest {
+            http1_header_layout: None,
             method: "GET".into(),
             url,
             headers: vec![],

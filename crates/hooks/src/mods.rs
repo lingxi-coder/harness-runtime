@@ -23,6 +23,7 @@ use crate::mod_api_context::{
     native_tool_call_origin, ModApiCallerKey, ModApiOriginContexts, ResolvedModApiContext,
 };
 use base64::Engine as _;
+use branding::{ENV_PREFIX, MOD_BUN_EXECUTABLE_ENV};
 use fs2::FileExt as _;
 use futures_util::future::{AbortHandle, Abortable};
 use futures_util::stream::{BoxStream, FuturesUnordered, StreamExt};
@@ -103,6 +104,7 @@ const SEC_DEFAULT_PLUGIN: &str = "cc-plugin-sec-default";
 const SEC_DEFAULT_STORAGE_ID: &str = "cc-plugin-sec-default@builtin";
 const SEC_DEFAULT_HOOK_ID: u64 = 0;
 const SEC_DEFAULT_CALLER_EVENT: &str = "internal.sec-default";
+
 tokio::task_local! {
     static MOD_WORKER_RECOVERY_SCOPE: bool;
 }
@@ -1170,6 +1172,32 @@ pub trait ModSessionContext: Send + Sync {
     async fn ui_selection(&self) -> Result<Option<Utf16JsonProjection>, ModError> {
         Ok(None)
     }
+    /// Forward operations that require an attached desktop/mobile UI surface.
+    /// Each request and response stays in the source-backed JSON carrier.
+    async fn remote_ui_operation(
+        &self,
+        event: &str,
+        _input: Utf16JsonProjection,
+        _plugin: &str,
+    ) -> Result<Utf16JsonProjection, ModError> {
+        match event {
+            "ui.selection" => Ok(self
+                .ui_selection()
+                .await?
+                .unwrap_or_else(|| static_projection("null"))),
+            "ui.copy" => Ok(static_projection(
+                r#"{"isCopied":false,"reason":"no-surface"}"#,
+            )),
+            "prompt.read" => Ok(static_projection(r#"{"text":"","cursor":0}"#)),
+            "prompt.fill" => Ok(static_projection(
+                r#"{"isFilled":false,"refusal":"no_composer","text":"","cursor":0}"#,
+            )),
+            "prompt.suggest" => Ok(static_projection(r#"{"isShown":false}"#)),
+            _ => Err(ModError::Protocol(format!(
+                "Unknown remote UI operation: {event}"
+            ))),
+        }
+    }
     /// Forward a host-local Client VM frame to the owner of this session.
     async fn emit_mod_ui_client_frame(&self, _runtime_id: &str, _frame: &Utf16JsonProjection) {}
     /// Invalidate only the supplied UI render sites in this session.
@@ -1535,6 +1563,19 @@ impl ModSessionContext for WeakModSessionContext {
             .upgrade()
             .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
         session.ui_selection().await
+    }
+
+    async fn remote_ui_operation(
+        &self,
+        event: &str,
+        input: Utf16JsonProjection,
+        plugin: &str,
+    ) -> Result<Utf16JsonProjection, ModError> {
+        let session = self
+            .0
+            .upgrade()
+            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        session.remote_ui_operation(event, input, plugin).await
     }
 
     async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
@@ -5303,7 +5344,7 @@ impl ModHost {
         bun_executable: Option<&Path>,
         store_root: Option<PathBuf>,
     ) -> Result<Arc<Self>, ModError> {
-        let from_host = std::env::var_os("LINGXI_MOD_BUN_EXECUTABLE");
+        let from_host = std::env::var_os(MOD_BUN_EXECUTABLE_ENV);
         let executable = bun_executable
             .map(Path::to_path_buf)
             .or_else(|| from_host.as_deref().map(PathBuf::from))
@@ -6208,6 +6249,9 @@ impl ModHost {
                 Some(context_ticket)
             } else {
                 generation_session.map(|session| {
+                    // The origin ticket is stable for a captured hook origin; pair it
+                    // with this worker request id so concurrent W1 generations never
+                    // share the background session binding.
                     let context_ticket = format!("{}:{}:{}", self.instance_id, id, ticket.as_str());
                     epoch
                         .generation_api_sessions
@@ -6758,7 +6802,7 @@ impl ModHost {
                     dispatch_message,
                     api_context.hook_origin.clone(),
                     generation_session,
-                    generation_context_ticket,
+                    generation_context_ticket.clone(),
                 )
                 .await?;
             type ClockCall<'a> = Pin<
@@ -6929,6 +6973,24 @@ impl ModHost {
                             )
                             .await
                             .map(|value| match value {
+                                HostApiValue::JsonProjection(value)
+                                    if matches!(
+                                        event,
+                                        "env.get"
+                                            | "ui.selection"
+                                            | "ui.copy"
+                                            | "prompt.read"
+                                            | "prompt.fill"
+                                            | "prompt.suggest"
+                                            | "model.classify"
+                                            | "telemetry.log"
+                                            | "telemetry.mark"
+                                    ) && value
+                                        .at_pointer("")
+                                        .is_some_and(JsonValueView::is_null) =>
+                                {
+                                    HostApiValue::Undefined
+                                }
                                 value => value,
                             })
                         };
@@ -6939,6 +7001,8 @@ impl ModHost {
                                     "tool.check"
                                         | "tool.call"
                                         | "prompt.compose"
+                                        | "prompt.fill"
+                                        | "prompt.suggest"
                                         | "prompt.context"
                                         | "session.receive"
                                 );
@@ -6984,6 +7048,48 @@ impl ModHost {
                                         .into(),
                                 ));
                             }
+                            return Ok(HostApiValue::JsonProjection(result_projection));
+                        }
+                        if event == "prompt.fill" {
+                            // The Native fill operation reports the text and
+                            // cursor after applying the fill. Read them through
+                            // the same host UI route so hook rewrites and exact
+                            // UTF-16 source remain visible to the caller.
+                            let after = self
+                                .dispatch_host_api_with_projection(
+                                    "prompt.read",
+                                    Some(static_projection("{}")),
+                                    cwd,
+                                    session,
+                                    cwd_is_pinned,
+                                    depth.saturating_add(1),
+                                    origin.clone(),
+                                    api_context.clone(),
+                                    storage_id.clone(),
+                                    skip_hook_id,
+                                    log_route_id,
+                                    tool_call_context.clone(),
+                                    generation_context_ticket.clone(),
+                                )
+                                .await?;
+                            let after = match after {
+                                HostApiValue::JsonProjection(value) => value,
+                                HostApiValue::Undefined => {
+                                    static_projection(r#"{"text":"","cursor":0}"#)
+                                }
+                            };
+                            let text = after
+                                .subprojection("/text")
+                                .unwrap_or_else(|_| static_projection(r#""""#));
+                            let cursor = after
+                                .subprojection("/cursor")
+                                .unwrap_or_else(|_| static_projection("0"));
+                            let mut answer = result_projection;
+                            set_projection_field(&mut answer, "text", text)?;
+                            set_projection_field(&mut answer, "cursor", cursor)?;
+                            return Ok(HostApiValue::JsonProjection(answer));
+                        }
+                        if event == "prompt.suggest" {
                             return Ok(HostApiValue::JsonProjection(result_projection));
                         }
                         if event == "prompt.compose" {
@@ -7828,14 +7934,19 @@ impl ModHost {
                 },
             };
         }
-        if event == "ui.selection" {
-            return match session {
-                Some(session) => match session.ui_selection().await? {
-                    Some(selection) => Ok(HostApiValue::JsonProjection(selection)),
-                    None => Ok(HostApiValue::Undefined),
-                },
-                None => Ok(HostApiValue::Undefined),
+        if matches!(
+            event,
+            "ui.selection" | "ui.copy" | "prompt.read" | "prompt.fill" | "prompt.suggest"
+        ) {
+            let Some(session) = session else {
+                return Ok(HostApiValue::Undefined);
             };
+            let input = input.unwrap_or_else(|| static_projection("{}"));
+            let result = session.remote_ui_operation(event, input, plugin).await?;
+            if result.at_pointer("").is_some_and(JsonValueView::is_null) {
+                return Ok(HostApiValue::Undefined);
+            }
+            return Ok(HostApiValue::JsonProjection(result));
         }
 
         let live_cwd = if cwd_is_pinned {
@@ -13406,7 +13517,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicitly_selected_bun_executable_runs_worker() {
-        let Some(executable) = std::env::var_os("LINGXI_MOD_BUN_EXECUTABLE") else {
+        let Some(executable) = std::env::var_os(MOD_BUN_EXECUTABLE_ENV) else {
             return;
         };
         let executable = Path::new(&executable);
@@ -17691,7 +17802,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let module = dir.path().join("env.js");
         let missing = format!(
-            "LINGXI_MOD_UNSET_{}_{}",
+            "{ENV_PREFIX}MOD_UNSET_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -17745,7 +17856,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let module = dir.path().join("env_set.js");
         let name = format!(
-            "LINGXI_MOD_ENV_SET_{}_{}",
+            "{ENV_PREFIX}MOD_ENV_SET_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

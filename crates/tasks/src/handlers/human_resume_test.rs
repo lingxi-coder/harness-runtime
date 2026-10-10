@@ -262,6 +262,7 @@ async fn handback_stopped_restore_preserves_exact_surrogates_and_rejects_hidden_
             },
             body: lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(body, units)
                 .unwrap(),
+
             sender_name: "worker".into(),
             sender_id: sender.to_string(),
             sender_task_id: sender.to_string(),

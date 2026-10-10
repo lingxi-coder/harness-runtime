@@ -512,6 +512,7 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
         session
             .history
             .push(lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![
                     lingxi_core::types::ContentBlock::Text {
@@ -555,6 +556,7 @@ async fn lifecycle_hook_ctx_uses_trimmed_last_assistant_text() {
         .await
         .history
         .push(lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "   ".to_string(),
@@ -723,6 +725,205 @@ async fn main_thread_agent_model_override_distinguishes_empty_and_missing_profil
     }
 }
 
+fn resumed_agent_with_model(model: agent::AgentModel) -> agent::AgentDefinition {
+    agent::AgentDefinition {
+        agent_type: "resumed-agent".into(),
+        when_to_use: "resume fixture".into(),
+        tools: keep_all_tools(),
+        max_turns: 4,
+        model,
+        permission_mode: agent::AgentPermissionMode::Default,
+        source: agent::AgentSource::Flag,
+        offer_provider: None,
+        base_dir: PathBuf::from("/work/repo"),
+        system_prompt: Some("resumed prompt".into()),
+        mcp_servers: Vec::new(),
+        frontmatter_hooks: Vec::new(),
+        icon: None,
+        allowed_tools: Vec::new(),
+        worktree_requirement: None,
+        disallowed_tools: Vec::new(),
+        skills: Vec::new(),
+        required_mcp_servers: Vec::new(),
+        background: false,
+        omit_instructions: false,
+        isolation: None,
+        memory: None,
+        effort: None,
+        initial_prompt: None,
+        color: None,
+        observer: None,
+        cache_ttl: None,
+    }
+}
+
+#[tokio::test]
+async fn resumed_concrete_agent_model_recovers_a_retired_saved_model() {
+    use agent::model_resolution::{ModelResolutionContext, ModelResolutionError, ModelRouteFacts};
+
+    for (spec, expected_profile) in [
+        ("current-model", "profile-a"),
+        ("profile-b/current-model", "profile-b"),
+    ] {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = calls.clone();
+        let orch = orch_with_config(OrchestratorConfig {
+            model: "live-model".into(),
+            apply_resumed_agent_model: true,
+            ..Default::default()
+        })
+        .with_model_resolution_context_provider(Arc::new(
+            move |model: &str, profile: Option<&str>| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((model.to_owned(), profile.map(str::to_owned)));
+                let unavailable = || ModelResolutionError::RouteUnavailable {
+                    model: model.to_owned(),
+                    profile: profile.map(str::to_owned),
+                    reason: "model is unavailable on this profile".into(),
+                };
+                let (model, profile) = match (model, profile) {
+                    ("live-model", _) => ("live-model", "live-profile"),
+                    ("current-model", Some(profile @ ("profile-a" | "profile-b"))) => {
+                        ("current-model", profile)
+                    }
+                    ("profile-b/current-model", None | Some("profile-b")) => {
+                        ("current-model", "profile-b")
+                    }
+                    _ => return Err(unavailable()),
+                };
+                Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: model.to_owned(),
+                        profile: Some(profile.to_owned()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            },
+        ));
+        orch.session.lock().await.model_profile = Some("live-profile".into());
+        calls.lock().unwrap().clear();
+        let definition = resumed_agent_with_model(agent::AgentModel::Explicit(spec.into()));
+        let resumed_session = lingxi_core::types::SessionId::new();
+
+        lingxi_core::host::OrchestratorHandle::resume_session(
+            &orch,
+            resumed_session,
+            Vec::new(),
+            None,
+            None,
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                model: "retired-model".into(),
+                model_profile: Some("profile-a".into()),
+                main_thread_agent_type: Some(definition.agent_type.clone()),
+                main_thread_agent_definition: Some(serde_json::to_value(definition).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the agent's configured model can replace the retired saved model");
+
+        let session = orch.session.lock().await;
+        assert_eq!(session.session_id, resumed_session);
+        assert_eq!(session.model, "current-model");
+        assert_eq!(session.model_profile.as_deref(), Some(expected_profile));
+        assert_eq!(
+            orch.tools.main_loop_model().as_deref(),
+            Some("current-model")
+        );
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(model, _)| model != "retired-model"));
+    }
+}
+
+#[tokio::test]
+async fn resumed_relative_agent_alias_uses_the_saved_profiles_catalog() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = calls.clone();
+    let orch = orch_with_config(OrchestratorConfig {
+        model: "live-model".into(),
+        apply_resumed_agent_model: true,
+        ..Default::default()
+    })
+    .with_model_resolution_context_provider(Arc::new(
+        move |model: &str, profile: Option<&str>| {
+            captured
+                .lock()
+                .unwrap()
+                .push((model.to_owned(), profile.map(str::to_owned)));
+            let (model, profile) = match (model, profile) {
+                ("live-model", _) => ("live-model", "profile-b"),
+                ("sonnet", Some("profile-a")) => ("sonnet", "profile-a"),
+                ("profile-a-sonnet", Some("profile-a")) => ("profile-a-sonnet", "profile-a"),
+                _ => {
+                    return Err(ModelResolutionError::RouteUnavailable {
+                        model: model.to_owned(),
+                        profile: profile.map(str::to_owned),
+                        reason: "model is unavailable on this profile".into(),
+                    });
+                }
+            };
+            Ok(ModelResolutionContext {
+                route: ModelRouteFacts {
+                    model: model.to_owned(),
+                    profile: Some(profile.to_owned()),
+                    provider: Some(ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                family_defaults: FamilyModelDefaults {
+                    sonnet: Some(format!("{profile}-sonnet")),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        },
+    ));
+    orch.session.lock().await.model_profile = Some("profile-b".into());
+    calls.lock().unwrap().clear();
+    let definition = resumed_agent_with_model(agent::AgentModel::Alias("sonnet".into()));
+
+    lingxi_core::host::OrchestratorHandle::resume_session(
+        &orch,
+        lingxi_core::types::SessionId::new(),
+        Vec::new(),
+        None,
+        None,
+        lingxi_core::host::ResumeRuntimeSnapshot {
+            model: "retired-model".into(),
+            model_profile: Some("profile-a".into()),
+            main_thread_agent_type: Some(definition.agent_type.clone()),
+            main_thread_agent_definition: Some(serde_json::to_value(definition).unwrap()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a relative alias resolves from the resumed profile without the retired model");
+
+    let session = orch.session.lock().await;
+    assert_eq!(session.model, "profile-a-sonnet");
+    assert_eq!(session.model_profile.as_deref(), Some("profile-a"));
+    assert_eq!(
+        orch.tools.main_loop_model().as_deref(),
+        Some("profile-a-sonnet")
+    );
+    let calls = calls.lock().unwrap();
+    assert!(calls.contains(&("sonnet".into(), Some("profile-a".into()))));
+    assert!(calls
+        .iter()
+        .all(|(model, profile)| model != "sonnet" || profile.as_deref() == Some("profile-a")));
+    assert!(calls.iter().all(|(model, _)| model != "retired-model"));
+}
+
 #[tokio::test]
 async fn initial_model_gate_refreshes_with_route_authority_before_wire_tool_assembly() {
     let mut config = OrchestratorConfig::default();
@@ -789,4 +990,76 @@ async fn main_thread_agent_no_model_override_leaves_session_model() {
     )
     .await;
     assert_eq!(orch.session().lock().await.model, "base-model");
+}
+
+/// Native 2.1.293 surfaces a provider APIError without the taxonomy's
+/// `invalid request:` prefix. Local validator failures have no provider status.
+#[tokio::test]
+async fn provider_invalid_request_uses_native_api_error_copy() {
+    let orch = orch_with_config(OrchestratorConfig::default());
+    for (message, expected) in [
+        (
+            "400 HEADLESS_LOCAL_PROVIDER_ERROR",
+            "API Error: 400 HEADLESS_LOCAL_PROVIDER_ERROR",
+        ),
+        (
+            r#"400 {"type":"error","error":{"message":"bad request"}}"#,
+            "API Error: 400 bad request",
+        ),
+        (
+            r#"422 {"error":{"message":"unsupported field"}}"#,
+            "API Error: 422 unsupported field",
+        ),
+        (
+            "invalid model configuration",
+            "invalid request: invalid model configuration",
+        ),
+    ] {
+        assert_eq!(
+            orch.model_error_text(&LlmError::InvalidRequest {
+                message: message.into()
+            })
+            .await,
+            expected,
+        );
+    }
+}
+
+/// The result status comes from the typed provider error, not the legacy
+/// envelope fallback which categorizes local InvalidRequest errors as 400.
+#[tokio::test]
+async fn graceful_provider_error_metrics_preserve_actual_status_without_guessing() {
+    use crate::test_support::MockStreamingApiClient;
+    for (message, expected_status) in [
+        ("400 HEADLESS_LOCAL_PROVIDER_ERROR", Some(400)),
+        ("422 unsupported field", Some(422)),
+        ("invalid model configuration", None),
+    ] {
+        let orch = ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(MockStreamingApiClient::with_open_error(
+                LlmError::InvalidRequest {
+                    message: message.into(),
+                },
+                vec![],
+            )),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/work/repo"),
+        );
+        orch.run_turn_streaming_with_cancel("hi", tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("APIError remains a graceful assistant result");
+        let metrics = orch.completed_turn_metrics().unwrap();
+        assert_eq!(metrics.stop_reason.as_deref(), Some("model_error"));
+        assert_eq!(metrics.api_error_status, expected_status);
+        assert_eq!(
+            metrics.api_error_stop_reason.as_deref(),
+            Some("stop_sequence")
+        );
+    }
 }

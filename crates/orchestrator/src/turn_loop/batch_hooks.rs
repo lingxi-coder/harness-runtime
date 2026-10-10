@@ -87,9 +87,16 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
     }
     // Populate `transcript_path` + `permission_mode` from the same live
     // sources as the per-tool hook contexts.
-    let (session_id, plan_mode) = {
+    let (session_id, plan_mode, model_selection) = {
         let s = orch.session.lock().await;
-        (s.session_id, s.plan_mode)
+        (
+            s.session_id,
+            s.plan_mode,
+            hooks::HookModelSelection {
+                model: s.model.clone(),
+                model_profile: s.model_profile.clone(),
+            },
+        )
     };
     let transcript_path = orch
         .transcript
@@ -99,10 +106,18 @@ pub(super) async fn run_post_tool_batch_hooks_inner(
         .unwrap_or_else(|| orch.computed_transcript_path(&session_id));
     let batch_ctx = HookContext {
         prompt_transcript: Some(orch.prompt_hook_transcript().await),
+        model_selection: Some(model_selection),
+        inherit: orch.hook_agent_inheritance.clone(),
+        agent_depth: Some(0),
         session_id,
         cwd: orch.current_cwd(),
         transcript_path,
-        permission_mode: Some(if plan_mode { "plan" } else { "default" }.to_string()),
+        permission_mode: Some(if plan_mode {
+            "plan".to_string()
+        } else {
+            orch.permission_mode()
+                .unwrap_or_else(|| "default".to_string())
+        }),
         publication_guard: Some(Arc::clone(&publication_guard)),
         ..Default::default()
     };
@@ -330,10 +345,8 @@ pub(crate) async fn append_tool_injected_messages(
     }
 }
 
-/// SKILLEXEC.3 (model scope): fold a tool batch's `context_modifier`s over a
-/// seed context carrying the live `session.model`, then persist the resolved
-/// model back to `session.model` when it changed (TS `contextModifier` sets
-/// `options.mainLoopModel` for the rest of the session).
+/// Fold a tool batch's modifiers over the live model/profile, then resolve the
+/// requested route before changing session state.
 ///
 /// Called POST-BATCH by BOTH drivers (the batched [`execute_one_turn`] and the
 /// streaming `try_run_turn_streaming`) at the same point they append injected
@@ -349,19 +362,69 @@ pub(crate) async fn append_tool_injected_messages(
 pub(crate) async fn apply_model_context_modifiers(
     orch: &ConversationOrchestrator,
     modifiers: Vec<ContextModifier>,
-) {
+) -> Result<(), crate::error::OrchestratorError> {
     if modifiers.is_empty() {
-        return;
+        return Ok(());
     }
-    let current = orch.session.lock().await.model.clone();
-    let resolved = modifiers
-        .into_iter()
-        .fold(ToolUseContext::model_seed(current), |ctx, modifier| {
-            modifier(ctx)
-        })
-        .options
-        .main_loop_model;
-    apply_resolved_model_context(orch, resolved).await;
+    let (current, current_profile) = {
+        let session = orch.session.lock().await;
+        (session.model.clone(), session.model_profile.clone())
+    };
+    let mut context = ToolUseContext::model_seed(current);
+    context.options.model_profile = current_profile;
+    for modifier in modifiers {
+        let updated = modifier(context.clone());
+        context = resolve_model_context_modifier(
+            &context,
+            updated,
+            orch.model_resolution_context_provider.as_deref(),
+        )
+        .map_err(model_context_error)?;
+    }
+    apply_resolved_model_context(
+        orch,
+        context.options.main_loop_model,
+        context.options.model_profile,
+    )
+    .await
+}
+
+/// Validate one modifier without changing the session. Both dispatch drivers
+/// use the resolved route as the next modifier's parent, so a relative alias
+/// after an explicit profile change uses that profile's catalog.
+pub(crate) fn resolve_model_context_modifier(
+    previous: &ToolUseContext,
+    mut updated: ToolUseContext,
+    provider: Option<&dyn agent::ModelResolutionContextProvider>,
+) -> Result<ToolUseContext, String> {
+    if previous.options.main_loop_model == updated.options.main_loop_model
+        && previous.options.model_profile == updated.options.model_profile
+    {
+        return Ok(updated);
+    }
+    let provider = provider.ok_or_else(|| "no model route resolver is installed".to_string())?;
+    let parent_context = provider
+        .context_for_route(
+            &previous.options.main_loop_model,
+            previous.options.model_profile.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+    let selection = agent::model_resolution::resolve_skill_model_selection(
+        &updated.options.main_loop_model,
+        updated.options.model_profile.as_deref(),
+        &parent_context,
+        provider,
+    )
+    .map_err(|error| error.to_string())?;
+    updated.options.main_loop_model = selection.model;
+    updated.options.model_profile = selection.model_profile;
+    Ok(updated)
+}
+
+fn model_context_error(error: String) -> crate::error::OrchestratorError {
+    crate::error::OrchestratorError::StreamingProtocol(format!(
+        "tool model preference could not be resolved: {error}"
+    ))
 }
 
 /// Apply the model layer already folded by the owned streaming scheduler. The
@@ -377,43 +440,47 @@ pub(crate) async fn apply_model_context_state(
             "streaming tool context state is invalid: {error}"
         ))
     })?;
-    apply_resolved_model_context(orch, context.options.main_loop_model.clone()).await;
-    Ok(())
+    apply_resolved_model_context(
+        orch,
+        context.options.main_loop_model.clone(),
+        context.options.model_profile.clone(),
+    )
+    .await
 }
 
-async fn apply_resolved_model_context(orch: &ConversationOrchestrator, resolved: String) {
+async fn apply_resolved_model_context(
+    orch: &ConversationOrchestrator,
+    requested_model: String,
+    requested_profile: Option<String>,
+) -> Result<(), crate::error::OrchestratorError> {
     let (current, current_profile) = {
         let session = orch.session.lock().await;
         (session.model.clone(), session.model_profile.clone())
     };
-    if resolved == current {
-        return;
+    if requested_model == current && requested_profile == current_profile {
+        return Ok(());
     }
-    let listings = orch.api.list_model_listings();
-    let (target_model, explicit_profile) = lingxi_core::host::parse_model_ref(&resolved, &listings);
-    let target_profile = explicit_profile.or_else(|| {
-        current_profile
-            .as_ref()
-            .filter(|profile| {
-                listings.iter().any(|listing| {
-                    listing.provider_id.as_str() == profile.as_str()
-                        && listing.request_model == target_model
-                })
-            })
-            .cloned()
-            .or_else(|| {
-                let mut matches = listings
-                    .iter()
-                    .filter(|listing| listing.request_model == target_model);
-                let first = matches.next()?;
-                matches.next().is_none().then(|| first.provider_id.clone())
-            })
-    });
+    let mut previous_context = ToolUseContext::model_seed(current.clone());
+    previous_context.options.model_profile = current_profile.clone();
+    let mut updated_context = ToolUseContext::model_seed(requested_model);
+    updated_context.options.model_profile = requested_profile;
+    let context = resolve_model_context_modifier(
+        &previous_context,
+        updated_context,
+        orch.model_resolution_context_provider.as_deref(),
+    )
+    .map_err(model_context_error)?;
+    let target_model = context.options.main_loop_model;
+    let target_profile = context.options.model_profile;
+    if target_model == current && target_profile == current_profile {
+        return Ok(());
+    }
     {
         let mut session = orch.session.lock().await;
         session.model.clone_from(&target_model);
         session.model_profile.clone_from(&target_profile);
     }
+    orch.refresh_main_loop_model_for_route(&target_model, target_profile.as_deref());
     orch.run_post_model_switch_hooks(
         &current,
         &target_model,
@@ -422,4 +489,5 @@ async fn apply_resolved_model_context(orch: &ConversationOrchestrator, resolved:
         "auto",
     )
     .await;
+    Ok(())
 }

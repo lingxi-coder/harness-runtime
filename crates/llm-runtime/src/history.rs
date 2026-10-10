@@ -98,7 +98,58 @@ pub struct HistoryResponse {
     )]
     pub resumable: Option<JsonPayload>,
 }
+impl HistoryResponse {}
 impl HistoryResponse {
+    /// Admitted host request effort, never decoded from provider output.
+    pub fn per_turn_effort(&self) -> Option<Utf16JsonProjection> {
+        let source = self
+            .provider_metadata
+            .payload_at("/llm_client/per_turn_effort")?;
+        serde_json::from_str(source.as_json_source()).ok()
+    }
+
+    /// Record only the admitted effort that produced this provider response.
+    /// Nested source edits preserve unrelated provider metadata byte-for-byte.
+    pub(crate) fn set_per_turn_effort(
+        &mut self,
+        effort: Option<&Utf16JsonProjection>,
+    ) -> Result<(), crate::LlmError> {
+        let Some(effort) = effort else {
+            return Ok(());
+        };
+        let effort_source =
+            effort
+                .to_json_string()
+                .map_err(|error| crate::LlmError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+        let effort = JsonPayload::parse(&effort_source).map_err(|error| {
+            crate::LlmError::InvalidRequest {
+                message: error.to_string(),
+            }
+        })?;
+        let empty = || JsonPayload::parse("{}").expect("static JSON object is valid");
+        let root = if self.provider_metadata.is_root_object() {
+            self.provider_metadata.clone()
+        } else {
+            empty()
+        };
+        let client = root
+            .payload_at("/llm_client")
+            .filter(|value| value.is_root_object())
+            .unwrap_or_else(empty)
+            .with_object_field("per_turn_effort", &effort)
+            .map_err(|error| crate::LlmError::InvalidRequest {
+                message: error.to_string(),
+            })?;
+        self.provider_metadata =
+            root.with_object_field("llm_client", &client)
+                .map_err(|error| crate::LlmError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+        Ok(())
+    }
+
     /// Host-authored observations only. Wire projection clears this reserved
     /// key before installing events admitted by the execution context.
     pub fn server_fallback_events(&self) -> Vec<HistoryServerFallback> {
@@ -545,6 +596,9 @@ pub enum CacheControl {
 /// Application history message converted once at the SDK input boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
+    /// Host API-system controls; consumed once at the provider input boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_output_config: Option<lingxi_core::types::ApiSystemOutputConfig>,
     /// Message role.
     pub role: String,
     /// Ordered content blocks.
@@ -932,6 +986,9 @@ pub enum CacheEdit {
 /// hosted-tool passthrough (`provider/anthropic.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolDeclaration {
+    /// Exact schema at the host tool-admission boundary, never a wire field.
+    #[serde(skip)]
+    pub input_schema_projection: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
     /// Tool name.
     pub name: String,
     /// Source-backed JSON string, retaining exact JavaScript UTF-16 units.

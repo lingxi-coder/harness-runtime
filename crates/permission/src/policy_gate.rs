@@ -64,6 +64,7 @@ use async_trait::async_trait;
 use lingxi_core::host::permission_gate as core_permission;
 use lingxi_core::host::permission_gate::PermissionRequestSource;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -2670,7 +2671,7 @@ fn read_only_default_auto_allows(
     // An undecided Auto-mode subagent needs contextual approval. Its legacy
     // AllowByDefault entry must not turn classifier Pass into an approval when
     // the contextual classifier is unavailable or itself cannot decide.
-    if mode == PermissionMode::Auto && matches!(name, "Agent" | "Task") {
+    if mode == PermissionMode::Auto && name == "Agent" {
         return false;
     }
     // LINGXI DIVERGENCE, narrowly scoped to the rows that have no oracle

@@ -402,6 +402,7 @@ fn agent_tool_request() -> SubagentSpawnRequest {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,

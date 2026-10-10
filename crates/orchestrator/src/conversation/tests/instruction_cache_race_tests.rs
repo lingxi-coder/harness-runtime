@@ -100,7 +100,7 @@ async fn assert_root_context_activation_race(resume_same_id: bool) {
         initial.eager_instructions.as_ref().unwrap()[0].content,
         "before reset"
     );
-    assert!(initial.user_context["claudeMd"].contains("before reset"));
+    assert!(initial.user_context["instructions"].contains("before reset"));
     assert_eq!(memory.loads.load(Ordering::SeqCst), 1);
 
     *root.prompt_runtime.prompt_snapshot.lock().await = Some(PromptSnapshot {
@@ -178,8 +178,12 @@ async fn assert_root_context_activation_race(resume_same_id: bool) {
         after_activation.eager_instructions.as_ref().unwrap()[0].content,
         "published session instructions"
     );
-    assert!(after_activation.user_context["claudeMd"].contains("published session instructions"));
-    assert!(!after_activation.user_context["claudeMd"].contains("unpublished reset instructions"));
+    assert!(
+        after_activation.user_context["instructions"].contains("published session instructions")
+    );
+    assert!(
+        !after_activation.user_context["instructions"].contains("unpublished reset instructions")
+    );
     assert_eq!(memory.loads.load(Ordering::SeqCst), 2);
     assert_eq!(root.prompt_runtime.instruction_cache.builds_started(), 2);
 }

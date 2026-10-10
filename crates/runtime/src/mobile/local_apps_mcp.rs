@@ -1262,6 +1262,8 @@ impl LocalAppsMcpTransport {
     fn result(value: Value) -> McpToolResultDto {
         let text = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
         McpToolResultDto {
+            result_projection: None,
+
             content: json!([{ "type": "text", "text": text }]),
             is_error: false,
             structured_content: Some(value),
@@ -1285,6 +1287,8 @@ impl LocalAppsMcpTransport {
     /// and an iPhone in portrait, and the frame alone does not say which.
     fn image_result(data: &str, mime_type: &str, metadata: Value) -> McpToolResultDto {
         McpToolResultDto {
+            result_projection: None,
+
             content: json!([{ "type": "image", "data": data, "mimeType": mime_type }]),
             is_error: false,
             structured_content: Some(metadata),
@@ -1372,6 +1376,8 @@ impl LocalAppsMcpTransport {
             }
         }
         McpToolResultDto {
+            result_projection: None,
+
             content,
             is_error: false,
             // Image/text payload bytes ride only in the real MCP content
@@ -1394,6 +1400,8 @@ impl LocalAppsMcpTransport {
 
     fn tool_error(message: impl Into<String>) -> McpToolResultDto {
         McpToolResultDto {
+            result_projection: None,
+
             content: json!([{ "type": "text", "text": message.into() }]),
             is_error: true,
             ..Default::default()
@@ -1414,6 +1422,9 @@ impl LocalAppsMcpTransport {
 
     fn tool(name: &str, description: &str, input_schema: Value) -> McpToolDto {
         McpToolDto {
+            input_schema_projection: None,
+            definition_projection: None,
+
             server_name: String::new(),
             tool_name: name.to_string(),
             description: description.to_string(),
@@ -2000,6 +2011,9 @@ impl LocalAppsMcpTransport {
                 )));
             }
             let tool = McpToolDto {
+                input_schema_projection: None,
+                definition_projection: None,
+
                 server_name: scope.server_name(),
                 tool_name: definition.name.clone(),
                 description: definition.description.clone().unwrap_or_default(),

@@ -298,8 +298,9 @@ impl Task for DreamHandler {
         //    `context_paths` has no source on the variant, so an empty vec is
         //    passed.
         let request = SubagentSpawnRequest {
-            agent_spawn_provenance: Default::default(),
             agent_spawn_token: None,
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
+            agent_spawn_provenance: Default::default(),
             parent_native_query_depth: None,
             handback_opt_in: false,
             parent_permission_mode: None,
@@ -346,6 +347,7 @@ impl Task for DreamHandler {
             origin_session_id: None,
             // Top-level spawn ⇒ the spawner's own default model anchors resolution.
             parent_model_override: None,
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,

@@ -229,6 +229,7 @@ fn local(id: &str, agent_id: AgentId, status: TaskStatus) -> LocalAgentTaskState
         agent_id,
         subagent_type: "worker".into(),
         prompt: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
+
         error: None,
         messages: Vec::new(),
         pending_messages: Vec::new(),
@@ -264,6 +265,7 @@ fn report(actor: AgentId) -> PreparedHandbackReport {
             warning: None,
         },
         body: handback_frame("whole sanitized report").into(),
+
         sender_name: "worker".into(),
         sender_id: actor.to_string(),
         sender_task_id: actor.to_string(),

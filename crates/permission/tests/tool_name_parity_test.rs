@@ -47,11 +47,7 @@ fn agent_constant_resolves_allow() {
         tool_default(tool_agent::agent::AGENT_TOOL_NAME),
         PromptDefault::AllowByDefault
     );
-    // Legacy alias of Agent
-    assert_eq!(
-        tool_default(tool_agent::agent::LEGACY_AGENT_TOOL_NAME),
-        PromptDefault::AllowByDefault
-    );
+    assert_eq!(tool_default("Task"), PromptDefault::DenyByDefault);
 }
 
 #[test]

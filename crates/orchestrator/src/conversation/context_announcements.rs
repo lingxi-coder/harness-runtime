@@ -55,6 +55,7 @@ pub(crate) fn context_attachment_projection(
     match render_instruction_attachment(attachment) {
         Some(body) => ConversationMessage::user_meta(id, body),
         None => ConversationMessage::System {
+            api_system: None,
             id,
             content: "".into(),
             subtype: Some("model_reminder_attachment".into()),
@@ -154,6 +155,9 @@ impl ConversationOrchestrator {
         ConversationMessage,
         lingxi_core::types::utf16_json::Utf16JsonProjection,
     )> {
+        if self.config.bare {
+            return Vec::new();
+        }
         let mut context = self.instruction_context_snapshot().await;
         context.announcement_history = self.context_attachment_history(history);
         if context.rendering == InstructionRendering::Inline {

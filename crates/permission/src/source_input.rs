@@ -335,7 +335,10 @@ mod tests {
         let mut scalars = mapped_all[0].chars().map(u32::from);
         let mut previous = scalars.next().unwrap();
         for scalar in scalars {
-            assert!(previous < scalar, "mapping must preserve every code-unit order");
+            assert!(
+                previous < scalar,
+                "mapping must preserve every code-unit order"
+            );
             previous = scalar;
         }
         assert_eq!(mapped_all[0].chars().count(), usize::from(u16::MAX) + 1);
@@ -360,8 +363,14 @@ mod tests {
         let escaped_then_feff = [b'\\' as u16, b' ' as u16, 0xfeff];
         let even_backslash = [b'\\' as u16, b'\\' as u16, b' ' as u16];
         let nel = [0x0085u16];
-        assert_eq!(trim_gitignore_end_units(&escaped_then_feff), &escaped_then_feff[..2]);
-        assert_eq!(trim_gitignore_end_units(&even_backslash), &even_backslash[..2]);
+        assert_eq!(
+            trim_gitignore_end_units(&escaped_then_feff),
+            &escaped_then_feff[..2]
+        );
+        assert_eq!(
+            trim_gitignore_end_units(&even_backslash),
+            &even_backslash[..2]
+        );
         assert_eq!(trim_gitignore_end_units(&nel), &nel);
     }
 }

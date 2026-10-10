@@ -239,7 +239,7 @@ fn hidden_connections_are_not_listed() {
 
 // ── Desugaring `settings.providers` into connections ───────────────────────
 
-use llm_runtime::{ProviderCredentialMode, ProviderParseOptions, parse_provider_profiles_lenient};
+use llm_runtime::{parse_provider_profiles_lenient, ProviderCredentialMode, ProviderParseOptions};
 use std::collections::BTreeMap;
 
 fn parse(json: serde_json::Value) -> (Vec<ProviderProfile>, Vec<String>) {

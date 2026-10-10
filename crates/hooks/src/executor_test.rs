@@ -1769,6 +1769,19 @@ mod command_arm_tests {
     }
 
     #[tokio::test]
+    async fn user_prompt_submit_preserves_exact_js_utf16_text() {
+        let projection =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""before\ud800after""#)
+                .unwrap();
+        let stdin = dispatch_and_capture(
+            HookEventType::UserPromptSubmit,
+            HookEvent::UserPromptSubmit { prompt: projection },
+        )
+        .await;
+        assert!(stdin.contains(r#""prompt":"before\ud800after""#), "{stdin}");
+    }
+
+    #[tokio::test]
     async fn user_prompt_submit_event_serializes_prompt() {
         let stdin = dispatch_and_capture(
             HookEventType::UserPromptSubmit,
@@ -2716,6 +2729,75 @@ mod command_arm_tests {
         };
         let (_marker, body) = build_envelope_body(&ev, &ctx).expect("must serialize");
         assert!(body.contains(r#""action":"cancel""#), "{body}");
+    }
+    #[tokio::test]
+    async fn subagent_stop_command_uses_published_child_path_cwd_and_last_message() {
+        let child_worktree = tempfile::tempdir().unwrap();
+        let child_cwd = child_worktree.path().to_path_buf();
+        let process = MockRunner::ok(output("", "", 0));
+        let mut hook = command_hook();
+        hook.events = vec![HookEventType::SubagentStop];
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let executor = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(process.clone(), Arc::new(StubSandbox));
+        let session = lingxi_core::types::SessionId::new();
+        let child = lingxi_core::types::AgentId::new();
+        executor.publish_agent_prompt_transcript(
+            session,
+            child,
+            crate::HookModelSelection {
+                model: "child-model".into(),
+                model_profile: Some("child-profile".into()),
+            },
+            crate::PromptHookTranscript::default(),
+            crate::AgentStopMetadata {
+                agent_transcript_path: "/tmp/child/subagents/agent-real-child.jsonl".into(),
+                cwd: child_cwd.clone(),
+                last_assistant_message: Some("child final answer".into()),
+                depth: Some(3),
+                ..Default::default()
+            },
+        );
+        executor
+            .execute_excluding_agent(
+                HookEvent::SubagentStop {
+                    agent_id: child,
+                    agent_type: "reviewer".into(),
+                    status: "completed".into(),
+                },
+                HookContext {
+                    session_id: session,
+                    cwd: "/tmp/parent-workspace".into(),
+                    last_assistant_message: Some("parent final answer".into()),
+                    agent_transcript_path: Some("/tmp/parent.jsonl".into()),
+                    ..Default::default()
+                },
+                child,
+            )
+            .await;
+        let payload: serde_json::Value =
+            serde_json::from_str(process.recorded_stdin.lock().unwrap().as_ref().unwrap()).unwrap();
+        assert_eq!(
+            payload["agent_transcript_path"],
+            "/tmp/child/subagents/agent-real-child.jsonl"
+        );
+        assert_eq!(payload["last_assistant_message"], "child final answer");
+        assert_eq!(payload["cwd"], child_cwd.to_string_lossy().as_ref());
+        assert_eq!(
+            process
+                .recorded_cwd
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .as_deref(),
+            Some(child_cwd.as_path())
+        );
     }
 }
 
@@ -4904,15 +4986,46 @@ mod http_agent_dispatch_tests {
             Arc::new(RwLock::new(registry)),
             Arc::new(UnusedHttp),
             Arc::new(UnusedRuntime),
-        )
-        .with_agent_spawner(spawner.clone());
+        );
+
+        let unbound = exec
+            .execute(
+                pre_event(),
+                HookContext {
+                    inherit: Some(dummy_inherit()),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(matches!(
+            unbound.all_results[0].1.outcome,
+            HookOutcome::Error
+        ));
+        assert!(spawner.recorded.lock().unwrap().is_empty());
+        let binding: Arc<dyn SubagentSpawner> = spawner.clone();
+        let weak = Arc::downgrade(&binding);
+        exec.attach_agent_spawner(weak.clone());
+        drop(binding);
+        assert_eq!(
+            Arc::strong_count(&spawner),
+            1,
+            "the hook executor borrows its owner"
+        );
 
         // The Agent arm needs the inheritance bundle on the context.
         let ctx = HookContext {
             inherit: Some(dummy_inherit()),
+            model_selection: Some(crate::registry::HookModelSelection {
+                model: "child-model".into(),
+                model_profile: Some("profile-b".into()),
+            }),
+            agent_id: Some(lingxi_core::types::AgentId::new()),
+            agent_depth: Some(3),
+            permission_mode: Some("plan".into()),
+            session_id: lingxi_core::types::SessionId::new(),
             ..Default::default()
         };
-        let agg = exec.execute(pre_event(), ctx).await;
+        let agg = exec.execute(pre_event(), ctx.clone()).await;
 
         // The Agent arm reached the spawner with the hook's agent_type and a
         // prompt that spliced the template + the serialized payload.
@@ -4941,6 +5054,21 @@ mod http_agent_dispatch_tests {
         assert_eq!(agg.decision, Some(HookDecision::Approve));
         let (_, r) = &agg.all_results[0];
         assert!(matches!(r.outcome, HookOutcome::Success));
+        assert_eq!(Arc::strong_count(&spawner), 1);
+        drop(spawner);
+        assert!(
+            weak.upgrade().is_none(),
+            "the hook binding cannot retain the spawner graph"
+        );
+        let expired = exec.execute(pre_event(), ctx).await;
+        assert!(matches!(
+            expired.all_results[0].1.outcome,
+            HookOutcome::Error
+        ));
+        assert!(expired.all_results[0]
+            .1
+            .stderr
+            .contains("agent executor not wired"));
     }
 }
 
@@ -5107,8 +5235,78 @@ mod prompt_dispatch_tests {
         }
     }
 
+    struct AggregateOnlyGuard {
+        checks: std::sync::atomic::AtomicUsize,
+        current_checks: usize,
+    }
+
+    impl crate::attachment::HookPublicationGuard for AggregateOnlyGuard {
+        fn is_current(&self) -> bool {
+            self.checks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                < self.current_checks
+        }
+
+        fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+            None
+        }
+
+        fn publish_if_current<'a>(
+            &'a self,
+            _publication: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            panic!("private aggregate preparation must not publish side effects");
+        }
+
+        fn commit_if_current<'a>(
+            &'a self,
+            _mutation: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            panic!("private aggregate preparation must not reserve a durable lease");
+        }
+    }
+
     #[tokio::test]
-    async fn parent_subagent_stop_consumes_only_matching_child_live_history() {
+    async fn sinkless_hook_output_keeps_generation_checks_without_a_durable_lease() {
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        let hook = prompt_hook();
+        let identity = attachment_identity(&pre_event());
+        let result = HookResult {
+            outcome: HookOutcome::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            response: Some(HookResponse {
+                decision: Some(HookDecision::Defer),
+                ..Default::default()
+            }),
+        };
+        // Cover a live generation, expiry before preparation, and expiry while
+        // the private outputs are being prepared.
+        for (current_checks, expected_output) in [(2, true), (0, false), (1, false)] {
+            let guard = AggregateOnlyGuard {
+                checks: std::sync::atomic::AtomicUsize::new(0),
+                current_checks,
+            };
+            let mut aggregate = AggregateHookResult::default();
+            let outputs = exec
+                .publish_run_attachment(&mut aggregate, &hook, &identity, &result, 0, Some(&guard))
+                .await;
+            assert_eq!(outputs.is_some(), expected_output);
+            assert_eq!(
+                aggregate.hook_attachments.len(),
+                usize::from(expected_output),
+                "expired private outputs must not enter the aggregate"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn parent_subagent_stop_consumes_matching_child_history_and_route() {
         let runner = Arc::new(RecordingRunner {
             recorded: Mutex::new(Vec::new()),
             result: Mutex::new(Some(Ok(r#"{"ok":true,"reason":"child complete"}"#.into()))),
@@ -5116,6 +5314,11 @@ mod prompt_dispatch_tests {
         let mut registry = HookRegistry::new();
         let mut hook = prompt_hook();
         hook.events = vec![HookEventType::SubagentStop];
+        hook.executor = DefHookExecutor::Prompt {
+            prompt: "Child complete? $ARGUMENTS".into(),
+            model: None,
+            continue_on_block: false,
+        };
         registry.register(hook);
         let exec = HookExecutorImpl::new(
             Arc::new(RwLock::new(registry)),
@@ -5165,12 +5368,23 @@ mod prompt_dispatch_tests {
             HookContext {
                 session_id: session,
                 prompt_transcript: Some(snapshot("parent must not leak")),
+                model_selection: Some(parent_route),
+                permission_mode: Some("plan".into()),
                 ..Default::default()
             },
             child,
         )
         .await;
         let calls = runner.recorded.lock().unwrap();
+        assert!(
+            calls[0].model.is_none(),
+            "the default evaluator route is exercised"
+        );
+        assert_eq!(calls[0].model_selection.as_ref(), Some(&child_route));
+        assert!(
+            calls[0].prompt.contains(r#""permission_mode":"plan""#),
+            "the parent still owns the hook's base permission metadata"
+        );
         assert_eq!(
             calls[0].transcript.as_ref().unwrap().messages,
             child_snapshot.messages
@@ -5266,7 +5480,19 @@ mod prompt_dispatch_tests {
         )
         .with_prompt_runner(runner.clone());
 
-        let agg = exec.execute(pre_event(), HookContext::default()).await;
+        let selection = crate::registry::HookModelSelection {
+            model: "child-model".into(),
+            model_profile: Some("profile-b".into()),
+        };
+        let agg = exec
+            .execute(
+                pre_event(),
+                HookContext {
+                    model_selection: Some(selection.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
 
         // The Prompt arm reached the runner with the substituted prompt + the
         // serialized event payload + the model override.
@@ -5288,6 +5514,11 @@ mod prompt_dispatch_tests {
             "the serialized event payload is spliced into $ARGUMENTS",
         );
         assert_eq!(recorded[0].model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(recorded[0].model_selection.as_ref(), Some(&selection));
+        assert!(
+            !recorded[0].prompt.contains("child-model"),
+            "route authority stays outside the event payload"
+        );
         drop(recorded);
         // The runner's `{ok:false}` verdict surfaces as a Block decision.
         assert_eq!(agg.decision, Some(HookDecision::Block));

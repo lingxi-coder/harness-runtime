@@ -314,12 +314,9 @@ mod tests {
 
     #[tokio::test]
     async fn model_frontmatter_returns_context_modifier_switching_main_loop_model() {
-        // SKILLEXEC.3 (model scope): a skill with `model:` returns a
-        // `context_modifier` that switches the turn's main-loop model. Here the
-        // seed `ctx` (fresh_ctx → main_loop_model "test", no `[1m]`) has no 1M
-        // suffix, so the resolved model is the bare override.
+        // Frontmatter is passed to the host without provider or model defaults.
         let desc = SkillDescriptor {
-            model: Some("claude-opus-4-6".into()),
+            model: Some("balanced".into()),
             ..prompt_desc("switcher")
         };
         let tool = SkillTool::with_loader(
@@ -334,15 +331,14 @@ mod tests {
             .context_modifier
             .expect("a skill with model: returns a context_modifier");
         let modified = modifier(fresh_ctx());
-        assert_eq!(modified.options.main_loop_model, "claude-opus-4-6");
+        assert_eq!(modified.options.main_loop_model, "balanced");
+        assert_eq!(modified.options.model_profile, None);
     }
 
     #[tokio::test]
-    async fn model_frontmatter_modifier_preserves_1m_suffix() {
-        // When the session is on `[1m]` and the skill's family supports 1M, the
-        // suffix is carried over (TS resolveSkillModelOverride).
+    async fn model_frontmatter_modifier_defers_route_and_context_window_resolution() {
         let desc = SkillDescriptor {
-            model: Some("claude-sonnet-4-6".into()),
+            model: Some("other/shared".into()),
             ..prompt_desc("switcher")
         };
         let tool = SkillTool::with_loader(
@@ -355,9 +351,11 @@ mod tests {
             .expect("ok");
         let modifier = out.context_modifier.expect("context_modifier present");
         let mut seed = fresh_ctx();
-        seed.options.main_loop_model = "claude-opus-4-6[1m]".into();
+        seed.options.main_loop_model = "parent[1m]".into();
+        seed.options.model_profile = Some("current".into());
         let modified = modifier(seed);
-        assert_eq!(modified.options.main_loop_model, "claude-sonnet-4-6[1m]");
+        assert_eq!(modified.options.main_loop_model, "other/shared");
+        assert_eq!(modified.options.model_profile, None);
     }
 
     #[tokio::test]
@@ -1924,12 +1922,11 @@ mod fork_dispatch_tests {
     async fn a_forking_skill_launches_a_background_subagent() {
         let spawner: Arc<RecordingSpawner> = Arc::default();
         let tool = tool_with(spawner.clone(), fork_desc("review", None), vec![]);
+        let mut caller = ctx_with_registry();
+        caller.options.main_loop_model = "gpt-4o".into();
+        caller.options.model_profile = Some("openai".into());
         let res = tool
-            .call(
-                source_json!({"skill": "review"}),
-                ctx_with_registry(),
-                fresh_tx(),
-            )
+            .call(source_json!({"skill": "review"}), caller, fresh_tx())
             .await
             .expect("fork dispatch succeeds");
 
@@ -1972,6 +1969,9 @@ mod fork_dispatch_tests {
             Some("review")
         );
         assert_eq!(req.subagent_type, "code-reviewer");
+        assert_eq!(req.parent_model_override.as_deref(), Some("gpt-4o"));
+        assert_eq!(req.parent_model_profile_override.as_deref(), Some("openai"));
+        assert!(req.model_profile.is_none());
         assert!(req.run_in_background);
         // The `SendMessage` handle is the skill name, so `@review` resolves.
         assert_eq!(req.name.as_deref(), Some("review"));
@@ -2386,7 +2386,7 @@ mod fork_dispatch_tests {
 fn declared_effort_matches_the_oracle_union() {
     use session::forked_skill::Effort;
 
-    for level in ["low", "medium", "high", "xhigh", "max"] {
+    for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
         assert_eq!(
             super::parse_declared_effort(level),
             Some(Effort::Level(level.to_string())),

@@ -723,6 +723,16 @@ impl ConversationOrchestrator {
         images: &[lingxi_core::types::ImageSource],
         origin_override: Option<serde_json::Value>,
     ) -> ModPromptScreen {
+        self.screen_mod_prompt_submit_projected(text, images, origin_override)
+            .await
+    }
+
+    pub(super) async fn screen_mod_prompt_submit_projected(
+        &self,
+        text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        images: &[lingxi_core::types::ImageSource],
+        origin_override: Option<serde_json::Value>,
+    ) -> ModPromptScreen {
         let origin = origin_override.unwrap_or_else(crate::mod_prompt_origin::current);
         let attachments: Vec<_> = images
             .iter()
@@ -1220,12 +1230,16 @@ impl ConversationOrchestrator {
         // `transcript_path` EMPTY for every lifecycle hook. `computed_transcript_path`
         // is itself `""` only when neither a writer nor a `config_home` is present
         // (library/test builds), preserving the old behavior there.
-        let (session_id, plan_mode, last_assistant_message) = {
+        let (session_id, plan_mode, last_assistant_message, model_selection) = {
             let s = self.session.lock().await;
             (
                 s.session_id,
                 s.plan_mode,
                 Self::last_assistant_message_for_hooks(&s.history),
+                hooks::HookModelSelection {
+                    model: s.model.clone(),
+                    model_profile: s.model_profile.clone(),
+                },
             )
         };
         let transcript_path = self
@@ -1257,7 +1271,11 @@ impl ConversationOrchestrator {
         // user input, which `current_prompt_id` reproduces exactly.
         let prompt_id = self.prompt_runtime.current_prompt_id.lock().await.clone();
         HookContext {
+            model_safety_observer: self.model_safety_observer().await,
             prompt_transcript: Some(self.prompt_hook_transcript().await),
+            model_selection: Some(model_selection),
+            inherit: self.hook_agent_inheritance.clone(),
+            agent_depth: Some(0),
             session_id,
             cwd: self.current_cwd(),
             transcript_path,
@@ -1442,6 +1460,14 @@ impl ConversationOrchestrator {
             self.output.emit_text(&warning.into_projection()).await;
         }
         blocked
+    }
+
+    pub(super) async fn fire_user_prompt_submit_projected(
+        &self,
+        prompt: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        message_id: MessageId,
+    ) -> bool {
+        self.fire_user_prompt_submit(prompt, message_id).await
     }
 
     /// Fire the `MessageDisplay` hooks at the BEGIN of an assistant-message

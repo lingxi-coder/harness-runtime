@@ -625,7 +625,12 @@ pub fn core_description(name: &str) -> &'static str {
         // (M4 cc2.1.198) The /agents wizard was removed; the command now
         // returns static guidance. Description verbatim from the 2.1.198
         // binary command object (`name:"agents"`, description `(removed) …`).
-        "agents" => "(removed) Ask Claude to create/manage subagents, or edit .lingxi/agents/",
+        "agents" => {
+            static DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+                format!("(removed) Ask {} to create/manage subagents, or edit {}/agents/", branding::PRODUCT_NAME, branding::DOT_DIR)
+            });
+            DESCRIPTION.as_str()
+        },
         // WIZARD-06. SLASH-03: re-worded upstream between 2.1.220 and 2.1.238.
         // Byte-exact from BOTH 2.1.238 twins (oracle @294963678):
         //   mSl={type:"local",name:"auto-mode-setup",supportsNonInteractive:!0,

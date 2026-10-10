@@ -37,6 +37,9 @@ pub struct CompactionResult {
     pub compaction_usage: Option<Usage>,
     /// Actual model inherited by the summary side-query.
     pub summary_model: String,
+    /// Profile the summary side-query was routed through. Without it a model
+    /// id shared by several profiles is billed at the unknown tier.
+    pub summary_profile: Option<String>,
     /// Resulting messages (typically a single summary system message).
     pub summary_messages: Vec<ConversationMessage>,
     /// Trimmed model text, before the continuation wrapper, for `PostCompact`.
@@ -372,6 +375,7 @@ impl Autocompactor {
             } else {
                 cache_params.tool_use_options.main_loop_model.clone()
             };
+            let summary_profile = cache_params.tool_use_options.model_profile.clone();
             let mut summarize = messages[..split_at].to_vec();
             let mut stripped_media = false;
             let mut head_truncations = 0;
@@ -656,6 +660,7 @@ impl Autocompactor {
                 true_post_compact_token_count: result.usage.tokens.input,
                 compaction_usage: Some(result.usage),
                 summary_model,
+                summary_profile,
                 summary_messages,
                 raw_summary_text,
                 messages_to_preserve: if preserve_tail {
@@ -685,6 +690,7 @@ impl Autocompactor {
             true_post_compact_token_count: post,
             compaction_usage: Some(Usage::default()),
             summary_model: self.config.summary_model.clone(),
+            summary_profile: None,
             summary_messages,
             raw_summary_text: raw_summary_text.into(),
             messages_to_preserve: Vec::new(),
@@ -813,6 +819,7 @@ fn source_user_message(
         .string_units("")
         .expect("source user text is a root string");
     ConversationMessage::User {
+        api_message_override: None,
         id,
         content: vec![ContentBlock::TextJsUtf16 {
             text: String::from_utf16_lossy(&units),
@@ -1113,6 +1120,7 @@ mod tests {
     /// Assistant message carrying a tool-use block under `id` (opens a group).
     fn assistant_tool(id: MessageId, tool: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id,
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
@@ -1130,6 +1138,7 @@ mod tests {
 
     fn tool_result_msg() -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
@@ -1232,6 +1241,35 @@ mod tests {
             Some("PARENT SYSTEM PROMPT")
         );
         // Usage from the forked call is carried through.
+    }
+
+    #[tokio::test]
+    async fn compact_reports_the_profile_its_summary_was_routed_through() {
+        // `deepseek-flash` is listed under more than one profile; billed
+        // without one, the summary call was charged at the unknown tier.
+        let client = Arc::new(MockClient {
+            seen: Mutex::new(None),
+            canned_text: "<summary>ok</summary>".into(),
+        });
+        let runner = Arc::new(
+            ForkedAgentRunner::new()
+                .with_side_query_client(client.clone(), "claude-opus-4-6".into()),
+        );
+        let slot = Arc::new(CacheSafeParamsSlot::new());
+        let mut params = cache_safe_params(Vec::new());
+        params.tool_use_options.main_loop_model = "deepseek-flash".into();
+        params.tool_use_options.model_profile = Some("deepseek".into());
+        slot.save(params).await;
+
+        let result = Autocompactor::with_forked_runner(runner, slot)
+            .compact(vec![user_msg("hello"), user_msg("world")])
+            .await
+            .expect("wired compact succeeds");
+
+        let sent = client.seen.lock().unwrap().clone().expect("client called");
+        assert_eq!(sent.profile.as_deref(), Some("deepseek"));
+        assert_eq!(result.summary_model, "deepseek-flash");
+        assert_eq!(result.summary_profile.as_deref(), Some("deepseek"));
     }
 
     #[tokio::test]
@@ -1537,6 +1575,7 @@ mod tests {
     #[test]
     fn summarize_all_split_keeps_tool_results_with_their_call() {
         let tool_result = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
@@ -1976,6 +2015,7 @@ mod tests {
 
     fn assistant_text(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.into(),
@@ -2076,6 +2116,7 @@ mod tests {
     #[tokio::test]
     async fn media_recovery_retries_same_prefix_once_with_stripped_images() {
         let image = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Image {
                 source: lingxi_core::types::ImageSource::Url {

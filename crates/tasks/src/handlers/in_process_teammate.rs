@@ -67,7 +67,9 @@ use agent::display::{AgentColor, AgentDisplay};
 use agent::pool::StateMachinePool;
 // `PermissionMode` is re-exported from the `agent` crate (which depends on
 // `permission`) so `tasks` can reference it without a new `permission` dep.
-use agent::model_resolution::{ModelResolutionContext, ModelResolutionContextProvider};
+use agent::model_resolution::{
+    ModelResolutionContext, ModelResolutionContextProvider, ResolvedModelSelection,
+};
 use agent::runner::SubagentEvent;
 use agent::PermissionMode;
 use agent::SubagentApiClient;
@@ -489,7 +491,7 @@ impl TeammateDefinitionResolver for DefaultTeammateDefinition {
         name: &str,
     ) -> Option<AgentDefinition> {
         Some(AgentDefinition {
-            omit_claude_md: false,
+            omit_instructions: false,
             cache_ttl: None,
             agent_type: name.to_string(),
             when_to_use: String::new(),
@@ -986,15 +988,8 @@ impl InProcessTeammateHandler {
         description: impl Into<Utf16JsonProjection> + Send,
         definition: AgentDefinition,
     ) -> Result<SubagentContext, TaskError> {
-        self.build_context_for_profile(
-            agent_id,
-            name,
-            team_name,
-            description,
-            self.default_model_profile.as_deref(),
-            definition,
-        )
-        .await
+        self.build_context_for_profile(agent_id, name, team_name, description, None, definition)
+            .await
     }
 
     async fn build_context_for_profile(
@@ -1004,116 +999,217 @@ impl InProcessTeammateHandler {
         team_name: &str,
         description: impl Into<Utf16JsonProjection> + Send,
         route_profile: Option<&str>,
-        mut definition: AgentDefinition,
+        definition: AgentDefinition,
     ) -> Result<SubagentContext, TaskError> {
         let description = description.into();
+        let environmental_model = std::env::var(branding::SUBAGENT_MODEL_ENV)
+            .ok()
+            .filter(|model| !model.is_empty());
+        self.build_context_for_selection(
+            agent_id,
+            name,
+            team_name,
+            &description,
+            route_profile,
+            None,
+            None,
+            environmental_model.as_deref(),
+            definition,
+        )
+        .await
+        .map(|(context, _)| context)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn build_context_for_selection(
+        &self,
+        agent_id: lingxi_core::types::AgentId,
+        name: &str,
+        team_name: &str,
+        description: &Utf16JsonProjection,
+        route_profile: Option<&str>,
+        parent_model_override: Option<&str>,
+        parent_profile_override: Option<&str>,
+        environmental_model: Option<&str>,
+        mut definition: AgentDefinition,
+    ) -> Result<
+        (
+            SubagentContext,
+            Option<lingxi_core::host::team_spawn::TeammateModelSelection>,
+        ),
+        TaskError,
+    > {
         let description_units = description
             .string_units("")
-            .expect("teammate prompt description is a root string");
+            .expect("teammate prompt description is a root-string projection");
         // Resolve the model preference to a concrete wire id, mirroring the
         // `PoolSubagentSpawner` seam (`Inherit`→parent model, family alias→
         // concrete id), so a wired teammate runs against a live provider. Unset
         // `default_model` (tests / no boot wiring) leaves it RAW (legacy).
         let has_live_selection_provider = self.default_model_selection_provider.get().is_some();
-        let live_selection = self
-            .default_model_selection_provider
-            .get()
-            .map(|provider| provider())
-            .transpose()
-            .map_err(|error| TaskError::Internal(error.to_string()))?
-            .flatten();
-        if has_live_selection_provider && live_selection.is_none() {
+        let explicit_parent = parent_model_override.filter(|model| !model.is_empty());
+        let live_selection = if explicit_parent.is_some() {
+            None
+        } else {
+            self.default_model_selection_provider
+                .get()
+                .map(|provider| provider())
+                .transpose()
+                .map_err(|error| TaskError::Internal(error.to_string()))?
+                .flatten()
+        };
+        if has_live_selection_provider && live_selection.is_none() && explicit_parent.is_none() {
             return Err(TaskError::Internal(
                 "model/provider selection is unavailable".into(),
             ));
         }
-        let parent_model = live_selection
-            .as_ref()
-            .map(|selection| &selection.model)
-            .or(self.default_model.as_ref());
-        let default_profile = live_selection
-            .as_ref()
-            .and_then(|selection| selection.model_profile.as_deref())
-            .or(self.default_model_profile.as_deref());
-        let model_resolves_from_parent_context = matches!(
-            &definition.model,
-            AgentModel::Inherit | AgentModel::Alias(_)
-        );
+        let parent_model = explicit_parent
+            .or_else(|| {
+                live_selection
+                    .as_ref()
+                    .map(|selection| selection.model.as_str())
+            })
+            .or(self.default_model.as_deref());
+        let parent_profile = parent_profile_override.or_else(|| {
+            live_selection
+                .as_ref()
+                .and_then(|selection| selection.model_profile.as_deref())
+                .or(self.default_model_profile.as_deref())
+        });
+        let environmental_model = environmental_model.filter(|model| !model.is_empty());
+        let route_profile = environmental_model
+            .is_none()
+            .then_some(route_profile)
+            .flatten();
+        let selected_preference = environmental_model
+            .map(|model| AgentModel::Explicit(model.to_owned()))
+            .unwrap_or_else(|| definition.model.clone());
         let mut selected_profile = None;
+        let mut admitted_route = None;
+        let mut child_selection = None;
         if let Some(parent_model) = parent_model {
             let parent_context = if let Some(selection) = live_selection.as_ref() {
-                if route_profile.is_none() || route_profile == selection.model_profile.as_deref() {
+                if parent_model == selection.model
+                    && parent_profile == selection.model_profile.as_deref()
+                {
                     selection.model_resolution_context.clone()
                 } else if let Some(provider) = &self.model_resolution_context_provider {
                     provider
-                        .context_for_route(parent_model, route_profile)
+                        .context_for_route(parent_model, parent_profile)
                         .map_err(|error| TaskError::Internal(error.to_string()))?
                 } else {
                     return Err(TaskError::Internal(
-                        "model route profile override has no host route resolver".into(),
+                        "parent model route override has no host route resolver".into(),
                     ));
                 }
             } else if let Some(provider) = &self.model_resolution_context_provider {
                 provider
-                    .context_for_route(parent_model, route_profile.or(default_profile))
+                    .context_for_route(parent_model, parent_profile)
                     .map_err(|error| TaskError::Internal(error.to_string()))?
             } else {
                 ModelResolutionContext {
                     route: agent::model_resolution::ModelRouteFacts {
-                        model: parent_model.clone(),
+                        model: parent_model.to_owned(),
+                        profile: parent_profile.map(str::to_owned),
                         ..Default::default()
                     },
                     ..Default::default()
                 }
             };
-            let resolved = agent::resolve_agent_model_with_context(
-                &definition.model,
-                parent_model,
-                self.permission_mode,
-                self.model_setting.as_deref(),
-                &parent_context,
-            )
-            .map_err(|error| TaskError::Internal(error.to_string()))?;
-
-            // An explicit request profile is the selected child route. Without
-            // one, an Inherit/Alias result was resolved by the live parent
-            // context itself, so its profile is already the authoritative
-            // route for that result. A changed explicit wire model has no such
-            // inherited route fact: resolve it unqualified and fail admission
-            // if the host cannot identify one unique profile.
-            selected_profile = if let Some(profile) = route_profile {
-                let provider =
-                    self.model_resolution_context_provider
-                        .as_ref()
-                        .ok_or_else(|| {
-                            TaskError::Internal(
-                                "explicit model profile has no host route resolver".into(),
-                            )
-                        })?;
-                let child_context = provider
-                    .context_for_route(&resolved, Some(profile))
-                    .map_err(|error| TaskError::Internal(error.to_string()))?;
-                child_context
-                    .route
-                    .profile
-                    .or_else(|| Some(profile.to_owned()))
-            } else if resolved == *parent_model || model_resolves_from_parent_context {
-                parent_context.route.profile.clone()
-            } else if let Some(provider) = &self.model_resolution_context_provider {
-                provider
-                    .context_for_route(&resolved, None)
-                    .map_err(|error| TaskError::Internal(error.to_string()))?
-                    .route
-                    .profile
+            let uses_parent_policy = environmental_model.is_none()
+                && route_profile.is_none()
+                && match &selected_preference {
+                    AgentModel::Inherit => true,
+                    AgentModel::Alias(model) | AgentModel::Explicit(model) => {
+                        agent::model_resolution::is_relative_model_alias(model)
+                    }
+                };
+            let preference = if uses_parent_policy {
+                agent::resolve_agent_model_with_context(
+                    &selected_preference,
+                    parent_model,
+                    self.permission_mode,
+                    self.model_setting.as_deref(),
+                    &parent_context,
+                )
+                .map_err(|error| TaskError::Internal(error.to_string()))?
             } else {
-                None
+                match &selected_preference {
+                    AgentModel::Explicit(model) | AgentModel::Alias(model) => model.clone(),
+                    AgentModel::Inherit => parent_model.to_owned(),
+                }
             };
-            definition.model = AgentModel::Explicit(resolved);
+            let selection = if let Some(provider) = &self.model_resolution_context_provider {
+                let profile = if uses_parent_policy {
+                    parent_context.route.profile.as_deref()
+                } else {
+                    route_profile
+                };
+                let mut selection = agent::model_resolution::resolve_user_model_selection(
+                    &preference,
+                    profile,
+                    &parent_context,
+                    provider.as_ref(),
+                )
+                .map_err(|error| TaskError::Internal(error.to_string()))?;
+                // A same-route Bedrock child inherits its parent's region.
+                // An environmental or cross-provider selection owns its route.
+                if environmental_model.is_none()
+                    && selection.model_profile == parent_context.route.profile
+                    && selection.model_resolution_context.route.provider
+                        == Some(agent::ModelProviderKind::Bedrock)
+                {
+                    let prefixed = agent::resolve_agent_model_with_context(
+                        &AgentModel::Explicit(selection.model.clone()),
+                        parent_model,
+                        self.permission_mode,
+                        self.model_setting.as_deref(),
+                        &selection.model_resolution_context,
+                    )
+                    .map_err(|error| TaskError::Internal(error.to_string()))?;
+                    selection = agent::model_resolution::resolve_user_model_selection(
+                        &prefixed,
+                        selection.model_profile.as_deref(),
+                        &selection.model_resolution_context,
+                        provider.as_ref(),
+                    )
+                    .map_err(|error| TaskError::Internal(error.to_string()))?;
+                }
+                selection
+            } else {
+                if route_profile.is_some() && route_profile != parent_profile {
+                    return Err(TaskError::Internal(
+                        "explicit model profile has no host route resolver".into(),
+                    ));
+                }
+                let resolved = agent::resolve_agent_model_with_context(
+                    &selected_preference,
+                    parent_model,
+                    self.permission_mode,
+                    self.model_setting.as_deref(),
+                    &parent_context,
+                )
+                .map_err(|error| TaskError::Internal(error.to_string()))?;
+                let mut context = parent_context;
+                context.route.model = resolved.clone();
+                ResolvedModelSelection {
+                    model: resolved,
+                    model_profile: context.route.profile.clone(),
+                    model_resolution_context: context,
+                }
+            };
+            selected_profile = selection.model_profile.clone();
+            admitted_route = Some(lingxi_core::host::team_spawn::TeammateModelSelection {
+                model: selection.model.clone(),
+                model_profile: selected_profile.clone(),
+            });
+            definition.model = AgentModel::Explicit(selection.model.clone());
+            child_selection = Some(selection);
         }
         // Advertise the teammate's tool pool (claude-code `assembleToolPool`) via
         // the SAME shared resolver `PoolSubagentSpawner` uses, keyed on the
-        // resolved model. Unfilled registry ⇒ empty (chat-only, byte-identical to
-        // before this seam). With tools advertised the teammate can actually emit
+        // resolved model/profile. Unfilled registry ⇒ empty (chat-only). With
+        // tools advertised the teammate can actually emit
         // `tool_use`; the dispatch allow-list guards what the inherited invoker runs.
         let (tool_schemas, allowed_tools) = match self.tool_registry.get() {
             Some(registry) => {
@@ -1125,7 +1221,7 @@ impl InProcessTeammateHandler {
                     registry,
                     &definition,
                     denied,
-                    self.default_model.as_deref(),
+                    child_selection.as_ref(),
                     0,
                     // Every in-process teammate is a coordinator worker, so
                     // shared and inline `role:"comms"` MCP tools stay with
@@ -1149,11 +1245,12 @@ impl InProcessTeammateHandler {
         let prompt_messages = if description_units.is_empty() {
             vec![]
         } else {
-            let rendered = teammate_message_envelope(TEAM_LEAD_NAME, &description);
+            let rendered = teammate_message_envelope(TEAM_LEAD_NAME, description);
             let rendered_units = rendered
                 .string_units("")
                 .expect("rendered prompt is a root-string projection");
             vec![lingxi_core::types::ConversationMessage::User {
+                api_message_override: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                     text: String::from_utf16_lossy(&rendered_units),
@@ -1180,7 +1277,7 @@ impl InProcessTeammateHandler {
         let rendered_system_prompt =
             render_teammate_system_prompt(&base_system_prompt, definition.system_prompt.as_ref());
         let icon = definition.icon.clone();
-        Ok(SubagentContext {
+        let context = SubagentContext {
             server_fallback_model_enforcement: None,
             handback: None,
             handback_restore_start: None,
@@ -1237,6 +1334,7 @@ impl InProcessTeammateHandler {
                 icon,
             },
             model_profile: selected_profile,
+            model_resolution_context_provider: self.model_resolution_context_provider.clone(),
             api_client: Some(self.api_client.clone()),
             tool_invoker: self.tool_invoker.clone(),
             // Invoke the factory for every context. Cloning one source here
@@ -1262,6 +1360,11 @@ impl InProcessTeammateHandler {
             // cells (filled at the composition root, same as `PoolSubagentSpawner`).
             // Unfilled ⇒ the runner skips them (byte-identical legacy).
             hook_executor: self.hook_executor.get().cloned(),
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
+            subagent_stop_firer: self
+                .hook_executor
+                .get()
+                .and_then(|executor| executor.subagent_stop_firer(self.hook_session_id)),
             strict_plugin_only_hooks: self
                 .strict_plugin_only_hooks
                 .get()
@@ -1282,7 +1385,8 @@ impl InProcessTeammateHandler {
             correlation_id: None,
             model_attempt: None,
             refusal_fallback_chain: Vec::new(),
-        })
+        };
+        Ok((context, admitted_route))
     }
 }
 
@@ -1353,9 +1457,8 @@ fn apply_spawn_context(
     context.cwd = request.cwd.map(Into::into);
     context.origin_session_id = request.origin_session_id;
     context.depth = request.depth;
-    if request.model_profile.is_some() {
-        context.model_profile = request.model_profile;
-    }
+    // The context builder has already resolved model and profile together.
+    // Applying local execution context must not replace that selected route.
     if request.mode.as_deref() == Some("plan") {
         context.permission_mode_override = Some("plan".into());
     }
@@ -1377,16 +1480,6 @@ fn apply_spawn_context(
     {
         context.display.color = color;
     }
-}
-
-fn is_unresolved_model_alias(model: &str) -> bool {
-    let model = lingxi_core::host::effort::trim_js_whitespace(model).to_ascii_lowercase();
-    let base =
-        lingxi_core::host::effort::trim_js_whitespace(model.strip_suffix("[1m]").unwrap_or(&model));
-    matches!(
-        base,
-        "inherit" | "opus" | "opusplan" | "sonnet" | "haiku" | "fable" | "best"
-    )
 }
 
 /// Map a [`SubagentEvent`] to the terminal [`TaskStatus`] that ends the
@@ -1533,6 +1626,15 @@ impl Task for InProcessTeammateHandler {
             ));
         };
 
+        if spawn_request
+            .as_ref()
+            .is_some_and(|request| request.model_profile.is_some() && request.model.is_none())
+        {
+            return Err(TaskError::Internal(
+                "model_profile requires an explicit child model".into(),
+            ));
+        }
+
         // 2. Allocate the task id + spool file.
         let task_id = generate_task_id(TaskType::InProcessTeammate);
         let spool_path = self
@@ -1561,13 +1663,23 @@ impl Task for InProcessTeammateHandler {
         let route_profile = spawn_request
             .as_ref()
             .and_then(|request| request.model_profile.as_deref());
-        let mut subagent_ctx = self
-            .build_context_for_profile(
+        let environmental_model = std::env::var(branding::SUBAGENT_MODEL_ENV)
+            .ok()
+            .filter(|model| !model.is_empty());
+        let (mut subagent_ctx, admitted_route) = self
+            .build_context_for_selection(
                 agent_id,
                 &name,
                 &team_name,
-                description,
+                &description,
                 route_profile,
+                spawn_request
+                    .as_ref()
+                    .and_then(|request| request.parent_model_override.as_deref()),
+                spawn_request
+                    .as_ref()
+                    .and_then(|request| request.parent_model_profile_override.as_deref()),
+                environmental_model.as_deref(),
                 definition,
             )
             .await?;
@@ -1578,14 +1690,8 @@ impl Task for InProcessTeammateHandler {
             subagent_ctx.tool_invoker = Some(inherit.tool_invoker);
             subagent_ctx.budget = Some(inherit.budget);
         }
-        let teammate_model = match &subagent_ctx.agent_definition.model {
-            AgentModel::Inherit => self.default_model.clone(),
-            AgentModel::Alias(_) => None,
-            AgentModel::Explicit(model) if is_unresolved_model_alias(model) => None,
-            AgentModel::Explicit(model) => Some(model.clone()),
-        };
         let teammate_model_route =
-            teammate_model.map(|model| (model, subagent_ctx.model_profile.clone()));
+            admitted_route.map(|selection| (selection.model, selection.model_profile));
         let plan_control = match (&self.plan_approval_mailbox, &subagent_ctx.tool_invoker) {
             (Some(mailbox), Some(inner))
                 if subagent_ctx.permission_mode_override.as_deref() == Some("plan") =>

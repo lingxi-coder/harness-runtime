@@ -13,7 +13,7 @@ use tool_api::tool_trait::{
     ValidationError,
 };
 
-/// `LINGXI_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
+/// Listing tests mutate process-global subscription/steer signals; serialize the
 /// gate-sensitive tests (every one removes/sets the var under this lock).
 static AGENT_LIST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -97,6 +97,7 @@ impl Tool for NamedTool {
     ) -> Result<ToolCallResult, ToolError> {
         Ok(ToolCallResult {
             data: tool_api::tool_trait::generated_builtin_result(&serde_json::json!({})),
+
             model_content: None,
             new_messages: vec![],
             context_modifier: None,
@@ -135,7 +136,7 @@ fn wait_for_mcp_servers_is_visible_only_without_tool_search() {
 
 fn agent_def(agent_type: &str, when_to_use: &str, tools: AgentToolPolicy) -> AgentDefinition {
     AgentDefinition {
-        omit_claude_md: false,
+        omit_instructions: false,
         cache_ttl: None,
         agent_type: agent_type.into(),
         when_to_use: when_to_use.into(),
@@ -194,15 +195,13 @@ fn reg_with_agent_tool() -> ToolRegistry {
 }
 
 #[tokio::test]
-async fn gate_explicit_off_is_none() {
+async fn removed_inline_catalog_override_does_not_suppress_reminder() {
     let _g = AGENT_LIST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    // v2.1.193 default is ON (catalog externalized); the LEGACY inline path
-    // (explicit `=false`) keeps the catalog in the description, so the
-    // orchestrator emits no reminder.
-    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
+    // The obsolete inline-catalog override cannot suppress the current reminder.
 
+    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
     let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
         "general-purpose",
         "anything",
@@ -214,8 +213,8 @@ async fn gate_explicit_off_is_none() {
     let got = orch.agent_listing_reminder_message().await;
     std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
     assert!(
-        got.is_none(),
-        "explicit gate OFF ⇒ no reminder (inline path)"
+        got.is_some(),
+        "the current catalog reminder is always enabled when Agent is available"
     );
 }
 
@@ -230,10 +229,8 @@ async fn gate_on_no_catalog_still_announces_builtins() {
     let _g = AGENT_LIST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
     let orch = orch_with(reg_with_agent_tool(), None);
     let got = orch.agent_listing_reminder_message().await;
-    std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
     let text = got
         .expect("built-ins must be announced even with no disk catalog")
         .text_content();
@@ -253,7 +250,6 @@ async fn gate_on_but_agent_tool_absent_is_none() {
     let _g = AGENT_LIST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
     let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
         "general-purpose",
         "anything",
@@ -264,7 +260,6 @@ async fn gate_on_but_agent_tool_absent_is_none() {
     // Empty registry — the Agent tool is not present this turn.
     let orch = orch_with(ToolRegistry::new(), Some(catalog));
     let got = orch.agent_listing_reminder_message().await;
-    std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
     assert!(got.is_none(), "Agent tool absent ⇒ no reminder");
 }
 
@@ -273,7 +268,6 @@ async fn gate_on_turn0_full_listing_with_initial_header() {
     let _g = AGENT_LIST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
     // Catalog supplies a custom type; built-ins are merged in too.
     let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
         "custom-agent",
@@ -283,7 +277,6 @@ async fn gate_on_turn0_full_listing_with_initial_header() {
     let orch = orch_with(reg_with_agent_tool(), Some(catalog));
 
     let msg = orch.agent_listing_reminder_message().await;
-    std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
     let text = msg.expect("turn-0 reminder present").text_content();
 
     assert!(text.starts_with("<system-reminder>"), "got: {text}");
@@ -309,7 +302,6 @@ async fn gate_on_later_turn_no_new_types_is_none() {
     let _g = AGENT_LIST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
     let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
         "custom-agent",
         "a project agent",
@@ -324,7 +316,6 @@ async fn gate_on_later_turn_no_new_types_is_none() {
     assert!(t0.is_some(), "turn-0 must emit");
     // Turn 1 with the same catalog ⇒ nothing new ⇒ None.
     let t1 = orch.agent_listing_reminder_message().await;
-    std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
     assert!(t1.is_none(), "no new types ⇒ no reminder");
 }
 
@@ -333,7 +324,6 @@ async fn gate_on_newly_added_type_emits_delta_with_new_header_only() {
     let _g = AGENT_LIST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
     let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
         "alpha-agent",
         "the alpha agent",
@@ -365,7 +355,6 @@ async fn gate_on_newly_added_type_emits_delta_with_new_header_only() {
         .await
         .expect("turn-1 delta")
         .text_content();
-    std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
 
     assert!(
         t1.contains("New agent types are now available for the Agent tool:"),
@@ -395,7 +384,6 @@ async fn gate_on_initial_listing_carries_the_concurrency_note() {
     let _g = AGENT_LIST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
     let catalog = Arc::new(tokio::sync::RwLock::new(vec![agent_def(
         "alpha-agent",
         "the alpha agent",
@@ -433,7 +421,6 @@ async fn gate_on_initial_listing_carries_the_concurrency_note() {
         .await
         .expect("turn-1 delta")
         .text_content();
-    std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
     assert!(
         !t1.contains(NOTE),
         "the note is gated on isInitial; got: {t1}"
@@ -449,7 +436,6 @@ async fn gate_on_removed_type_emits_the_removal_branch_and_the_ambient_trailer()
     let _g = AGENT_LIST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
     let catalog = Arc::new(tokio::sync::RwLock::new(vec![
         agent_def(
             "zeta-agent",
@@ -508,7 +494,6 @@ async fn gate_on_removed_type_emits_the_removal_branch_and_the_ambient_trailer()
         .await
         .expect("turn-2 re-announce")
         .text_content();
-    std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
     assert!(
         t2.contains("New agent types are now available for the Agent tool:")
             && t2.contains("- beta-agent:"),
@@ -542,6 +527,7 @@ async fn agent_offer_withheld_agent_is_absent_from_model_reminder() {
     )
     .await
     .unwrap();
+
     let mut hook_registry = hooks::HookRegistry::new();
     hook_registry.set_mod_host(host);
 

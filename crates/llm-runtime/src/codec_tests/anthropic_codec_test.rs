@@ -13,6 +13,7 @@ fn encode_image_url_block_emits_url_source() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ImageUrl {
             url: "https://x/y.png".to_string(),
@@ -183,6 +184,7 @@ fn server_tool_use_round_trip_encode() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "assistant".to_string(),
         content: vec![ContentBlock::ServerToolUse {
             id: "stu_01".to_string(),
@@ -204,6 +206,7 @@ fn connector_text_encode_preserves_native_content() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "assistant".to_string(),
         content: vec![ContentBlock::ConnectorText {
             connector_text: "hi".to_string(),
@@ -223,6 +226,7 @@ fn advisor_tool_result_encode_preserves_native_content() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::AdvisorToolResult {
             tool_use_id: "stu_01".to_string(),
@@ -243,6 +247,7 @@ fn encode_request_shape_is_anthropic_messages() {
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.system = vec![llm_runtime::SystemBlock::text("sys")];
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
@@ -288,6 +293,7 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::Text {
             text: "use the computer".to_string(),
@@ -299,6 +305,7 @@ fn encode_request_hosted_computer_use_tool_passthrough_and_beta_header() {
     extra.insert("display_width_px".to_string(), serde_json::json!(1024));
     extra.insert("display_height_px".to_string(), serde_json::json!(768));
     request.tools.push(ToolDeclaration {
+        input_schema_projection: None,
         name: "computer".to_string(),
         description: String::new().into(),
         input_schema: json_payload(serde_json::Value::Null),
@@ -329,6 +336,7 @@ fn encode_request_no_beta_header_without_hosted_tool() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::Text {
             text: "hi".to_string(),
@@ -352,6 +360,7 @@ fn encode_request_maps_image_and_tool_result_blocks() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![
             ContentBlock::Image {
@@ -359,6 +368,7 @@ fn encode_request_maps_image_and_tool_result_blocks() {
                 bytes: vec![1, 2, 3],
             },
             ContentBlock::ToolResult {
+                output_projection: None,
                 tool_call_id: "tool-1".to_string(),
                 output: super::json_payload(serde_json::json!({"ok": true})),
                 is_error: Some(false),
@@ -413,9 +423,9 @@ fn encode_request_passes_tool_result_content_block_array_verbatim() {
     // stringified. (An object output, above, still stringifies.)
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
-    request.messages.push(Message {
+    request.messages.push(Message { api_output_config: None,
         role: "user".to_string(),
-        content: vec![ContentBlock::ToolResult {
+        content: vec![ContentBlock::ToolResult { output_projection: None,
             tool_call_id: "tool-1".to_string(),
             output: super::json_payload(serde_json::json!([
                 { "type": "text", "text": "see image:" },
@@ -446,9 +456,11 @@ fn encode_request_emits_cache_edits_and_cache_reference() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![
             ContentBlock::ToolResult {
+                output_projection: None,
                 tool_call_id: "toolu_abc".to_string(),
                 output: super::json_payload(serde_json::json!("body")),
                 is_error: Some(false),
@@ -486,8 +498,10 @@ fn encode_request_omits_cache_reference_when_absent() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![ContentBlock::ToolResult {
+            output_projection: None,
             tool_call_id: "toolu_abc".to_string(),
             output: super::json_payload(serde_json::json!("body")),
             is_error: Some(false),
@@ -678,6 +692,7 @@ fn encode_thinking_round_trip_requires_signature() {
 
     let mut signed = HistoryFixture::new("claude-sonnet-4-20250514");
     signed.messages.push(Message {
+        api_output_config: None,
         role: "assistant".to_string(),
         content: vec![ContentBlock::Reasoning {
             text: "pondering".to_string(),
@@ -693,6 +708,7 @@ fn encode_thinking_round_trip_requires_signature() {
 
     let mut unsigned = HistoryFixture::new("claude-sonnet-4-20250514");
     unsigned.messages.push(Message {
+        api_output_config: None,
         role: "assistant".to_string(),
         content: vec![ContentBlock::Reasoning {
             text: "pondering".to_string(),
@@ -726,6 +742,7 @@ fn redacted_thinking_round_trips() {
 
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "assistant".to_string(),
         content: decoded.content,
     });
@@ -759,9 +776,11 @@ fn encode_tool_result_error_flag() {
     let codec = AnthropicMessagesCodec::new("https://api.anthropic.com", "2023-06-01");
     let mut request = HistoryFixture::new("claude-sonnet-4-20250514");
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![
             ContentBlock::ToolResult {
+                output_projection: None,
                 tool_call_id: "tool-1".to_string(),
                 output: super::json_payload(serde_json::json!("boom")),
                 is_error: Some(true),
@@ -769,6 +788,7 @@ fn encode_tool_result_error_flag() {
                 cache_reference: None,
             },
             ContentBlock::ToolResult {
+                output_projection: None,
                 tool_call_id: "tool-2".to_string(),
                 output: super::json_payload(serde_json::json!("fine")),
                 is_error: Some(false),
@@ -1112,6 +1132,7 @@ fn encode_system_blocks_and_cache_control() {
         },
     ];
     request.messages.push(Message {
+        api_output_config: None,
         role: "user".to_string(),
         content: vec![
             ContentBlock::Text {
@@ -1120,6 +1141,7 @@ fn encode_system_blocks_and_cache_control() {
                 citations: None,
             },
             ContentBlock::ToolResult {
+                output_projection: None,
                 tool_call_id: "tool-1".to_string(),
                 output: super::json_payload(serde_json::json!("ok")),
                 is_error: Some(false),

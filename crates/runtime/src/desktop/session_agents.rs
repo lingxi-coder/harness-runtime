@@ -1032,6 +1032,7 @@ mod tests {
                 .on_event(SubagentObservation::Message {
                     agent_id,
                     message: ConversationMessage::System {
+                        api_system: None,
                         id: lingxi_core::types::MessageId::new(),
                         content: "idle".into(),
                         subtype: Some("agent_idle".into()),
@@ -1117,6 +1118,7 @@ mod tests {
         let visible =
             ConversationMessage::user(lingxi_core::types::MessageId::new(), "hello".to_string());
         let hidden = ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "summary".into(),
@@ -1336,6 +1338,7 @@ mod tests {
             .on_event(SubagentObservation::Message {
                 agent_id,
                 message: ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "resumed output".to_string(),

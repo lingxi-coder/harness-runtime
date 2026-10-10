@@ -6,13 +6,13 @@
 
 | 项目 | 当前身份 |
 |---|---|
-| Harness integration 基线 | `9b5adb729e7c63eabcd5c49984f8f2427ae103f6`；Source 对齐和其他集成修改仍在工作树中 |
-| SDK integration 基线 | `c1902f8c2d9e1c8b034c612126c415a3365ef066`；Source 对齐和其他集成修改仍在工作树中 |
-| Harness manifest 中的 Git rev | `0c6a907d897a54e656700c00cf335d91b10dca0b` |
+| Harness integration 基线 | `84bc9674f447ce8b06844557c0c976a14fac0ba8`；正在整合本地 main `5ddeb2c6e6fd0a54571181ced966454a58df0555`，尚未完成全链门禁 |
+| SDK integration 基线 | `11f35e6cb05749eac0d50bdbb74ce0b49fa6c013`；已合并 main，workspace/tests 编译通过，测试与产品验收单独记录 |
+| Harness manifest 中的 Git rev | 由集成依赖更新批次固定到上述 SDK 提交 |
 | 当前生效的 SDK 来源 | Cargo `[patch."https://github.com/lingxi-coder/llm-client"]` 指向 `../llm-client` |
 | SDK 基线合并报告 | 工作区 `.omx/context/computer-use-implementation-20261006/sdk-baseline-alignment-20261006/alignment-report.md` |
 
-manifest 中的 Git rev 仍是本轮 Source 对齐前的基线；当前验证使用本地 patch 指向 SDK integration 工作树。Source 对齐的 SDK 和 Harness 改动尚未成为不可变提交。发布前需提交 SDK、更新 Harness 的 Git rev，并在去掉路径 patch 后完成 `--locked` 构建；本地路径 patch 不能证明远端依赖可获取。
+SDK 已形成上述合并提交；Harness main 合并尚在进行。最终三仓必须以统一不可变提交执行 `--locked` 构建；本地路径 patch 不能证明远端依赖可获取，尚未提交或未执行的验收不继承历史候选结论。
 
 原生启用由 host 提供 `VerifiedComputerProfile { model, profile, provider, evidence }`，通过 `ConversationOrchestrator::with_verified_computer_profiles` 注入。空 allowlist 保持 function 投影。构造器过滤空 `evidence`，但无法鉴定一段字符串是否来自真实验收；集成方必须提供能够定位实际 model/profile、endpoint、协议、操作与桌面结果的证据。desktop host 通过 `DesktopConfig.verified_computer_profiles` 配置，并由现有 assembly 传入该 builder；`VerifiedComputerProfile` 与 `NativeComputerProvider` 从 desktop 公共入口导出。默认配置为空，本轮独立桌面验收不能用作真实 Provider profile 的 evidence。
 

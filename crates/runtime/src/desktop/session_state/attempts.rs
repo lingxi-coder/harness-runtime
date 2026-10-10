@@ -86,7 +86,7 @@ impl AttemptProjection {
             _ => {
                 return Err(CostPersistError::Storage(
                     "non-attempt event in attempt fold".into(),
-                ))
+                ));
             }
         }
         self.acks.insert(

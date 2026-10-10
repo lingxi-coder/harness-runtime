@@ -102,6 +102,53 @@ where
     Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)
 }
 
+fn serialize_root_string_projection<S>(
+    projection: &Utf16JsonProjection,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if projection.string_units("").is_none() {
+        return Err(serde::ser::Error::custom(
+            "projection must contain a root JSON string",
+        ));
+    }
+    serialize_json_projection(projection, serializer)
+}
+
+fn serialize_optional_root_string_projection<S>(
+    projection: &Option<Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match projection {
+        Some(projection) => serialize_root_string_projection(projection, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_optional_root_string_projection<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    if raw.get().trim() == "null" {
+        return Ok(None);
+    }
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    if projection.string_units("").is_none() {
+        return Err(serde::de::Error::custom(
+            "projection must contain a root JSON string",
+        ));
+    }
+    Ok(Some(projection))
+}
+
 fn null_json_projection() -> Utf16JsonProjection {
     Utf16JsonProjection::parse("null").expect("null is valid JSON")
 }
@@ -207,6 +254,41 @@ where
         .remove(name)
         .map(|raw| Utf16JsonProjection::parse(raw.get()).map_err(E::custom))
         .transpose()
+}
+
+fn raw_optional_nullable<T, E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<T>, E>
+where
+    T: DeserializeOwned,
+    E: serde::de::Error,
+{
+    match fields.remove(name) {
+        None => Ok(None),
+        Some(raw) if raw.get().trim() == "null" => Ok(None),
+        Some(raw) => serde_json::from_str(raw.get()).map(Some).map_err(E::custom),
+    }
+}
+
+fn raw_optional_root_string_projection<E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<Utf16JsonProjection>, E>
+where
+    E: serde::de::Error,
+{
+    match fields.remove(name) {
+        None => Ok(None),
+        Some(raw) if raw.get().trim() == "null" => Ok(None),
+        Some(raw) => {
+            let projection = Utf16JsonProjection::parse(raw.get()).map_err(E::custom)?;
+            if projection.string_units("").is_none() {
+                return Err(E::custom(format!("field {name} must be a JSON string")));
+            }
+            Ok(Some(projection))
+        }
+    }
 }
 
 fn raw_string_json_projection<E>(
@@ -900,6 +982,78 @@ pub struct CompactBoundaryMetadata {
 }
 
 impl ContentBlock {
+    /// Recover the exact source input belonging to a tool call.
+    pub fn projected_tool_input(
+        &self,
+    ) -> Result<Option<Utf16JsonProjection>, crate::types::utf16_json::Utf16JsonProjectionError>
+    {
+        let Self::ToolUse { input, .. } = self else {
+            return Ok(None);
+        };
+        input.validate()?;
+        Ok(Some(input.clone()))
+    }
+
+    /// Recover the exact model-facing source content for a tool result.
+    pub fn projected_tool_result(
+        &self,
+    ) -> Result<Option<Utf16JsonProjection>, crate::types::utf16_json::Utf16JsonProjectionError>
+    {
+        use crate::types::utf16_json::Utf16JsonProjectionError;
+        let Self::ToolResult {
+            content,
+            content_blocks,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        let projection = content_blocks.as_ref().unwrap_or(content);
+        projection.validate()?;
+        if content_blocks.is_some() && projection.array_len("").is_none() {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "tool result content blocks must be a JSON array",
+            ));
+        }
+        if content_blocks.is_none() && projection.string_units("").is_none() {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "tool result content must be a JSON string",
+            ));
+        }
+        Ok(Some(projection.clone()))
+    }
+
+    /// Replace a tool result's source content while keeping its string/array
+    /// representation in the canonical field.
+    pub fn rebase_tool_result_projection(
+        &mut self,
+        source: Utf16JsonProjection,
+    ) -> Result<(), crate::types::utf16_json::Utf16JsonProjectionError> {
+        use crate::types::utf16_json::Utf16JsonProjectionError;
+        source.validate()?;
+        let Self::ToolResult {
+            content,
+            content_blocks,
+            ..
+        } = self
+        else {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "result source requires a tool result block",
+            ));
+        };
+        if source.string_units("").is_some() {
+            *content = source;
+            *content_blocks = None;
+        } else if source.array_len("").is_some() {
+            *content_blocks = Some(source);
+        } else {
+            return Err(Utf16JsonProjectionError::InvalidProjection(
+                "tool result content must be a string or array",
+            ));
+        }
+        Ok(())
+    }
+
     /// Text a user-facing renderer may display from this block.
     ///
     /// Anthropic text blocks with unknown native fields stay as one raw
@@ -917,6 +1071,26 @@ impl ContentBlock {
             _ => None,
         }
     }
+}
+
+/// A model-facing API system row or projection. Original transcript rows keep
+/// their identity while an admitted projection changes only model input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiSystemMessage {
+    pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<ApiSystemOutputConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiSystemOutputConfig {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_root_string_projection",
+        deserialize_with = "deserialize_optional_root_string_projection"
+    )]
+    pub effort: Option<Utf16JsonProjection>,
 }
 
 /// A single message in a conversation, role-tagged for serde.
@@ -991,6 +1165,10 @@ pub enum ConversationMessage {
             skip_serializing_if = "Option::is_none"
         )]
         turn_origin: Option<Utf16JsonProjection>,
+        /// Model-facing representation of an admitted user row, when it differs
+        /// from the original transcript row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_message_override: Option<ApiSystemMessage>,
     },
     /// Assistant-authored message — may include tool-use blocks.
     Assistant {
@@ -1010,6 +1188,16 @@ pub enum ConversationMessage {
             skip_serializing_if = "Option::is_none"
         )]
         resumable: Option<Utf16JsonProjection>,
+        /// Native admitted effort used by this successful response. Provider
+        /// output cannot populate this owner-only history field.
+        #[serde(
+            default,
+            rename = "perTurnEffort",
+            serialize_with = "serialize_optional_root_string_projection",
+            deserialize_with = "deserialize_optional_root_string_projection",
+            skip_serializing_if = "Option::is_none"
+        )]
+        per_turn_effort: Option<Utf16JsonProjection>,
     },
     /// System prompt — flat string, no tool blocks.
     System {
@@ -1024,6 +1212,10 @@ pub enum ConversationMessage {
         /// Structured system-message subtype, when present.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subtype: Option<String>,
+        /// Explicit model-facing API system row. Transcript-only notices have
+        /// no payload and remain excluded from model requests.
+        #[serde(default, rename = "apiSystem", skip_serializing_if = "Option::is_none")]
+        api_system: Option<ApiSystemMessage>,
         /// Typed compact-boundary metadata.
         #[serde(
             default,
@@ -1076,6 +1268,10 @@ impl<'de> Deserialize<'de> for ConversationMessage {
                     usage_limit_note: raw_optional(&mut fields, "usageLimitNote")?,
                     origin: raw_optional_projection(&mut fields, "origin")?,
                     turn_origin: raw_optional_projection(&mut fields, "turnOrigin")?,
+                    api_message_override: raw_optional_nullable(
+                        &mut fields,
+                        "api_message_override",
+                    )?,
                 })
             }
             "assistant" => {
@@ -1087,12 +1283,17 @@ impl<'de> Deserialize<'de> for ConversationMessage {
                     content: raw_content_blocks::<D::Error>(raw_content)?,
                     stop_reason: raw_optional_string(&mut fields, "stop_reason")?,
                     resumable: raw_optional_projection(&mut fields, "resumable")?,
+                    per_turn_effort: raw_optional_root_string_projection(
+                        &mut fields,
+                        "perTurnEffort",
+                    )?,
                 })
             }
             "system" => Ok(Self::System {
                 id: raw_required(&mut fields, "id")?,
                 content: raw_string_json_projection(&mut fields, "content")?,
                 subtype: raw_optional_string(&mut fields, "subtype")?,
+                api_system: raw_optional_nullable(&mut fields, "apiSystem")?,
                 compact_metadata: raw_optional(&mut fields, "compactMetadata")?,
                 model_fallback: raw_optional(&mut fields, "modelFallback")?,
                 refusal_fallback: raw_optional(&mut fields, "refusalFallback")?,
@@ -1225,6 +1426,7 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -1247,6 +1449,7 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -1309,6 +1512,7 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -1325,6 +1529,7 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -1344,6 +1549,7 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -1358,6 +1564,7 @@ impl ConversationMessage {
             id,
             content: content.into(),
             subtype: Some("compact_boundary".to_string()),
+            api_system: None,
             compact_metadata: Some(metadata),
             model_fallback: None,
             refusal_fallback: None,
@@ -1407,6 +1614,7 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -1437,6 +1645,7 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 
@@ -1530,6 +1739,102 @@ impl ConversationMessage {
             _ => Vec::new(),
         }
     }
+
+    /// Construct a model-facing API system row without adding a transcript
+    /// notice to the ordinary system content stream.
+    #[must_use]
+    pub fn api_system(id: MessageId, message: ApiSystemMessage) -> Self {
+        Self::System {
+            id,
+            content: Utf16JsonProjection::root_string(String::new(), Vec::new())
+                .expect("empty text is a valid source string"),
+            subtype: Some("api_system".into()),
+            api_system: Some(message),
+            compact_metadata: None,
+            model_fallback: None,
+            refusal_fallback: None,
+        }
+    }
+}
+
+/// Project per-turn effort from successful assistant responses onto API system
+/// rows while leaving the stored transcript messages untouched.
+pub fn project_per_turn_effort(
+    messages: Vec<ConversationMessage>,
+    current: &Utf16JsonProjection,
+) -> Vec<ConversationMessage> {
+    current
+        .string_units("")
+        .expect("per-turn effort must be a root JSON string");
+    let mut effort = current.clone();
+    let mut levels = vec![Vec::new(); messages.len()];
+    for (index, message) in messages.iter().enumerate().rev() {
+        if let ConversationMessage::Assistant {
+            per_turn_effort: Some(saved),
+            ..
+        } = message
+        {
+            levels[index] = saved
+                .string_units("")
+                .expect("stored per-turn effort must be a root JSON string");
+            effort = saved.clone();
+        } else {
+            levels[index] = effort
+                .string_units("")
+                .expect("per-turn effort must be a root JSON string");
+        }
+    }
+    // The reverse pass assigns an assistant's saved effort to its own row;
+    // user rows use the nearest later assistant, or the current request at tail.
+    let mut projected = Vec::with_capacity(messages.len() + 1);
+    let mut active: Option<Vec<u16>> = None;
+    let mut pending: Option<Utf16JsonProjection> = None;
+    for (index, mut message) in messages.into_iter().enumerate() {
+        if !matches!(message, ConversationMessage::User { .. }) {
+            if let Some(next_effort) = pending.take() {
+                active = next_effort.string_units("");
+                if let ConversationMessage::System {
+                    api_system: Some(payload),
+                    ..
+                } = &mut message
+                {
+                    payload.output_config = Some(ApiSystemOutputConfig {
+                        effort: Some(next_effort),
+                    });
+                } else {
+                    projected.push(ConversationMessage::api_system(
+                        MessageId::new(),
+                        ApiSystemMessage {
+                            content: Vec::new(),
+                            output_config: Some(ApiSystemOutputConfig {
+                                effort: Some(next_effort),
+                            }),
+                        },
+                    ));
+                }
+            }
+        }
+        if matches!(message, ConversationMessage::User { .. }) {
+            let next_units = levels[index].clone();
+            pending = (active.as_deref() != Some(next_units.as_slice())).then(|| {
+                Utf16JsonProjection::root_string(String::from_utf16_lossy(&next_units), next_units)
+                    .expect("saved effort is a root JSON string")
+            });
+        }
+        projected.push(message);
+    }
+    if let Some(next_effort) = pending {
+        projected.push(ConversationMessage::api_system(
+            MessageId::new(),
+            ApiSystemMessage {
+                content: Vec::new(),
+                output_config: Some(ApiSystemOutputConfig {
+                    effort: Some(next_effort),
+                }),
+            },
+        ));
+    }
+    projected
 }
 
 /// One in-memory unit surfaced from the loader to the agent loop.
@@ -1598,6 +1903,7 @@ mod tests {
             stop_reason: None,
 
             resumable: None,
+            per_turn_effort: None,
         };
 
         assert_eq!(message.text_content(), "visible");
@@ -1726,6 +2032,7 @@ mod tests {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         };
         let line = serde_json::to_string(&m).unwrap();
         // A non-meta user message must NOT serialize an `is_meta` field
@@ -1822,6 +2129,7 @@ mod tests {
             id,
             content: "notice".into(),
             subtype: None,
+            api_system: None,
             compact_metadata: None,
             model_fallback: None,
             refusal_fallback: None,
@@ -1932,6 +2240,7 @@ mod tests {
             stop_reason: None,
 
             resumable: None,
+            per_turn_effort: None,
         };
         assert!(m.has_tool_use());
         assert_eq!(m.tool_calls().len(), 1);
@@ -2028,6 +2337,7 @@ mod tests {
             stop_reason: None,
 
             resumable: None,
+            per_turn_effort: None,
         };
         let stored = serde_json::to_value(&message).unwrap();
         assert!(stored["content"][0].get("citations").is_some());
@@ -2344,6 +2654,7 @@ mod tests {
             content: Vec::new(),
             stop_reason: Some("max_tokens".into()),
             resumable: None,
+            per_turn_effort: None,
         };
         let absent = serde_json::to_string(&base).expect("assistant serializes");
         assert!(!absent.contains("resumable"));
@@ -2353,6 +2664,7 @@ mod tests {
             decoded,
             ConversationMessage::Assistant {
                 resumable: None,
+                per_turn_effort: None,
                 ..
             }
         ));
@@ -2364,6 +2676,7 @@ mod tests {
                 content: Vec::new(),
                 stop_reason: Some("max_tokens".into()),
                 resumable: Some(projection.clone()),
+                per_turn_effort: None,
             };
             let serialized = serde_json::to_string(&message).expect("assistant serializes");
             assert!(serialized.contains(&format!(r#""resumable":{source}"#)));
@@ -2378,6 +2691,50 @@ mod tests {
             };
             assert_eq!(actual, projection);
         }
+    }
+
+    #[test]
+    fn per_turn_effort_keeps_exact_source_through_history_projection() {
+        let effort = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let response = ConversationMessage::Assistant {
+            id: MessageId::new(),
+            content: Vec::new(),
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+            per_turn_effort: Some(effort.clone()),
+        };
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert!(encoded.contains(r#""perTurnEffort":"\ud800""#), "{encoded}");
+        let decoded: ConversationMessage = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, response);
+
+        let projected = project_per_turn_effort(
+            vec![
+                ConversationMessage::user(MessageId::new(), "prompt".into()),
+                response,
+            ],
+            &Utf16JsonProjection::root_string("medium".into(), "medium".encode_utf16().collect())
+                .unwrap(),
+        );
+        let api_row = projected
+            .iter()
+            .find_map(|message| match message {
+                ConversationMessage::System {
+                    api_system: Some(payload),
+                    ..
+                } => Some(payload),
+                _ => None,
+            })
+            .expect("effort is projected into an API system row");
+        let actual = api_row
+            .output_config
+            .as_ref()
+            .and_then(|config| config.effort.as_ref())
+            .expect("the exact effort source remains present");
+        assert_eq!(actual.string_units(""), Some(vec![0xd800]));
+        assert!(serde_json::to_string(api_row)
+            .unwrap()
+            .contains(r#""effort":"\ud800""#));
     }
 
     #[test]

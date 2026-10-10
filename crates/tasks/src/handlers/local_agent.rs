@@ -809,8 +809,9 @@ impl LocalAgentHandler {
             .as_ref()
             .and_then(|r| r.forked_skill_name.clone());
         let request = spawn_request.unwrap_or_else(|| SubagentSpawnRequest {
-            agent_spawn_provenance: Default::default(),
             agent_spawn_token: None,
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::Session,
+            agent_spawn_provenance: Default::default(),
             parent_native_query_depth: None,
             handback_opt_in: false,
             parent_permission_mode: None,
@@ -851,6 +852,7 @@ impl LocalAgentHandler {
             depth: 0,
             origin_session_id: None,
             parent_model_override: None,
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -1814,8 +1816,9 @@ mod tests {
     /// resolved before dispatch (the P1-01 ownership transfer).
     fn request_with_worktree(prompt: &str) -> SubagentSpawnRequest {
         SubagentSpawnRequest {
-            agent_spawn_provenance: Default::default(),
             agent_spawn_token: None,
+            stop_hook_scope: Default::default(),
+            agent_spawn_provenance: Default::default(),
             parent_native_query_depth: None,
             handback_opt_in: false,
             parent_permission_mode: None,
@@ -1856,6 +1859,7 @@ mod tests {
             depth: 1,
             origin_session_id: None,
             parent_model_override: None,
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -4328,8 +4332,9 @@ mod tests {
         let inherited_budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(MockBudget);
         let creator_agent_id = lingxi_core::types::AgentId::new();
         let expected = SubagentSpawnRequest {
-            agent_spawn_provenance: Default::default(),
             agent_spawn_token: None,
+            stop_hook_scope: Default::default(),
+            agent_spawn_provenance: Default::default(),
             parent_native_query_depth: None,
             handback_opt_in: false,
             parent_permission_mode: None,
@@ -4370,6 +4375,7 @@ mod tests {
             depth: 3,
             origin_session_id: None,
             parent_model_override: Some("claude-opus-4-6".into()),
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,

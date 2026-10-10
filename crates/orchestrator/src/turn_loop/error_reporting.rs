@@ -363,6 +363,7 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
         .unwrap_or_else(|| PROMPT_TOO_LONG_ERROR_MESSAGE.to_string());
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![ContentBlock::Text {
             text: text.clone(),
@@ -397,6 +398,7 @@ pub(crate) async fn surface_prompt_too_long(orch: &ConversationOrchestrator) -> 
 pub(crate) async fn surface_rapid_refill_thrashing(orch: &ConversationOrchestrator) -> MessageId {
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![ContentBlock::Text {
             text: compaction::RAPID_REFILL_THRASHING_MESSAGE.to_string(),
@@ -642,6 +644,7 @@ pub(crate) async fn surface_terminal_api_error(
     )?;
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![ContentBlock::TextJsUtf16 {
             text: text
@@ -796,6 +799,7 @@ pub(crate) async fn surface_model_error(
     orch: &ConversationOrchestrator,
     error_text: Utf16JsonProjection,
     env: ApiErrorEnvelope,
+    provider_status: Option<u16>,
 ) -> MessageId {
     if let Some(bus) = orch.model_runtime.analytics_bus.as_ref() {
         let mut metadata = telemetry::LogEventMetadata::new();
@@ -812,6 +816,7 @@ pub(crate) async fn surface_model_error(
     orch.output
         .emit_terminal_api_error(status, reason, "stop_sequence")
         .await;
+    orch.note_turn_api_error_status(provider_status);
     id
 }
 
@@ -854,6 +859,7 @@ pub(crate) async fn surface_api_error_notice(
     };
     let assistant_id = MessageId::new();
     let assistant_msg = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: assistant_id,
         content: vec![content],
         stop_reason: Some("model_error".to_string()),
@@ -884,6 +890,14 @@ pub(crate) fn orchestrator_error_text_source(
     model: &str,
 ) -> Utf16JsonProjection {
     match error {
+        OrchestratorError::MaxStructuredOutputRetries {
+            max_retries,
+            last_error: Some(detail),
+        } => source_error_affixes(
+            &format!("Failed to provide valid structured output after {max_retries} attempts — last StructuredOutput error: "),
+            &detail.string_units("").expect("structured output error is a source string"),
+            "",
+        ),
         OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => {
             let native = error.native_anthropic_error_facts();
             if native.is_some() && error.http_status() == Some(404) {

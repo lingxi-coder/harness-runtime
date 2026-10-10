@@ -141,7 +141,7 @@ impl BunJsonSchemaValidator {
     /// `bun` PATH command used by the ModHost developer profile. The Bun process
     /// is not spawned until the first schema compilation.
     pub fn new_from_host_environment() -> Arc<Self> {
-        let executable = std::env::var_os("LINGXI_MOD_BUN_EXECUTABLE")
+        let executable = std::env::var_os(branding::MOD_BUN_EXECUTABLE_ENV)
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("bun"));
         Self::new(executable)
@@ -1005,5 +1005,164 @@ done
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("ensure_started retained an exited worker generation");
+    }
+}
+
+#[cfg(test)]
+mod native_draft7_semantics_tests {
+    use super::*;
+
+    fn projection(json: &str) -> Utf16JsonProjection {
+        Utf16JsonProjection::parse(json).expect("valid source JSON fixture")
+    }
+
+    async fn compile(
+        session: &Arc<dyn JsonSchemaValidatorSession>,
+        schema: &str,
+    ) -> Arc<dyn CompiledJsonSchema> {
+        session
+            .compile(&projection(schema))
+            .await
+            .expect("Native Draft-07 schema compiles")
+    }
+
+    async fn validate(compiled: &Arc<dyn CompiledJsonSchema>, input: &str) -> JsonSchemaValidation {
+        compiled
+            .validate(&projection(input))
+            .await
+            .expect("Bun worker validates the source input")
+    }
+
+    #[tokio::test]
+    async fn draft7_all_of_and_local_refs_keep_native_error_order() {
+        let validator = BunJsonSchemaValidator::new_from_host_environment();
+        let session = validator.new_session(SchemaProfile::StructuredOutputDraft7);
+        let schema = compile(
+            &session,
+            r##"{"type":"object","definitions":{"number":{"type":"integer","minimum":5}},"allOf":[{"required":["x"]},{"properties":{"a":{"$ref":"#/definitions/number"}}}],"additionalProperties":false}"##,
+        )
+        .await;
+
+        let JsonSchemaValidation::Invalid { detail, keywords } =
+            validate(&schema, r#"{"a":2,"b":4}"#).await
+        else {
+            panic!("invalid allOf instance was accepted")
+        };
+        assert_eq!(
+            keywords,
+            [
+                "required",
+                "minimum",
+                "additionalProperties",
+                "additionalProperties"
+            ]
+        );
+        assert_eq!(
+            detail.string_at(""),
+            Some("root: must have required property 'x', /a: must be >= 5, root: must NOT have additional properties ('a' is not allowed), root: must NOT have additional properties ('b' is not allowed)")
+        );
+    }
+
+    #[tokio::test]
+    async fn draft7_ajv_rule_order_unions_dependencies_and_conditions_are_retained() {
+        let validator = BunJsonSchemaValidator::new_from_host_environment();
+        let session = validator.new_session(SchemaProfile::StructuredOutputDraft7);
+
+        let property_schema = compile(
+            &session,
+            r#"{"type":"object","maxProperties":1,"minProperties":5,"required":["x"],"properties":{"a":{"type":"integer"}},"additionalProperties":false}"#,
+        )
+        .await;
+        let JsonSchemaValidation::Invalid { detail, keywords } =
+            validate(&property_schema, r#"{"a":"bad","b":2}"#).await
+        else {
+            panic!("invalid property instance was accepted")
+        };
+        assert_eq!(
+            keywords,
+            [
+                "maxProperties",
+                "minProperties",
+                "required",
+                "additionalProperties",
+                "type"
+            ]
+        );
+        assert_eq!(
+            detail.string_at(""),
+            Some("root: must NOT have more than 1 properties (got 2), root: must NOT have fewer than 5 properties (got 2), root: must have required property 'x', root: must NOT have additional properties ('b' is not allowed), /a: must be integer")
+        );
+
+        let union_schema = compile(
+            &session,
+            r#"{"type":"object","properties":{"x":{"oneOf":[{"type":"string"},{"type":"number"}]},"y":{"anyOf":[{"type":"integer","minimum":2},{"type":"string","minLength":3}]}},"dependencies":{"a":["b","c"]},"propertyNames":{"pattern":"^[a-z]+$"}}"#,
+        )
+        .await;
+        let JsonSchemaValidation::Invalid { detail, keywords } =
+            validate(&union_schema, r#"{"x":true,"y":false,"a":1,"BAD":2}"#).await
+        else {
+            panic!("invalid union/dependency instance was accepted")
+        };
+        assert_eq!(
+            keywords,
+            [
+                "pattern",
+                "propertyNames",
+                "dependencies",
+                "dependencies",
+                "type",
+                "type",
+                "oneOf",
+                "type",
+                "type",
+                "anyOf"
+            ]
+        );
+        assert_eq!(
+            detail.string_at(""),
+            Some("root: must match pattern \"^[a-z]+$\", root: property name must be valid, root: must have properties b, c when property a is present, root: must have properties b, c when property a is present, /x: must be string, /x: must be number, /x: must match exactly one schema in oneOf, /y: must be integer, /y: must be string, /y: must match a schema in anyOf")
+        );
+
+        let conditional_schema = compile(
+            &session,
+            r#"{"if":{"required":["a"]},"then":{"required":["b"]}}"#,
+        )
+        .await;
+        let JsonSchemaValidation::Invalid { detail, keywords } =
+            validate(&conditional_schema, r#"{"a":1}"#).await
+        else {
+            panic!("invalid conditional instance was accepted")
+        };
+        assert_eq!(keywords, ["required", "if"]);
+        assert_eq!(
+            detail.string_at(""),
+            Some("root: must have required property 'b', root: must match \"then\" schema")
+        );
+    }
+
+    #[tokio::test]
+    async fn draft7_required_surrogates_and_enum_replacement_values_keep_distinct_identity() {
+        let validator = BunJsonSchemaValidator::new_from_host_environment();
+        let session = validator.new_session(SchemaProfile::StructuredOutputDraft7);
+        let schema = compile(
+            &session,
+            r#"{"type":"object","required":["\ud800"],"properties":{"x":{"enum":["�"]}}}"#,
+        )
+        .await;
+
+        let JsonSchemaValidation::Invalid { detail, keywords } =
+            validate(&schema, r#"{"x":"\ud800"}"#).await
+        else {
+            panic!("the unpaired source value was conflated with U+FFFD")
+        };
+        assert_eq!(keywords, ["required", "enum"]);
+        assert!(detail.string_units("").unwrap().contains(&0xd800));
+        assert!(detail.string_at("").unwrap().contains("[\"�\"]"));
+
+        assert_eq!(
+            validate(&schema, r#"{"x":"�","\ud800":true}"#).await,
+            JsonSchemaValidation::Valid,
+            "the exact required key and the distinct replacement character are both accepted"
+        );
     }
 }

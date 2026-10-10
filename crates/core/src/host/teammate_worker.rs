@@ -24,6 +24,7 @@ pub enum WorkerToParent {
     },
     Ready {
         task_id: String,
+        selection: crate::host::team_spawn::TeammateModelSelection,
     },
     SendMessage {
         id: u64,

@@ -97,6 +97,7 @@ async fn seed_history(orch: &ConversationOrchestrator, n: usize) {
             ));
         } else {
             s.history.push(ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: format!("reply-{i} padded with enough detail for compaction"),
@@ -373,6 +374,7 @@ async fn failure_leaves_history_unchanged() {
                 ));
             } else {
                 s.history.push(ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: MessageId::new(),
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: format!("reply-{i}"),
@@ -808,6 +810,7 @@ async fn seed_marked(orch: &ConversationOrchestrator, n: usize, at: usize) -> St
             ConversationMessage::user(MessageId::new(), format!("USER-{i}"))
         } else {
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: format!("ASSISTANT-{i}"),

@@ -14,6 +14,7 @@ use lingxi_core::host::{
     FusionPublicationReceipt, FusionRunOutcome, FusionRunRecorder, FusionRunRecorderFactory,
     FusionSlashPublicationTarget, FusionStatus, OrchestratorHandle,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::json;
 use session::jsonl::{JsonlWriter, TranscriptAppendOutcome, TranscriptWriterError};
 use std::collections::HashMap;
@@ -458,7 +459,7 @@ impl DesktopFusionRecorder {
             )));
         };
         let delivery_id = outbox.delivery_id.clone();
-        let payload = outbox.payload.clone();
+        let payload = Utf16JsonProjection::from_serde_value(&outbox.payload)?;
         let orchestrator = target
             .history
             .read()

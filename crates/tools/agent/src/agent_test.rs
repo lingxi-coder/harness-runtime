@@ -250,12 +250,8 @@ mod tests {
     use tool_api::test_support::{ctx_for_file_tools, fresh_tx, make_dummy_fs};
     use tool_api::ToolRegistry;
 
-    /// `LINGXI_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
-    /// tests whose `build_prompt`/`prompt` output depends on the
-    /// `should_inject_agent_list_in_messages()` gate so a gate-ON test never
-    /// races a default-OFF test. Every such test acquires this AND removes the
-    /// var first, neutralizing ordering (mirrors `tools/shell/src/prompt.rs`).
-    use crate::agent::AGENT_LIST_ENV_LOCK;
+    /// Prompt and fork tests serialize current process-global prompt gates.
+    use crate::agent::AGENT_PROMPT_ENV_LOCK;
 
     /// Build a `BuiltinToolContext` wired with all four M4-05 mocks.
     fn wired_ctx(
@@ -696,7 +692,9 @@ mod tests {
         bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
 
         let tool = AgentTool::new(bctx);
-        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let statistics_session = lingxi_core::types::SessionId::new();
+        ctx.origin_session_id = Some(statistics_session);
         let input = serde_json::json!({
             "description": "do work",
             "subagent_type": "Plan",
@@ -725,6 +723,15 @@ mod tests {
             0,
             "budget rejection must not consume a lifetime spawn slot"
         );
+        let statistics =
+            lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(
+                registry.as_ref(),
+                statistics_session,
+            )
+            .unwrap()
+            .snapshot();
+        assert_eq!(statistics.refused.budget, 1);
+        assert_eq!(statistics.spawned, 0);
     }
 
     // =====================================================================
@@ -808,6 +815,68 @@ mod tests {
         assert_eq!(spawner.invocations().len(), 1);
     }
 
+    struct FailedIdentitySpawner(lingxi_core::types::AgentId);
+
+    #[async_trait]
+    impl SubagentSpawner for FailedIdentitySpawner {
+        async fn agent_listing(&self) -> Vec<SubagentListingEntry> {
+            arc_mock_spawner().agent_listing().await
+        }
+
+        async fn resolve_selection(
+            &self,
+            subagent_type: &str,
+            model: Option<&str>,
+        ) -> lingxi_core::host::subagent_spawn::SelectedAgentMeta {
+            arc_mock_spawner()
+                .resolve_selection(subagent_type, model)
+                .await
+        }
+
+        async fn spawn(
+            &self,
+            _request: SubagentSpawnRequest,
+            _inherit: SubagentInheritance,
+        ) -> Result<SubagentResult, lingxi_core::host::subagent_spawn::SubagentSpawnError> {
+            Ok(SubagentResult::Failed {
+                agent_id: self.0,
+                reason: "provider request failed".into(),
+                usage: Default::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_child_keeps_its_host_identity_in_the_tool_error() {
+        let agent_id = lingxi_core::types::AgentId::new();
+        let mut bctx = wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.subagent_spawner = Some(Arc::new(FailedIdentitySpawner(agent_id)));
+        let tool = AgentTool::new(bctx);
+        let error = tool
+            .call(
+                json!({
+                    "description": "inspect child failure",
+                    "subagent_type": "general-purpose",
+                    "prompt": "inspect",
+                    "run_in_background": false,
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("a failed child stays a tool error");
+        assert_eq!(error.model_facing_message(), "provider request failed");
+        assert!(matches!(
+            error,
+            ToolError::SubagentFailed { agent_id: id, .. } if id == agent_id
+        ));
+    }
+
     /// `tengu_agent_tool_terminated` — the metric that counts runs which were
     /// STOPPED rather than finished. It had an emitter and no caller, so it
     /// never fired: a killed subagent was invisible to it.
@@ -877,6 +946,8 @@ mod tests {
         );
         let tool = AgentTool::new(bctx);
         let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let statistics_session = lingxi_core::types::SessionId::new();
+        ctx.origin_session_id = Some(statistics_session);
         let limit = lingxi_core::host::subagent_spawn::max_subagent_spawn_depth();
         ctx.depth = limit;
         let err = tool
@@ -902,6 +973,15 @@ mod tests {
         }
         assert!(spawner.invocations().is_empty());
         assert_eq!(registry.get_total_agent_spawns(), 0);
+        let statistics =
+            lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(
+                registry.as_ref(),
+                statistics_session,
+            )
+            .unwrap()
+            .snapshot();
+        assert_eq!(statistics.refused.depth_limit, 1);
+        assert_eq!(statistics.spawned, 0);
     }
 
     #[tokio::test]
@@ -918,7 +998,9 @@ mod tests {
             arc_mock_budget(u64::MAX),
         );
         let tool = AgentTool::new(bctx);
-        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let statistics_session = lingxi_core::types::SessionId::new();
+        ctx.origin_session_id = Some(statistics_session);
         let cap = lingxi_core::host::subagent_spawn::max_concurrent_subagents();
         let err = tool
             .call(
@@ -943,6 +1025,15 @@ mod tests {
         }
         assert!(spawner.invocations().is_empty());
         assert_eq!(registry.get_total_agent_spawns(), 0);
+        let statistics =
+            lingxi_core::host::task_registry::TaskRegistryHandle::agent_session_statistics(
+                registry.as_ref(),
+                statistics_session,
+            )
+            .unwrap()
+            .snapshot();
+        assert_eq!(statistics.refused.concurrency_limit, 1);
+        assert_eq!(statistics.spawned, 0);
     }
 
     #[tokio::test]
@@ -987,7 +1078,7 @@ mod tests {
     // `taskRegistry.getTotalAgentSpawns` / `incrementTotalAgentSpawns`).
     // =====================================================================
 
-    // `xtu()` = `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION ?? 200`.
+    // `xtu()` = `LINGXI_MAX_SUBAGENTS_PER_SESSION ?? 200`.
     #[test]
     fn max_subagents_per_session_resolves_env_and_default() {
         assert_eq!(max_subagents_per_session_from(None), 200);
@@ -1030,7 +1121,7 @@ mod tests {
             msg.contains(
                 "Subagent spawn limit reached (1000 of 200 agents spawned). \
 Complete the remaining work directly with your tools instead of spawning more agents. \
-If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
+If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_PER_SESSION."
             ),
             "cap message must be byte-exact: {msg}"
         );
@@ -1088,7 +1179,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[test]
     fn agent_tool_name_locked() {
         assert_eq!(AGENT_TOOL_NAME, "Agent");
-        assert_eq!(LEGACY_AGENT_TOOL_NAME, "Task");
+        let tool = AgentTool::new(ctx_for_file_tools(
+            make_dummy_fs(),
+            Arc::new(AnalyticsBus::new()),
+            vec![PathBuf::from("/tmp")],
+        ));
+        assert!(tool.aliases().is_empty());
     }
 
     #[test]
@@ -1799,10 +1895,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn fusion_disabled_is_not_listed_and_explicit_call_is_not_found() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
             spawner,
@@ -1832,7 +1927,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(
-            !prompt.contains("- fusion:"),
+            !prompt.contains("`fusion` is also available"),
             "disabled fusion must not appear in the listing"
         );
         let err = tool
@@ -1918,10 +2013,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[allow(clippy::await_holding_lock)]
     async fn fusion_enabled_lists_and_returns_ok_including_needs_parent() {
         use lingxi_core::host::task_registry::TaskRegistryHandle;
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         let spawner = arc_mock_spawner();
         let registry = arc_mock_task_registry();
         let bctx = wired_ctx(
@@ -2109,7 +2203,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// genuinely dispatched, 1 rejected before allocation, `partial_ok`
     /// still satisfied so the orchestrator returns `Ok` — must release the
     /// one phantom reservation slot, leaving only the 2 real spawns charged
-    /// against the session's lifetime `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`
+    /// against the session's lifetime `LINGXI_MAX_SUBAGENTS_PER_SESSION`
     /// counter. Asserting the QUOTA COUNT (not a result field) is the
     /// judgment call this finding turns on: the tool result looks identical
     /// either way, only `get_total_agent_spawns()` reveals the phantom
@@ -2170,7 +2264,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// for every "did this panel reach the spawner" filter on its side).
     /// The Ok arm's quota release must exclude it exactly as it excludes
     /// `"spawn"`, or every such panel permanently burns one slot of the
-    /// session's lifetime `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` quota for
+    /// session's lifetime `LINGXI_MAX_SUBAGENTS_PER_SESSION` quota for
     /// a subagent that provably never existed. As with the `"spawn"` case,
     /// only `get_total_agent_spawns()` reveals the phantom charge — the
     /// tool result is byte-identical either way.
@@ -2455,7 +2549,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// provider calls. `MinPanelsNotMet` happens AFTER every panel actually
     /// ran, so the full `panel_n` reservation must stay charged (not
     /// released) — otherwise a repeated failing Fusion run is free to retry
-    /// forever against `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`.
+    /// forever against `LINGXI_MAX_SUBAGENTS_PER_SESSION`.
     #[tokio::test]
     async fn fusion_min_panels_not_met_keeps_all_reserved_spawns() {
         use lingxi_core::host::task_registry::TaskRegistryHandle;
@@ -2667,7 +2761,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     /// `resolve_and_reserve` / biased-select pre-panel window) must release
     /// the full `panel_n` reservation — a cancel that never made a provider
     /// call must not permanently narrow
-    /// `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` for agents that never
+    /// `LINGXI_MAX_SUBAGENTS_PER_SESSION` for agents that never
     /// existed. `ErroringFusion` never touches the progress channel, so it
     /// models a cancel observed strictly before `run_panel_stage`.
     #[tokio::test]
@@ -3458,7 +3552,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     /// [round-12 review, finding 3] ONE dispatch, TWO terminations, ONE
-    /// charge against `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`.
+    /// charge against `LINGXI_MAX_SUBAGENTS_PER_SESSION`.
     ///
     /// The `Ok` arm has charged "panels that provably reached the spawner"
     /// since round 4 — it filters `error_category: "spawn"` /
@@ -4165,10 +4259,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let v = json!({"description": "d", "subagent_type": "Plan", "prompt": "Design."});
         let parsed: AgentToolInput = serde_json::from_value(v).unwrap();
         assert!(parsed.model.is_none());
+        assert!(parsed.model_profile.is_none());
         assert!(parsed.run_in_background.is_none());
         assert!(parsed.name.is_none());
-        assert!(parsed.team_name.is_none());
-        assert!(parsed.mode.is_none());
         assert!(parsed.isolation.is_none());
         assert!(parsed.cwd.is_none());
         assert!(parsed.context_paths.is_empty());
@@ -4190,6 +4283,28 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // The advertised schema requires `description` + `prompt` (TS schema), and
     // exposes NO `context_paths` field to the model.
     #[test]
+    fn agent_public_input_omits_removed_permission_and_team_fields() {
+        for schema in [&*AGENT_INPUT_SCHEMA, &*AGENT_INPUT_SCHEMA_MODEL] {
+            let properties = schema["properties"].as_object().unwrap();
+            assert!(!properties.contains_key("mode"));
+            assert!(!properties.contains_key("team_name"));
+        }
+        let parsed: AgentToolInput = serde_json::from_value(json!({
+            "description":"inspect", "prompt":"inspect"
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(parsed).unwrap();
+        assert!(serialized.get("mode").is_none());
+        assert!(serialized.get("team_name").is_none());
+        let description = AGENT_INPUT_SCHEMA["properties"]["model"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            description.contains("deployment model override can replace this model and profile")
+        );
+    }
+
+    #[test]
     fn agent_schema_requires_description_and_prompt() {
         let required = AGENT_INPUT_SCHEMA["required"]
             .as_array()
@@ -4205,10 +4320,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(!props.contains_key("context_paths"));
         for k in [
             "model",
+            "model_profile",
             "run_in_background",
             "name",
-            "team_name",
-            "mode",
             "isolation",
             "cwd",
             "preset",
@@ -4220,11 +4334,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         ] {
             assert!(props.contains_key(k), "schema exposes {k}");
         }
-        // `model` + `isolation` carry the TS enum constraint.
-        assert_eq!(
-            AGENT_INPUT_SCHEMA["properties"]["model"]["enum"],
-            json!(["sonnet", "opus", "haiku", "fable"])
-        );
+        // Model selection is catalog driven across all configured providers.
+        assert!(AGENT_INPUT_SCHEMA["properties"]["model"]
+            .get("enum")
+            .is_none());
         assert_eq!(
             AGENT_INPUT_SCHEMA["properties"]["isolation"]["enum"],
             json!(["worktree", "remote"])
@@ -4249,6 +4362,56 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 "Optional model override for this agent. Takes precedence over the agent definition's model frontmatter and the configured default subagent model. If omitted, uses the agent definition's model, else the default (inherits from the parent unless a default subagent model is configured). Ignored for subagent_type: \"fork\" — forks always inherit the parent model."
             )
         );
+        assert!(AGENT_INPUT_SCHEMA["properties"]["model"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("profile/model"));
+    }
+
+    #[test]
+    fn agent_schema_accepts_models_from_multiple_providers() {
+        const URL: &str = "mem://agent-provider-schema";
+        let schema =
+            project_agent_input_schema_with_policy(&AGENT_INPUT_SCHEMA_MODEL, false, false, false);
+        let mut schemas = boon::Schemas::new();
+        let mut compiler = boon::Compiler::new();
+        compiler.add_resource(URL, schema).unwrap();
+        let compiled = compiler.compile(URL, &mut schemas).unwrap();
+        for model in [
+            "gpt-4o",
+            "gemini-2.5-pro",
+            "claude-sonnet-4-5",
+            "openai/gpt-4o",
+            "sonnet",
+        ] {
+            let input = json!({"description":"inspect", "prompt":"inspect", "model":model});
+            schemas.validate(&input, compiled).unwrap();
+        }
+        schemas
+            .validate(
+                &json!({
+                    "description":"inspect", "prompt":"inspect", "model":"gpt-4o",
+                    "model_profile":"openai",
+                }),
+                compiled,
+            )
+            .unwrap();
+        assert!(schemas
+            .validate(
+                &json!({
+                    "description":"inspect", "prompt":"inspect", "model_profile":"openai",
+                }),
+                compiled
+            )
+            .is_err());
+        assert!(schemas
+            .validate(
+                &json!({
+                    "description":"inspect", "prompt":"inspect", "model":42,
+                }),
+                compiled
+            )
+            .is_err());
     }
 
     /// `gSn()`'s tail projections over the advertised schema (@3575600):
@@ -4259,14 +4422,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[test]
     fn agent_schema_projection_covers_coordinator_and_model_force() {
         // Non-coordinator, no force: the base description, unchanged.
-        let plain = project_agent_input_schema(&AGENT_INPUT_SCHEMA_MODEL, false);
+        let plain =
+            project_agent_input_schema_with_policy(&AGENT_INPUT_SCHEMA_MODEL, false, false, false);
         assert_eq!(
             plain["properties"]["model"]["description"],
             json!(AGENT_MODEL_PARAM_DESCRIPTION)
         );
         // Coordinator (env unset ⇒ not forced): the steering suffix, appended
         // with no separator because the binary concatenates with `+`.
-        let coord = project_agent_input_schema(&AGENT_INPUT_SCHEMA_MODEL, true);
+        let coord =
+            project_agent_input_schema_with_policy(&AGENT_INPUT_SCHEMA_MODEL, true, false, false);
         let desc = coord["properties"]["model"]["description"]
             .as_str()
             .expect("model description is a string");
@@ -4285,6 +4450,189 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             assert!(props.contains_key("prompt"));
             assert!(!props.contains_key("cwd"), "cwd is never advertised");
         }
+        let forced =
+            project_agent_input_schema_with_policy(&AGENT_INPUT_SCHEMA_MODEL, false, true, false);
+        assert!(forced["properties"].get("model").is_none());
+        assert!(forced["properties"].get("model_profile").is_none());
+        let forced_coordinator =
+            project_agent_input_schema_with_policy(&AGENT_INPUT_SCHEMA_MODEL, true, false, true);
+        for field in ["model", "model_profile"] {
+            assert!(forced_coordinator["properties"][field]["description"]
+                .as_str()
+                .unwrap()
+                .ends_with(AGENT_MODEL_PARAM_COORDINATOR_FORCED_SUFFIX));
+        }
+    }
+
+    #[test]
+    fn forced_model_selection_clears_model_and_profile_together() {
+        let mut parsed: AgentToolInput = serde_json::from_value(json!({
+            "description":"inspect", "prompt":"inspect",
+            "model":"gpt-4o", "model_profile":"openai",
+        }))
+        .unwrap();
+        clear_model_overrides_when_forced(&mut parsed, true);
+        assert!(parsed.model.is_none());
+        assert!(parsed.model_profile.is_none());
+    }
+
+    #[test]
+    fn model_profile_hook_preserves_missing_and_clears_explicit_null() {
+        assert_eq!(
+            model_profile_after_hook(&json!({}), Some("openai".into())).unwrap(),
+            Some("openai".into())
+        );
+        assert_eq!(
+            model_profile_after_hook(&json!({"model_profile":null}), Some("openai".into()))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            model_profile_after_hook(&json!({"model_profile":"gemini"}), Some("openai".into()))
+                .unwrap(),
+            Some("gemini".into())
+        );
+        assert!(model_profile_after_hook(&json!({"model_profile":42}), None).is_err());
+    }
+
+    #[test]
+    fn named_hook_model_clearing_keeps_the_selection_pair_consistent() {
+        let mut parsed: AgentToolInput = serde_json::from_value(json!({
+            "description":"inspect", "prompt":"inspect", "name":"scout",
+            "model":"gpt-4o", "model_profile":"openai",
+        }))
+        .unwrap();
+        let rewrite = json!({"model":null,"model_profile":null});
+        parsed.model = model_after_hook(&rewrite, parsed.model.take()).unwrap();
+        parsed.model_profile =
+            model_profile_after_hook(&rewrite, parsed.model_profile.take()).unwrap();
+        assert!(parsed.model.is_none());
+        assert!(parsed.model_profile.is_none());
+        assert_eq!(
+            model_after_hook(&json!({}), Some("gpt-4o".into())).unwrap(),
+            Some("gpt-4o".into())
+        );
+        assert_eq!(
+            model_after_hook(&json!({"model":"gemini-2.5-pro"}), Some("gpt-4o".into())).unwrap(),
+            Some("gemini-2.5-pro".into())
+        );
+        assert!(model_after_hook(&json!({"model":42}), None).is_err());
+    }
+
+    #[test]
+    fn forced_schema_ignores_profile_only_model_selection() {
+        for (coordinator, model_forced, coordinator_forces) in
+            [(false, true, false), (true, false, true)]
+        {
+            let schema = project_agent_input_schema_with_policy(
+                &AGENT_INPUT_SCHEMA_MODEL,
+                coordinator,
+                model_forced,
+                coordinator_forces,
+            );
+            let mut schemas = boon::Schemas::new();
+            let mut compiler = boon::Compiler::new();
+            compiler
+                .add_resource("mem://forced-agent-schema", schema)
+                .unwrap();
+            let compiled = compiler
+                .compile("mem://forced-agent-schema", &mut schemas)
+                .unwrap();
+            schemas
+                .validate(
+                    &json!({"description":"inspect", "prompt":"inspect", "model_profile":"openai"}),
+                    compiled,
+                )
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_tool_forwards_model_profile_across_launch_modes() {
+        let _guard = AGENT_PROMPT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for launch in ["sync", "async", "teammate"] {
+            let spawner = arc_mock_spawner();
+            if launch == "teammate" {
+                spawner.enable_teammates();
+            }
+            let tool = AgentTool::new(wired_ctx(
+                spawner.clone(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ));
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.options.main_loop_model = "claude-sonnet-4-5".into();
+            ctx.options.model_profile = Some("anthropic".into());
+            let mut input = json!({
+                "description":"inspect", "prompt":"inspect", "model":"gpt-4o",
+                "model_profile":"openai", "run_in_background":launch != "sync",
+            });
+            if launch == "teammate" {
+                input["name"] = json!("scout");
+            }
+            tool.call(input, ctx, fresh_tx())
+                .await
+                .expect("routed spawn");
+            let invocations = spawner.invocations();
+            assert_eq!(invocations.len(), 1, "{launch}");
+            assert_eq!(
+                invocations[0].request.model.as_deref(),
+                Some("gpt-4o"),
+                "{launch}"
+            );
+            assert_eq!(
+                invocations[0].request.model_profile.as_deref(),
+                Some("openai"),
+                "{launch}"
+            );
+            assert_eq!(
+                invocations[0].request.parent_model_override.as_deref(),
+                Some("claude-sonnet-4-5"),
+                "{launch}"
+            );
+            assert_eq!(
+                invocations[0]
+                    .request
+                    .parent_model_profile_override
+                    .as_deref(),
+                Some("anthropic"),
+                "{launch}"
+            );
+            assert_eq!(
+                spawner.agent_spawn_inputs()[0]["model_profile"],
+                json!("openai"),
+                "{launch}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_tool_rejects_profile_without_model() {
+        let spawner = arc_mock_spawner();
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let error = tool
+            .call(
+                json!({
+                    "description":"inspect", "prompt":"inspect", "model_profile":"openai",
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("model_profile requires an explicit model"));
+        assert!(spawner.invocations().is_empty());
     }
 
     // The `name` property carries the zod `.regex(uZc)` body as a wire JSON
@@ -4359,8 +4707,6 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "model",
             "run_in_background",
             "name",
-            "team_name",
-            "mode",
             "isolation",
             "preset",
             "models",
@@ -4428,7 +4774,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     async fn omitted_subagent_type_spawns_general_purpose() {
         // Acquire the fork-gate lock. Omitted type is general-purpose regardless
         // of the 2.1.232 default-ON feature gate.
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -4465,7 +4811,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // session model and a nested spawn against the immediate parent's model.
     #[tokio::test]
     async fn agent_tool_threads_main_loop_model_as_parent_override() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -4488,14 +4834,18 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             Some("deepseek-flash"),
             "the live/parent main_loop_model is threaded as the spawn's parent override"
         );
-        assert_eq!(inv[0].request.model_profile.as_deref(), Some("deepseek"));
+        assert!(inv[0].request.model_profile.is_none());
+        assert_eq!(
+            inv[0].request.parent_model_profile_override.as_deref(),
+            Some("deepseek")
+        );
     }
 
     // The legacy `"subagent"` placeholder (an un-seeded dispatch) is NOT threaded
     // as a parent override — the spawner then falls back to its own default.
     #[tokio::test]
     async fn agent_tool_placeholder_main_loop_model_is_not_threaded() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -4587,7 +4937,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // `LINGXI_DISABLE_BACKGROUND_TASKS` used to have its OWN lock here. That
     // was the bug: `build_prompt` reads the same variable to decide whether the
     // background bullet renders, and the prompt tests serialize on
-    // `AGENT_LIST_ENV_LOCK` — so two locks guarded one process-global and
+    // `AGENT_PROMPT_ENV_LOCK` — so two locks guarded one process-global and
     // neither excluded the other. Everything that touches prompt-affecting env
     // now shares ONE lock.
 
@@ -4598,7 +4948,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn async_launch_payload_has_resolved_model_and_threads_tool_use_id() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -4734,7 +5084,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn dispatch_async_marks_its_invoker_background_owned() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -4936,7 +5286,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn omitted_run_in_background_defaults_to_async() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -4969,7 +5319,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn async_launched_tool_result_is_byte_exact_2_1_223() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5119,13 +5469,6 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
-    /// End to end for `EZe`: a flagged handoff review must reach the parent as
-    /// the FIRST content block, ahead of everything else, exactly as
-    /// `cu.content=[{type:"text",text:xg.warning},...cu.content]` does.
-    ///
-    /// This is the test the seam actually needs: every layer below it can be
-    /// green while the call site is never reached, which is how the previous
-    /// handoff module sat unwired behind a dead flag.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn a_flagged_handoff_review_is_prepended_to_the_subagent_result() {
@@ -5150,7 +5493,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             }
         }
 
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5195,7 +5538,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn explicit_false_runs_agent_synchronously() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5266,7 +5609,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn disable_background_tasks_env_forces_sync() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_DISABLE_BACKGROUND_TASKS", "1");
@@ -5308,7 +5651,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // POSITIVE term `Y`), so an omitted `run_in_background` still launches async.
     #[test]
     fn fork_feature_flag_omits_run_in_background_from_advertised_schema() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("LINGXI_FORK_SUBAGENT").ok();
@@ -5339,7 +5682,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // gates background agents. This test pins the OLD behaviour as WRONG.
     #[test]
     fn pro_plan_does_not_hide_run_in_background_from_advertised_schema() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("LINGXI_FORK_SUBAGENT").ok();
@@ -5377,7 +5720,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn pro_plan_still_dispatches_agents_in_the_background() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5426,7 +5769,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn async_isolation_worktree_created_and_cwd_threaded() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5491,7 +5834,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn definition_isolation_worktree_created_when_input_omits_isolation() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5542,7 +5885,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn explicit_isolation_overrides_definition_isolation() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5592,7 +5935,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn async_worktree_create_failure_errors_before_spawn() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5641,7 +5984,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn explicit_cwd_wins_over_worktree_path() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5690,7 +6033,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn sync_worktree_kept_when_dirty_removed_when_clean() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");
@@ -5769,10 +6112,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     // ── codex #5: fork-subagent path ──
-    // NOTE: fork-gate tests serialize on `AGENT_LIST_ENV_LOCK` (not a separate
-    // lock): `build_prompt` now reads BOTH `LINGXI_AGENT_LIST_IN_MESSAGES`
-    // and `LINGXI_FORK_SUBAGENT`, so any test that sets EITHER env (or reads
-    // the prompt) must share ONE lock to avoid racing through the prompt builder.
+    // NOTE: fork-gate tests serialize on `AGENT_PROMPT_ENV_LOCK` (not a separate
+    // lock): `build_prompt` reads `LINGXI_FORK_SUBAGENT`, so prompt and
+    // fork tests share one lock to prevent races through the prompt builder.
 
     /// Build a `ToolUseContext` carrying the given conversation history (for the
     /// fork-path assistant-message selection + recursion guard).
@@ -5787,6 +6129,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     fn parent_assistant_with_tool_use() -> lingxi_core::types::ConversationMessage {
         lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Text {
@@ -5810,7 +6153,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // test never flips the env under it.)
     #[tokio::test]
     async fn fork_gate_off_omitted_spawns_general_purpose_no_fork_fields() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -5842,7 +6185,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // feature is ON. Only an explicit `subagent_type: "fork"` inherits context.
     #[tokio::test]
     async fn fork_gate_on_omitted_spawns_general_purpose() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
@@ -5878,7 +6221,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // in ctx.messages → fork path.
     #[tokio::test]
     async fn fork_gate_on_explicit_fork_takes_fork_path() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
@@ -5906,10 +6249,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             .sent_paths
             .insert("/project/pkg/AGENTS.md".into());
         ctx.instruction_context = Some(instructions.clone());
+        ctx.options.model_profile = Some("anthropic".into());
         let input = serde_json::json!({
             "description": "fork it",
             "prompt": "Do the subtask",
             "subagent_type": "fork",
+            "model": "gpt-4o",
+            "model_profile": "openai",
             "run_in_background": false
         });
         tool.call(input, ctx, fresh_tx())
@@ -5922,6 +6268,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert!(!inv[0].request.handback_opt_in);
         // Fork path sends model: None (claude model: undefined).
         assert!(inv[0].request.model.is_none());
+        assert!(inv[0].request.model_profile.is_none());
+        assert_eq!(
+            inv[0].request.parent_model_profile_override.as_deref(),
+            Some("anthropic")
+        );
         let fc = inv[0]
             .request
             .fork_context_messages
@@ -5966,7 +6317,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // `override.systemPrompt = forkParentSystemPrompt`, AgentTool.tsx:622-623).
     #[tokio::test]
     async fn fork_threads_parent_system_prompt_onto_request() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
@@ -6016,7 +6367,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // and the spawner is NOT invoked.
     #[tokio::test]
     async fn fork_recursion_guard_rejects_inside_fork_child() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
@@ -6077,7 +6428,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // an explicit type never forks).
     #[tokio::test]
     async fn fork_gate_on_explicit_type_does_not_fork() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "1");
@@ -6114,7 +6465,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     #[tokio::test]
-    async fn implicit_teammate_dispatch_ignores_legacy_inputs_and_returns_oracle_text() {
+    async fn implicit_teammate_dispatch_returns_current_result_text() {
         let spawner = arc_mock_spawner();
         spawner.enable_teammates();
         let tool = AgentTool::new(wired_ctx(
@@ -6125,8 +6476,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         ));
         let result = tool
             .call(
-                json!({"description":"scout", "prompt":"inspect", "name":"scout",
-            "team_name":"ignored", "mode":"plan"}),
+                json!({"description":"scout", "prompt":"inspect", "name":"scout"}),
                 fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
@@ -6167,7 +6517,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     }
 
     #[tokio::test]
-    async fn teammate_inherits_parent_plan_mode_and_resolved_model_ignoring_input_mode() {
+    async fn teammate_inherits_parent_plan_mode_and_defers_requested_model_to_route_resolution() {
         let spawner = arc_mock_spawner();
         spawner.enable_teammates();
         spawner.script_selection(lingxi_core::host::subagent_spawn::SelectedAgentMeta {
@@ -6189,7 +6539,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             context, fresh_tx()).await.unwrap();
         let calls = spawner.invocations();
         assert_eq!(calls[0].request.mode.as_deref(), Some("plan"));
-        assert_eq!(calls[0].request.model.as_deref(), Some("resolved-model-id"));
+        assert_eq!(calls[0].request.model.as_deref(), Some("haiku"));
         assert_eq!(
             calls[0].request.cwd.as_deref(),
             Some("/parent/current-repo")
@@ -6214,8 +6564,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 arc_mock_mailbox(),
                 arc_mock_budget(u64::MAX),
             ));
-            let mut input =
-                json!({"description":"scout", "prompt":"inspect", "team_name":"ignored"});
+            let mut input = json!({"description":"scout", "prompt":"inspect"});
             input
                 .as_object_mut()
                 .unwrap()
@@ -6300,6 +6649,50 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
                 );
                 assert!(!spawner.invocations()[0].request.run_in_background);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn named_teammate_mod_rewrite_carries_model_pair_and_actual_agent_identity() {
+        for rewrite in [
+            json!({"model":"gpt-4o","model_profile":"openai"}),
+            json!({"model":null,"model_profile":null}),
+        ] {
+            let spawner = arc_mock_spawner();
+            spawner.enable_teammates();
+            spawner.script_agent_spawn_rewrite(rewrite.clone());
+            let tool = AgentTool::new(wired_ctx(
+                spawner.clone(),
+                arc_mock_task_registry(),
+                arc_mock_mailbox(),
+                arc_mock_budget(u64::MAX),
+            ));
+            let result = tool
+                .call(
+                    json!({
+                        "description":"inspect", "prompt":"inspect", "name":"scout",
+                        "model":"haiku", "model_profile":"anthropic",
+                    }),
+                    fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                    fresh_tx(),
+                )
+                .await
+                .expect("a valid admitted teammate must return success");
+            assert_eq!(result.data["status"], "teammate_spawned");
+            assert_eq!(result.data["teammate_id"], "scout@session");
+            let actual_id = lingxi_core::types::AgentId::parse_prefixed(
+                result.data["agent_id"].as_str().unwrap(),
+            )
+            .unwrap();
+            let receipts = spawner.agent_spawn_started();
+            assert_eq!(receipts.len(), 1);
+            assert_eq!(receipts[0].0, actual_id);
+            let calls = spawner.invocations();
+            assert_eq!(calls[0].request.model.as_deref(), rewrite["model"].as_str());
+            assert_eq!(
+                calls[0].request.model_profile.as_deref(),
+                rewrite["model_profile"].as_str()
+            );
         }
     }
 
@@ -6391,8 +6784,6 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "prompt": "go",
             "model": "opus",
             "name": "scout",
-            "team_name": "alpha",
-            "mode": "plan",
             "cwd": "/work"
         });
         // NOTE: `isolation:"worktree"` is intentionally NOT set here — it now has
@@ -6416,26 +6807,21 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         assert_eq!(req.name.as_deref(), Some("scout"));
         assert_eq!(req.team_name, None);
-        // (parity 2.1.212) The `mode` call param is DEPRECATED and ignored — it is
-        // accepted on the wire but NEVER threaded into the spawn request, so the
-        // child inherits the parent's live permission mode instead.
+        // Ordinary Agent calls inherit the parent permission mode and do not
+        // select a team; the internal request keeps these fields for other paths.
         assert_eq!(req.mode, None);
         // The explicit `cwd` override threads through as the resolved cwd.
         assert_eq!(req.cwd.as_deref(), Some("/work"));
     }
 
-    // Dynamic prompt: catalog lines (formatAgentLine) appear, sourced from the
-    // spawner's `agent_listing`. The mock spawner surfaces two entries.
+    // The dynamic catalog travels in the per-turn reminder, while the tool
+    // description remains stable across catalog changes.
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // brief; serializes the gate env var
-    async fn prompt_injects_dynamic_agent_catalog_lines() {
-        let _g = AGENT_LIST_ENV_LOCK
+    #[allow(clippy::await_holding_lock)] // brief; serializes current prompt gates
+    async fn prompt_uses_catalog_pointer_and_omits_inline_agent_lines() {
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // The inline catalog lines live only on the LEGACY gate-OFF path (the
-        // 2.1.193 default externalizes them to the orchestrator reminder), so
-        // force the inline path to exercise `formatAgentLine` rendering here.
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
         let spawner = arc_mock_spawner();
         let bctx = wired_ctx(
@@ -6456,13 +6842,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
-        assert!(prompt.contains("Available agent types and the tools they have access to:"));
-        // formatAgentLine: `- {type}: {whenToUse} (Tools: {tools})`.
-        assert!(
-            prompt.contains("- general-purpose: use for anything (Tools: All tools)"),
-            "catalog line missing; prompt was:\n{prompt}"
-        );
-        assert!(prompt.contains("- Explore: search (Tools: All tools except Edit)"));
+        assert!(prompt.contains(
+            "Available agent types are listed in <system-reminder> messages in the conversation."
+        ));
+        assert!(!prompt.contains("Available agent types and the tools they have access to:"));
+        assert!(!prompt.contains("- general-purpose: use for anything (Tools: All tools)"));
+        assert!(!prompt.contains("- Explore: search (Tools: All tools except Edit)"));
         // Core structural anchors from getPrompt.
         assert!(prompt.contains("Launch a new agent to handle complex, multi-step tasks"));
         assert!(prompt.contains("If omitted, the general-purpose agent is used."));
@@ -6548,18 +6933,13 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
-    // The advertised catalog excludes a denied agent type (claude-code `Pxe`):
-    // `Explore` is denied, so it must NOT appear in the prompt while
-    // `general-purpose` still does.
+    // A catalog pointer cannot bypass the live Agent type permission check.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn prompt_filters_denied_agent_types() {
-        let _g = AGENT_LIST_ENV_LOCK
+    async fn catalog_pointer_preserves_agent_type_denial() {
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // Inline catalog lines (and thus the deny filter's visible effect) live
-        // on the LEGACY gate-OFF path; force it.
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         let spawner = arc_mock_spawner();
         let mut bctx = wired_ctx(
             spawner.clone(),
@@ -6580,13 +6960,22 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(
-            prompt.contains("- general-purpose:"),
-            "general-purpose should remain; prompt was:\n{prompt}"
+            prompt.contains("Available agent types are listed in <system-reminder>"),
+            "catalog pointer should remain; prompt was:\n{prompt}"
         );
+        assert!(!prompt.contains("- Explore:"));
+        let err = tool
+            .call(
+                json!({"description":"inspect", "prompt":"inspect", "subagent_type":"Explore"}),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
         assert!(
-            !prompt.contains("- Explore:"),
-            "denied Explore must be filtered out; prompt was:\n{prompt}"
+            matches!(err, ToolError::InvalidInput(ref message) if message.contains("has been denied by permission rule"))
         );
+        assert!(spawner.invocations().is_empty());
     }
 
     // A permission gate that denies the synthetic `fusion` agent type, for
@@ -6611,18 +7000,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
-    /// [finding 23] The inline catalog (`LINGXI_AGENT_LIST_IN_MESSAGES=false`)
-    /// must not advertise `fusion` when `Agent(fusion)` is denied — the same
-    /// treatment `prompt_filters_denied_agent_types` proves for a built-in.
+    /// [finding 23] The Fusion notice must not advertise `fusion` when
+    /// `Agent(fusion)` is denied.
     /// Before the fix, `append_fusion_listing` ran AFTER the deny-filter
     /// `retain` calls, so the synthetic entry was immune to them.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn prompt_filters_denied_fusion_agent_type() {
-        let _g = AGENT_LIST_ENV_LOCK
+    async fn prompt_filters_denied_fusion_notice() {
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         let spawner = arc_mock_spawner();
         let mut bctx = wired_ctx(
             spawner.clone(),
@@ -6647,11 +7034,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
         std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(
-            prompt.contains("- general-purpose:"),
-            "general-purpose should remain; prompt was:\n{prompt}"
+            prompt.contains("Available agent types are listed in <system-reminder>"),
+            "catalog pointer should remain; prompt was:\n{prompt}"
         );
         assert!(
-            !prompt.contains("- fusion:"),
+            !prompt.contains("`fusion` is also available"),
             "denied fusion must be filtered out of the advertised catalog, \
              or the model wastes a whole turn dispatching a type it will be \
              hard-rejected for; prompt was:\n{prompt}"
@@ -6742,7 +7129,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // prompt`, or the `Example usage:` blocks.
     #[test]
     fn build_prompt_lean_gate_selects_short_or_long_arm() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
@@ -6778,7 +7165,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // accepted naming divergence (the SHORT arm already does this).
     #[test]
     fn build_prompt_long_arm_spine_is_byte_exact() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
@@ -6829,7 +7216,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // prompt) — it just wasn't consulted here.
     #[test]
     fn build_prompt_steer_gate_drops_the_reach_lead() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_SUBAGENT_STEER");
@@ -6862,7 +7249,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // dropped entirely (`${!n?"":…}`). 2.1.220 had neither arm.
     #[test]
     fn build_prompt_requires_subagent_type_when_general_purpose_is_unavailable() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
@@ -6905,7 +7292,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     async fn call_rejects_omitted_subagent_type_when_general_purpose_is_unavailable() {
         // With `LINGXI_FORK_SUBAGENT` ON an omitted subagent_type takes the FORK
         // path, not this one — serialize against the gate-ON tests.
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -6954,7 +7341,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // brief; serializes the fork-gate env var
     async fn call_rejects_an_agent_type_whose_every_tool_is_denied() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -7004,7 +7391,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // brief; serializes the fork-gate env var
     async fn tools_denied_types_are_absent_from_the_available_agents_tail() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -7052,7 +7439,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // brief; serializes the fork-gate env var
     async fn empty_tools_denied_set_changes_nothing() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
@@ -7085,11 +7472,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // non-coordinator SHORT form carries `## When to use`.
     #[test]
     fn build_prompt_coordinator_branch_is_slim() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // Force the legacy inline path so the catalog line is in the description.
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
@@ -7098,11 +7483,11 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }];
         let full = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
         let slim = AgentTool::build_prompt(&agents, &[], true, LEAN_MODEL, true);
-        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         assert!(full.contains("## When to use"));
         assert!(!slim.contains("## When to use"));
-        // Both carry the agent catalog (legacy inline path).
-        assert!(slim.contains("- general-purpose: anything (Tools: All tools)"));
+        // Both carry the static catalog pointer.
+        assert!(slim.contains("Available agent types are listed in <system-reminder>"));
+        assert!(!slim.contains("- general-purpose: anything (Tools: All tools)"));
     }
 
     // The lean-form bullet list carries the agent-definition bullet between the
@@ -7113,10 +7498,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // content and position.
     #[test]
     fn build_prompt_carries_agent_definition_bullet() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
         let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
@@ -7125,7 +7509,6 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             tools_description: "All tools".into(),
         }];
         let prompt = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
-        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
         assert!(
             prompt.contains(
@@ -7144,7 +7527,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // prompt env lock (the subscription global is process-wide).
     #[test]
     fn build_prompt_pro_plan_gate() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
@@ -7196,7 +7579,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // A non-pro tier (e.g. max) does NOT trip the pro gate.
     #[test]
     fn build_prompt_non_pro_tier_no_gate() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
@@ -7225,7 +7608,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // env lock because `LINGXI_FORK_SUBAGENT` is process-wide.
     #[test]
     fn build_prompt_fork_gate() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
@@ -7279,7 +7662,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // still enables it (the `"env"` arm runs before the headless check).
     #[test]
     fn build_prompt_fork_gate_off_when_non_interactive_unless_env_set() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
@@ -7310,7 +7693,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
 
     #[tokio::test]
     async fn build_prompt_fork_gate_uses_task_local_session_mode() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
@@ -7348,10 +7731,9 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
     // prompt carries no per-tool MCP-servers section regardless of registry.
     #[test]
     fn build_prompt_omits_fabricated_mcp_servers_note() {
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
             when_to_use: "anything".into(),
@@ -7371,17 +7753,16 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         );
     }
 
-    // `agent_listing_delta` gate ON (AgentTool/prompt.ts:194-199): the inline
-    // catalog is replaced by the static pointer line, and the per-agent
-    // `formatAgentLine` lines are NOT in the description (they move to the
+    // The removed inline-catalog override cannot replace the static pointer
+    // with per-agent `formatAgentLine` lines (those belong to the
     // orchestrator's per-turn `<system-reminder>` attachment).
     #[test]
-    fn build_prompt_gate_on_emits_static_pointer_line_not_inline_catalog() {
-        let _g = AGENT_LIST_ENV_LOCK
+    fn build_prompt_ignores_removed_inline_catalog_env_override() {
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
         std::env::set_var("LINGXI_FORK_SUBAGENT", "0");
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
 
         let agents = vec![lingxi_core::host::subagent_spawn::SubagentListingEntry {
             agent_type: "general-purpose".into(),
@@ -7390,24 +7771,23 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             tools_description: "All tools".into(),
         }];
         let p = AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true);
-
-        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
 
         assert!(
             p.contains(
                 "Available agent types are listed in <system-reminder> messages in the conversation."
             ),
-            "gate-ON prompt must carry the static pointer line; was:\n{p}"
+            "current prompt must carry the static pointer line; was:\n{p}"
         );
         // The inline catalog header + the per-agent line must be ABSENT.
         assert!(
             !p.contains("Available agent types and the tools they have access to:"),
-            "gate-ON prompt must NOT carry the inline catalog header"
+            "current prompt must NOT carry the inline catalog header"
         );
         assert!(
             !p.contains("- general-purpose: anything (Tools: All tools)"),
-            "gate-ON prompt must NOT carry inline formatAgentLine lines"
+            "current prompt must NOT carry inline formatAgentLine lines"
         );
         // The rest of the SHORT-form scaffold is present.
         assert!(p.contains("Launch a new agent to handle complex, multi-step tasks"));
@@ -8481,7 +8861,7 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // Serialize with the test that deliberately enables it; otherwise this
         // async-path assertion can be rerouted through the synchronous branch
         // when the test binary runs cases in parallel.
-        let _g = AGENT_LIST_ENV_LOCK
+        let _g = AGENT_PROMPT_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("LINGXI_DISABLE_BACKGROUND_TASKS");

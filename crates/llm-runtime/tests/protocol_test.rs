@@ -9,6 +9,7 @@ use llm_runtime::{validate_capabilities, Capabilities, LlmRequest};
 fn tool_declarations_require_tools_capability() {
     let mut request = LlmRequest::new("text-only").with_user_text("hi");
     request.input.tools = vec![ToolSpec {
+        input_schema_json: None,
         name: "Read".to_string(),
         description: lingxi_llm_client::protocol::JsonPayload::string("d"),
         input_schema: lingxi_llm_client::protocol::JsonPayload::parse(r#"{"type":"object"}"#)

@@ -888,14 +888,14 @@ fn convert_one_message(
     msg: lingxi_core::types::ConversationMessage,
 ) -> Result<llm_runtime::Message, llm_runtime::LlmError> {
     match msg {
-        lingxi_core::types::ConversationMessage::User { content, .. } => Ok(llm_runtime::Message {
+        lingxi_core::types::ConversationMessage::User { content, .. } => Ok(llm_runtime::Message { api_output_config: None,
             role: "user".to_string(),
             content: content
                 .into_iter()
                 .map(convert_content_block)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
-        lingxi_core::types::ConversationMessage::Assistant { content, .. } => Ok(llm_runtime::Message {
+        lingxi_core::types::ConversationMessage::Assistant { content, .. } => Ok(llm_runtime::Message { api_output_config: None,
             role: "assistant".to_string(),
             content: content
                 .into_iter()
@@ -942,6 +942,7 @@ fn convert_content_block(
             name,
             input,
             provider_id,
+            ..
         } => Ok(llm_runtime::ContentBlock::ToolCall {
             // Replay the verbatim provider id when preserved (see agent::convert).
             id: provider_id.unwrap_or_else(|| id.to_string()),
@@ -1070,6 +1071,10 @@ fn convert_tool_choice(choice: Option<&serde_json::Value>) -> Option<llm_runtime
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "computer_scope_tests.rs"]
+mod computer_scope_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1350,6 +1355,7 @@ mod tests {
         request.query_source = QuerySource::Custom("hook_prompt".into());
         request.system_prompt = Some(r#"Answer with exactly one label: "\ud800"."#.into());
         request.messages = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                 text: prompt_display.clone(),
@@ -1396,6 +1402,7 @@ mod tests {
         let display = String::from_utf16_lossy(&units);
         let mut request = req(None);
         request.messages = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                 text: display,
@@ -1574,6 +1581,7 @@ mod tests {
         request.tools = parent_tools.clone();
         request.messages = vec![
             ConversationMessage::System {
+                api_system: None,
                 id: MessageId::new(),
                 content: "Conversation compacted".to_string().into(),
                 subtype: None,
@@ -2454,7 +2462,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "computer_scope_tests.rs"]
-mod computer_scope_tests;

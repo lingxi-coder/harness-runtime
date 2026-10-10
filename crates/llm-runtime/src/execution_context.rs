@@ -172,12 +172,37 @@ impl PartialEq for RequestDispatchObserver {
 
 impl Eq for RequestDispatchObserver {}
 
+/// Credential captures owned by one logical native request. Retry drafts share
+/// the same per-profile snapshot without sharing credentials across routes.
+#[derive(Clone, Default)]
+pub struct RequestCredentials {
+    pub(crate) snapshots: Arc<
+        std::sync::Mutex<
+            std::collections::BTreeMap<String, Arc<crate::execution::RequestCredentialSnapshot>>,
+        >,
+    >,
+}
+
+impl std::fmt::Debug for RequestCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RequestCredentials(<captured>)")
+    }
+}
+
+impl PartialEq for RequestCredentials {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.snapshots, &other.snapshots)
+    }
+}
+
 /// Host-owned execution state. Cloning preserves the logical attempt and its
 /// recovery scope; it does not authorize another physical dispatch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionContext {
     /// Trusted main/origin session captured before provider preparation.
     pub request_session_id: Option<String>,
+    /// Logical request credential capture reused across retry drafts only.
+    pub request_credentials: Option<RequestCredentials>,
     /// Session authority captured before execution; never resolved from provider input.
     pub model_safety_observer: Option<lingxi_core::host::model_safety::ModelSafetyObserver>,
     /// Native prompt source and typed cache inputs, projected after the
@@ -202,6 +227,12 @@ pub struct ExecutionContext {
     /// applying first-party request-only policies, so failover cannot inherit
     /// the primary route's Native admission.
     pub native_anthropic_base_url_fingerprint: Option<String>,
+    /// Current Native thinking state admitted before request preparation.
+    pub anthropic_context_management:
+        Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicContextManagement>,
+    /// Host-selected thinking display policy for an explicitly admitted Native route.
+    pub native_thinking_display:
+        Option<lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy>,
     /// Native inherited defaults are a boot snapshot, independently of live caps.
     pub inherited_effort_settings: Option<Vec<lingxi_core::host::effort::EffortSettingsLayer>>,
     pub effort_table_options: lingxi_core::host::effort_table::TableOptions,
@@ -340,6 +371,12 @@ mod tests {
 pub struct PromptCacheRequestContext {
     /// The current Native system-prompt input, before provider block projection.
     pub system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
+    /// Versioned system protocol prefix and accepted query facts, captured by
+    /// the host before normalization. None keeps neutral request semantics.
+    pub native_system_prefix: Option<(
+        lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix,
+        lingxi_llm_client::providers::anthropic::system_prompt::NativePromptAttribution,
+    )>,
     /// SDK-owned process and host settings supplied by this request's builder.
     pub policy: lingxi_llm_client::providers::anthropic::system_prompt::CachePolicy,
     /// Read the current Host auth generation. ModelRuntime samples it before
@@ -379,6 +416,10 @@ impl std::fmt::Debug for PromptCacheRequestContext {
         formatter
             .debug_struct("PromptCacheRequestContext")
             .field("system", &self.system)
+            .field(
+                "native_system_prefix",
+                &self.native_system_prefix.as_ref().map(|_| "<captured>"),
+            )
             .field("policy", &self.policy)
             .field("current_account_epoch", &"<host generation getter>")
             .field("native_bare_mode", &self.native_bare_mode)
@@ -394,6 +435,7 @@ impl PartialEq for PromptCacheRequestContext {
         let left = &self.policy;
         let right = &other.policy;
         self.system == other.system
+            && self.native_system_prefix == other.native_system_prefix
             && self.native_bare_mode == other.native_bare_mode
             && self.native_unix_socket == other.native_unix_socket
             && left.hipaa_tainted == right.hipaa_tainted

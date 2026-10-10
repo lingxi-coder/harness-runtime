@@ -405,6 +405,7 @@ async fn stage_assistant_row(
         return;
     }
     let raw = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: MessageId::new(),
         content,
         stop_reason: stop_reason.map(str::to_owned),
@@ -836,6 +837,7 @@ async fn append_unmatched_stream_tool_results(
                 content_blocks: None,
             };
             let message = ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![result],
                 is_meta: false,
@@ -911,6 +913,7 @@ async fn publish_live_tool_completion(
     let tool_use_id = id;
     early_tool_result_ids.insert(tool_use_id.clone());
     let row = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: vec![block],
         is_meta: false,
@@ -1588,6 +1591,7 @@ struct PromptTranscriptCancellationGuard {
     executor: Option<std::sync::Arc<hooks::HookExecutorImpl>>,
     session_id: lingxi_core::types::SessionId,
     agent_id: lingxi_core::types::AgentId,
+    owner: Option<std::sync::Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>>,
     completed: bool,
 }
 
@@ -1595,7 +1599,11 @@ impl Drop for PromptTranscriptCancellationGuard {
     fn drop(&mut self) {
         if !self.completed {
             if let Some(executor) = &self.executor {
-                executor.take_agent_prompt_transcript(self.session_id, self.agent_id);
+                executor.discard_agent_prompt_transcript(
+                    self.session_id,
+                    self.agent_id,
+                    self.owner.as_ref(),
+                );
             }
         }
     }
@@ -1620,6 +1628,7 @@ pub async fn run_subagent(
         executor: ctx.hook_executor.clone(),
         session_id: ctx.hook_session_id,
         agent_id: ctx.agent_id,
+        owner: ctx.subagent_stop_firer.clone(),
         completed: false,
     };
     let non_interactive = ctx
@@ -1637,8 +1646,29 @@ pub async fn run_subagent(
         }
     });
     let resumed_history = ctx.resumed_history.clone();
+    let request_session_id = ctx
+        .origin_session_id
+        .or_else(lingxi_core::host::session_flags::current_request_session_id);
+    let safety_observer = ctx
+        .budget
+        .as_ref()
+        .and_then(|budget| budget.model_safety_observer())
+        .or_else(lingxi_core::host::model_safety::current_model_safety_observer);
     let inner: llm_runtime::BoxFuture<'static, ()> =
         Box::pin(run_subagent_inner(ctx, event_rx, out_tx));
+    let inner: llm_runtime::BoxFuture<'static, ()> = if let Some(observer) = safety_observer {
+        Box::pin(lingxi_core::host::model_safety::scope_model_safety(
+            observer, inner,
+        ))
+    } else {
+        inner
+    };
+    let inner: llm_runtime::BoxFuture<'static, ()> = Box::pin(
+        lingxi_core::host::session_flags::scope_subagent_request_session_id(
+            request_session_id,
+            inner,
+        ),
+    );
     crate::transcript::scope_message_row_indexes(
         resumed_history.as_deref(),
         llm_runtime::scope_agent_prompt_cache_ttl(
@@ -1823,6 +1853,9 @@ async fn run_subagent_inner(
     });
 
     let mut live_hook_transcript = hooks::PromptHookTranscript::default();
+    let hook_inherit = subagent_hook_inheritance(&ctx);
+    let hook_depth = ctx.depth;
+    let hook_permission_mode = ctx.permission_mode_override.clone();
     let terminal_status = if agent_scoped_stop.is_some() {
         // Proxy: forward events, capture the terminal disposition.
         let (proxy_tx, mut proxy_rx) = mpsc::channel::<SubagentEvent>(16);
@@ -1884,6 +1917,9 @@ async fn run_subagent_inner(
     ) = (agent_scoped_stop, terminal_status)
     {
         let stop_ctx = hooks::registry::HookContext {
+            agent_depth: Some(hook_depth),
+            inherit: hook_inherit,
+            permission_mode: hook_permission_mode,
             prompt_transcript: Some(live_hook_transcript),
             model_selection: Some(live_hook_model_selection.clone()),
             session_id,
@@ -2377,6 +2413,15 @@ fn format_skill_loading_metadata(skill_name: &Utf16JsonProjection) -> ContentBlo
     }
 }
 
+fn subagent_hook_inheritance(
+    ctx: &SubagentContext,
+) -> Option<lingxi_core::host::SubagentInheritance> {
+    Some(lingxi_core::host::SubagentInheritance {
+        tool_invoker: ctx.tool_invoker.clone()?,
+        budget: ctx.budget.clone()?,
+    })
+}
+
 /// Build the G4 (SubagentStart additionalContext) + G5 (skills) messages claude
 /// `runAgent` prepends to a child's INITIAL messages before the query loop, in
 /// claude's order: additionalContext (runAgent.ts:530-555) → skills
@@ -2421,6 +2466,13 @@ async fn build_preload_messages(
     if let Some(hooks) = &ctx.hook_executor {
         if !lingxi_core::host::is_fusion_panel_type(&agent_type) {
             let hook_ctx = hooks::registry::HookContext {
+                model_selection: Some(hooks::registry::HookModelSelection {
+                    model: resolve_model(ctx),
+                    model_profile: ctx.model_profile.clone(),
+                }),
+                agent_depth: Some(ctx.depth),
+                inherit: subagent_hook_inheritance(ctx),
+                permission_mode: ctx.permission_mode_override.clone(),
                 session_id: ctx.hook_session_id,
                 agent_id: Some(ctx.agent_id),
                 cwd: ctx.hook_cwd.clone(),
@@ -2485,6 +2537,7 @@ async fn build_preload_messages(
                     blocks.push(format_skill_loading_metadata(&load.display_name));
                     blocks.extend(load.content);
                     out.push(ConversationMessage::User {
+                        api_message_override: None,
                         id: MessageId::new(),
                         content: blocks,
                         is_meta: true,
@@ -2661,6 +2714,7 @@ async fn emit_parked(
         out_tx,
         agent_id,
         &lingxi_core::types::ConversationMessage::System {
+            api_system: None,
             id: lingxi_core::types::MessageId::new(),
             content: "idle".to_string().into(),
             subtype: Some("agent_idle".to_string()),
@@ -2715,6 +2769,14 @@ fn publish_prompt_hook_transcript(
     usage: &llm_runtime::ExecutionUsage,
     model_selection: &hooks::HookModelSelection,
 ) {
+    if ctx.stop_hook_scope == lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped
+        || ctx
+            .subagent_stop_firer
+            .as_ref()
+            .is_some_and(|owner| !owner.is_current())
+    {
+        return;
+    }
     if let Some(executor) = &ctx.hook_executor {
         executor.publish_agent_prompt_transcript(
             ctx.hook_session_id,
@@ -2737,6 +2799,27 @@ fn publish_prompt_hook_transcript(
                 )
                 .unwrap_or(usize::MAX),
                 ..Default::default()
+            },
+            hooks::AgentStopMetadata {
+                agent_transcript_path: ctx
+                    .transcript_subdir
+                    .join(format!("agent-{}.jsonl", ctx.agent_id)),
+                cwd: ctx.cwd.clone().unwrap_or_else(|| ctx.hook_cwd.clone()),
+                last_assistant_message: history
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        matches!(
+                            message,
+                            lingxi_core::types::ConversationMessage::Assistant { .. }
+                        )
+                    })
+                    .and_then(|message| {
+                        let text = message.text_content();
+                        (!text.trim().is_empty()).then_some(text)
+                    }),
+                owner: ctx.subagent_stop_firer.clone(),
+                depth: Some(ctx.depth),
             },
         );
     }
@@ -2875,16 +2958,15 @@ async fn emit_transcript_snapshot(
 /// - `Qp`  = `"AskUserQuestion"`
 /// - `brt` = `"ConnectGitHub"`
 /// - `tke` = `"WaitForMcpServers"`
-/// - `SI`  = `"Workflow"` (non-ant only; `USER_TYPE !== "ant"`)
 /// - `Mh`  = `"ScheduleWakeup"`
 ///
 /// All subagent runners are inside a subagent by definition (`n` = true).
-/// `is_ant` gates `Workflow` exactly like `HDd`'s ant-gate.
+/// Workflow availability follows the resolved tool catalog and permissions.
 ///
 /// Returns `Some(note_suffix)` when the tool is in the `nke` set, `None`
 /// otherwise. The note starts with `. ` to append to an in-progress sentence.
-fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<String> {
-    // The static nke set elements always present for both ant and non-ant:
+fn companion_note_for_disallowed_tool(tool_name: &str) -> Option<String> {
+    // Tools unavailable in every subagent, regardless of product identity:
     const NKE_BASE: &[&str] = &[
         "TaskOutput",
         "ExitPlanMode",
@@ -2894,8 +2976,7 @@ fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<S
         "WaitForMcpServers",
         "ScheduleWakeup",
     ];
-    // "Workflow" is added for non-ant (HDd: `...(e!=="ant"?[SI]:[])`).
-    let in_nke = NKE_BASE.contains(&tool_name) || (!is_ant && tool_name == "Workflow");
+    let in_nke = NKE_BASE.contains(&tool_name);
     if in_nke {
         // Binary §7 verbatim (leading `. ` — appended to an in-progress sentence):
         // `. ${toolName} is not available inside subagents. Complete the task with
@@ -2908,15 +2989,23 @@ fn companion_note_for_disallowed_tool(tool_name: &str, is_ant: bool) -> Option<S
     }
 }
 
-/// Apply one tool-result batch's modifiers to the concrete per-agent context.
-/// All tools in a batch share the same pre-batch snapshot; callbacks then fold
-/// in tool-use order after their results have been selected. The resulting
-/// model/profile become the actual route for the next Agent request.
+struct PreparedNestedToolContext {
+    state: lingxi_core::host::tool_invoker::ToolInvocationContextState,
+    model: String,
+    model_profile: Option<String>,
+    model_selected: bool,
+}
+
+/// Prepare one batch's modifiers in tool-use order, resolving each model
+/// against the preceding route before publishing any state or transcript row.
 fn apply_nested_tool_context_modifiers(
-    state: &mut Option<lingxi_core::host::tool_invoker::ToolInvocationContextState>,
+    state: &Option<lingxi_core::host::tool_invoker::ToolInvocationContextState>,
     observed_states: Vec<lingxi_core::host::tool_invoker::ToolInvocationContextState>,
     modifiers: Vec<lingxi_core::host::tool_invoker::ToolInvocationContextModifier>,
-) -> Result<Option<(String, Option<String>)>, String> {
+    current_model: &str,
+    current_profile: Option<&str>,
+    provider: Option<&dyn crate::model_resolution::ModelResolutionContextProvider>,
+) -> Result<PreparedNestedToolContext, String> {
     let base = observed_states
         .first()
         .cloned()
@@ -2930,21 +3019,46 @@ fn apply_nested_tool_context_modifiers(
         .map_err(|error| format!("Nested tool context state is invalid: {error}"))?
         .as_ref()
         .clone();
+    let mut selected_model = current_model.to_string();
+    let mut selected_profile = current_profile.map(str::to_string);
+    let mut model_selected = false;
     for modifier in modifiers {
         context = modifier
             .apply::<tool_api::context::ToolUseContext>(context)
             .map_err(|error| {
                 format!("Nested tool context modifier could not be applied: {error}")
             })?;
+        if context.options.main_loop_model != selected_model
+            || context.options.model_profile != selected_profile
+        {
+            model_selected = true;
+            let provider = provider.ok_or_else(|| {
+                "Nested tool model change requires a configured model route resolver".to_string()
+            })?;
+            let parent = provider
+                .context_for_route(&selected_model, selected_profile.as_deref())
+                .map_err(|error| error.to_string())?;
+            let selection = crate::model_resolution::resolve_skill_model_selection(
+                &context.options.main_loop_model,
+                context.options.model_profile.as_deref(),
+                &parent,
+                provider,
+            )
+            .map_err(|error| error.to_string())?;
+            context.options.main_loop_model = selection.model;
+            context.options.model_profile = selection.model_profile;
+            selected_model.clone_from(&context.options.main_loop_model);
+            selected_profile.clone_from(&context.options.model_profile);
+        }
     }
-    let model = context.options.main_loop_model.clone();
-    let profile = context.options.model_profile.clone();
-    *state = Some(
-        lingxi_core::host::tool_invoker::ToolInvocationContextState::new(std::sync::Arc::new(
-            context,
-        )),
-    );
-    Ok(Some((model, profile)))
+    Ok(PreparedNestedToolContext {
+        model: context.options.main_loop_model.clone(),
+        model_profile: context.options.model_profile.clone(),
+        model_selected,
+        state: lingxi_core::host::tool_invoker::ToolInvocationContextState::new(
+            std::sync::Arc::new(context),
+        ),
+    })
 }
 
 /// Real multi-turn agentic loop.
@@ -2992,7 +3106,6 @@ async fn run_subagent_loop(
     let mut tool_context_state: Option<
         lingxi_core::host::tool_invoker::ToolInvocationContextState,
     > = None;
-    let user_model = model.clone();
     // Per-run refusal cascade. claude-code's subagents share the main thread's
     // because they share its query generator; here the loops are separate, so
     // each run walks its own chain (handed down on the context).
@@ -3442,21 +3555,24 @@ async fn run_subagent_loop(
     // every injected message gets a fresh budget.
     loop {
         if let Some(handback) = &ctx.handback {
-            let parent_mode = ctx
-                .tool_invoker
-                .as_ref()
-                .and_then(|invoker| invoker.permission_mode())
-                .as_deref()
-                .and_then(crate::permission_mode::parse_wire_mode);
-            let child_override = parent_mode.and_then(|parent| {
-                crate::permission_mode::effective_child_mode(
-                    None,
-                    parent,
-                    ctx.agent_definition.permission_mode,
-                    handback.spawn_bypass_gates,
-                    &mut |message| tracing::warn!("{message}"),
-                )
+            let parent_mode = handback.trusted_parent_permission_mode.or_else(|| {
+                ctx.tool_invoker
+                    .as_ref()
+                    .and_then(|invoker| invoker.permission_mode())
+                    .as_deref()
+                    .and_then(crate::permission_mode::parse_wire_mode)
             });
+            let child_override = parent_mode
+                .and_then(|parent| {
+                    crate::permission_mode::effective_child_mode(
+                        None,
+                        parent,
+                        ctx.agent_definition.permission_mode,
+                        handback.spawn_bypass_gates,
+                        &mut |message| tracing::warn!("{message}"),
+                    )
+                })
+                .or(handback.trusted_parent_permission_mode);
             ctx.permission_mode_override =
                 child_override.map(|mode| crate::permission_mode::wire_mode_str(mode).to_string());
             let child_mode = child_override.or(parent_mode);
@@ -3802,7 +3918,7 @@ async fn run_subagent_loop(
                         call_opts,
                         agent_spawn_provenance: ctx.agent_spawn_provenance.clone(),
                         fallback_target: lingxi_core::host::refusal_driver::FallbackTargetContext {
-                            user_model: user_model.clone(),
+                            user_model: logical_tool_model.clone(),
                             turn_override: refusal_cascade.target_model().map(str::to_owned),
                             ..Default::default()
                         },
@@ -3833,7 +3949,7 @@ async fn run_subagent_loop(
                     let stream = match await_workflow_query_phase(
                         lingxi_core::host::refusal_driver::scope_fallback_target(
                             lingxi_core::host::refusal_driver::FallbackTargetContext {
-                                user_model: user_model.clone(),
+                                user_model: logical_tool_model.clone(),
                                 turn_override: refusal_cascade.target_model().map(str::to_owned),
                                 ..Default::default()
                             },
@@ -3998,7 +4114,7 @@ async fn run_subagent_loop(
                                     Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
                                         if let Some(turn) = mod_turn.as_mut() { turn.aborted(); }
                                         if let Some(executor) = &ctx.hook_executor {
-                                            executor.take_agent_prompt_transcript(ctx.hook_session_id, ctx.agent_id);
+                                            executor.discard_agent_prompt_transcript(ctx.hook_session_id, ctx.agent_id, ctx.subagent_stop_firer.as_ref());
                                         }
                                         emit_killed(&ctx,
                                             &out_tx,
@@ -4433,6 +4549,7 @@ async fn run_subagent_loop(
                                 if !salvaged.is_empty() {
                                     if !had_streamed_assistant_rows {
                                         let partial_message = ConversationMessage::Assistant {
+                                            per_turn_effort: None,
                                             id: MessageId::new(),
                                             content: salvaged,
                                             stop_reason: Some("api_error".to_string()),
@@ -4652,6 +4769,7 @@ async fn run_subagent_loop(
                             name,
                             input,
                             provider_id,
+                            ..
                         } => Some((id.clone(), name.clone(), input.clone(), provider_id.clone())),
                         _ => None,
                     })
@@ -4804,10 +4922,8 @@ async fn run_subagent_loop(
                             // yyo companion note (binary v2.1.186 §7): when the blocked tool
                             // is in the `nke` external companion set, append the byte-exact
                             // guidance suffix so the model knows the tool is a subagent
-                            // boundary, not a typo. Gate on USER_TYPE like HDd.
-                            let is_ant = std::env::var("USER_TYPE").is_ok_and(|v| v == "ant");
-                            let note = companion_note_for_disallowed_tool(name, is_ant)
-                                .unwrap_or_default();
+                            // boundary, not a typo.
+                            let note = companion_note_for_disallowed_tool(name).unwrap_or_default();
                             tool_results.push(ContentBlock::ToolResult {
                                 tool_use_id: tool_use_id.clone(),
                                 content: plain_json_string(format!(
@@ -4981,6 +5097,7 @@ async fn run_subagent_loop(
                     if !tool_results.is_empty() {
                         native_next_turn_has_tool_results = true;
                         let tool_results_msg = ConversationMessage::User {
+                            api_message_override: None,
                             id: MessageId::new(),
                             content: tool_results,
                             is_meta: false,
@@ -5150,22 +5267,56 @@ async fn run_subagent_loop(
                     }
                     flush_transcript(transcript.as_ref(), history, &mut transcript_written).await;
                     if !context_modifiers.is_empty() {
-                        match apply_nested_tool_context_modifiers(
-                            &mut tool_context_state,
+                        let prepared = apply_nested_tool_context_modifiers(
+                            &tool_context_state,
                             context_state_candidates,
                             context_modifiers,
-                        ) {
-                            Ok(Some((updated_model, updated_profile))) => {
-                                logical_tool_model.clone_from(&updated_model);
-                                logical_tool_model_profile.clone_from(&updated_profile);
-                                *live_hook_model_selection = hooks::HookModelSelection {
-                                    model: logical_tool_model.clone(),
-                                    model_profile: logical_tool_model_profile.clone(),
+                            &logical_tool_model,
+                            logical_tool_model_profile.as_deref(),
+                            ctx.model_resolution_context_provider.as_deref(),
+                        );
+                        let prepared = match prepared {
+                            Ok(prepared) => {
+                                let changed = prepared.model_selected
+                                    || prepared.model != logical_tool_model
+                                    || prepared.model_profile != logical_tool_model_profile;
+                                let persisted = match transcript.as_ref().filter(|_| changed) {
+                                    Some(writer) => writer
+                                        .record_model_selection(
+                                            &prepared.model,
+                                            prepared.model_profile.as_deref(),
+                                        )
+                                        .await
+                                        .map_err(|error| format!("could not persist nested tool model selection: {error}")),
+                                    None => Ok(()),
                                 };
-                                model = updated_model;
-                                model_profile = updated_profile;
+                                persisted.map(|()| prepared)
                             }
-                            Ok(None) => {}
+                            Err(error) => Err(error),
+                        };
+                        match prepared {
+                            Ok(prepared) => {
+                                if prepared.model_selected
+                                    || prepared.model != logical_tool_model
+                                    || prepared.model_profile != logical_tool_model_profile
+                                {
+                                    // An accepted tool selection is a user route
+                                    // change, so its next query starts outside
+                                    // the previously admitted refusal cascade.
+                                    refusal_cascade.clear_target();
+                                    model.clone_from(&prepared.model);
+                                    model_profile.clone_from(&prepared.model_profile);
+                                }
+                                logical_tool_model.clone_from(&prepared.model);
+                                logical_tool_model_profile.clone_from(&prepared.model_profile);
+                                live_hook_model_selection
+                                    .model
+                                    .clone_from(&logical_tool_model);
+                                live_hook_model_selection
+                                    .model_profile
+                                    .clone_from(&logical_tool_model_profile);
+                                tool_context_state = Some(prepared.state);
+                            }
                             Err(error) => {
                                 publish_prompt_hook_transcript(
                                     &ctx,
@@ -5847,7 +5998,11 @@ async fn run_subagent_loop(
                 }
                 Some(lingxi_core::Event::UserExit | lingxi_core::Event::UserInterrupt) => {
                     if let Some(executor) = &ctx.hook_executor {
-                        executor.take_agent_prompt_transcript(ctx.hook_session_id, ctx.agent_id);
+                        executor.discard_agent_prompt_transcript(
+                            ctx.hook_session_id,
+                            ctx.agent_id,
+                            ctx.subagent_stop_firer.as_ref(),
+                        );
                     }
                     emit_killed(
                         &ctx,
@@ -6596,6 +6751,7 @@ fn refusal_fallback_frame(
     banner: &lingxi_core::host::refusal_notice::RefusalNotice,
 ) -> ConversationMessage {
     ConversationMessage::System {
+        api_system: None,
         id,
         content: format!(
             "This model's safeguards flagged this message. Switched to {}.",

@@ -479,6 +479,7 @@ pub fn filter_messages_to_fingerprints<S: BuildHasher>(
             ConversationMessage::User {
                 id,
                 content,
+                api_message_override,
                 is_meta,
                 is_compact_summary,
                 is_visible_in_transcript_only,
@@ -489,6 +490,7 @@ pub fn filter_messages_to_fingerprints<S: BuildHasher>(
             } => Ok(ConversationMessage::User {
                 id,
                 content: filter_blocks_to_fingerprints(content, wanted)?,
+                api_message_override,
                 is_meta,
                 is_compact_summary,
                 is_visible_in_transcript_only,
@@ -500,11 +502,13 @@ pub fn filter_messages_to_fingerprints<S: BuildHasher>(
             ConversationMessage::Assistant {
                 id,
                 content,
+                per_turn_effort,
                 stop_reason,
                 resumable,
             } => Ok(ConversationMessage::Assistant {
                 id,
                 content: filter_blocks_to_fingerprints(content, wanted)?,
+                per_turn_effort,
                 stop_reason,
                 resumable,
             }),
@@ -790,6 +794,7 @@ fn rewrite_message_for_nonvision(
         ConversationMessage::User {
             id,
             content,
+            api_message_override,
             is_meta,
             is_compact_summary,
             is_visible_in_transcript_only,
@@ -800,6 +805,7 @@ fn rewrite_message_for_nonvision(
         } => Ok(ConversationMessage::User {
             id,
             content: rewrite_blocks_for_nonvision(content, documents_supported)?,
+            api_message_override,
             is_meta,
             is_compact_summary,
             is_visible_in_transcript_only,
@@ -811,11 +817,13 @@ fn rewrite_message_for_nonvision(
         ConversationMessage::Assistant {
             id,
             content,
+            per_turn_effort,
             stop_reason,
             resumable,
         } => Ok(ConversationMessage::Assistant {
             id,
             content: rewrite_blocks_for_nonvision(content, documents_supported)?,
+            per_turn_effort,
             stop_reason,
             resumable,
         }),
@@ -845,6 +853,7 @@ fn rewrite_blocks_for_nonvision(
                 is_error,
                 provider_tool_use_id,
                 content_blocks: Some(blocks),
+                ..
             } => {
                 rewritten.push(ContentBlock::ToolResult {
                     tool_use_id,
@@ -934,6 +943,7 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
         messages.push(match role {
             MessageRole::User => ConversationMessage::user(MessageId::new(), text),
             MessageRole::Assistant => ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::Text {
                     text: text.into(),
@@ -971,6 +981,7 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
         content.push(item.block.clone());
     }
     messages.push(ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content,
         is_meta: false,
@@ -1621,6 +1632,7 @@ mod tests {
 
     fn user_message(content: Vec<ContentBlock>) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content,
             is_meta: false,

@@ -106,6 +106,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
+use crate::session_agent_transcript::{
+    parse_main_session_agent_message_rows, parse_session_agent_message_rows,
+    read_session_agent_next_message_index, session_agent_conversation_is_visible,
+    session_identity_snapshot_for_path,
+};
 use async_trait::async_trait;
 use client::adapter::controls::{decode_reasoning_selection, lower_conversation_controls};
 use client::adapter::lowering::lower_status_snapshot;
@@ -450,6 +455,9 @@ pub struct MobileRuntime {
 
 struct MobileAppAgentExecutor {
     config: OrchestratorConfig,
+    model_profile: Option<String>,
+    model_resolution_context_provider:
+        Arc<dyn agent::model_resolution::ModelResolutionContextProvider>,
     api: Arc<dyn OrchestratorApiClient>,
     streaming_api: Arc<dyn StreamingApiClient>,
     hooks: Arc<hooks::HookExecutorImpl>,
@@ -479,6 +487,10 @@ impl MobileAppAgentExecutor {
     #[allow(clippy::too_many_arguments)]
     fn new(
         config: OrchestratorConfig,
+        model_profile: Option<String>,
+        model_resolution_context_provider: Arc<
+            dyn agent::model_resolution::ModelResolutionContextProvider,
+        >,
         api: Arc<dyn OrchestratorApiClient>,
         streaming_api: Arc<dyn StreamingApiClient>,
         hooks: Arc<hooks::HookExecutorImpl>,
@@ -491,6 +503,8 @@ impl MobileAppAgentExecutor {
     ) -> Self {
         Self {
             config,
+            model_profile,
+            model_resolution_context_provider,
             api,
             streaming_api,
             hooks,
@@ -598,10 +612,16 @@ impl MobileAppAgentExecutor {
                 Arc::new(StaticMemoryProvider::empty()),
                 layout.root().join(layout.workspace_rel()),
             )
+            .with_model_resolution_context_provider(self.model_resolution_context_provider.clone())
             .with_session_id(lingxi_core::types::SessionId::new())
             .with_config_home(self.config_home.clone())
             .with_hooks_restricted(true),
         );
+        if let Some(profile) = self.model_profile.as_deref() {
+            agent
+                .seed_initial_model_profile(&self.config.model, profile)
+                .await;
+        }
         let history = local_apps::load_agent_history(&layout, session_id)
             .map_err(|error| error.to_string())?
             .into_iter()
@@ -1747,7 +1767,10 @@ mod session_identity_import_tests {
             .await
             .unwrap();
         assert_eq!(empty, SessionMessageIdentitySnapshot::default());
-        let sidecar = transcript_path.with_file_name("session.jsonl.lingxi-message-identities");
+        let sidecar = transcript_path.with_file_name(format!(
+            "session.jsonl{}",
+            branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX
+        ));
         assert!(!sidecar.exists());
     }
 }
@@ -8725,6 +8748,10 @@ impl MobileEngineHandle {
 #[cfg(test)]
 #[path = "host/tests/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "host/app_agent_route_tests.rs"]
+mod app_agent_route_tests;
 
 #[cfg(test)]
 #[path = "host/tests/mobile_provider_allowlist_tests.rs"]

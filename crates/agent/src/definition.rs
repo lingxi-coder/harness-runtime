@@ -85,11 +85,10 @@ pub struct AgentDefinition {
     #[serde(default)]
     pub background: bool,
     /// Omit user/project/local instructions only when running as a subagent.
-    #[serde(default, rename = "omitClaudeMd")]
-    pub omit_claude_md: bool,
-    /// Isolation mode: run in a git worktree, or remotely (claude
-    /// `isolation`). `Remote` is ant-only and rejected by the parsers on
-    /// non-ant builds.
+    #[serde(default, rename = "omitInstructions")]
+    pub omit_instructions: bool,
+    /// Isolation mode selected for the agent. Availability is enforced by
+    /// the host execution policy when the agent is spawned.
     #[serde(default)]
     pub isolation: Option<AgentIsolation>,
     /// Persistent memory scope (claude `memory`). Parsed, stored, and EXECUTED:
@@ -99,7 +98,7 @@ pub struct AgentDefinition {
     /// injection (the scope selects only WHERE memory lives, not which tools).
     #[serde(default)]
     pub memory: Option<lingxi_core::types::WritableScope>,
-    /// Reasoning effort preference (claude `effort` = level OR integer).
+    /// Reasoning effort preference, validated against the selected provider.
     #[serde(default)]
     pub effort: Option<AgentEffort>,
     /// Prepended to the first user turn (claude `initialPrompt`). The raw
@@ -230,30 +229,27 @@ pub enum AgentSource {
     AdditionalDirectory,
 }
 
-/// Isolation mode for an agent (claude `isolation`).
-///
-/// `Remote` is ant-only; the markdown/JSON parsers reject it on non-ant
-/// builds (gated on `USER_TYPE == "ant"`).
+/// Isolation mode for an agent. The host decides which execution modes it supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentIsolation {
     /// Run in an isolated git worktree (claude `'worktree'`).
     Worktree,
-    /// Run remotely in CCR (claude `'remote'`; ant-only).
+    /// Run in a remote environment provided by the host.
     Remote,
 }
 
-/// Reasoning effort preference (claude `EffortValue = EffortLevel | number`).
+/// Reasoning effort preference passed to the shared LLM request boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentEffort {
-    /// A named level — one of [`EFFORT_LEVELS`] (claude `EffortLevel`).
+    /// A named level from [`EFFORT_LEVELS`].
     Level(String),
-    /// An integer effort value (claude numeric effort; ant-only at runtime).
+    /// An integer thinking budget, when supported by the selected provider.
     Numeric(i64),
 }
 
 impl AgentEffort {
-    /// The wire value for `output_config.effort`: a level string or an integer
-    /// budget (claude-code `SF`'s normalized output).
+    /// A scalar effort preference for the shared request boundary: a named
+    /// level or an integer budget. The SDK owns its provider-specific projection.
     #[must_use]
     pub fn to_wire(&self) -> serde_json::Value {
         match self {
@@ -262,22 +258,23 @@ impl AgentEffort {
         }
     }
 
-    /// Parse a JSON effort opt (claude-code workflow `agent({effort})`): a level
-    /// string (validated against [`EFFORT_LEVELS`], `med`→`medium`) or an
-    /// integer. `None` for anything else.
+    /// Parse a JSON effort preference: a level from [`EFFORT_LEVELS`] or an
+    /// integer. `None` for an invalid value.
     #[must_use]
     pub fn from_json(value: &serde_json::Value) -> Option<AgentEffort> {
         match value {
-            serde_json::Value::String(s) => parse_effort_from_string(s),
+            serde_json::Value::String(s) if EFFORT_LEVELS.contains(&s.as_str()) => {
+                Some(AgentEffort::Level(s.clone()))
+            }
             serde_json::Value::Number(n) => n.as_i64().map(AgentEffort::Numeric),
             _ => None,
         }
     }
 }
 
-/// Valid named effort levels (claude `EFFORT_LEVELS` / `nP =
-/// ["low","medium","high","xhigh","max"]`, v2.1.183).
-pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// Named reasoning efforts supported by the shared LLM protocol.
+/// The selected provider validates which levels its model accepts.
+pub const EFFORT_LEVELS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// Coerce a YAML/JSON frontmatter value into an [`AgentEffort`], mirroring
 /// claude `parseEffortValue` (effort.ts:71-87):
@@ -430,5 +427,28 @@ mod cache_ttl_tests {
             serde_json::from_str::<AgentCacheTtl>("\"5m\"").unwrap(),
             AgentCacheTtl::FiveMinutes
         );
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    #[test]
+    fn named_efforts_match_the_shared_protocol() {
+        for level in EFFORT_LEVELS {
+            let parsed = AgentEffort::from_json(&serde_json::json!(level)).unwrap();
+            let wire = parsed.to_wire();
+            let mut request = llm_runtime::protocol::LlmRequest::default();
+            request.set_effort(Some(wire)).unwrap();
+            let effort = request.input.thinking.unwrap().effort.unwrap();
+            assert_eq!(
+                serde_json::to_value(effort).unwrap(),
+                serde_json::json!(level)
+            );
+        }
+        for raw in ["unsupported", "7", "7junk", "1.5"] {
+            assert!(AgentEffort::from_json(&serde_json::json!(raw)).is_none());
+        }
     }
 }

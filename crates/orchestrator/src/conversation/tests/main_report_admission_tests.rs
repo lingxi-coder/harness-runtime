@@ -214,6 +214,7 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
         body_units.clone(),
     )
     .unwrap();
+
     let expected_message = envelope.model_message();
     let message_id = envelope.receipt.message_id;
     orch.admit(envelope).await.unwrap();
@@ -359,6 +360,7 @@ async fn main_report_utf16_surrogate_survives_prepared_restart_and_actual_wire_s
                 .history
                 .iter()
                 .all(|message| message.id() != message_id),
+
             "invalid native Peer report cannot become human input or altered model text: {corruption}"
         );
     }
@@ -469,6 +471,7 @@ async fn admission_acks_under_parent_gate_and_ordinary_prepare_sends_one_peer_me
         rows[0].message.string_at("/content/0/text"),
         Some(model_text.as_str())
     );
+
     assert!(!orch.has_pending_main_reports(scope).await);
     // Recipient idempotency acknowledges the same admitted identity even after
     // consumption, while a conflicting payload cannot create a second message.
@@ -480,6 +483,7 @@ async fn admission_acks_under_parent_gate_and_ordinary_prepare_sends_one_peer_me
         .body
         .set_string_units("", &conflicting_units)
         .unwrap();
+
     assert!(matches!(
         orch.admit(conflicting).await,
         Err(HandbackAdmissionError::Rejected { .. })
@@ -521,6 +525,7 @@ async fn main_admission_rejects_invalid_utf16_or_forged_sender_before_persisting
                 envelope.body =
                     lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}").unwrap();
             }
+
             "sender_task_id" => envelope.origin.sender_task_id = "forged-task-id".into(),
             _ => unreachable!(),
         }
@@ -751,6 +756,7 @@ impl MainReportWaker for WakeProbe {
 }
 
 #[tokio::test]
+
 async fn delayed_duplicate_wake_after_ordinary_prepare_is_quiet_without_an_extra_api_call() {
     let temp = tempfile::tempdir().unwrap();
     let (orch, api, _, output) = fixture_with_output(temp.path(), SessionId::new(), true, false);

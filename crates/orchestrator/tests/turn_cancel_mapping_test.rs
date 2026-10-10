@@ -58,7 +58,8 @@ impl OrchestratorApiClient for CancelsThenSucceeds {
         Ok(mock_message_response(
             vec![LlmContentBlock::Text {
                 text: "finished the work".into(),
-                cache_control: None, citations: None,
+                cache_control: None,
+                citations: None,
             }],
             Some("end_turn"),
         ))

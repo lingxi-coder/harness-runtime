@@ -374,23 +374,37 @@ fn build_gates_the_memory_prefetch_on_the_auto_memory_gate() {
     );
 }
 
-#[test]
-fn session_memory_composition_uses_token_gate_defaults() {
-    const SRC: &str = concat!(
-        include_str!("../mod.rs"),
-        "\n",
-        include_str!("../assembly.rs")
+#[tokio::test]
+async fn session_memory_composition_uses_token_gate_defaults() {
+    struct UnusedSideQueryClient;
+
+    #[async_trait::async_trait]
+    impl sidequery::SideQueryClient for UnusedSideQueryClient {
+        async fn query(
+            &self,
+            _: sidequery::SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            panic!("constructing the memory handle must not contact a provider");
+        }
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let handle = orchestrator::prompt::build_session_memory_handle(
+        Arc::new(UnusedSideQueryClient),
+        "configured-model".into(),
+        memory::session_memory::SessionMemoryConfig {
+            enabled: true,
+            ..Default::default()
+        },
+        home.path(),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
     );
-    // Keep the needle assembled so this source-level guard cannot match
-    // its own assertion while still pinning the production composition
-    // root to the memory crate's 10k/5k/3 defaults.
-    let needle = "\"claude-haiku-".to_string()
-        + "4-5\".to_string(),\n                0,\n                0,";
-    assert_eq!(
-        SRC.matches(&needle).count(),
-        1,
-        "desktop must leave legacy session-memory thresholds at zero"
-    );
+    let extractor = handle.extractor.lock().await;
+    let config = extractor.config();
+    assert!(config.enabled);
+    assert_eq!(config.minimum_message_tokens_to_init, 10_000);
+    assert_eq!(config.minimum_tokens_between_update, 5_000);
+    assert_eq!(config.tool_calls_between_updates, 3);
 }
 
 #[test]
@@ -2588,9 +2602,14 @@ fn desktop_config_default_is_constructible() {
     assert!(cfg.api_key.is_empty());
     assert_eq!(cfg.cwd, std::path::PathBuf::from("."));
     assert_eq!(cfg.lingxi_home, std::path::PathBuf::new());
-    // Mirrors `DesktopEngineConfig::default().default_model` (2.1.198:
-    // Sonnet 5 is the default first-party model).
-    assert_eq!(cfg.default_model, "claude-sonnet-5");
+    // The catalog default includes its declared provider owner.
+    assert_eq!(
+        cfg.default_model,
+        lingxi_core::host::qualified_model_ref(
+            lingxi_core::host::provider_default_model("anthropic").unwrap(),
+            Some("anthropic"),
+        ),
+    );
     // Opus-fallback default: no fallback model unless argv supplies one.
     assert!(cfg.fallback_model.is_none());
     assert!(cfg.provider_profiles.is_none());
@@ -2852,7 +2871,7 @@ fn merge_cli_flag_agents_precedence_and_safe_mode() {
 
     // Normal: same-named `reviewer` replaced (source Flag), `extra` appended.
     let mut agents = vec![dir_agent("reviewer"), dir_agent("keeper")];
-    super::merge_cli_flag_agents(&mut agents, Some(raw), false);
+    super::merge_cli_flag_agents(&mut agents, Some(raw), false).unwrap();
     assert_eq!(agents.len(), 3);
     let reviewer = agents.iter().find(|a| a.agent_type == "reviewer").unwrap();
     assert_eq!(reviewer.when_to_use, "from flag");
@@ -2862,18 +2881,18 @@ fn merge_cli_flag_agents_precedence_and_safe_mode() {
 
     // Safe mode: the payload is ignored outright.
     let mut safe = vec![dir_agent("reviewer")];
-    super::merge_cli_flag_agents(&mut safe, Some(raw), true);
+    super::merge_cli_flag_agents(&mut safe, Some(raw), true).unwrap();
     assert_eq!(safe.len(), 1);
     assert_eq!(safe[0].when_to_use, "from dir");
 
     // No flag: untouched.
     let mut none = vec![dir_agent("reviewer")];
-    super::merge_cli_flag_agents(&mut none, None, false);
+    super::merge_cli_flag_agents(&mut none, None, false).unwrap();
     assert_eq!(none.len(), 1);
 
-    // Invalid JSON: logged, no agents contributed, no abort.
+    // Invalid explicit configuration rejects without modifying the catalog.
     let mut bad = vec![dir_agent("reviewer")];
-    super::merge_cli_flag_agents(&mut bad, Some("{nope"), false);
+    assert!(super::merge_cli_flag_agents(&mut bad, Some("{nope"), false).is_err());
     assert_eq!(bad.len(), 1);
 }
 
@@ -3171,6 +3190,9 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
         .expect("agent MCP config parses");
     let table_key = mcp::registry::agent_scope_table_key(agent_id, "srv");
     let dto = |tool_name: &str, requires_user_interaction: bool| lingxi_core::host::McpToolDto {
+        input_schema_projection: None,
+        definition_projection: None,
+
         server_name: "srv".into(),
         tool_name: tool_name.into(),
         description: tool_name.into(),
@@ -3462,6 +3484,7 @@ pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) 
         api_base: "https://api.anthropic.com".to_string(),
         anthropic_client_metadata: None,
         api_key: String::new(),
+        api_key_source: llm_runtime::CredentialSource::Configured,
         api_key_helper: None,
         // (M13) Inert auth-resolver inputs: no managed OAuth forcing, no
         // FD-inherited key.
@@ -3534,8 +3557,10 @@ pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) 
         // questionnaire surface.
         ask_user_question_tx: None,
         computer_access_tx: None,
+        verified_computer_profiles: Vec::new(),
         session_agent_observer: None,
         audio: None,
+        ..DesktopConfig::default()
     };
     (tmp, cfg)
 }
@@ -3557,7 +3582,7 @@ async fn apply_worktree_launch_is_inert_when_flag_absent() {
         vec![boot_cwd.clone()],
     );
 
-    super::apply_worktree_launch(&None, &None, &ctx)
+    super::apply_worktree_launch(&None, &None, &ctx, None)
         .await
         .expect("None must never fail");
 
@@ -3594,7 +3619,7 @@ async fn apply_worktree_launch_creates_and_populates_session() {
     let mock = Arc::new(tool_api::test_support::MockWorktreeManager::new());
     ctx.worktree = mock.clone() as Arc<dyn lingxi_core::host::worktree::WorktreeManager>;
 
-    super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
+    super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx, None)
         .await
         .expect("create must succeed against the injected WorktreeManager");
 
@@ -3739,6 +3764,45 @@ impl lingxi_core::host::ProcessRunner for RecordingProcessRunner {
     }
 }
 
+#[derive(Default)]
+struct RecordingDesktopDiagnostics(std::sync::Mutex<Vec<String>>);
+
+#[async_trait::async_trait]
+impl crate::desktop::DesktopDiagnosticSink for RecordingDesktopDiagnostics {
+    async fn stderr_line(&self, line: &str) {
+        self.0.lock().unwrap().push(line.to_owned());
+    }
+}
+
+#[tokio::test]
+async fn startup_mcp_warning_uses_only_the_injected_diagnostic_sink() {
+    let (_tmp, mut cfg) = test_config(true);
+    cfg.isolated_credential_storage = true;
+    cfg.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::PlainTextFixture;
+    cfg.defer_session_start = true;
+    std::fs::write(cfg.cwd.join(".mcp.json"), r#"{"servers":{}}"#).unwrap();
+    let expected = mcp::config_diagnostics::collect_all_mcp_config_warnings(&cfg.cwd, None)
+        .into_iter()
+        .map(|warning| warning.to_stderr_line())
+        .collect::<Vec<_>>();
+    assert!(
+        !expected.is_empty(),
+        "the fixture must exercise actual startup diagnostics"
+    );
+    let diagnostics = Arc::new(RecordingDesktopDiagnostics::default());
+    cfg.diagnostics = Some(diagnostics.clone());
+    let runtime = build(
+        cfg,
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(*diagnostics.0.lock().unwrap(), expected);
+    drop(runtime);
+    assert!(DesktopConfig::default().diagnostics.is_none());
+}
+
 /// `--worktree feat --tmux` (both `Some`), tmux invocation succeeds (exit
 /// 0): `apply_worktree_launch` must create exactly one tmux session and
 /// record ITS EXACT derived name
@@ -3759,9 +3823,15 @@ async fn apply_worktree_launch_with_tmux_creates_and_records_session_name() {
     let runner = Arc::new(RecordingProcessRunner::new(0));
     ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
-    super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
-        .await
-        .expect("worktree + tmux launch must succeed");
+    let diagnostics = RecordingDesktopDiagnostics::default();
+    super::apply_worktree_launch(
+        &Some("feat".to_string()),
+        &Some(String::new()),
+        &ctx,
+        Some(&diagnostics),
+    )
+    .await
+    .expect("worktree + tmux launch must succeed");
 
     assert_eq!(
         runner.probe_calls(),
@@ -3778,7 +3848,13 @@ async fn apply_worktree_launch_with_tmux_creates_and_records_session_name() {
         .unwrap()
         .clone()
         .expect("worktree_session must be populated");
-    assert_eq!(session.tmux_session_name, Some(expected_name));
+    assert_eq!(session.tmux_session_name, Some(expected_name.clone()));
+    assert_eq!(
+        *diagnostics.0.lock().unwrap(),
+        vec![format!(
+            "Created tmux session: {expected_name}\nTo attach: tmux attach -t {expected_name}"
+        )]
+    );
 }
 
 /// A tmux invocation that fails (non-zero exit) must NOT fail boot — the
@@ -3798,9 +3874,18 @@ async fn apply_worktree_launch_tmux_failure_is_non_fatal() {
     let runner = Arc::new(RecordingProcessRunner::new(1));
     ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
-    super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
-        .await
-        .expect("a tmux failure must not fail boot");
+    let diagnostics = RecordingDesktopDiagnostics::default();
+    super::apply_worktree_launch(
+        &Some("feat".to_string()),
+        &Some(String::new()),
+        &ctx,
+        Some(&diagnostics),
+    )
+    .await
+    .expect("a tmux failure must not fail boot");
+    let notices = diagnostics.0.lock().unwrap().clone();
+    assert_eq!(notices.len(), 1);
+    assert!(notices[0].starts_with("Warning: Failed to create tmux session: "));
 
     assert_eq!(
         runner.create_calls(),
@@ -3836,7 +3921,7 @@ async fn apply_worktree_launch_without_tmux_flag_issues_no_tmux_call() {
     let runner = Arc::new(RecordingProcessRunner::new(0));
     ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
-    super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx)
+    super::apply_worktree_launch(&Some("feat".to_string()), &None, &ctx, None)
         .await
         .expect("worktree-only launch must succeed");
 
@@ -3872,7 +3957,7 @@ async fn apply_worktree_launch_tmux_without_worktree_is_a_hard_error() {
         vec![boot_cwd.clone()],
     );
 
-    let err = super::apply_worktree_launch(&None, &Some(String::new()), &ctx)
+    let err = super::apply_worktree_launch(&None, &Some(String::new()), &ctx, None)
         .await
         .expect_err("--tmux without --worktree must be a hard boot failure");
     assert!(matches!(err, super::BuildError::TmuxRequiresWorktree));
@@ -3901,9 +3986,10 @@ async fn apply_worktree_launch_native_tmux_not_installed_is_hard_error() {
     let runner = Arc::new(RecordingProcessRunner::with_exits(127, 0));
     ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
-    let err = super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx)
-        .await
-        .expect_err("native --tmux with tmux absent must hard-fail boot");
+    let err =
+        super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx, None)
+            .await
+            .expect_err("native --tmux with tmux absent must hard-fail boot");
     assert!(
         matches!(err, super::BuildError::TmuxNotInstalled(ref hint)
                 if hint == platform_posix::worktree_tmux::tmux_install_hint()),
@@ -3953,6 +4039,7 @@ async fn apply_worktree_launch_classic_tmux_skips_install_preflight() {
         &Some("feat".to_string()),
         &Some("classic".to_string()),
         &ctx,
+        None,
     )
     .await
     .expect("classic --tmux skips the install pre-flight and does not hard-fail");
@@ -7348,7 +7435,7 @@ fn customization_gates_match_binary_maps() {
     assert!(!off.disables_mcp_discovery());
     assert!(!off.disables_claude_md(false));
 
-    // Safe mode disables all of them, claudeMd unconditionally (no
+    // Safe mode disables all of them, instructions unconditionally (no
     // explicit-request escape: "--agents: ignored in safe mode").
     assert!(safe.disables_settings_hooks());
     assert!(safe.disables_plugins());
@@ -7359,7 +7446,7 @@ fn customization_gates_match_binary_maps() {
     assert!(safe.disables_claude_md(true), "safe mode ignores --add-dir");
 
     // Bare: hooks/plugins/skills/agents disabled, but ambient MCP
-    // discovery is NOT (`V5d.mcpAutoDiscovered:!1`), and claudeMd is
+    // discovery is NOT (`V5d.mcpAutoDiscovered:!1`), and instructions is
     // re-enabled by an explicit `--add-dir` request (`eue()`'s
     // `explicitlyRequested:cI().length>0`).
     assert!(bare.disables_settings_hooks());
@@ -7696,7 +7783,7 @@ async fn build_with_injected_memory_reaches_system_prompt() {
     // body. This proves the controlled provider flowed through build() into
     // the orchestrator's prompt assembly — the gap (desktop loads NO memory)
     // is closed.
-    // R-P1: claudeMd lives in the leading additional-context `<system-reminder>`
+    // R-P1: instructions lives in the leading additional-context `<system-reminder>`
     // meta now (built from the SAME `memory_block::format`), NOT the system
     // prompt. The injected LINGXI.md must reach THAT.
     let ctx = rt
@@ -7949,6 +8036,60 @@ async fn restricted_build_hides_default_restricted_builtins_from_advertising() {
     assert!(
         tool_names.iter().any(|name| name == "Read"),
         "restricted filtering must not drop unrelated builtins"
+    );
+}
+
+#[tokio::test]
+async fn headless_explicit_empty_tools_applies_without_restricted_mode() {
+    for schema in [
+        None,
+        Some(r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#),
+    ] {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.restricted = false;
+        cfg.restricted_tools = Some(vec![String::new()]);
+        cfg.json_schema = schema
+            .map(|raw| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).unwrap());
+        let output = Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let permissions = Arc::new(RecordingPermissionSink::default());
+        let runtime = build(cfg, output, permissions).await.expect("build");
+        let names = runtime.orchestrator.tool_names();
+        let expected: Vec<String> = if schema.is_some() {
+            vec!["StructuredOutput".into()]
+        } else {
+            vec![]
+        };
+        assert_eq!(names, expected);
+        assert!(runtime.tools.mod_registration_disabled());
+        assert_eq!(runtime.structured_output_slot.is_some(), schema.is_some());
+        runtime.session_lifecycle.shutdown_and_drain().await;
+    }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn headless_bare_default_catalog_matches_frozen_native() {
+    let (_tmp, mut config) = test_config(true);
+    config.customization_gates.bare = true;
+    config.restricted_tools = Some(vec!["default".into()]);
+    let runtime = build(
+        config,
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        runtime.orchestrator.advertised_tool_names().await,
+        ["Bash", "Edit", "Read"]
+    );
+    assert!(!runtime.tools.mod_registration_disabled());
+    assert!(
+        runtime
+            .session_lifecycle
+            .shutdown_and_drain()
+            .await
+            .complete
     );
 }
 
@@ -9800,6 +9941,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
         inline: false,
         restricted: false,
         flag_settings: None,
+        load_order: RwLock::new(Vec::new()),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -9881,6 +10023,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
         inline: false,
         restricted: false,
         flag_settings: None,
+        load_order: RwLock::new(Vec::new()),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -9988,6 +10131,7 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
         inline: false,
         restricted: false,
         flag_settings: None,
+        load_order: RwLock::new(Vec::new()),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     });
 
@@ -10517,6 +10661,7 @@ async fn plugin_runtime_refresh_strips_agent_escalation_from_live_catalog() {
         inline: false,
         restricted: false,
         flag_settings: None,
+        load_order: RwLock::new(Vec::new()),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -10643,6 +10788,7 @@ async fn plugin_runtime_refresh_benign_agent_does_enter_catalog() {
         inline: false,
         restricted: false,
         flag_settings: None,
+        load_order: RwLock::new(Vec::new()),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -10968,6 +11114,7 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
         inline: false,
         restricted: false,
         flag_settings: None,
+        load_order: RwLock::new(Vec::new()),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 

@@ -490,6 +490,7 @@ impl SkillTool {
             // AgentTool's statistics/accounting path. Preserve the primary
             // implementation's explicit absence of an AgentSpawnToken.
             agent_spawn_token: None,
+            stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope::AgentScoped,
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
             parent_native_query_depth: None,
@@ -536,7 +537,11 @@ impl SkillTool {
             // exists to narrow. Without this the forked agent would run with
             // the PARENT's tools, which is strictly wider than the skill's.
             additional_disallowed_tools: desc.disallowed_tools.clone(),
-            parent_model_override: None,
+            parent_model_override: {
+                let model = ctx.options.main_loop_model.trim();
+                (!model.is_empty() && model != "subagent").then(|| model.to_owned())
+            },
+            parent_model_profile_override: ctx.options.model_profile.clone(),
             resumed_history: None,
             max_turns_override: None,
             max_output_tokens_per_turn: None,
@@ -1028,6 +1033,7 @@ fn user_message_from_source(
         .string_units("")
         .expect("skill prompt message is a root string");
     lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
             text: String::from_utf16_lossy(&units),
@@ -1764,21 +1770,14 @@ present this turn, the skill is loaded — follow it directly rather than callin
         }
         let data = projection_object(fields);
 
-        // SKILLEXEC.3 (model scope): when the skill declares `model:` in its
-        // frontmatter, return a `context_modifier` that switches the session's
-        // main-loop model for the rest of the session — 1:1 with TS
-        // `SkillTool.ts:808-821` (`contextModifier` sets `options.mainLoopModel
-        // = resolveSkillModelOverride(model, ctx.options.mainLoopModel)`),
-        // including the `[1m]`-suffix preservation rule. The turn loop seeds the
-        // closure's `ctx` with the live `session.model` (the `currentModel`
-        // argument) and folds it POST-BATCH. When `model` is absent the modifier
-        // stays `None`, so the no-override path is byte-identical.
+        // Resolve a frontmatter model against the live model and profile after
+        // dispatch. A skill model has no independent profile; qualified model
+        // references and route-scoped aliases are resolved by the host catalog.
         let context_modifier: Option<tool_api::ContextModifier> =
             model_override.map(|model| -> tool_api::ContextModifier {
                 Box::new(move |mut ctx: ToolUseContext| {
-                    let current = ctx.options.main_loop_model.clone();
-                    ctx.options.main_loop_model =
-                        crate::model_override::resolve_skill_model_override(&model, &current);
+                    ctx.options.main_loop_model = model;
+                    ctx.options.model_profile = None;
                     ctx
                 })
             });

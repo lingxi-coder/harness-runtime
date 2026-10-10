@@ -5009,6 +5009,7 @@ async fn workflow_observer_projects_message_rows_and_refusal_rows_without_treati
     let message_id = lingxi_core::types::MessageId::new();
     let tool_use_id = lingxi_core::types::ToolUseId::new();
     let assistant = lingxi_core::types::ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: message_id,
         content: vec![lingxi_core::types::ContentBlock::ToolUse {
             id: tool_use_id,
@@ -5258,9 +5259,9 @@ fn without_a_usable_override_the_gate_is_the_cpu_default() {
 /// The env var's spelling is the contract with the user; a typo here fails
 /// silently and looks exactly like the feature not existing.
 #[test]
-fn the_override_env_var_is_spelled_the_way_claude_code_spells_it() {
+fn the_override_env_var_uses_the_product_namespace() {
     assert_eq!(
         WORKFLOW_MAX_CONCURRENT_AGENTS_ENV,
-        "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS"
+        branding::WORKFLOW_MAX_CONCURRENT_AGENTS_ENV
     );
 }

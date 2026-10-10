@@ -180,9 +180,9 @@ fn no_judge_eligible_row_claims_structured_output_on_a_non_encoding_codec() {
         "coverage check: expected the real builtin catalog, only saw {checked} rows"
     );
     assert!(
-            offenders.is_empty(),
-            "these rows would be elected Fusion analyst and then hard-fail at encode time: {offenders:?}"
-        );
+        offenders.is_empty(),
+        "these rows would be elected Fusion analyst and then hard-fail at encode time: {offenders:?}"
+    );
 }
 
 /// Codec support must preserve capable models and leave incapable models false.

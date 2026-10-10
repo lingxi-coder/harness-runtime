@@ -300,7 +300,7 @@ pub fn collect_mcp_config_warnings(
             return vec![McpConfigWarning {
                 file: file.map(str::to_string),
                 path: String::new(),
-                message: "Missing \"mcpServers\" \u{2014} found \"servers\" instead. Claude Code reads MCP servers from the \"mcpServers\" key.".to_string(),
+                message: "Missing \"mcpServers\" \u{2014} found \"servers\" instead. MCP servers must be configured in the \"mcpServers\" key.".to_string(),
                 suggestion: Some(format!(
                     "Rename the top-level \"servers\" key to \"mcpServers\" in {}",
                     file.unwrap_or("your MCP config")
@@ -1160,7 +1160,7 @@ mod tests {
         assert_eq!(w[0].severity, McpConfigSeverity::Fatal);
         assert_eq!(
             w[0].message,
-            "Missing \"mcpServers\" \u{2014} found \"servers\" instead. Claude Code reads MCP servers from the \"mcpServers\" key."
+            "Missing \"mcpServers\" \u{2014} found \"servers\" instead. MCP servers must be configured in the \"mcpServers\" key."
         );
         assert_eq!(
             w[0].suggestion.as_deref(),

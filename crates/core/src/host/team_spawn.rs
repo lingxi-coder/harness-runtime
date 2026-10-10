@@ -49,6 +49,15 @@ pub enum TeamSpawnError {
     Internal(String),
 }
 
+/// Model route captured from the teammate's final admitted runtime context.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TeammateModelSelection {
+    /// Concrete provider-local model ID.
+    pub model: String,
+    /// Configured profile that serves the selected model.
+    pub model_profile: Option<String>,
+}
+
 /// Spawn/kill seam for coordinator-managed teammate tasks.
 ///
 /// Object-safe so the coordinator tools can hold an
@@ -83,6 +92,18 @@ pub trait TeamSpawnSeam: Send + Sync {
     ) -> Result<String, TeamSpawnError> {
         self.spawn_teammate(agent_id, name, team_name, request.prompt)
             .await
+    }
+
+    /// Read the final model route after successful teammate admission.
+    /// Hosts must derive this from the admitted task, rather than the caller's
+    /// unresolved model preference.
+    async fn resolved_model_selection(
+        &self,
+        _task_id: &str,
+    ) -> Result<TeammateModelSelection, TeamSpawnError> {
+        Err(TeamSpawnError::Unsupported(
+            "resolved teammate model selection is unavailable on this host".into(),
+        ))
     }
 
     /// Actual pane coordinates when the host selected a terminal backend.
@@ -207,10 +228,13 @@ mod tests {
 /// Model-facing metadata returned after a persistent teammate starts.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TeammateLaunch {
+    /// Advertised teammate recipient (`name@team`).
     pub teammate_id: String,
+    /// Actual internal AgentId, serialized in its prefixed display form.
     pub agent_id: String,
     pub agent_type: String,
     pub model: String,
+    pub model_profile: Option<String>,
     pub name: String,
     pub color: String,
     pub tmux_session_name: String,

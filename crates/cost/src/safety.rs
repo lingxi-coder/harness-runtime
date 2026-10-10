@@ -14,7 +14,6 @@ impl SafetyStops {
     pub(crate) fn snapshot(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
     }
-
     pub(crate) fn reset(&self) {
         self.0.store(0, Ordering::Relaxed);
     }
@@ -42,7 +41,6 @@ mod tests {
         observer.record(ModelSafetyStop::Refusal);
         observer.record(ModelSafetyStop::ContentFiltering);
         assert_eq!(original.snapshot(), 2);
-
         original.reset();
         assert_eq!(original.snapshot(), 0);
         let resumed = Arc::new(SafetyStops::default());

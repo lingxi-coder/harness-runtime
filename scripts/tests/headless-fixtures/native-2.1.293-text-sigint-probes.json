@@ -1,0 +1,526 @@
+{
+  "version": "2.1.293",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "researchOnly": true,
+  "parityEstablished": false,
+  "textDiagnostics": [
+    {
+      "fixture": "probe-text-max-turns",
+      "captureRoot": "/tmp/headless-baseline-293-text-errors/probe-text-max-turns/native-a",
+      "nativeRepetitions": 1,
+      "exit": {
+        "code": 1,
+        "signal": null
+      },
+      "stdoutHex": "4572726f723a2052656163686564206d6178207475726e7320283129",
+      "stdoutText": "Error: Reached max turns (1)",
+      "stderrHex": "",
+      "stdoutSha256": "c8725aa448fad6f6df7b0e98144d8eab14dfba2702df67da271145df26f67212",
+      "note": "Text mode has no structured result subtype; max-turns original validation copied a JSON subtype expectation and marked the receipt incomplete, despite normal exit1 and captured exact diagnostic."
+    },
+    {
+      "fixture": "probe-text-provider-error",
+      "captureRoot": "/tmp/headless-baseline-293-text-errors/probe-text-provider-error/native-a",
+      "nativeRepetitions": 1,
+      "exit": {
+        "code": 1,
+        "signal": null
+      },
+      "stdoutHex": "415049204572726f723a2034303020484541444c4553535f4c4f43414c5f50524f56494445525f4552524f520a",
+      "stdoutText": "API Error: 400 HEADLESS_LOCAL_PROVIDER_ERROR\n",
+      "stderrHex": "",
+      "stdoutSha256": "1b03ffb0abd51be933867707ff8541596b163ded344b7f85133a81435c8e88ca",
+      "note": null
+    },
+    {
+      "fixture": "probe-text-schema-error",
+      "captureRoot": "/tmp/headless-baseline-293-text-errors/probe-text-schema-error/native-a",
+      "nativeRepetitions": 1,
+      "exit": {
+        "code": 1,
+        "signal": null
+      },
+      "stdoutHex": "4572726f723a204661696c656420746f2070726f766964652076616c69642073747275637475726564206f7574707574206166746572203020617474656d70747320e28094206c61737420537472756374757265644f7574707574206572726f723a204f757470757420646f6573206e6f74206d6174636820726571756972656420736368656d613a202f616e737765723a206d75737420626520737472696e67",
+      "stdoutText": "Error: Failed to provide valid structured output after 0 attempts \u2014 last StructuredOutput error: Output does not match required schema: /answer: must be string",
+      "stderrHex": "",
+      "stdoutSha256": "7867f54886dd87e1f1c93b3295defe87941743b288474f7a57889a8b04f70fd4",
+      "note": null
+    }
+  ],
+  "blockedStdout": [
+    {
+      "format": "text",
+      "observation": "exit",
+      "forcedCleanup": false,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "intendedTextBytes": 2097169,
+      "events": [
+        {
+          "kind": "stdin-eof",
+          "wallMs": 1791433317481
+        },
+        {
+          "kind": "provider-response-write",
+          "wallMs": 1791433317739,
+          "ordinal": 0,
+          "attempted": true
+        },
+        {
+          "kind": "sigint",
+          "wallMs": 1791433318740,
+          "stdoutReadableLength": 65536,
+          "stdoutDestroyed": false,
+          "stdoutReadableEnded": false
+        },
+        {
+          "kind": "exit",
+          "wallMs": 1791433320750,
+          "code": 0,
+          "signal": null
+        },
+        {
+          "kind": "observation-ended",
+          "wallMs": 1791433320750,
+          "observation": "exit",
+          "stdoutReadableLength": 0,
+          "stdoutDestroyed": false,
+          "stdoutReadableEnded": false
+        }
+      ],
+      "channels": {
+        "stdout": {
+          "bytes": 131072,
+          "sha256": "e72209fbbd480b947c4263babeb08ee1393625849c3b2aed264c988df570adfe"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdin": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "sessions": [
+        {
+          "path": "projects/-private-var-folders-2c-gch8wj4s0d52rygkyd6b9f-h0000gn-T-headless-blocked-owned-8H54ZF-workspace/54a524d5-7cc6-495e-8c28-24c8f44bc4b1.jsonl",
+          "bytes": 2101276,
+          "sha256": "522b5f8cbea797dbd586ec8145f6dc5c4135005ff42fda3138ab29cf9c749812"
+        }
+      ],
+      "providerUnexpected": [],
+      "captureRoot": "/tmp/headless-baseline-293-blocked-stdout-fixed/text",
+      "sigintToExitMs": 2010,
+      "stdoutPrefixHex": "484541444c4553535f424c4f434b45445f78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+    },
+    {
+      "format": "stream-json",
+      "observation": "exit",
+      "forcedCleanup": false,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "intendedTextBytes": 2097169,
+      "events": [
+        {
+          "kind": "stdin-eof",
+          "wallMs": 1791433320771
+        },
+        {
+          "kind": "provider-response-write",
+          "wallMs": 1791433320975,
+          "ordinal": 0,
+          "attempted": true
+        },
+        {
+          "kind": "sigint",
+          "wallMs": 1791433321975,
+          "stdoutReadableLength": 68491,
+          "stdoutDestroyed": false,
+          "stdoutReadableEnded": false
+        },
+        {
+          "kind": "exit",
+          "wallMs": 1791433323983,
+          "code": 0,
+          "signal": null
+        },
+        {
+          "kind": "observation-ended",
+          "wallMs": 1791433323983,
+          "observation": "exit",
+          "stdoutReadableLength": 0,
+          "stdoutDestroyed": false,
+          "stdoutReadableEnded": false
+        }
+      ],
+      "channels": {
+        "stdout": {
+          "bytes": 134027,
+          "sha256": "98c3c91a0d92eed658ef11cf2d879ee7176ce3c4b77c001155554f5284e55f9e"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdin": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "sessions": [
+        {
+          "path": "projects/-private-var-folders-2c-gch8wj4s0d52rygkyd6b9f-h0000gn-T-headless-blocked-owned-355Afx-workspace/5a3a8791-d988-47dc-8bac-97bb3e0c4ddc.jsonl",
+          "bytes": 2101276,
+          "sha256": "2c80b38b2a762b79bdffb461a9298308872e004e1f2b9b7eabc60bf7e0b6a8b4"
+        }
+      ],
+      "providerUnexpected": [],
+      "captureRoot": "/tmp/headless-baseline-293-blocked-stdout-fixed/stream-json",
+      "sigintToExitMs": 2008,
+      "stdoutPrefixHex": "7b2274797065223a2273797374656d222c2273756274797065223a2275695f696e76616c6964617465222c226576656e74223a2275692e72656e646572222c2275756964223a2266373435373631352d383238322d343261342d616136392d333630336466336333336135222c2273657373696f6e5f6964223a2235613361383739312d643938382d343764632d386261632d393762623365306334646463227d0a7b2274797065223a2273797374656d222c2273756274797065223a22696e6974222c22637764223a222f707269766174652f7661722f666f6c646572732f32632f67636838776a34733064353272"
+    },
+    {
+      "format": "text",
+      "observation": "exit",
+      "forcedCleanup": false,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "intendedTextBytes": 2097169,
+      "events": [
+        {
+          "kind": "stdin-eof",
+          "wallMs": 1791433415468
+        },
+        {
+          "kind": "provider-response-write",
+          "wallMs": 1791433415664,
+          "ordinal": 0,
+          "attempted": true
+        },
+        {
+          "kind": "sigint",
+          "wallMs": 1791433416665,
+          "stdoutReadableLength": 65536,
+          "stdoutDestroyed": false,
+          "stdoutReadableEnded": false
+        },
+        {
+          "kind": "exit",
+          "wallMs": 1791433418681,
+          "code": 0,
+          "signal": null
+        },
+        {
+          "kind": "observation-ended",
+          "wallMs": 1791433418681,
+          "observation": "exit",
+          "stdoutReadableLength": 0,
+          "stdoutDestroyed": false,
+          "stdoutReadableEnded": false
+        }
+      ],
+      "channels": {
+        "stdout": {
+          "bytes": 131072,
+          "sha256": "e72209fbbd480b947c4263babeb08ee1393625849c3b2aed264c988df570adfe"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdin": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "sessions": [
+        {
+          "path": "projects/-private-var-folders-2c-gch8wj4s0d52rygkyd6b9f-h0000gn-T-headless-blocked-owned-Io7ftB-workspace/54a524d5-7cc6-495e-8c28-24c8f44bc4b1.jsonl",
+          "bytes": 2101276,
+          "sha256": "e0df4fcb361889044f635d9311e8eb670091b8404375b3aadb0ca71fcc172dac"
+        }
+      ],
+      "providerUnexpected": [],
+      "captureRoot": "/tmp/headless-baseline-293-blocked-stdout-fixed-repeat/text",
+      "sigintToExitMs": 2016,
+      "stdoutPrefixHex": "484541444c4553535f424c4f434b45445f78787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878"
+    },
+    {
+      "format": "stream-json",
+      "observation": "exit",
+      "forcedCleanup": false,
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "intendedTextBytes": 2097169,
+      "events": [
+        {
+          "kind": "stdin-eof",
+          "wallMs": 1791433418702
+        },
+        {
+          "kind": "provider-response-write",
+          "wallMs": 1791433418899,
+          "ordinal": 0,
+          "attempted": true
+        },
+        {
+          "kind": "sigint",
+          "wallMs": 1791433419900,
+          "stdoutReadableLength": 68490,
+          "stdoutDestroyed": false,
+          "stdoutReadableEnded": false
+        },
+        {
+          "kind": "exit",
+          "wallMs": 1791433421906,
+          "code": 0,
+          "signal": null
+        },
+        {
+          "kind": "observation-ended",
+          "wallMs": 1791433421906,
+          "observation": "exit",
+          "stdoutReadableLength": 0,
+          "stdoutDestroyed": false,
+          "stdoutReadableEnded": false
+        }
+      ],
+      "channels": {
+        "stdout": {
+          "bytes": 134026,
+          "sha256": "24cf3789b444d7889e59f18fc142cf0cc401927e612423f27d0a7741fb60dff6"
+        },
+        "stderr": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stdin": {
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "sessions": [
+        {
+          "path": "projects/-private-var-folders-2c-gch8wj4s0d52rygkyd6b9f-h0000gn-T-headless-blocked-owned-HuICXJ-workspace/5a3a8791-d988-47dc-8bac-97bb3e0c4ddc.jsonl",
+          "bytes": 2101276,
+          "sha256": "2e8e6ad8b60fe90c4484646c12bad7a371cf693643684e35b7678b61c5757af0"
+        }
+      ],
+      "providerUnexpected": [],
+      "captureRoot": "/tmp/headless-baseline-293-blocked-stdout-fixed-repeat/stream-json",
+      "sigintToExitMs": 2006,
+      "stdoutPrefixHex": "7b2274797065223a2273797374656d222c2273756274797065223a2275695f696e76616c6964617465222c226576656e74223a2275692e72656e646572222c2275756964223a2266376630326430642d626463362d346562332d383338662d643031626264636336353130222c2273657373696f6e5f6964223a2235613361383739312d643938382d343764632d386261632d393762623365306334646463227d0a7b2274797065223a2273797374656d222c2273756274797065223a22696e6974222c22637764223a222f707269766174652f7661722f666f6c646572732f32632f67636838776a34733064353272"
+    }
+  ],
+  "unverified": [
+    "Harness text diagnostic/native SIGINT equality",
+    "SIGINT exit behavior with TTY or additional configured hooks",
+    "whole stdout equality under deliberate backpressure cancellation"
+  ],
+  "discardedPreliminaryCollector": {
+    "captureRoot": "/tmp/headless-baseline-293-blocked-stdout",
+    "reason": "Native exit timing captured, but listener attached after exit allowed Node automatic stdio drain to lose initial bytes; fixed collector installed a listener before pause."
+  },
+  "sourceExcerpts": [
+    {
+      "id": "native_print_text_subtype_renderer",
+      "offset": 209184850,
+      "length": 1117,
+      "sha256": "2151d3a32003a037500ff7c0f52ab7bd6f550df4d8209cfcdb728d5c901b4d28",
+      "source": "putFormat){case\"json\":if(!mn||mn.type!==\"result\"){process.stderr.write(`Error: No messages returned from query\n`),t(\"runHeadless: no result message returned from query\",{level:\"error\"}),Ts(1);return}if(b.verbose){gr(_(rs)+`\n`);break}gr(_(mn)+`\n`);break;case\"stream-json\":break;default:if(!mn||mn.type!==\"result\"){process.stderr.write(`Error: No messages returned from query\n`),t(\"runHeadless: no result message returned from query\",{level:\"error\"}),Ts(1);return}switch(mn.subtype){case\"success\":{let Ne=ss.partialForResult===void 0?mn.result:`${ss.partialForResult}\n${mn.result}`;gr(Ne.endsWith(`\n`)?Ne:Ne+`\n`);break}case\"error_during_execution\":{let Ne=PUn();if(Ne!==void 0)process.stderr.write(`${Ne}\n`);gr(\"Execution error\");break}case\"error_max_turns\":gr(`Error: Reached max turns (${b.maxTurns})`);break;case\"error_max_budget_usd\":gr(`Error: Exceeded USD budget (${b.maxBudgetUsd})`);break;case\"error_max_structured_output_retries\":gr(`Error: ${mn.errors[0]??\"Failed to provide valid structured output after maximum retries\"}`)}}if(MEr(),Aqe()||tc.isLaptopExtractActive(e.host))await tc.drainPendingExtraction(e."
+    },
+    {
+      "id": "native_print_sigint_handler",
+      "offset": 209194510,
+      "length": 580,
+      "sha256": "abf096835b195edcdf18a34485c3421f850024cc554e05a5c26fbe7f32327a02",
+      "source": "tries:H})});let ua=()=>{if(te(\"info\",\"shutdown_signal\",{signal:\"SIGINT\"}),js()){qJ();return}if(He.abortController&&!He.abortController.signal.aborted)He.abortController.abort(cc(\"user-cancel\"));vn.abort(),qJ(),Zn(0)};process.on(\"SIGINT\",ua);let wi=!1,yd=()=>{if(wi||js())return;wi=!0,u9(),p_n(),vn.abort(),Zn(143)};process.on(\"SIGTERM\",yd),E6t(),r.setOnStreamClosedWithParkedQuestion(()=>{if(lu(),Lt(),He.abortController&&!He.abortController.signal.aborted)He.abortController.abort(cc(\"shutdown\"))}),bt(async()=>{if(sr)wn.persist(sr);Jo.resolve(),dr.onShutdown(),Fo.reportTerminat"
+    },
+    {
+      "id": "stdout_drain_external_clock",
+      "offset": 184097840,
+      "length": 733,
+      "sha256": "126c3b5af56e5a42e7e40cc276bf63fd3491bd8483b45b4a1df00bb2ba153dd3",
+      "source": ";Object.assign(this,new a)}}var o=new a;function gr(e){o.markEverWritten();let t=Buffer.byteLength(e);if(v(process.stdout,e,()=>{o.recordFlushed(t)}))o.recordQueued(t)}async function PIt(e=2000,{scaleBudgetToQueue:t=!0}={}){let n=o.endStdoutOnce();if(n===void 0)return;let r=Promise.all([n,o.fullyFlushed()]);await Nt(t?Promise.race([r,k(e)]):r,t?avr(e):e,\"stdout drain timeout (exit)\").catch(()=>{})}function qJ(){o.markExternallyClocked()}function Sbo(){return o.isExternallyClocked()}function k(e){return o.ensureExternallyClockedPromise().then(()=>Z(e))}var _=262144,w=30000;function ivr(){return o.outstandingBytes()}function avr(e=2000){return Math.min(w,Math.max(e,Math.ceil(ivr()*1000/_)))}function ZU(e){v(process.stderr,e)}"
+    },
+    {
+      "id": "shutdown_exit_code_and_drain",
+      "offset": 192241755,
+      "length": 1955,
+      "sha256": "bcbb5264b32fcbc04a9c5b5c0b1ae19a2ffc472c60bbf98640b01fef9ab45107",
+      "source": "his.worktreeRemoval)t(`Worktree ${r.removeWorktree.path} kept: a shutdown was already under way`,{level:\"warn\"});return}if(this.shutdownInProgress=!0,u9(),process.exitCode=e,r?.suppressResumeHint)this.resumeHintPrinted=!0;this.resumeHintOmitsWorktree=r?.removeWorktree!==void 0,this.worktreeRemoval=r?.removeWorktree;let{executeSessionEndHooks:s,getSessionEndHookTimeoutMs:g,SESSION_END_HOOK_TIMEOUT_MS_DEFAULT:h}=await import(\"/$bunfs/root/chunk-77rs7zp0.js\"),b;try{b=g()}catch{b=h}this.armShutdownFailsafe(Math.max(5000,b+5000),e),rve(),this.printResumeHint();let w;try{let G=(async()=>{try{await Hlt()}catch{}})();await Promise.race([G,new Promise((q,Y)=>{w=setTimeout((he)=>he(new Uot),WJ,Y)})]),clearTimeout(w)}catch{clearTimeout(w)}if(Htt())this.armShutdownFailsafe(Math.max(jAs,b+5000),e);try{await Utt()}catch{}p_n();try{await Xht()}catch{}try{await xot()}catch{}if(r?.removeWorktree)await this.removeWorktreeAtExit(r.removeWorktree,e,Math.max(5000,b+5000));try{if(!XIt())await s(qB(),n,{signal:AbortSignal.timeout(b),storageV5:this.handles.storageV5,credentials:this.handles.credentials})}catch{}p_n();try{await Xht()}catch{}try{wZt()}catch{}Rnr();try{u_n(\"session_end\")}catch{}let M=await this.waitForHeldOAuthRefresh(e);if(await tM(),await r0e(),M&&Ast()!==null)await this.waitForHeldOAuthRefresh(e),await tM();if(r?.finalMessage)try{_A(2,r.finalMessage+`\n`)}catch{}try{await UTe()}catch{}try{await J_e()}catch{}try{await K1n()}catch{}await this.armFailsafeAndDrainStdout(e),this.forceExit(e)}async armFailsafeAndDrainStdout(e){this.armShutdownFailsafe(avr()+GNn,e),await PIt()}async waitForHeldOAuthRefresh(e){if(Ast()===null)return!0;if(this.failsafeFiresAtMs!==void 0)this.armShutdownFailsafe(Math.max(0,this.failsafeFiresAtMs-Date.now())+Ghr,e);return $co(Ghr)}}function Fot(e){let n=xEn(e);if(!(!n&&e instanceof Error)){if(typeof e===\"string\")return{error_name:\"string\",error_message:hs(e).slice(0,2000),isHostError:!1};let w=n?J4r(e,\"name"
+    },
+    {
+      "id": "shutdown_wrapper",
+      "offset": 192245954,
+      "length": 276,
+      "sha256": "a45655a87497c099f92ad1a2ec2883228a06c6f956f352c4ef25ce8e1d75191e",
+      "source": "function Zn(e=0,n=\"other\",r){return cS().shutdown(e,n,r)}function Ts(e=0,n=\"other\"){cS().shutdownSync(e,n)}function js(){return cS().isShuttingDown()}function v6t(){cS().claimShutdown()}function JHs(){cS().releaseShutdownClaim()}function Inr(e){cS().registerBeforeInteractiveS"
+    },
+    {
+      "id": "force_exit",
+      "offset": 192233235,
+      "length": 305,
+      "sha256": "428e0669c78ec9e21bca77dfd5db6c200dd7348b2d96747f75e63e72040cbd72",
+      "source": "ntPrinted=!0}catch{}}forceExit(e){if(this.failsafeTimer!==void 0)clearTimeout(this.failsafeTimer),this.failsafeTimer=void 0,this.failsafeFiresAtMs=void 0;try{u9r()?.drainStdin()}catch{}try{process.exit(e)}catch(n){process.kill(process.pid,\"SIGKILL\")}throw Error(\"unreachable\")}markPrintModeSignalHandlersR"
+    },
+    {
+      "id": "execution_error_notice_latch",
+      "offset": 184067210,
+      "length": 180,
+      "sha256": "930d73033ffbf71b35aaeecea251428ac93e0d0b25c09d1a75962a813812a5f9",
+      "source": "deUnavailableResponses(e)}function Pkr(e){n().host.requestLatches.setAutoModeUnavailableStopNotice(e)}function PUn(){return n().host.requestLatches.autoModeUnavailableStopNotice()}"
+    },
+    {
+      "id": "execution_notice_latch_storage",
+      "offset": 184022380,
+      "length": 445,
+      "sha256": "75c453829311d248c233f2a7631626185d64bbdd923e378f0f3879b9a6e191ac",
+      "source": "let o of this.#k.values())if(o.runKey===e)t++;return t}noteAutoModeUnavailableResponse(e,t){this.#k.set(e,t)}clearAutoModeUnavailableResponses(e){for(let[t,o]of this.#k)if(o.runKey===e)this.#k.delete(t)}setAutoModeUnavailableStopNotice(e){this.#R=e}autoModeUnavailableStopNotice(){return this.#R}setLocalCommandExitCode(e){this.#T=e}localCommandExitCode(){return this.#T}observedGateway(){return this.#M}serverClassifierFallbackChoice(){return t"
+    },
+    {
+      "id": "permission_stop_notice_selection",
+      "offset": 200764490,
+      "length": 525,
+      "sha256": "697431aae119bee57061038f5cc8f23347cb87cfbc7a36d0f069b7c64a00231a",
+      "source": "en=${Rt.length})`)}let Gt=ft.findLast((V)=>!In(V))??ft.at(-1)??{type:\"user\",message:C.message},ur=at?H.engineDeferredSlash===void 0:uL(wt),jt=Ki(ie.signal.reason)===\"permission-stop\"?q2t(K2t()):void 0,Ts=vt!==null?[vt]:at&&jt!==void 0?[u$r(Gt,pt),jt]:ur&&Bt===void 0&&!M1o(Gt,pt)?N1o(Gt,pt,lr):null;try{if(tt&&D1o({trailing:Gt,preceding:ft.at(-2),terminalReason:wt,retractionExhausted:ht.length===0&&qt.size>0}))tt=!1,Ut=null,It=void 0,Et=void 0,Ot=\"\",pt=\"tool_use\",i(\"tengu_trailing_api_error_notice_skipped\",{engine:S(\"sess"
+    },
+    {
+      "id": "print_notice_latch_assignment",
+      "offset": 200766300,
+      "length": 320,
+      "sha256": "d8817ba849496d1dde6f6d3012518d87657d9b685c5a650bc2e163f931f25cc3",
+      "source": "0,Math.round(os-E)):void 0,deferred_tool_use:Bt}}),...D},As;if(C.uuid!==void 0)As=ee(C.uuid,vt!==null?\"cancelled\":rjn(wt,Ss));if(q.shift(),at)Pkr(jt);else if(jt!==void 0)yield Q(Wt(jt,\"warning\"));yield*I(),yield*G(dr,As)}while(Ae.length>0&&!se?.signal.aborted&&W())yield*I(),await Z(100);if(Ae.length>0&&se?.signal.abort"
+    },
+    {
+      "id": "setup_failure_notice_clear",
+      "offset": 200754850,
+      "length": 315,
+      "sha256": "16e9501230eba2e2eeb48c4833fd8d652b924dec9e8a5d79741d2d64c8791a44",
+      "source": "uldQuery,timestamp:C.timestamp},H;try{H=await s(C)}catch(V){c(V),re(V),q.shift();let o=C.uuid!==void 0?ee(C.uuid,\"cancelled\"):void 0;if(at)Pkr(void 0);yield*I();let B={...Z7({startedAt:E,common:{is_error:!0,duration_api_ms:0,num_turns:0,stop_reason:null,session_id:J,total_cost_usd:Wh(),usage:ts(),modelUsage:MI(),p"
+    },
+    {
+      "id": "auto_stop_threshold",
+      "offset": 193995360,
+      "length": 330,
+      "sha256": "1b6aa98679bda1c904746f7bf6deaf5c6afd9a04c1240eedb08bb3d771258969",
+      "source": "VER;e.userServerClassifierSwitch=n===void 0?null:Le(n)}return e.userServerClassifierSwitch}var OOo=(e,n)=>{let r=setTimeout(e,n);return()=>clearTimeout(r)},Sw=10;function t5(e){return e??\"main\"}var DOo=!0;async function Czt(e,n){let r=Jvo(e);if(r!==void 0)return r.position>=Sw?{kind:\"stop\",position:r.position,recorded:!1}:{kind:"
+    },
+    {
+      "id": "auto_stop_notice_formatter",
+      "offset": 193997406,
+      "length": 325,
+      "sha256": "c9a85d4c29d92ee6f77818f5cf1e987eec4fd32baeec3f3f2524350a223084ae",
+      "source": "function q2t(e){let n=`Auto mode is unavailable \\u2014 the server returned no safety verdict for the last ${Sw} responses, so Claude stopped. Send a message to try again, or switch out of auto mode.`;return e===void 0?n:`${n} Requests in this session go through ${e}; a proxy that alters responses could cause this.`}var Jue="
+    },
+    {
+      "id": "api_error_terminal_from_final_assistant",
+      "offset": 200613375,
+      "length": 355,
+      "sha256": "97c106534e1913ce9e8713ae9cb45595ee10d3ca6861af7333d9a64d1201e8cc",
+      "source": "(Ls)y(\"query_thinking_only_response\");if(h?.isApiErrorMessage){if(Rt&&To(f)&&Ic()&&b.startsWith(\"repl_main_thread\")&&!f.agentId){let ie=yN(h)??h.errorDetails??\"\";await Rt().markApiFailure(To(f),Ff(),h.error,ie,h.apiError)}return z2e(h,f),{reason:\"api_error\",errorKind:h.error,isTransient:i5r(h),quotaLimits:h.quotaLimits}}let Se=!f.agentId&&f.getAppState("
+    },
+    {
+      "id": "api_error_synthetic_assistant_stop",
+      "offset": 196423080,
+      "length": 605,
+      "sha256": "d68730c7669cd3e1bf4f269746a9ea4e84cdf351ede4394a65943f81141bc63c",
+      "source": "l,fallback_credit:null},now:Y=()=>new Date().toISOString(),uuid:he=Bh}){return{type:\"assistant\",uuid:he(),timestamp:Y(),message:{diagnostics:null,id:he(),container:null,model:na,role:\"assistant\",stop_details:null,stop_reason:\"stop_sequence\",stop_sequence:\"\",type:\"message\",usage:q,content:e,context_management:null},requestId:void 0,apiError:r,...s!==void 0&&{apiErrorParams:s},apiErrorIsTransient:g,quotaLimits:h,error:b,errorDetails:w,truncatedAfterOutput:M,isApiErrorMessage:n,isVirtual:G}}function Yc({content:e,usage:n,isVirtual:r,now:s,uuid:g}){return hAn({content:typeof e===\"string\"?[{type:\"text\","
+    },
+    {
+      "id": "engine_return_terminal_reason",
+      "offset": 200764195,
+      "length": 210,
+      "sha256": "edb962da1f573d122f1e2cc325f705ac4a90fc67784267ada6bee317195a9db3",
+      "source": "Ss=ie.signal.aborted,await ns.return(void 0).catch(()=>{}),fe?.removeEventListener(\"abort\",et),ie.signal.removeEventListener(\"abort\",_s);let V=ts();t(`[engine] turn ${$e} end (turns=${Ft} usage in=${V.input_tok"
+    }
+  ],
+  "executionErrorStderrContract": "PUn reads only host.requestLatches.autoModeUnavailableStopNotice. On permission-stop the engine sets this to q2t(K2t()); turn-setup failure clears it. This is not the generic error ring or result.errors[0].",
+  "http400JsonResult": {
+    "captureRoot": "/tmp/headless-baseline-293-json-provider-error/probe-json-provider-error/native-a/processes",
+    "nativeRepetitions": 1,
+    "exit": {
+      "code": 1,
+      "signal": null
+    },
+    "stderrHex": "",
+    "stdoutSha256": "b581bd35834e1aa3e5f6596180c9e89d4bb02663c80b147734adc842acb50607",
+    "result": {
+      "duration_api_ms": 0,
+      "stop_reason": "stop_sequence",
+      "session_id": "8521a129-f38e-4a8a-8fee-9bdb39af882a",
+      "total_cost_usd": 0,
+      "usage": {
+        "output_tokens_details": {
+          "thinking_tokens": 0
+        },
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "",
+        "iterations": [],
+        "speed": "standard",
+        "fallback_credit": null
+      },
+      "modelUsage": {},
+      "permission_denials": [],
+      "terminal_reason": "api_error",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "safety_stops": 0,
+      "is_error": true,
+      "num_turns": 1,
+      "subtype": "success",
+      "api_error_status": 400,
+      "result": "API Error: 400 HEADLESS_LOCAL_PROVIDER_ERROR",
+      "type": "result",
+      "duration_ms": 43,
+      "uuid": "6025e5ef-4787-468c-acb4-b7c0fd9b7050",
+      "queued_turn_count": 0,
+      "result_index": 0
+    }
+  }
+}

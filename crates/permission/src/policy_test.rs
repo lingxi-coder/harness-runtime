@@ -2285,14 +2285,14 @@ mod tests {
             ),
             PermissionResult::Ask { .. }
         ));
-        // The legacy alias `Task` resolves to `Agent` content matching as well.
+        // Removed Task rules do not grant or deny Agent permissions.
         let p2 = policy_with_roots(
             r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
             PermissionMode::Default,
         );
         assert!(matches!(
             p2.authorize("Agent", &source_json!({ "subagent_type": "Explore" })),
-            PermissionResult::Deny { .. }
+            PermissionResult::Ask { .. }
         ));
     }
 
@@ -2332,18 +2332,13 @@ mod tests {
         let mut set = p.agent_deny_content_types();
         set.sort();
         assert_eq!(set, vec!["Explore".to_string(), "Plan".to_string()]);
-        // The `Task` alias is matched too (LingXi stores the alias verbatim).
+        // A removed Task rule cannot deny Agent catalog entries.
         let p2 = policy_with_roots(
             r#"{ "permissions": { "deny": ["Task(Explore)"] } }"#,
             PermissionMode::Default,
         );
-        assert_eq!(
-            p2.agent_type_deny_source("Explore"),
-            Some(PermissionRuleSource::Settings(
-                lingxi_core::types::SettingsScope::Project
-            ))
-        );
-        assert_eq!(p2.agent_deny_content_types(), vec!["Explore".to_string()]);
+        assert_eq!(p2.agent_type_deny_source("Explore"), None);
+        assert!(p2.agent_deny_content_types().is_empty());
     }
 
     // ── PERM.4: Plan mode + isBypassPermissionsModeAvailable bypasses ──────

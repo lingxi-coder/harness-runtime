@@ -932,9 +932,17 @@ pub enum ToolError {
         /// Char limit that was hit.
         limit: usize,
     },
-    /// M4-05: subagent loop crashed.
-    #[error("subagent failed: {}", .0.string_at("").unwrap_or_default())]
-    SubagentFailed(Utf16JsonProjection),
+    /// A spawned subagent terminated with an error. Preserve the allocated
+    /// child's identity so the host can retain the correct lifecycle route.
+    #[error("subagent failed: {}", .reason.string_at("").unwrap_or_default())]
+    SubagentFailed {
+        /// The allocated child, distinct from an admission failure.
+        agent_id: lingxi_core::types::AgentId,
+        /// Exact model-facing failure reason.
+        reason: Utf16JsonProjection,
+        /// An existing host lifecycle worker already owns the global stop.
+        terminal_hooks_owned: bool,
+    },
     /// M4-07: MCP server reported a tool-call failure.
     #[error("MCP tool error: {server}/{tool}")]
     McpFailure {
@@ -977,10 +985,10 @@ impl ToolError {
         match self {
             ToolError::InvalidInput(message)
             | ToolError::PermissionDenied(message)
-            | ToolError::SubagentFailed(message)
             | ToolError::Transport(message)
             | ToolError::Io(message)
             | ToolError::LspFailure(message) => message.clone(),
+            ToolError::SubagentFailed { reason, .. } => reason.clone(),
             ToolError::McpFailure {
                 server,
                 tool,
@@ -1096,9 +1104,13 @@ mod m4_01_error_variant_tests {
 
         // Other single-string variants are bare too.
         assert_eq!(
-            ToolError::SubagentFailed("boom".into())
-                .model_facing_message()
-                .string_at(""),
+            ToolError::SubagentFailed {
+                agent_id: lingxi_core::types::AgentId::new(),
+                reason: "boom".into(),
+                terminal_hooks_owned: false,
+            }
+            .model_facing_message()
+            .string_at(""),
             Some("boom")
         );
 

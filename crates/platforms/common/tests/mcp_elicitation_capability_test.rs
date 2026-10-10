@@ -14,6 +14,7 @@ use lingxi_core::host::{
     McpTransport, McpTransportSpec,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
 use platform_common::RemoteMcpTransport;
 use serde_json::{json, Value};
 use std::{
@@ -244,6 +245,7 @@ impl jsonrpc::InboundHandler for CancelUrl {
         assert_eq!(request.id, jsonrpc::Id::String(INPUT_KEY.into()));
         let params = request.params.as_ref().unwrap();
         let params: Value = serde_json::from_str(params.as_json()).unwrap();
+
         assert_eq!(params["mode"], "url");
         assert_eq!(params["message"], INPUT_MESSAGE);
         assert_eq!(params["url"], INPUT_URL);

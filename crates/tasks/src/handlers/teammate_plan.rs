@@ -217,6 +217,7 @@ impl ToolInvoker for PlanAwareInvoker {
         &self,
         name: &str,
         input: Utf16JsonProjection,
+
         context: SubagentInvocationContext,
         lease: Option<u64>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
@@ -228,6 +229,7 @@ impl ToolInvoker for PlanAwareInvoker {
         &self,
         name: &str,
         input: Utf16JsonProjection,
+
         context: SubagentInvocationContext,
         lease: Option<u64>,
         supplied: Arc<dyn std::any::Any + Send + Sync>,

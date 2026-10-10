@@ -229,6 +229,7 @@ fn make_notice(
         lingxi_core::host::refusal_server_control::BannerScope::Local => "local",
     };
     lingxi_core::types::ConversationMessage::System {
+        api_system: None,
         id,
         content: content.into(),
         subtype: Some("model_refusal_fallback".into()),

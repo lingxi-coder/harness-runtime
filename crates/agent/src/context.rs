@@ -147,7 +147,7 @@ pub struct SubagentContext {
     pub mobile_runtime_workspace_reminder: Option<Arc<str>>,
     /// Resolved user context and per-agent lazy instruction cursor.
     pub instruction_context: lingxi_core::host::instructions::InstructionContext,
-    /// Explicit fork userContext overrides bypass omitClaudeMd selection.
+    /// Explicit fork userContext overrides bypass omitInstructions selection.
     pub instruction_context_is_override: bool,
     pub instruction_provider:
         Option<Arc<dyn lingxi_core::host::instructions::InstructionContextProvider>>,
@@ -165,6 +165,10 @@ pub struct SubagentContext {
     /// typed streaming request. `None` selects the host's current default
     /// provider route.
     pub model_profile: Option<String>,
+    /// Live configured routes used to resolve model changes returned by child
+    /// tools against this agent's current model and provider profile.
+    pub model_resolution_context_provider:
+        Option<Arc<dyn crate::model_resolution::ModelResolutionContextProvider>>,
     /// Managed model restriction snapshot used to validate a provider-admitted
     /// server fallback before the child accepts its response. This carries no
     /// provider catalog; `None` means the host supplied no restriction.
@@ -250,6 +254,11 @@ pub struct SubagentContext {
     /// Admission token for an Agent-tool request. Only the execution owner
     /// reports start and terminal receipts; non-Agent launches leave this empty.
     pub agent_spawn_token: Option<lingxi_core::host::agent_statistics::AgentSpawnToken>,
+    pub stop_hook_scope: lingxi_core::host::subagent_spawn::SubagentStopScope,
+    /// Session epoch captured at admission. Snapshot publication cannot bind a
+    /// retained child to a later restored run or session generation.
+    pub subagent_stop_firer:
+        Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>>,
     /// Managed `strictPluginOnlyCustomization:["hooks"]` decision captured by
     /// the composition root. When true, user/project definitions may not
     /// register command-capable frontmatter hooks.
@@ -274,7 +283,7 @@ pub struct SubagentContext {
     /// [`lingxi_core::host::tool_invoker::SubagentInvocationContext::depth`] →
     /// `ToolUseContext.depth`, and the spawner passes it to
     /// [`crate::tool_resolver::AgentToolResolver`] to gate the `Agent` tool at
-    /// `depth < CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
+    /// `depth < LINGXI_MAX_SUBAGENT_SPAWN_DEPTH` (default 1).
     pub depth: u32,
     /// Observer declaration whose companion watches this agent and, when
     /// enabled, propagates to recursive children.

@@ -267,6 +267,177 @@ fn reporting_ctx(
     ctx
 }
 
+struct RejectInheritedPermissionPrompt;
+
+#[async_trait]
+impl PermissionGate for RejectInheritedPermissionPrompt {
+    async fn check(&self, _: &str, _: &serde_json::Value) -> PermissionDecision {
+        PermissionDecision::Deny {
+            reason: "test permission prompt rejected".into(),
+        }
+    }
+}
+
+struct InheritedPermissionWriteProbe {
+    observed_modes: Arc<Mutex<Vec<Option<String>>>>,
+    body_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl tool_api::Tool for InheritedPermissionWriteProbe {
+    fn name(&self) -> &str {
+        "Write"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| serde_json::json!({"type":"object"}))
+    }
+    fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        false
+    }
+    async fn check_permissions(
+        &self,
+        _: &serde_json::Value,
+        context: &tool_api::ToolUseContext,
+    ) -> permission::PermissionResult {
+        self.observed_modes
+            .lock()
+            .unwrap()
+            .push(context.trusted_effective_permission_mode.clone());
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test tool defers authorization to the policy gate".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+        "Test write probe".into()
+    }
+    async fn prompt(&self, _: &tool_api::PromptOptions) -> String {
+        "Test write probe".into()
+    }
+    async fn call(
+        &self,
+        _: serde_json::Value,
+        _: tool_api::ToolUseContext,
+        _: tool_api::ToolProgressSender,
+    ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+        self.body_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(tool_api::ToolCallResult::from_data(serde_json::Value::Null))
+    }
+}
+
+#[tokio::test]
+async fn handback_ineligible_runner_preserves_trusted_parent_permission_under_root_bypass() {
+    for mode in [
+        permission::PermissionMode::DontAsk,
+        permission::PermissionMode::Auto,
+    ] {
+        for trusted_parent in [None, Some(mode)] {
+            let observed_modes = Arc::new(Mutex::new(Vec::new()));
+            let body_calls = Arc::new(AtomicUsize::new(0));
+            let mut tools = tool_api::ToolRegistry::new();
+            tools.register_builtin(Arc::new(InheritedPermissionWriteProbe {
+                observed_modes: observed_modes.clone(),
+                body_calls: body_calls.clone(),
+            }));
+            let policy = Arc::new(permission::policy::PermissionPolicy::new(
+                permission::PermissionMode::BypassPermissions,
+            ));
+            let gate = Arc::new(permission::policy_gate::PolicyPermissionGate::new(
+                policy,
+                Arc::new(RejectInheritedPermissionPrompt),
+            ));
+            let invoker = tool_api::RegistryToolInvoker::new(Arc::new(tools)).with_gate(gate);
+            let mut write = tool_use_response("Write", Some("tool_use"));
+            if let llm_runtime::ContentBlock::ToolCall { input, .. } = &mut write.content[0] {
+                *input = serde_json::json!({
+                    "file_path": "/private/tmp/unused-inherited-permission-probe",
+                    "content": "test",
+                });
+            }
+            let api = MockSubagentApiClient::new(vec![
+                Ok(write),
+                Ok(text_response("done", Some("end_turn"))),
+            ]);
+            let mut ctx = loop_ctx(api.clone(), Some(Arc::new(invoker)), 2);
+            ctx.agent_definition.tools = AgentToolPolicy::All {
+                use_exact_tools: false,
+            };
+            // Without a host carrier, a previous definition fallback must still
+            // be recalculated against the live root rather than treated as trusted.
+            if trusted_parent.is_none() {
+                ctx.agent_definition.permission_mode = match mode {
+                    permission::PermissionMode::DontAsk => AgentPermissionMode::DontAsk,
+                    permission::PermissionMode::Auto => AgentPermissionMode::Auto,
+                    _ => unreachable!(),
+                };
+            }
+            ctx.permission_mode_override = Some(crate::permission_mode::wire_mode_str(mode).into());
+            ctx.allowed_tools = vec!["Write".into()];
+            let registry = ReportingRegistry::new();
+            let mut runtime = crate::handback::HandbackRuntime::new(
+                registry.clone(),
+                ctx.agent_id,
+                None,
+                "worker".into(),
+                "test".into(),
+                None,
+            );
+            runtime.trusted_parent_permission_mode = trusted_parent;
+            assert!(
+                !runtime.eligible,
+                "reporting eligibility is independent of permission inheritance"
+            );
+            ctx.handback = Some(Arc::new(runtime));
+            let events = execute_reporting(ctx).await;
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, SubagentEvent::Completed { .. })));
+            assert_eq!(
+                *observed_modes.lock().unwrap(),
+                vec![Some(
+                    crate::permission_mode::wire_mode_str(
+                        trusted_parent.unwrap_or(permission::PermissionMode::BypassPermissions)
+                    )
+                    .into()
+                )],
+            );
+            assert_eq!(
+                body_calls.load(Ordering::SeqCst),
+                usize::from(trusted_parent.is_none()),
+                "root bypass must not execute Write under a trusted inherited {mode:?}"
+            );
+            let has_expected_result = api.last_messages().iter().any(|message| {
+                let ConversationMessage::User { content, .. } = message else {
+                    return false;
+                };
+                content.iter().any(|block| {
+                    matches!(block, ContentBlock::ToolResult { is_error, .. }
+                        if *is_error == Some(trusted_parent.is_some()))
+                })
+            });
+            assert!(
+                has_expected_result,
+                "the real policy result must reach the next model request"
+            );
+            assert!(!registry.state.lock().unwrap().as_ref().unwrap().active);
+        }
+    }
+}
+
 fn report_response_source(tool_input: Utf16JsonProjection) -> llm_runtime::HistoryResponse {
     let mut response = text_and_tool_response(
         "unsent text must not leak",

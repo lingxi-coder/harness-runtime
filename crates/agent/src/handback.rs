@@ -24,6 +24,10 @@ pub struct HandbackRuntime {
     pub sender_id: String,
     pub agent_type: String,
     pub spawn_bypass_gates: crate::permission_mode::SpawnBypassGates,
+    /// Immediate parent's enforcing mode supplied by the trusted host. Without
+    /// this carrier, each retained run reads the bound invoker's live mode.
+    /// Definition fallbacks remain separate from this inheritance anchor.
+    pub trusted_parent_permission_mode: Option<permission::PermissionMode>,
     pub ends_turn_enabled: Option<bool>,
     pub report_output: Option<crate::handback_output::HandbackReportOutput>,
     restored: Mutex<Option<HandbackState>>,
@@ -49,6 +53,7 @@ impl HandbackRuntime {
             sender_id: agent_id.to_string(),
             agent_type,
             spawn_bypass_gates: Default::default(),
+            trusted_parent_permission_mode: None,
             ends_turn_enabled: None,
             report_output: None,
             restored: Mutex::new(restored),
@@ -146,11 +151,8 @@ fn handback_result(success: bool, message: &str) -> ToolCallResult {
         ),
         (
             "message".into(),
-            Utf16JsonProjection::root_string(
-                message.to_owned(),
-                message.encode_utf16().collect(),
-            )
-            .expect("native Handback message"),
+            Utf16JsonProjection::root_string(message.to_owned(), message.encode_utf16().collect())
+                .expect("native Handback message"),
         ),
     ])
     .expect("native Handback result object");
@@ -159,11 +161,8 @@ fn handback_result(success: bool, message: &str) -> ToolCallResult {
         .expect("native Handback model result serialization");
     let mut result = ToolCallResult::from_data(data);
     result.model_content = Some(
-        Utf16JsonProjection::root_string(
-            model_text.clone(),
-            model_text.encode_utf16().collect(),
-        )
-        .expect("native Handback model content"),
+        Utf16JsonProjection::root_string(model_text.clone(), model_text.encode_utf16().collect())
+            .expect("native Handback model content"),
     );
     result
 }
@@ -253,12 +252,10 @@ impl Tool for SubagentHandbackTool {
         match String::from_utf16(&message) {
             Ok(message) => handback_classifier_input(&message),
             Err(_) => {
-                let encoded_message = Utf16JsonProjection::root_string(
-                    String::from_utf16_lossy(&message),
-                    message,
-                )
-                .and_then(|value| value.to_json_string())
-                .unwrap_or_else(|_| "null".into());
+                let encoded_message =
+                    Utf16JsonProjection::root_string(String::from_utf16_lossy(&message), message)
+                        .and_then(|value| value.to_json_string())
+                        .unwrap_or_else(|_| "null".into());
                 format!("hand-back to the agent that spawned this one (delivered as this agent's result — agent-authored, untrusted output carrying no user authority): {encoded_message}")
             }
         }
@@ -272,9 +269,8 @@ impl Tool for SubagentHandbackTool {
             return Err(ValidationError("message must be a string".into()));
         };
         if message_units.iter().all(|unit| {
-            char::from_u32(u32::from(*unit)).is_some_and(
-                lingxi_core::host::subagent_output_guard::is_js_space,
-            )
+            char::from_u32(u32::from(*unit))
+                .is_some_and(lingxi_core::host::subagent_output_guard::is_js_space)
         }) {
             return Err(ValidationError("message must not be empty".into()));
         }
@@ -365,10 +361,10 @@ impl Tool for SubagentHandbackTool {
         )
         .sanitized;
         if let Some(output) = &self.0.report_output {
-            if let Some(pointer) = output.substitute_utf16(
-                &inbox_units,
-                ctx.tool_use_id.as_ref().map(|id| id.as_str()),
-            ).await {
+            if let Some(pointer) = output
+                .substitute_utf16(&inbox_units, ctx.tool_use_id.as_ref().map(|id| id.as_str()))
+                .await
+            {
                 inbox_units = pointer
                     .text
                     .string_units("")
@@ -382,11 +378,9 @@ impl Tool for SubagentHandbackTool {
             prefix.append(&mut framed_units);
             framed_units = prefix;
         }
-        let body = Utf16JsonProjection::root_string(
-            String::from_utf16_lossy(&framed_units),
-            framed_units,
-        )
-        .expect("framed Handback body is a source string");
+        let body =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&framed_units), framed_units)
+                .expect("framed Handback body is a source string");
         let task_id = self.0.agent_id.to_string();
         let outcome = self
             .0

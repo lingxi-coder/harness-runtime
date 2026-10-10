@@ -34,9 +34,8 @@ pub const DEFAULT_API_KEY_HELPER_TTL_MS: u64 = 300_000;
 /// `{timeout:600000}` — the helper execution timeout: 10 minutes.
 pub const API_KEY_HELPER_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The `CLAUDE_CODE_API_KEY_HELPER_TTL_MS` env var name (kept verbatim — this
-/// repo preserves `CLAUDE_CODE_*` env names).
-pub const API_KEY_HELPER_TTL_ENV: &str = "CLAUDE_CODE_API_KEY_HELPER_TTL_MS";
+/// Product environment override for the host-owned API-key helper cache.
+pub const API_KEY_HELPER_TTL_ENV: &str = branding::API_KEY_HELPER_TTL_MS_ENV;
 
 /// `obc()` — resolve the helper-value TTL (milliseconds).
 ///

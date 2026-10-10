@@ -8,7 +8,7 @@ use llm_runtime::{
     ApiService, ClientConfig, LlmRequest, ModelRuntime, NonStreamingRequestClass,
     NonStreamingRetryOptions, SubscriberState, Transport,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 const MODEL: &str = "claude-opus-4-7";
 

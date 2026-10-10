@@ -1,0 +1,190 @@
+{
+  "version": "2.1.293",
+  "platform": "darwin-arm64",
+  "binarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "method": "Read-only mmap bounded native embedded JavaScript ranges; offsets are binary byte offsets, not inferred capture timestamps. Source evidence does not establish Harness runtime acceptance.",
+  "excerpts": [
+    {
+      "id": "headless_turn_clock",
+      "offset": 209042440,
+      "length": 600,
+      "sha256": "7caf4cac2cbc896f5c1e22baed37497ed0f248c28796b1a32901ed486543de8b",
+      "source": "null){let xe=Pr(e.cwd);if(B()&&wn!==void 0)go=await Pv(xe,e.session,wn);else go=Tv(xe,e.session)}if(go!==void 0)yield go;CMn();let Gr=!Hx(),Yr=performance.now(),Uo=Date.now();W3o();let As=fA(Fr,Ue?.frameTiming,Yr,Uo);if(gf(Fr,\"earlier_turn\",Yr),Ue?.shouldQuery!==!1){oqo(e.session,Mr);try{pkn(e.session,{credentials:e.credentials,storageV5:wn},Ue?.memoryKick)}catch(xe){t(`memory snapshot kick failed: ${xe instanceof Error?xe.message:String(xe)}`)}}let Is=Ue?.uuid&&(Ue.uuidIsClientEventUuid||!Ue.isMeta)?Ue.uuid:void 0,ln=yv(Is,Ue?.userMessageUuids,{primaryIsMeta:Ue?.isMeta===!0}),bo=Ue?.resumeRea"
+    },
+    {
+      "id": "headless_first_observation_state",
+      "offset": 209051960,
+      "length": 500,
+      "sha256": "aafc17911e5e18e5617c0e3dfff924bc2fd6d05a8e4b86e67c14ce3512fe87a6",
+      "source": "artialMessages:oo,...!1},ga=av(),as=(xe)=>mf(ga.settle(xe),K()),ds=oS(oo),Ha=no?k5r(s,ia):0,nc=s.at(-1),us=[],Mi=0,kd=new Set,Ot=Bp,Yn,cs,Ws=null,so=0,Co=0,ms=0,Qs,Vo,Ai=0,Fn=0,ha=0,Ii=1,Ba=Nn.length===0;function*_a(){if(!Ba)Ba=!0,yield*mv(Nn,Ue)}let ps=!1,fs=!1;try{while(!0){let{value:xe,done:io}=await Fe.next();if(io)throw Error(\"headless session: the engine loop ended before the turn result\");let Eo=xe,gs=!0,vd=xe.type===\"assistant\"&&!(\"parent_tool_use_id\"in xe)||xe.type===\"user\"||xe.type===\""
+    },
+    {
+      "id": "first_top_level_assistant",
+      "offset": 209052529,
+      "length": 506,
+      "sha256": "7b8c5fb4775676de403cfdcb577c846fe092d83abf9ece39b9434ebc4955620b",
+      "source": "case\"assistant\":{if(\"parent_tool_use_id\"in xe)break;let tt=Iu(xe);if(Ko.onAssistantMessage(tt),!so)so=performance.now();if(tt.message.stop_reason!=null)Ws=tt.message.stop_reason;if(tt.isApiErrorMessage)hs.push(...as(\"stream_error\"));let tn=dv(tt,Yn,cs);if(tn)cs=tt.message.id,mr=iSt(mr,tn);if(wd=tt.message.stop_reason!=null&&tt.message.stop_reason!==\"refusal\",Tn.push(tt),Gr)Ur.record();g.keep([tt]),yield*_a(),h.absorb([tt]);let Lr=await ZCo(e.session,tt,Ua,N,Lt.signal,e.storageV5,e.credentials);if(Lr!="
+    },
+    {
+      "id": "first_stream_content_and_request",
+      "offset": 209054350,
+      "length": 630,
+      "sha256": "6a11c51914de25f64da4db90a47a87c355e624a009b201e30dc4901c8070bf2e",
+      "source": "case\"stream_event\":if(Ko.onStreamEvent(xe),hs.push(...ds.onStreamEvent(xe.event,Ot)),!ms&&(xe.event.type===\"content_block_start\"||xe.event.type===\"content_block_delta\"))ms=performance.now();if(xe.event.type===\"message_start\"){if(!Co)Co=performance.now();if(Ot=Sme(Bp,xe.event.message.usage),!Ai&&\"requestSentAtMs\"in xe&&xe.requestSentAtMs)Ai=xe.requestSentAtMs;if(!Fn&&\"requestSentWallMs\"in xe&&xe.requestSentWallMs)Fn=xe.requestSentWallMs,ha=Ot.input_tokens+Ot.cache_read_input_tokens+Ot.cache_creation_input_tokens;Yn=xe.event.message.id}else if(xe.event.type===\"message_delta\"){if(xe.event.delta.stop_reason!=null){if(Ws=xe.eve"
+    },
+    {
+      "id": "success_predicate_and_result_timing",
+      "offset": 209056585,
+      "length": 2405,
+      "sha256": "9a847147b5658f9f1dd802a60f5affe6d0dc39a66d562b8a48cc09f4f3730f24",
+      "source": "await Ur.record(!0),Ho)await ip()}let Lr=xe.subtype===\"success\"&&!xe.is_error&&xe.deferred_tool_use===void 0;if(no!==void 0&&Lr&&us.length===0&&Mi>0){i(\"tengu_structured_output_retraction_exhausted\",{tombstoned_calls:Mi,num_turns:xe.num_turns}),yield Z7({startedAt:Yr,common:{is_error:!0,duration_api_ms:xe.duration_api_ms,num_turns:xe.num_turns,stop_reason:Ws,session_id:K(),total_cost_usd:xe.total_cost_usd,usage:mr,modelUsage:xe.modelUsage,permission_denials:xe.permission_denials,terminal_reason:uL(xe.terminal_reason)?xe.terminal_reason:\"structured_output_retry_exhausted\",fast_mode_state:xe.fast_mode_state,fast_mode_disabled_reason:xe.fast_mode_disabled_reason,origin:Ue?.origin,subagent_stats:gY(e.session),safety_stops:r8()},variant:{subtype:\"error_max_structured_output_retries\",errors:[GNo],...ln.errorVariantFields(),...bo}});return}if(Lr&&so)i(\"tengu_sdk_ttft\",{ttft_ms:vs(Yr,so),model:Ct(Bo),...yo!==void 0&&{tool_pool_reused:yo}});let Gn=Lr?wcs():void 0,Cn=Lr&&Ai?vs(Yr,Ai):void 0,Zr=Cn!==void 0?V3o(Cn,Ai):void 0,qa=Tn.findLast((Jn)=>(Jn.type===\"assistant\"||Jn.type===\"user\")&&!Ur.isHostRow(Jn)),Il=qa?.type===\"assistant\"&&!(qa.isApiErrorMessage&&!xe.is_error)?L1o(qa,Sd.get(qa)):void 0,Vt=ln.fields(),ao=Mv(Lr,Yr,Qs),Vs=Mv(Lr,Yr,Vo);Eo={...xe,usage:mr,duration_ms:vs(Yr,performance.now()),...xe.subtype===\"error_during_execution\"&&{errors:kar(e.session,xe.errors[0]??\"\",yA(xe.errors.slice(1),d$r(Oa)),\"first\")},...xe.subtype!==\"success\"&&Vt,...xe.subtype!==\"success\"&&bo,...xe.subtype===\"success\"&&{...Il!==void 0&&{result:Il},ttft_ms:Lr&&so?vs(Yr,so):void 0,ttft_stream_ms:Lr&&Co?vs(Yr,Co):void 0,time_to_request_ms:Cn,...Zr&&{time_to_request_phases_ms:Zr.phases,turn_start_resume_kind:Sv({orphanedPermission:Ue?.orphanedPermission,handedOffTurn:Ue?.handedOffTurn,deferredToolUse:Ue?.deferredToolUse})},...Zr?.window&&{process_turn_index:Zr.window.processTurnIndex,time_to_request_loop_lag_ms:Zr.window.loopLagMs},...Zr?.window?.resources&&{time_to_request_cpu_ms:Zr.window.resources.cpuMs,time_to_request_major_faults:Zr.window.resources.majorFaults},...Zr?.inputAttachments&&{input_attachments_detail:Zr.inputAttachments},...Zr?.storeConfirm&&{resume_store_confirm_detail:Zr.storeConfirm},first_content_frame_ms:Lr&&ms?vs(Yr,ms):void 0,first_stream_post_ms:ao.postMs,first_stream_post_ack_ms:Lr&&Qs?.ackedAtMs?vs(Yr,Qs.ackedAtMs):void 0,first_stream_post_queue_wait_ms:ao.queueWaitMs,f"
+    },
+    {
+      "id": "timing_rounding",
+      "offset": 209064529,
+      "length": 75,
+      "sha256": "d76f3cc743e66673016a37e13b9873bf2ee59c726233492263ad0d7c7db82f76",
+      "source": "function vs(e,r){return Math.max(0,Math.round(r-e))}function Mv(e,r,n){try{"
+    },
+    {
+      "id": "request_dispatch_anchor",
+      "offset": 194919770,
+      "length": 830,
+      "sha256": "6d4e5efad42fa114dc568c5bc37ce2f208beb99b96ec7485f885166cc48dc6f9",
+      "source": "ntials,storageV5:Y.storageV5,signal:g,clock:he}),async(nl,Ia,Mm)=>{if(QI===void 0)Xg(\"attempt_errored\",ra??null,null);if(Xh=Ia,sA=Mm.fastMode??!1,Cy=he.monotonicNow(),Zx=void 0,dve.push(Cy),Ef(\"query_client_creation_end\"),Se)WC(\"client_creation\"),jC(\"request_build\");let bp=Rve(Mm);if(fon(bp),M7e(bp,!0),Jk=bp.max_tokens,Ef(\"query_api_request_sent\"),t(`[API:timing] dispatching to ${Mc(Y.model)} model=${Y.model}`),Bz=he.now(),Mve===void 0&&Y.queryTracking?.roundStartedAtMs!==void 0)Y.queryTracking.firstDispatchedAtMs??=performance.now(),Mve=Math.round(Y.queryTracking.firstDispatchedAtMs-Y.queryTracking.roundStartedAtMs);if(!Y.agentId){if(Us)Cm(\"api_request_sent\");if(Se)WC(\"request_build\");if(Ia===1&&!$z){if($z=he.monotonicNow(),Ave=he.now(),Us)bcs();if(Se)Pve=KZt($z)}if(Us)try{CEt()}catch(gl){c(V(gl))}}Nz();let us=ud(proc"
+    },
+    {
+      "id": "partial_ttft_anchor",
+      "offset": 194933425,
+      "length": 425,
+      "sha256": "ba0e8746b8fc7778071b1ca95881510f6352183b7f25b0c46e0d8cae7d7535b0",
+      "source": "(us.index))continue;switch(us.type){case\"message_start\":{if(tx(typeof us.message===\"object\"&&us.message!==null,us,S(\"message_start_without_message\")),uf=!0,h7e(),Nf=us.message,Nf!==void 0&&\"resumable\"in Nf){let{resumable:nm,...oc}=Nf;Nf=oc}if(D7=Math.max(0,Math.round(he.monotonicNow()-Cy)),nd=Sme(nd,us.message?.usage),us.message?.model)Akr(Dn(Y.model),us.message.model);Hz=us.message.diagnostics?.cache_miss_reason??void 0,"
+    },
+    {
+      "id": "partial_request_anchor_carrier",
+      "offset": 194945170,
+      "length": 430,
+      "sha256": "3a975fafe84ad61db89eeb86a73f8f9ae0bffd72a5d91cf3fd77ba8a05cea91a",
+      "source": "t_block_stop\")sk=null,iS=!1;else if(us.type===\"message_stop\")rp=!1,sk=null,iS=!1;yield{type:\"stream_event\",event:us,...us.type===\"message_start\"?{ttftMs:D7,...$z?{requestSentAtMs:$z}:void 0,...Ave?{requestSentWallMs:Ave}:void 0}:void 0,...Bc!==void 0?{thinkingDisplay:Bc}:void 0}}if(Qh(),g.aborted){yield*f0();return}if(kp){let us=xy!==null?Math.round(he.monotonicNow()-xy):-1;throw te(\"info\",\"cli_stream_loop_exited_after_watchdo"
+    },
+    {
+      "id": "subagent_ledger",
+      "offset": 199941240,
+      "length": 1872,
+      "sha256": "bd2b678ec55216c912a29e6d8ff0f3f8d1c6de4131ed397e22ea45a173b7ad87",
+      "source": "r rejection decisions you make,\n// and the associated conversations in context, constitute Feedback under Anthropic's Commercial Terms,\n// and may be used to improve Anthropic's products, including training models.\n// You are responsible for reviewing any code suggestions before use.\n\n// (c) Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.\n\n// Version: 2.1.293\nimport{mt}from\"/$bunfs/root/chunk-vd0a9d2s.js\";import{c}from\"/$bunfs/root/chunk-tdmgys2e.js\";function n(){return{spawned:0,requested:{background:0,foreground:0,unset:0},started_in_background:0,max_depth:0,spawned_by_subagents:0,completed:0,failed:0,killed:{parent:0,user:0,system:0},refused:{depth_limit:0,concurrency_limit:0,budget:0}}}class s{#e;#t;constructor(e){this.#e=e}completed(){if(this.#n(\"completed\"))this.#e.completed+=1}failed(){if(this.#n(\"failed\"))this.#e.failed+=1}killed(e){if(this.#n(\"killed\"))this.#e.killed[e??\"user\"]+=1}cancelledAfterCompletion(){if(this.#t===\"completed\")this.#e.completed-=1,this.#t=void 0;this.killed(\"user\")}#n(e){if(this.#t!==void 0)return!1;return this.#t=e,!0}}class r{#e=n();#t=new Map;recordSpawn(e){let t=this.#e;if(t.spawned+=1,t.requested[e.runInBackground===void 0?\"unset\":e.runInBackground?\"background\":\"foreground\"]+=1,e.runsInBackground)t.started_in_background+=1;if(this.#t.set(e.agentType,(this.#t.get(e.agentType)??0)+1),t.max_depth=Math.max(t.max_depth,e.depth),e.depth>1)t.spawned_by_subagents+=1;return new s(t)}recordRefused(e){this.#e.refused[e]+=1}snapshot(){let e=this.#e;return{...e,requested:{...e.requested},killed:{...e.killed},refused:{...e.refused},by_type:Object.fromEntries(this.#t)}}reset(){Object.assign(this.#e,n()),this.#t.clear()}}var ZBe=new mt(()=>new r);function gY(e){if(!e)return;try{return ZBe.of(e).snapshot()}catch(t){c(t);return}"
+    },
+    {
+      "id": "subagent_schema_description",
+      "offset": 185441252,
+      "length": 2708,
+      "sha256": "2feaa64de2f1fe89a413b1955cca5db2adccba4e3c7da01bd3350fb4dd2b2c5c",
+      "source": "ay=f(()=>u({spawned:v().int().describe(\"Subagents actually started (one tengu_agent_tool_selected each); a refused or failed launch is not counted.\"),requested:u({background:v().int(),foreground:v().int(),unset:v().int()}).describe(\"Spawns by the run_in_background value the model passed; all count as unset while the parameter is not offered (background tasks disabled, or the fork gate on).\"),started_in_background:v().int().describe(\"Spawns that started in the background after defaults and session settings (tengu_agent_tool_selected.is_async); the rest blocked the spawning tool call.\"),by_type:pe(o(),v().int()).describe(\"Spawns by agent type.\"),max_depth:v().int().describe(\"Deepest spawn: 1 = started by the main thread, 2 = by a depth-1 subagent.\"),spawned_by_subagents:v().int().describe(\"Spawns made from inside another subagent (depth > 1).\"),completed:v().int(),failed:v().int(),killed:u({parent:v().int(),user:v().int(),system:v().int()}).describe(\"Stopped before finishing: parent = by another agent through TaskStop; system = by Claude Code itself (the --max-budget-usd halt, the sweep of background subagents when an SDK or IDE client interrupts, or -p giving up on a background subagent still running at its wait ceiling); user = any other stop, including a foreground subagent cancelled just as it finished (counted here, not as completed).\"),refused:u({depth_limit:v().int(),concurrency_limit:v().int(),budget:v().int()}).describe(\"Agent tool calls turned down because one of these limits was reached (other denials, such as an unknown agent type, are not counted). depth_limit stays near zero in practice: a subagent at the nesting limit is normally not offered the tool at all.\")}).describe(\"@internal Subagents started through the Agent tool in this session, as running totals (forked skills, workflows, teammates and other internal agents are not counted; two sessions in one process keep separate counts). Cumulative like modelUsage: read the latest result rather than summing across results; a resumed session starts fresh and a mid-session /clear zeroes it, though a background subagent that outlives the /clear still records its outcome, so completed, failed and killed can then exceed spawned. A result that was held back while background subagents finished carries the counts as of when it is written to the stream, as do its total_cost_usd, duration_api_ms and modelUsage (and usage where that is a running total; a per-turn main-loop usage keeps its turn-end value). Omitted by hosts without a local Agent tool and on crash/startup-error results; all zeros until the Agent tool starts or refuses a subagent. A remote (isolation: remote) launch counts as spawned but never repo"
+    },
+    {
+      "id": "subagent_spawn_actual_call",
+      "offset": 199992875,
+      "length": 565,
+      "sha256": "e25ccf80eb29f668bfb17307e63c3b96fd5c9144950eb77bab5f10f02888d2e5",
+      "source": "rce),color:ue(s.color),is_built_in_agent:ja(s),is_resume:!1,is_async:X,is_fork:Y,effort_param:ue(Lt),session_effort:ue(ce?.sessionEffort),subagent_effort:ue(ce?.subagentEffort),subagent_total_tokens_budget:ce?.totalTokensBudget,subagent_budget_on_top_of_start:ce?.totalTokensBudget===void 0?void 0:ce.isBudgetOnTopOfStart,agent_depth:be,agent_system_prompt_chars:kt.length,...tt&&EG(tt.name,tt.marketplace)}),ZBe.of(e.session).recordSpawn({agentType:s.agentType,runInBackground:K,runsInBackground:X,depth:be}));if(he){let r=await bEe({storageV5:e.storageV5,credenti"
+    },
+    {
+      "id": "subagent_depth_refusal",
+      "offset": 199980900,
+      "length": 570,
+      "sha256": "e5c3a9cfbcf454190b0a480a555739210e11164814b3f5274b79823bf7affaef",
+      "source": "CODE_COORDINATOR_FORCE_WORKER_INHERIT_MODEL)Xe=void 0;let Je=Xe,q=it,N=ut,pe=Ke,zt=Fu(e.agentContext),Wt=Uw();if(zt>=Wt)throw m(\"subagent_launch\",\"subagent_depth_cap\"),ZBe.of(e.session).recordRefused(\"depth_limit\"),new F(`Subagent nesting limit reached (depth ${zt} of ${Wt}). Complete this task directly using your tools instead of spawning another agent. If the user explicitly requested deeper nesting, ask them to raise CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH.`);if(e.agentId!==void 0&&rN(e.agentId))throw m(\"subagent_launch\",\"subagent_spawner_stop_pending\"),new F(\"Thi"
+    },
+    {
+      "id": "subagent_budget_refusal",
+      "offset": 199982960,
+      "length": 440,
+      "sha256": "7dde578123fb2fa7f65d82f068bb94207a0dc28941c9e5f02233ed7db5cd92b3",
+      "source": "n);if(!(r&&v===\"interrupt\"))throw new Ve}let{maxBudgetUsd:_}=e.options;if(e1(_))throw m(\"subagent_launch\",\"subagent_budget_exhausted\"),ZBe.of(e.session).recordRefused(\"budget\"),new F(`Budget limit reached ($${Efe().toFixed(2)} spent of the $${_} maximum). New agents cannot be started. Complete the remaining work directly with your tools, or wrap up with the results you already have.`)},jn=async()=>{let r=Nn(e);if(r)throw await Oe(),r;re"
+    },
+    {
+      "id": "subagent_concurrency_refusal",
+      "offset": 200015460,
+      "length": 550,
+      "sha256": "d4a7a57b7894144bd9330319665ec6ac1f1af15ea8d8ca6cfda8853f712f787c",
+      "source": "etAppState();if(nA(p.ultracode,n.rootToolSurface.mainLoopModel))return;return m(\"subagent_launch\",\"subagent_concurrency_cap\"),ZBe.of(n.session).recordRefused(\"concurrency_limit\"),new F(`Concurrent subagent limit reached. You can run ${e} subagents at once. Do not retry. If the user wants more concurrent subagents, ask them to increase CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS.`)}function $n(n,e){let g=Bfe(JB.agentType),p=n.filter((w)=>Bfe(w.agentType)===g),h=(w)=>e?.includes(w.agentType)??!0,T=p.find((w)=>w.agentType===JB.agentType);if(T)return h(T)"
+    },
+    {
+      "id": "subagent_completion",
+      "offset": 199880080,
+      "length": 480,
+      "sha256": "2864eec1b640ec052167969148eb01832bd77ab4a543984c466d3cb0e852737a",
+      "source": "r_count:an(re),assistant_message_count:q.size,total_tool_uses:w,duration_ms:O,total_tokens:J,is_built_in_agent:b,is_async:H,agent_depth:E,final_model:Ct(z?.at(-1)??k),model_swapped:(z?.length??1)>1}),n.spawnedSubagent?.completed();let _e=vd(),De=G&&dl(G.marketplace);Ms(\"subagent_completed\",{agent_type:b||De||_e?N:\"custom\",...j&&{\"agent.source\":j},is_built_in:b,is_async:H,total_tokens:J,total_tool_uses:w,duration_ms:O,model:k,final_model:Ct(z?.at(-1)??k),model_swapped:(z?.leng"
+    },
+    {
+      "id": "subagent_task_kill",
+      "offset": 196278140,
+      "length": 550,
+      "sha256": "dc9b0888ec0b6fca377ebc582d3d9e675bdbc47f7a3e4f6d9f77e10c32170c79",
+      "source": "ry\",\"local_agent\");let M=!1,G=!1;if(n.update(e,(q)=>Zar(q,s,q.status!==\"running\"&&!K_(q),(Y)=>(M=!0,G=Y.status!==\"running\",Y.abortController?.abort(Jlt()),Y.spawnedSubagent?.killed(r),{...Y,status:\"killed\",killedBy:r,notified:Y.notified||K_(Y),endTime:Date.now(),keepaliveReasons:new Set,evictAfter:w?R8e(Y,{park:!1}):void 0,abortController:void 0,selectedAgent:void 0}))),M)Vvn(e,n);if(M&&!w)gO(e,l9r,n),dbt(e,()=>bP(e,l9r,n)),Xwe(e,[e]);if(M){if(Pbe(e,n),G){let q=vo(e);if(WIe())Vn().killAgentMonitors?.(q,n);for(let[Y,he]of Object.entries(n.all())"
+    },
+    {
+      "id": "safety_description",
+      "offset": 185444986,
+      "length": 1954,
+      "sha256": "4acb655fb0dffef74b42eb678816665345fdd810471cda1307cdb77d5dff47bd",
+      "source": "cy=\"@internal How many times a safety system has stopped one of this session's model calls made through the query pipeline (main loop, subagents, forked skills, compaction and other internal calls), as a running total since the session started in this process; two sessions in one process keep separate counts. Counted: a response that ends on stop_reason refusal, whether Claude Code then shows it, retries it or re-sends it to another model; a refusal that the API itself answered on a fallback model; output that the API's content filter stopped for good (the stop ends the call); and, where the build can recognise it (public builds cannot), a server-side safety monitor's block (api_error safety_monitor_blocked). It counts these events, not calls: one call can add a refusal answered on a fallback model and then that model's own refusal. 0 means that none of these was seen; a kind of stop that this version does not know is not counted. Never sum across results. It is never saved, so a resumed session starts at 0 again, and a mid-session /clear zeroes it: over a stored log that spans a restart, a resume or a /clear, any result above 0 means a stop happened, and a later 0 does not cancel it. Present, 0 included, on every result that carries a turn's measured totals. Absent on the zeroed results that stand in for a crashed, cut or never-started turn, on Remote Control's results and from older producers, where it says nothing: absent is not 0. A call still running when a result is written (a background subagent's) shows on the next result; a result held back while background subagents finished carries the count as of when it is written to the stream, never less than it was built with. Not counted inside the pipeline: a stop of the API's content filter that Claude Code answers by streaming the request again (so 0 does not rule one out), an organization's data-loss-prevention denial (api_error dlp_request_denied), a block by a clou"
+    },
+    {
+      "id": "safety_ledger",
+      "offset": 183974490,
+      "length": 3010,
+      "sha256": "16eb81947d82f6e011e025506d524225545a3ed195bc9fdf8e3e0318bc61e5d7",
+      "source": "l;#h=null;#g=null;totalCostUSD(){return this.#e}restoredCostUSD(){return this.#a}restoredTokens(){return this.#d}totalAPIDuration(){return this.#t}totalAPIDurationWithoutRetries(){return this.#n}totalToolDuration(){return this.#o}totalDuration(){return Math.max(0,Date.now()-this.#r)}sessionStartTime(){return this.#i??this.#r}totalLinesAdded(){return this.#l}totalLinesRemoved(){return this.#u}hasUnknownModelCost(){return this.#c}safetyStops(){return this.#p}modelUsage(){return this.#s}usageForModel(e){return this.#s[e]}totalInputTokens(){return eoe(Object.values(this.#s),\"inputTokens\")}totalOutputTokens(){return eoe(Object.values(this.#s),\"outputTokens\")}totalCacheReadInputTokens(){return eoe(Object.values(this.#s),\"cacheReadInputTokens\")}totalCacheCreationInputTokens(){return eoe(Object.values(this.#s),\"cacheCreationInputTokens\")}totalWebSearchRequests(){return eoe(Object.values(this.#s),\"webSearchRequests\")}recordApiDuration(e,t){this.#t+=e,this.#n+=t}recordCost(e,t,o){this.#s[o]=t,this.#e+=e}recordToolDuration(e){this.#o+=e}recordLinesChanged(e,t){this.#l+=e,this.#u+=t}markUnknownModelCost(){this.#c=!0}recordSafetyStop(){this.#p+=1}zeroDurationsAndCostForTests(){this.#t=0,this.#n=0,this.#e=0,this.#a=0}restartClock(){this.#r=Date.now(),this.anchorLogicalStart(void 0)}anchorLogicalStart(e){this.#i=e===void 0?void 0:Math.min(e,this.#r)}restore({totalCostUSD:e,totalAPIDuration:t,totalAPIDurationWithoutRetries:o,totalToolDuration:r,totalLinesAdded:i,totalLinesRemoved:s,lastDuration:a,startTime:l,modelUsage:d,hasUnknownModelCost:p},m){if(this.#g=m,this.#e=e,this.#a=e,this.#t=t,this.#n=o,this.#o=r,this.#l=i,this.#u=s,this.#c=p??!1,d)this.#s=Z(d);if(this.#d={inputTokens:this.totalInputTokens(),outputTokens:this.totalOutputTokens(),cacheReadInputTokens:this.totalCacheReadInputTokens(),cacheCreationInputTokens:this.totalCacheCreationInputTokens()},a!==void 0)this.#r=Date.now()-a;this.anchorLogicalStart(l)}registerSaver(e){this.#f=e}runSaver(e,t){(this.#f??(t?t.#f:null))?.(e)}registerTranscriptRecorder(e){this.#h=e}runTranscriptRecorder(e,t,o){(this.#h??(o?o.#h:null))?.(e,t)}snapshot(){return{ownerSessionId:this.#g,totalCostUSD:this.#e,totalAPIDuration:this.#t,totalAPIDurationWithoutRetries:this.#n,totalToolDuration:this.#o,startTime:this.#r,sessionLogicalStartTime:this.#i,totalLinesAdded:this.#l,totalLinesRemoved:this.#u,restoredCostUSD:this.#a,restoredTokens:this.#d,hasUnknownModelCost:this.#c,safetyStops:this.#p,modelUsage:Qr(this.#s,(e)=>({...e}))}}restoreSnapshot(e){this.#g=e.ownerSessionId,this.#e=e.totalCostUSD,this.#t=e.totalAPIDuration,this.#n=e.totalAPIDurationWithoutRetries,this.#o=e.totalToolDuration,this.#r=e.startTime,this.#i=e.sessionLogicalStartTime,this.#l=e.totalLinesAdded,this.#u=e.totalLinesRemoved,this.#a=e.restoredCostUSD,this.#d=e.restoredTokens,this.#c=e.hasUnknownModelCost,this.#p=e.safetyStops,this.#s=Z(Qr(e.modelUsage,(t)=>({...t})))}claim(e){this.#g??=e}scopeTo(e){this.#g=e}ownerSessionId(){return this.#g}belongsTo(e){return this.#g===e}"
+    },
+    {
+      "id": "safety_wrappers",
+      "offset": 184033030,
+      "length": 125,
+      "sha256": "d5ea9e96cabbe2040ddd631b0b7c8fbfcc9e53bf44e23ed7e9da63fccfd6e7b4",
+      "source": "nownModelCost()}function Mvr(){n().costLedger.recordSafetyStop()}function r8(){return n().costLedger.safetyStops()}function K"
+    },
+    {
+      "id": "safety_error_increment",
+      "offset": 194744120,
+      "length": 400,
+      "sha256": "a1f3fdc71b33d64a1a18cf23f0aa50994513a454ad0786340f1dd1d750ddd5be",
+      "source": "MemoryKeys:ke,messageClientPlatform:Se,llmSpan:Te,fastMode:Ce,previousRequestId:xe,effort:Ie,attribution:Ue,promptTooLongIsHandled:Ne,agentContext:Ye,isLowPriority:Ze,dispatch:st}){if(uC(e)||m3e(e))Mvr();let Qe=e instanceof xt&&e.headers?e.headers:Y?.headers,it=wV({headers:Qe,baseUrl:process.env.ANTHROPIC_BASE_URL});Mlo(Qe?.get?.(XAt));let vt=G?void 0:M,Rt=ldr(e),Ft=e instanceof xt?e.status:void 0"
+    },
+    {
+      "id": "content_filter_error_predicate",
+      "offset": 193009040,
+      "length": 360,
+      "sha256": "0272aacc16ca78c41b94df9b9a9e18916ea948e3a9898a492616af2be9bb01a4",
+      "source": "erflow\"))}var _so=\"Output blocked by content filtering policy\";function uC(e){if(!(e instanceof Error)||!e.message.includes(_so))return!1;let n=\"originalError\"in e&&e.originalError instanceof Error?e.originalError:e,r=n instanceof xt?v$n(n):void 0;return r===void 0||r===400}var kso=\"Request rejected as unprocessable by the model (too many or oversized images"
+    },
+    {
+      "id": "public_monitor_predicate",
+      "offset": 186170550,
+      "length": 180,
+      "sha256": "efc574203fdcaeff7bd1627bd47e8cb21942c17c524f65170bb24831ae8d90c6",
+      "source": "0)return!1;return he.test(O(e)??e.message)}var AJ=\"safety_monitor_blocked\";function m3e(e){return!1}function w$n(e){return!1}function E$n(e){if(!(e instanceof xt)||!N(e))return;ret"
+    },
+    {
+      "id": "refusal_increment",
+      "offset": 194747930,
+      "length": 540,
+      "sha256": "b6128328ca0b2cd2d144260eea431e9b6e6369dceabefbcfbd623bd2967bca12",
+      "source": "function P3({model:e,requestId:n,querySource:r,effort:s,fastMode:g,attempt:h,attribution:b,serverFallbackHop:w,stopDetails:M,agentContext:G}){Mvr();let q=uye(r),Y=M?.category,he=Y&&ddr.has(Y)?Y:null;Ms(\"api_refusal\",{model:e,request_id:n,speed:g?\"fast\":\"normal\",attempt:h,server_fallback_hop:w,...q&&{query_source:q},...s&&{effort:s},...M!==void 0&&{has_category:he!==null,has_explanation:Boolean(M?.explanation)},...he&&vd()&&{category:he},...b&&$ar(r,b)},G)}function etn(e){let n=e.endsWith(\"==\")?2:e.endsWith(\"=\")?1:0;return Math.floor(e"
+    },
+    {
+      "id": "refusal_stream_once_guard",
+      "offset": 194941130,
+      "length": 520,
+      "sha256": "3a6b088b71e600f04586389f4f1fb811426553a449f0054a97664493c0b86e81",
+      "source": "tiveSkill,Y.activeMcpServer,Y.activeMcpTool)}else if(sR===\"none\")sR=\"pending\";if(Ec===\"refusal\"&&!Bi)Bi=!0,P3({model:Ze,requestId:ra||void 0,querySource:Y.querySource,effort:Bs,fastMode:sA,attempt:Xh,attribution:nte(Y.querySource,Y.spawnedBySkill,Y.activeSkill,Y.activeMcpServer,Y.activeMcpTool),serverFallbackHop:!1,stopDetails:us.delta.stop_details??null,agentContext:Y.agentContext});if(Y.serverRefusalFallback!==void 0){let pc=JI;if(JI=void 0,pc!==void 0){if(!sS)sS=!0,yield{type:\"server_fallback\",fromModel:pc.fromM"
+    },
+    {
+      "id": "held_result_ledger_refresh",
+      "offset": 185334472,
+      "length": 544,
+      "sha256": "f8e62675e28801cec0264fabed18c2d433c97e51e9ee1501dbd6cc1fe5e340e9",
+      "source": "\"];function vXt(e,s){if(e.type!==\"result\")return e;let r=s.subagentStats!==void 0?{subagent_stats:s.subagentStats}:{},n=e.safety_stops!==void 0?{safety_stops:Math.max(e.safety_stops,s.safetyStops)}:{};if(e.total_cost_usd!==void 0&&s.totalCostUsd<e.total_cost_usd)return{...e,...r,...n};return{...e,total_cost_usd:s.totalCostUsd,duration_api_ms:e.duration_api_ms===0?e.duration_api_ms:s.durationApiMs,modelUsage:s.modelUsage,...s.usage!==void 0&&{usage:s.usage},...r,...n}}function Tgs(e){let s=e.toLowerCase().replace(/[^a-z]+/g,\"_\").replace(/^"
+    }
+  ]
+}

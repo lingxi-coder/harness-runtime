@@ -271,7 +271,7 @@ async fn native_295_mcp_tool_resource_blobs_use_mime_extensions_and_exact_bytes(
             .model_content
             .as_ref()
             .and_then(|content| content.string_units("")),
-        Some(expected_model_units),
+        Some(expected_model_units.as_slice()),
         "all persisted resource messages reach the model in Native order"
     );
 }

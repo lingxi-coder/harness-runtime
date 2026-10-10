@@ -554,6 +554,113 @@ fn model_test_handler(default_model: Option<&str>) -> InProcessTeammateHandler {
     }
 }
 
+struct RoutePromptTool;
+
+#[async_trait]
+impl tool_api::Tool for RoutePromptTool {
+    fn name(&self) -> &str {
+        "RouteFacts"
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: OnceLock<serde_json::Value> = OnceLock::new();
+        SCHEMA.get_or_init(|| serde_json::json!({"type": "object"}))
+    }
+    fn is_enabled(&self, _: &tool_api::ToolStaticContext) -> bool {
+        true
+    }
+    fn max_result_size_chars(&self) -> usize {
+        1024
+    }
+    fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+        true
+    }
+    fn is_read_only(&self, _: &serde_json::Value) -> bool {
+        true
+    }
+    async fn check_permissions(
+        &self,
+        _: &serde_json::Value,
+        _: &tool_api::ToolUseContext,
+    ) -> permission::PermissionResult {
+        permission::PermissionResult::Allow {
+            reason: permission::PermissionDecisionReason::Other {
+                reason: "test".into(),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: permission::result::PermissionMetadata::default(),
+        }
+    }
+    async fn description(&self, _: &serde_json::Value, _: &tool_api::DescriptionOptions) -> String {
+        "Route facts".into()
+    }
+    async fn prompt(&self, opts: &tool_api::PromptOptions) -> String {
+        format!("model={:?}, profile={:?}", opts.model, opts.model_profile)
+    }
+    async fn call(
+        &self,
+        _: serde_json::Value,
+        _: tool_api::ToolUseContext,
+        _: tool_api::ToolProgressSender,
+    ) -> Result<tool_api::ToolCallResult, tool_api::ToolError> {
+        unreachable!("schema rendering does not invoke tools")
+    }
+}
+
+#[tokio::test]
+async fn teammate_tool_prompts_use_child_model_and_profile_for_duplicate_model_ids() {
+    let mut registry = agent::ToolRegistry::new();
+    registry.register_builtin(Arc::new(RoutePromptTool));
+    let handler = model_test_handler(Some("parent-model"))
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_tool_registry(Arc::new(registry))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            if !matches!(
+                (model, profile),
+                ("parent-model", Some("provider-a"))
+                    | ("shared-child-model", Some("provider-a" | "provider-b"))
+            ) {
+                return Err(agent::ModelResolutionError::RouteUnavailable {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    reason: "unexpected test route".into(),
+                });
+            }
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    provider: Some(agent::ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    for profile in ["provider-b", "provider-a"] {
+        let mut definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "worker")
+            .await
+            .unwrap();
+        definition.model = AgentModel::Explicit("shared-child-model".into());
+        let context = handler
+            .build_context_for_profile(
+                lingxi_core::types::AgentId::new(),
+                "worker",
+                "",
+                "",
+                Some(profile),
+                definition,
+            )
+            .await
+            .unwrap();
+        assert_eq!(context.model_profile.as_deref(), Some(profile));
+        assert_eq!(
+            context.tool_schemas[0]["description"],
+            format!("model=Some(\"shared-child-model\"), profile=Some(\"{profile}\")")
+        );
+    }
+}
+
 struct StaticSystemPromptRenderer(&'static str);
 
 #[async_trait]
@@ -1046,6 +1153,342 @@ async fn explicit_child_profile_overrides_the_default_route() {
 }
 
 #[tokio::test]
+async fn teammate_cross_provider_model_uses_child_route_without_retargeting_parent() {
+    use agent::model_resolution::{
+        ModelProviderKind, ModelResolutionContext, ModelResolutionError, ModelRouteFacts,
+    };
+    let queries = Arc::new(StdMutex::new(Vec::new()));
+    let observed = queries.clone();
+    let handler = model_test_handler(Some("claude-sonnet-4-5"))
+        .with_default_model_profile(Some("anthropic".into()))
+        .with_model_resolution_context_provider(Arc::new(
+            move |model: &str, profile: Option<&str>| {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((model.to_owned(), profile.map(str::to_owned)));
+                let (wire_model, selected_profile) = match (model, profile) {
+                    ("claude-sonnet-4-5", Some("anthropic")) => (model, "anthropic"),
+                    ("gpt-4o", Some("openai")) => (model, "openai"),
+                    ("openai/gpt-4o", None) => ("gpt-4o", "openai"),
+                    _ => {
+                        return Err(ModelResolutionError::RouteUnavailable {
+                            model: model.into(),
+                            profile: profile.map(str::to_owned),
+                            reason: "model is unavailable in this profile".into(),
+                        })
+                    }
+                };
+                Ok(ModelResolutionContext {
+                    route: ModelRouteFacts {
+                        model: wire_model.into(),
+                        profile: Some(selected_profile.into()),
+                        provider: Some(ModelProviderKind::Other),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            },
+        ));
+    for (model, profile) in [("gpt-4o", Some("openai")), ("openai/gpt-4o", None)] {
+        let mut definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "lead")
+            .await
+            .unwrap();
+        definition.model = AgentModel::Explicit(model.into());
+        let mut context = handler
+            .build_context_for_profile(
+                lingxi_core::types::AgentId::new(),
+                "lead",
+                "",
+                "",
+                profile,
+                definition,
+            )
+            .await
+            .expect("target provider supports the child model");
+        assert!(
+            matches!(context.agent_definition.model, AgentModel::Explicit(ref model) if model == "gpt-4o")
+        );
+        assert_eq!(context.model_profile.as_deref(), Some("openai"));
+        apply_spawn_context(
+            &mut context,
+            lingxi_core::host::SubagentSpawnRequest {
+                model_profile: Some("stale-unresolved-profile".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            context.model_profile.as_deref(),
+            Some("openai"),
+            "local context application cannot overwrite the resolved route"
+        );
+    }
+    assert!(!queries.lock().unwrap().iter().any(
+        |(model, profile)| model == "claude-sonnet-4-5" && profile.as_deref() == Some("openai")
+    ));
+}
+
+#[tokio::test]
+async fn teammate_alias_uses_immediate_parent_profile_with_shared_model_id() {
+    use agent::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+    let handler = model_test_handler(Some("shared-parent"))
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            let (profile, child) = match (model, profile) {
+                ("shared-parent", Some("provider-a")) | ("child-a", Some("provider-a")) => {
+                    ("provider-a", "child-a")
+                }
+                ("shared-parent", Some("provider-b")) | ("child-b", Some("provider-b")) => {
+                    ("provider-b", "child-b")
+                }
+                _ => {
+                    return Err(ModelResolutionError::RouteUnavailable {
+                        model: model.into(),
+                        profile: profile.map(str::to_owned),
+                        reason: "ambiguous without a provider profile".into(),
+                    })
+                }
+            };
+            Ok(ModelResolutionContext {
+                route: ModelRouteFacts {
+                    model: model.into(),
+                    profile: Some(profile.into()),
+                    provider: Some(ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                family_defaults: FamilyModelDefaults {
+                    sonnet: Some(child.into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    let missing_live_selection: Arc<std::sync::OnceLock<agent::DefaultModelSelectionProvider>> =
+        Arc::new(std::sync::OnceLock::new());
+    assert!(missing_live_selection
+        .set(Arc::new(|| Err(
+            agent::ModelResolutionError::RouteUnavailable {
+                model: "root-route".into(),
+                profile: None,
+                reason: "root selection is unavailable".into(),
+            }
+        )))
+        .is_ok());
+    let handler = handler.with_default_model_selection_provider_handle(missing_live_selection);
+    let mut definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "lead")
+        .await
+        .unwrap();
+    definition.model = AgentModel::Alias("sonnet".into());
+    let context = handler
+        .build_context_for_selection(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "",
+            "",
+            None,
+            Some("shared-parent"),
+            Some("provider-b"),
+            None,
+            definition,
+        )
+        .await
+        .expect("nested parent's route is pinned independently from the child")
+        .0;
+    assert!(
+        matches!(context.agent_definition.model, AgentModel::Explicit(ref model) if model == "child-b")
+    );
+    assert_eq!(context.model_profile.as_deref(), Some("provider-b"));
+}
+
+#[tokio::test]
+async fn teammate_environment_model_resolves_before_definition_and_call_profile() {
+    let handler = model_test_handler(Some("parent-model"))
+        .with_default_model_profile(Some("parent-profile".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            let (model, profile) = match (model, profile) {
+                ("parent-model", Some("parent-profile")) => ("parent-model", "parent-profile"),
+                ("openai/gpt-4o", None) | ("gpt-4o", Some("openai")) => ("gpt-4o", "openai"),
+                _ => {
+                    return Err(agent::ModelResolutionError::RouteUnavailable {
+                        model: model.into(),
+                        profile: profile.map(str::to_owned),
+                        reason: "wrong route".into(),
+                    })
+                }
+            };
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.into(),
+                    profile: Some(profile.into()),
+                    provider: Some(agent::ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    for preference in [
+        AgentModel::Inherit,
+        AgentModel::Alias("sonnet".into()),
+        AgentModel::Explicit("unavailable-model".into()),
+    ] {
+        let mut definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "lead")
+            .await
+            .unwrap();
+        definition.model = preference;
+        let (context, admitted) = handler
+            .build_context_for_selection(
+                lingxi_core::types::AgentId::new(),
+                "lead",
+                "",
+                "",
+                Some("call-profile"),
+                None,
+                None,
+                Some("openai/gpt-4o"),
+                definition,
+            )
+            .await
+            .expect("environmental model owns its complete route");
+        assert_eq!(context.model_profile.as_deref(), Some("openai"));
+        assert!(
+            matches!(context.agent_definition.model, AgentModel::Explicit(ref model) if model == "gpt-4o")
+        );
+        assert_eq!(admitted.unwrap().model, "gpt-4o");
+    }
+}
+
+#[tokio::test]
+async fn teammate_same_tier_and_bedrock_region_follow_parent_policy() {
+    let parent = "eu.anthropic.claude-sonnet-4-5-v1:0";
+    let handler = model_test_handler(Some(parent))
+        .with_default_model_profile(Some("bedrock".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    provider: Some(agent::ModelProviderKind::Bedrock),
+                    ..Default::default()
+                },
+                family_defaults: agent::FamilyModelDefaults {
+                    sonnet: Some("anthropic.claude-sonnet-4-5-v1:0".into()),
+                    haiku: Some("anthropic.claude-haiku-4-5-v1:0".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    for (preference, expected) in [
+        ("sonnet", parent),
+        ("haiku", "eu.anthropic.claude-haiku-4-5-v1:0"),
+        (
+            "anthropic.claude-haiku-4-5-v1:0",
+            "eu.anthropic.claude-haiku-4-5-v1:0",
+        ),
+    ] {
+        let mut definition = DefaultTeammateDefinition
+            .resolve(&lingxi_core::types::AgentId::new(), "lead")
+            .await
+            .unwrap();
+        definition.model = AgentModel::Explicit(preference.into());
+        let (context, admitted) = handler
+            .build_context_for_selection(
+                lingxi_core::types::AgentId::new(),
+                "lead",
+                "",
+                "",
+                None,
+                None,
+                None,
+                None,
+                definition,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(context.agent_definition.model, AgentModel::Explicit(ref model) if model == expected)
+        );
+        assert_eq!(admitted.unwrap().model, expected);
+        assert_eq!(context.model_profile.as_deref(), Some("bedrock"));
+    }
+}
+
+#[tokio::test]
+async fn named_spawn_rejects_profile_without_child_model() {
+    let (_directory, fs, runtime, handler) = make_handler(ScriptedApiClient::new(vec!["unused"]));
+    let result = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                spawn_request: Some(lingxi_core::host::SubagentSpawnRequest {
+                    model_profile: Some("openai".into()),
+                    ..Default::default()
+                }),
+                inheritance: None,
+                agent_id: lingxi_core::types::AgentId::new(),
+                name: "worker".into(),
+                team_name: "session".into(),
+                description: "inspect".into(),
+            },
+            ctx(fs, runtime),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(TaskError::Internal(ref message)) if message.contains("model_profile requires an explicit child model"))
+    );
+    assert!(handler.entries.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn named_spawn_metadata_keeps_resolved_wire_model_named_sonnet() {
+    let (_directory, fs, runtime, handler) = make_handler(ScriptedApiClient::new(vec!["unused"]));
+    let handler = handler
+        .with_default_model("parent-model")
+        .with_default_model_profile(Some("provider-a".into()))
+        .with_model_resolution_context_provider(Arc::new(|model: &str, profile: Option<&str>| {
+            Ok(agent::ModelResolutionContext {
+                route: agent::ModelRouteFacts {
+                    model: model.into(),
+                    profile: profile.map(str::to_owned),
+                    provider: Some(agent::ModelProviderKind::Other),
+                    ..Default::default()
+                },
+                family_defaults: agent::FamilyModelDefaults {
+                    sonnet: Some("sonnet".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }));
+    let handle = handler
+        .spawn(
+            TaskSpawnInput::InProcessTeammate {
+                spawn_request: Some(lingxi_core::host::SubagentSpawnRequest {
+                    model: Some("sonnet".into()),
+                    ..Default::default()
+                }),
+                inheritance: None,
+                agent_id: lingxi_core::types::AgentId::new(),
+                name: "worker".into(),
+                team_name: "session".into(),
+                description: "inspect".into(),
+            },
+            ctx(fs, runtime),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.teammate_model_route.as_ref(),
+        Some(&("sonnet".into(), Some("provider-a".into())))
+    );
+}
+
+#[tokio::test]
 async fn explicit_child_model_ambiguity_fails_context_admission() {
     use agent::model_resolution::{
         FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
@@ -1119,9 +1562,10 @@ async fn explicit_child_model_ambiguity_fails_context_admission() {
         *provider_queries.lock().unwrap(),
         vec![
             ("parent-model".into(), None),
+            ("shared-child-model".into(), Some("provider-a".into())),
             ("shared-child-model".into(), None),
         ],
-        "the child route is queried without an implicit provider, so neither profile is selected"
+        "a concrete child first tries the parent profile, then preserves the global ambiguity"
     );
 }
 

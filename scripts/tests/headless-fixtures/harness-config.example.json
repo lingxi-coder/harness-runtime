@@ -1,0 +1,9 @@
+{
+  "command": "/absolute/path/to/lingxi-cli",
+  "args": [],
+  "flags": [],
+  "env": {
+    "LINGXI_API_BASE_URL": "{{provider}}",
+    "LINGXI_CONFIG_DIR": "{{state}}"
+  }
+}

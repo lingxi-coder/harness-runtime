@@ -7,19 +7,19 @@ use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{SLEEP_COMPLETED, SLEEP_FAILED, SLEEP_STARTED};
-use tool_api::BuiltinToolContext;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
-    DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata,
-    ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
-    generated_builtin_result, generated_builtin_schema, source_text_projection,
+    generated_builtin_result, generated_builtin_schema, source_text_projection, DescriptionOptions,
+    PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
+    ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
+use tool_api::BuiltinToolContext;
 
 /// 10-minute cap on the sleep duration — matches BashTool's max.
 pub const SLEEP_MAX_DURATION_MS: u64 = 600_000;

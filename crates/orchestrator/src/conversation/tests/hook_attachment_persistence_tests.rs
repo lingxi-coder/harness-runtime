@@ -70,6 +70,7 @@ mod tool_frame_ordering_tests {
             None,
         )
         .await;
+
         assert_eq!(result_ids(&output.snapshot().await), vec![id.to_string()]);
     }
 
@@ -103,6 +104,7 @@ mod tool_frame_ordering_tests {
         })
         .await;
         assert_eq!(stage.tool_use_result, Some(projection_string("staged")));
+
         assert_eq!(
             result_ids(&output.snapshot().await),
             vec![nested.to_string()]
@@ -146,6 +148,7 @@ mod tool_frame_ordering_tests {
         .await;
         let replacement = serde_json::json!({"interrupted":true,"stdout":"partial"});
         let replacement_projection = projection_from_value(&replacement);
+
         orch.commit_mod_result_stage(
             &id,
             "Bash",
@@ -165,6 +168,7 @@ mod tool_frame_ordering_tests {
             event,
             lingxi_core::host::orchestrator::OutputEvent::ToolResult { id: got_id, result, .. }
                 if got_id == &id && result.semantically_eq(&replacement_projection)
+
         )));
     }
 
@@ -194,6 +198,7 @@ mod tool_frame_ordering_tests {
             None,
         )
         .await;
+
         assert!(
             result_ids(&output.snapshot().await).is_empty(),
             "nothing may reach the stream while buffering is on"
@@ -251,6 +256,7 @@ mod tool_frame_ordering_tests {
             &projection_string("REAL OUTPUT"),
             &projection_from_value(&serde_json::json!({ "stdout": "REAL OUTPUT" })),
             None,
+            None,
         )
         .await;
         orch.release_tool_frame(&id, "Bash", &projection_string("SYNTHETIC"), true)
@@ -283,6 +289,7 @@ mod tool_frame_ordering_tests {
             &projection_string("REAL OUTPUT"),
             &projection_from_value(&serde_json::json!({ "error": "aborted" })),
             Some("interrupted"),
+            None,
         )
         .await;
         orch.record_tool_denial_kind(&id, "user-rejected").await;
@@ -355,10 +362,12 @@ mod tool_frame_ordering_tests {
             .await;
 
         let message = lingxi_core::types::ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
                 content: crate::tool_result_text::root_text("cancelled"),
+
                 is_error: Some(true),
                 provider_tool_use_id: None,
                 content_blocks: None,
@@ -411,6 +420,7 @@ mod tool_frame_ordering_tests {
             &projection_string("out"),
             &projection_from_value(&serde_json::json!({"stdout": "out"})),
             Some("interrupted"),
+            None,
         )
         .await;
         orch.record_tool_use_result(
@@ -491,6 +501,7 @@ async fn hook_attachment_is_persisted_as_an_attachment_line() {
         .subprojection("/attachment")
         .unwrap()
         .semantically_eq(&expected_payload));
+
     assert!(v.get("message").is_none(), "no inner message: {}", lines[0]);
     // Payload precedes the discriminator on real 2.1.220 attachment lines.
     let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
@@ -541,10 +552,12 @@ async fn queued_hook_attachments_flush_after_the_tool_result_in_order() {
     .await;
 
     let msg = ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
             content: crate::tool_result_text::root_text("ok"),
+
             is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
@@ -611,6 +624,7 @@ async fn discarded_result_cleanup_removes_only_its_queued_attachments() {
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: accepted.clone(),
             content: crate::tool_result_text::root_text("accepted"),
+
             is_error: Some(false),
             provider_tool_use_id: None,
             content_blocks: None,
@@ -634,6 +648,7 @@ async fn discarded_result_cleanup_removes_only_its_queued_attachments() {
         2,
         "only accepted result and attachment persist"
     );
+
     let attachment_line: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
     assert_eq!(attachment_line["attachment"]["content"][0], "keep");
 }
@@ -784,6 +799,7 @@ async fn sink_forwards_to_the_attached_orchestrator() {
         &serde_json::json!({"type": "hook_success"}),
     ))
     .await;
+
     assert!(!path.exists(), "unattached sink writes nothing");
 
     let orch = Arc::new(orch_with_writer(dir.path(), path.clone()));

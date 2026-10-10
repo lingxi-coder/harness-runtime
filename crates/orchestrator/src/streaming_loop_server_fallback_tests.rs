@@ -51,6 +51,7 @@ fn server_fallback_reset_tombstones_all_query_tool_result_rows_and_keeps_other_j
         usage_limit_note: None,
         origin: None,
         turn_origin: None,
+        api_message_override: None,
     };
     let second_result = lingxi_core::types::ConversationMessage::User {
         id: second_result_id,
@@ -68,6 +69,7 @@ fn server_fallback_reset_tombstones_all_query_tool_result_rows_and_keeps_other_j
         usage_limit_note: None,
         origin: None,
         turn_origin: None,
+        api_message_override: None,
     };
     let unrelated = lingxi_core::types::ConversationMessage::user(other_id, "keep".into());
     let mut settlement = StreamToolSettlement {

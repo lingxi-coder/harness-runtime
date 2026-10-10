@@ -472,6 +472,7 @@ fn session_compact_message_from_row(
                 content,
                 stop_reason: None,
                 resumable: None,
+                per_turn_effort: None,
             })
         }
         "user" => {
@@ -499,6 +500,7 @@ fn session_compact_message_from_row(
                 content.push(block);
             }
             Ok(ConversationMessage::User {
+                api_message_override: None,
                 id,
                 content,
                 is_meta: false,
@@ -958,6 +960,7 @@ impl ConversationOrchestrator {
                     media_analysis_to_preserve: Vec::new(),
                     compaction_usage: None,
                     compaction_model: None,
+                    compaction_profile: None,
                 };
                 apply_session_compact_result(
                     &mut replacement,
@@ -1148,6 +1151,7 @@ impl ConversationOrchestrator {
     /// byte-identical by default. Never blocks the turn (the fork runs on the
     /// handle's runtime); a failed extraction is swallowed, never surfaced.
     pub(crate) async fn maybe_extract_session_memory(&self) {
+        let safety_observer = self.model_safety_observer().await;
         let Some(handle) = self.compaction_runtime.session_memory.clone() else {
             return;
         };
@@ -1198,56 +1202,59 @@ impl ConversationOrchestrator {
         let spawn_result = runtime
             .spawn(
                 "session-memory-extract",
-                Box::pin(async move {
-                    let _in_flight = in_flight_reset;
-                    let covered_through = params
-                        .fork_context_messages
-                        .last()
-                        .map(ConversationMessage::id);
-                    let revision = {
+                Box::pin(lingxi_core::host::model_safety::bind_model_safety(
+                    safety_observer,
+                    async move {
+                        let _in_flight = in_flight_reset;
+                        let covered_through = params
+                            .fork_context_messages
+                            .last()
+                            .map(ConversationMessage::id);
+                        let revision = {
+                            let mut ex = task_handle.extractor.lock().await;
+                            if task_handle
+                                .generation
+                                .load(std::sync::atomic::Ordering::Acquire)
+                                != generation
+                                || !ex.should_extract(&history)
+                            {
+                                return;
+                            }
+                            ex.state_revision()
+                        };
+
+                        let Ok(content) =
+                            memory::session_memory::SessionMemoryExtractor::run_extraction(
+                                &task_handle.runner,
+                                params,
+                            )
+                            .await
+                        else {
+                            return;
+                        };
+
                         let mut ex = task_handle.extractor.lock().await;
                         if task_handle
                             .generation
                             .load(std::sync::atomic::Ordering::Acquire)
                             != generation
-                            || !ex.should_extract(&history)
+                            || ex.state_revision() != revision
                         {
                             return;
                         }
-                        ex.state_revision()
-                    };
-
-                    let Ok(content) =
-                        memory::session_memory::SessionMemoryExtractor::run_extraction(
-                            &task_handle.runner,
-                            params,
-                        )
-                        .await
-                    else {
-                        return;
-                    };
-
-                    let mut ex = task_handle.extractor.lock().await;
-                    if task_handle
-                        .generation
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        != generation
-                        || ex.state_revision() != revision
-                    {
-                        return;
-                    }
-                    if ex
-                        .commit_extraction(
-                            &content,
-                            &session_id.to_string(),
-                            covered_through,
-                            &task_handle.config_home,
-                        )
-                        .is_ok()
-                    {
-                        ex.record_extraction_token_count(extraction_token_count);
-                    }
-                }),
+                        if ex
+                            .commit_extraction(
+                                &content,
+                                &session_id.to_string(),
+                                covered_through,
+                                &task_handle.config_home,
+                            )
+                            .is_ok()
+                        {
+                            ex.record_extraction_token_count(extraction_token_count);
+                        }
+                    },
+                )),
             )
             .await;
         if spawn_result.is_err() {
@@ -1377,6 +1384,9 @@ impl ConversationOrchestrator {
                     "Compaction cost preflight failed: {error}"
                 ))
             })?;
+            let safety_observer = cost_scope
+                .as_ref()
+                .map(cost::CostSessionScope::model_safety_observer);
             let phase_output = self.output.clone();
             let compact_for_core = compactor.clone();
             let cancel_for_core = cancel.clone();
@@ -1389,47 +1399,52 @@ impl ConversationOrchestrator {
                     let message_uuid = message_uuid_for_core.clone();
                     let phase_output = phase_output.clone();
                     let direction = direction_for_core;
-                    Box::pin(async move {
-                        let index = compaction::selector::index_of(&source_messages, &message_uuid)
-                            .ok_or_else(|| {
-                                hooks::mods::ModError::Native("Message not found.".into())
-                            })?;
-                        let split =
-                            compaction::selector::split_at(&source_messages, index, direction)
-                                .map_err(|message| {
-                                    hooks::mods::ModError::Native(message.to_string())
-                                })?;
-                        let context = split.summarizer_context(&source_messages);
-                        phase_output.emit_compaction_phase("summarizing").await;
-                        let api_started = std::time::Instant::now();
-                        let result = tokio::select! {
-                            biased;
-                            () = cancel.cancelled() => {
-                                return Err(hooks::mods::ModError::Native(
-                                    "Compaction canceled.".into(),
-                                ));
-                            }
-                            result = compactor.summarize_selection(
-                                context,
-                                &split.to_summarize,
-                                instructions.as_ref(),
-                                direction,
-                            ) => result.map_err(|error| {
-                                hooks::mods::ModError::Native(
-                                    Self::summarize_error(error).to_string(),
-                                )
-                            })?,
-                        };
-                        let api_duration = api_started.elapsed();
-                        let mut result = result;
-                        result.messages_to_preserve =
-                            compaction::partial::zero_preserved_tail_usage(split.to_keep);
-                        Ok(SessionCompactCoreOutput::new(
-                            result,
-                            source_messages,
-                            api_duration,
-                        ))
-                    })
+                    let safety_observer = safety_observer.clone();
+                    Box::pin(lingxi_core::host::model_safety::bind_model_safety(
+                        safety_observer,
+                        async move {
+                            let index =
+                                compaction::selector::index_of(&source_messages, &message_uuid)
+                                    .ok_or_else(|| {
+                                        hooks::mods::ModError::Native("Message not found.".into())
+                                    })?;
+                            let split =
+                                compaction::selector::split_at(&source_messages, index, direction)
+                                    .map_err(|message| {
+                                        hooks::mods::ModError::Native(message.to_string())
+                                    })?;
+                            let context = split.summarizer_context(&source_messages);
+                            phase_output.emit_compaction_phase("summarizing").await;
+                            let api_started = std::time::Instant::now();
+                            let result = tokio::select! {
+                                biased;
+                                () = cancel.cancelled() => {
+                                    return Err(hooks::mods::ModError::Native(
+                                        "Compaction canceled.".into(),
+                                    ));
+                                }
+                                result = compactor.summarize_selection(
+                                    context,
+                                    &split.to_summarize,
+                                    instructions.as_ref(),
+                                    direction,
+                                ) => result.map_err(|error| {
+                                    hooks::mods::ModError::Native(
+                                        Self::summarize_error(error).to_string(),
+                                    )
+                                })?,
+                            };
+                            let api_duration = api_started.elapsed();
+                            let mut result = result;
+                            result.messages_to_preserve =
+                                compaction::partial::zero_preserved_tail_usage(split.to_keep);
+                            Ok(SessionCompactCoreOutput::new(
+                                result,
+                                source_messages,
+                                api_duration,
+                            ))
+                        },
+                    ))
                 });
             let compacted = tokio::select! {
                 biased;
@@ -1675,6 +1690,9 @@ impl ConversationOrchestrator {
                     "Compaction cost preflight failed: {error}"
                 ))
             })?;
+            let safety_observer = cost_scope
+                .as_ref()
+                .map(cost::CostSessionScope::model_safety_observer);
             let phase_output = self.output.clone();
             let compact_for_core = compactor.clone();
             let cancel_for_core = cancel.clone();
@@ -1683,31 +1701,35 @@ impl ConversationOrchestrator {
                     let compactor = compact_for_core.clone();
                     let cancel = cancel_for_core.clone();
                     let phase_output = phase_output.clone();
-                    Box::pin(async move {
-                        phase_output.emit_compaction_phase("summarizing").await;
-                        let api_started = std::time::Instant::now();
-                        let result = tokio::select! {
-                            biased;
-                            () = cancel.cancelled() => {
-                                return Err(hooks::mods::ModError::Native(
-                                    "Compaction canceled.".into(),
-                                ));
-                            }
-                            result = compactor.process_forced(
-                                source_messages.clone(),
-                                instructions.as_ref(),
-                            ) => result.map_err(|error| {
-                                hooks::mods::ModError::Native(
-                                    Self::summarize_error(error).to_string(),
-                                )
-                            })?,
-                        };
-                        Ok(SessionCompactCoreOutput::new(
-                            result,
-                            source_messages,
-                            api_started.elapsed(),
-                        ))
-                    })
+                    let safety_observer = safety_observer.clone();
+                    Box::pin(lingxi_core::host::model_safety::bind_model_safety(
+                        safety_observer,
+                        async move {
+                            phase_output.emit_compaction_phase("summarizing").await;
+                            let api_started = std::time::Instant::now();
+                            let result = tokio::select! {
+                                biased;
+                                () = cancel.cancelled() => {
+                                    return Err(hooks::mods::ModError::Native(
+                                        "Compaction canceled.".into(),
+                                    ));
+                                }
+                                result = compactor.process_forced(
+                                    source_messages.clone(),
+                                    instructions.as_ref(),
+                                ) => result.map_err(|error| {
+                                    hooks::mods::ModError::Native(
+                                        Self::summarize_error(error).to_string(),
+                                    )
+                                })?,
+                            };
+                            Ok(SessionCompactCoreOutput::new(
+                                result,
+                                source_messages,
+                                api_started.elapsed(),
+                            ))
+                        },
+                    ))
                 });
             let compacted = tokio::select! {
                 biased;
@@ -2032,6 +2054,7 @@ impl ConversationOrchestrator {
                             name,
                             input,
                             provider_id,
+                            ..
                         } = block
                         else {
                             return None;
@@ -3013,7 +3036,8 @@ impl ConversationOrchestrator {
         ) else {
             return None;
         };
-        let model_ref = crate::cost_wiring::model_ref_from_string(model, None);
+        let model_ref =
+            crate::cost_wiring::model_ref_from_string(model, result.compaction_profile.as_deref());
         Some(scope.submit_model_response(cost::CostModelResponse {
             model_ref,
             usage,
@@ -3792,6 +3816,7 @@ mod session_compact_mod_tests {
             media_analysis_to_preserve: Vec::new(),
             compaction_usage: None,
             compaction_model: None,
+            compaction_profile: None,
         }
     }
 
@@ -3919,6 +3944,7 @@ mod session_compact_mod_tests {
         let tool_use_id = lingxi_core::types::ToolUseId::from("toolu_row_codec_test");
         let messages = vec![
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![
                     lingxi_core::types::ContentBlock::Text {
@@ -3937,6 +3963,7 @@ mod session_compact_mod_tests {
                 resumable: None,
             },
             ConversationMessage::User {
+                api_message_override: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),

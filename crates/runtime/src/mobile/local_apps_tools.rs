@@ -720,6 +720,8 @@ mod tests {
     fn a_captured_frame_survives_the_envelope_unwrap() {
         const DATA: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
         let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
+            result_projection: None,
+
             content: serde_json::json!([
                 { "type": "image", "data": DATA, "mimeType": "image/jpeg" }
             ]),
@@ -770,6 +772,8 @@ mod tests {
         const FRAME_A: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
         const FRAME_B: &str = "iVBORw0KGgoAAAANSUhEUg==";
         let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
+            result_projection: None,
+
             content: serde_json::json!([
                 { "type": "image", "data": FRAME_A, "mimeType": "image/jpeg" },
                 { "type": "image", "data": FRAME_B, "mimeType": "image/png" }
@@ -841,6 +845,8 @@ mod tests {
     fn qa_read_evidence_image_projection_retains_evidence_identity() {
         const DATA: &str = "RkFLRS1GUkFNRQ==";
         let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
+            result_projection: None,
+
             content: serde_json::json!([
                 { "type": "image", "data": DATA, "mimeType": "image/webp" }
             ]),
@@ -882,6 +888,8 @@ mod tests {
     #[test]
     fn an_empty_frame_falls_through_to_the_text_path() {
         let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
+            result_projection: None,
+
             content: serde_json::json!([{ "type": "image", "data": "", "mimeType": "image/jpeg" }]),
             is_error: true,
             structured_content: Some(serde_json::json!({ "ok": false })),
@@ -903,6 +911,8 @@ mod tests {
     #[test]
     fn a_text_envelope_is_unwrapped_unchanged() {
         let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
+            result_projection: None,
+
             content: serde_json::json!([{ "type": "text", "text": "{\"records\":[]}" }]),
             is_error: false,
             structured_content: Some(serde_json::json!({ "records": [] })),

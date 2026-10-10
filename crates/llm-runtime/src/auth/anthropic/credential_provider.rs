@@ -41,6 +41,20 @@ impl fmt::Debug for OAuthCredentialProvider {
 }
 
 impl CredentialProvider for OAuthCredentialProvider {
+    fn source<'a>(
+        &'a self,
+        _scope: &'a CredentialScope,
+    ) -> BoxFuture<'a, Result<crate::CredentialSource, LlmError>> {
+        Box::pin(async move {
+            let token = self.driver.state.token.read().await;
+            Ok(if token.access_token.expose_secret().is_empty() {
+                crate::CredentialSource::None
+            } else {
+                crate::CredentialSource::OAuth
+            })
+        })
+    }
+
     fn anthropic_auth_snapshot<'a>(
         &'a self,
         scope: &'a CredentialScope,

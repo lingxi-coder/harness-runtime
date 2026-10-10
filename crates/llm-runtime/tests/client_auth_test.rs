@@ -6,8 +6,8 @@ use json_payload_test::value as json_payload_value;
 
 use std::sync::Arc;
 
-use llm_runtime::BoxFuture;
 use llm_runtime::client::ModelRuntime;
+use llm_runtime::BoxFuture;
 use llm_runtime::{
     AuthStrategy, AzureConfig, Capabilities, ClientConfig, Credential, CredentialConfig,
     CredentialProvider, CredentialScope, LlmError, LlmRequest, ModelProfile, PricingConfig,
@@ -621,12 +621,10 @@ async fn missing_credential_config_sends_request_without_client_auth() {
         .await
         .expect("prepare");
 
-    assert!(
-        !prepared
-            .provider_request
-            .headers
-            .contains_key("Authorization")
-    );
+    assert!(!prepared
+        .provider_request
+        .headers
+        .contains_key("Authorization"));
     assert!(!prepared.provider_request.headers.contains_key("x-api-key"));
 }
 
@@ -648,26 +646,20 @@ async fn prepare_count_tokens_is_authenticated_for_anthropic_routes() {
         .await
         .expect("prepared");
 
-    assert!(
-        prepared
-            .url
-            .ends_with("/v1/messages/count_tokens?beta=true")
-    );
+    assert!(prepared
+        .url
+        .ends_with("/v1/messages/count_tokens?beta=true"));
     assert_eq!(
         prepared.headers.get("x-api-key").map(String::as_str),
         Some("ct-key")
     );
-    assert!(
-        json_payload_value(&prepared.body_json)
-            .get("max_tokens")
-            .is_none()
-    );
+    assert!(json_payload_value(&prepared.body_json)
+        .get("max_tokens")
+        .is_none());
     assert!(prepared.headers["anthropic-beta"].ends_with("token-counting-2024-11-01"));
-    assert!(
-        json_payload_value(&prepared.body_json)
-            .get("betas")
-            .is_none()
-    );
+    assert!(json_payload_value(&prepared.body_json)
+        .get("betas")
+        .is_none());
 }
 
 #[tokio::test]
@@ -1018,7 +1010,8 @@ async fn sigv4_exact_authorization_header_with_fixed_clock() {
     // Hardcoded regression pin (computed once via sigv4::sign_request above, 2026-06-12).
     // Signed headers: anthropic-version;content-type;host;x-amz-date
     // Signature covers: AnthropicMessages encode of LlmRequest::new("p-model") at 20150830T123600Z.
-    let pinned_auth = "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, \
+    let pinned_auth =
+        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/bedrock/aws4_request, \
         SignedHeaders=anthropic-version;content-type;host;x-amz-date, \
         Signature=2c9c9309c020f925f19d1996de491f9271f99a389ff18feb811f38eae4708f2b";
     assert_eq!(

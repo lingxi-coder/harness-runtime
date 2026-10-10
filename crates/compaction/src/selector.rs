@@ -169,6 +169,7 @@ mod tests {
     }
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: text.to_string(),
@@ -185,6 +186,7 @@ mod tests {
     #[test]
     fn up_to_retains_an_ordinary_system_message_with_compact_body() {
         let ordinary = ConversationMessage::System {
+            api_system: None,
             id: MessageId::new(),
             content: crate::boundary::BOUNDARY_CONTENT.into(),
             subtype: None,

@@ -216,7 +216,7 @@ impl Fixture {
                         .transpose()
                         .unwrap()
                         .unwrap_or_default();
-                    blocks.insert("claudeMd".to_owned(), body.clone());
+                    blocks.insert("instructions".to_owned(), body.clone());
                     let context = InstructionContext {
                         user_context: blocks,
                         eager_instructions: Some(files.as_ref().clone()),
@@ -456,10 +456,12 @@ impl Fixture {
 
 #[tokio::test]
 async fn current_native_fixture_replays_all_root_cache_operations() {
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../orchestrator/tests/fixtures/instruction_cache_2_1_286.json"
-    ))
-    .unwrap();
+    // The checked-in 2.1.286 capture is immutable. This is an internal behavior
+    // regression with the current `instructions` context key, not a byte gate.
+    let native =
+        include_str!("../../../orchestrator/tests/fixtures/instruction_cache_2_1_286.json")
+            .replace("claudeMd", "instructions");
+    let fixture: Value = serde_json::from_str(&native).unwrap();
     assert_eq!(fixture["version"], "2.1.286");
     assert_eq!(fixture["cases"].as_array().unwrap().len(), 20);
     let mut count = 0;
@@ -609,7 +611,7 @@ fn lifecycle_build(files: Arc<Vec<InstructionFile>>) -> InstructionContextBuild<
         .join("\n");
     let context = InstructionContext {
         eager_instructions: Some(files.as_ref().clone()),
-        user_context: BTreeMap::from([("claudeMd".to_owned(), body.clone())]),
+        user_context: BTreeMap::from([("instructions".to_owned(), body.clone())]),
         ..Default::default()
     };
     InstructionContextBuild::new(context, files)
@@ -685,7 +687,10 @@ async fn compound_lifecycles_keep_original_results_with_distinct_classifier_fenc
     }
     release_compact.send(()).unwrap();
     let old_context = retired_by_compaction.get().await.unwrap();
-    assert_eq!(old_context.user_context["claudeMd"], "before compaction");
+    assert_eq!(
+        old_context.user_context["instructions"],
+        "before compaction"
+    );
     assert!(!cache.is_current_context(key, &old_context));
     // Native pT does not fence a completion just because its entry was retired.
     assert_eq!(cache.classifier_ordinal(), 2);
@@ -736,7 +741,7 @@ async fn compound_lifecycles_keep_original_results_with_distinct_classifier_fenc
     release_reset.send(()).unwrap();
     let reset_old_context = retired_by_reset.get().await.unwrap();
     assert_eq!(
-        reset_old_context.user_context["claudeMd"],
+        reset_old_context.user_context["instructions"],
         "after compaction"
     );
     assert!(!cache.is_current_context(key, &reset_old_context));

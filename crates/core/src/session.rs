@@ -24,6 +24,11 @@ where
     }
 }
 
+fn empty_todo_source_text() -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::new(), Vec::new())
+        .expect("empty text is a valid source projection")
+}
+
 /// Running total of `Usage` across all turns in a session.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CumulativeUsage(pub Usage);
@@ -61,6 +66,7 @@ pub struct TodoItem {
     /// `TodoItemSchema.activeForm`). Wire key is camelCase `activeForm`.
     #[serde(
         rename = "activeForm",
+        default = "empty_todo_source_text",
         deserialize_with = "deserialize_todo_source_text",
         serialize_with = "crate::types::utf16_json::raw_json_serde::serialize"
     )]
@@ -423,6 +429,7 @@ mod mod_session_turn_tests {
                 usage_limit_note: None,
                 origin: None,
                 turn_origin: None,
+                api_message_override: None,
             },
             second.clone(),
         ]);
@@ -565,9 +572,10 @@ mod m4_04_session_extension_tests {
     }
 
     #[test]
-    fn todo_requires_current_active_form_wire_field() {
+    fn todo_defaults_omitted_active_form_to_empty_source_text() {
         let item = r#"{"id":"t1","content":"buy milk","status":"pending"}"#;
-        assert!(serde_json::from_str::<TodoItem>(item).is_err());
+        let parsed: TodoItem = serde_json::from_str(item).unwrap();
+        assert_eq!(parsed.active_form.string_at(""), Some(""));
     }
 
     #[test]

@@ -231,6 +231,7 @@ mod tests {
 
     fn asst_calling_endconv() -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolUse {
                 id: Default::default(),
@@ -245,7 +246,7 @@ mod tests {
     }
 
     fn ctx_with(messages: Vec<ConversationMessage>) -> ToolUseContext {
-        let mut c = ToolUseContext::model_seed("x".into());
+        let mut c = ToolUseContext::model_seed("x".into(), None);
         c.messages = messages;
         c
     }

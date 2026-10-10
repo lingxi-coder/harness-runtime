@@ -436,6 +436,7 @@ impl ExactHookText {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         }
     }
 }

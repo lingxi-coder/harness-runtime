@@ -6,13 +6,13 @@
     clippy::unused_async
 )]
 
-use cost::CostTracker;
 use cost::pricing::PricingCatalog;
+use cost::CostTracker;
 use lingxi_core::host::OrchestratorHandle;
 use lingxi_core::types::SessionId;
 use llm_runtime::{ContentBlock, ExecutionUsage as Usage, HistoryResponse};
 use orchestrator::test_support::{
-    MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider, noop_hook_executor,
+    noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorConfig};
 use std::sync::Arc;

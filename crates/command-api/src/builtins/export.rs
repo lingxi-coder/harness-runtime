@@ -334,6 +334,7 @@ mod tests {
 
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
@@ -354,6 +355,7 @@ mod tests {
     #[test]
     fn renders_tool_blocks() {
         let msgs = vec![ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -361,6 +363,7 @@ mod tests {
                     citations: None,
                 },
                 ContentBlock::ToolUse {
+                    input_projection: None,
                     id: lingxi_core::types::ToolUseId::new(),
                     name: "Read".into(),
                     input: Utf16JsonProjection::from_serde_value(
@@ -382,6 +385,7 @@ mod tests {
     #[test]
     fn skips_internal_media_analysis_blocks() {
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {

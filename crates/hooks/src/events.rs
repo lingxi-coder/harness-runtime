@@ -290,6 +290,8 @@ pub enum HookEvent {
         agent_type: String,
         /// Resolved model, when the request pinned one.
         model: Option<String>,
+        /// Provider profile selected for the child model.
+        model_profile: Option<String>,
         /// Working directory the subagent would run in.
         cwd: Option<String>,
         /// Whether the spawn was requested as a background run.

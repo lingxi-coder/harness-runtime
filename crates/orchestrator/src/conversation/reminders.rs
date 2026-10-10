@@ -1499,8 +1499,7 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     }
 
     /// The per-turn, transient `agent_listing_delta` reminder, or `None` when
-    /// the gate is OFF (the default — keeps the inline-catalog build
-    /// byte-identical), the `Agent` tool is absent this turn, or no NEW agent
+    /// the `Agent` tool is absent this turn, or no NEW agent
     /// type has appeared since the last reminder. A wired DISK catalog is NOT
     /// required — built-ins are always announced (binary `aLe` uses
     /// `activeAgents`, which includes built-ins).
@@ -1509,17 +1508,14 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     /// (`getAgentListingDeltaAttachment`, attachments.ts:1490-1554 →
     /// `normalizeAttachmentForAPI`'s `'agent_listing_delta'` case,
     /// messages.ts:4194-4215):
-    /// - GATE: `shouldInjectAgentListInMessages()` (env
-    ///   `LINGXI_AGENT_LIST_IN_MESSAGES`, default OFF — see
-    ///   [`agent::should_inject_agent_list_in_messages`]). When ON, `AgentTool`'s
-    ///   description drops the inline catalog for a static pointer line and the
-    ///   catalog is conveyed here instead, so the tool-schema prompt cache stops
-    ///   busting on every MCP/plugin/permission-driven catalog change.
+    /// - PLACEMENT: the Agent tool description carries a static pointer and
+    ///   the catalog is conveyed here, so catalog changes do not invalidate
+    ///   the tool-schema prompt cache.
     /// - TOOL GATE: skip when the `Agent` tool is not in the registry this turn
     ///   (attachments.ts:1497-1501) — the listing would be unactionable.
     /// - ENTRIES: the merged built-ins + catalog listing via
     ///   [`agent::agent_listing_entries`] (later-wins precedence, sorted), the
-    ///   same source of truth the inline prompt uses.
+    ///   same source of truth the Agent tool uses to validate selections.
     /// - DELTA: emit lines only for types NOT yet announced
     ///   ([`Self::sent_agent_names`]); `is_initial` = the set was empty BEFORE
     ///   this turn (TS `announced.size === 0`). An empty delta ⇒ `None`.
@@ -1559,21 +1555,12 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     ///   [`lingxi_core::host::subscription::is_pro_plan`] and
     ///   [`lingxi_core::host::live_sessions::subagent_steer_is_default`].
     ///
-    /// NOT inert: `LINGXI_AGENT_LIST_IN_MESSAGES` defaults **ON** since 2.1.193
-    /// (`lingxi_core::host::subagent_spawn::should_inject_agent_list_in_messages` returns
-    /// `true` when unset), so a stock session that has the Agent tool now sends
-    /// the concurrency note on its FIRST agent listing — which is exactly what
-    /// 2.1.238 does for a non-Pro plan on the default steer. The removal branch
-    /// stays silent until a catalog actually shrinks.
+    /// A session with the Agent tool sends the concurrency note on its first
+    /// listing. The removal branch stays silent until the catalog shrinks.
     pub(crate) async fn agent_listing_reminder_message(&self) -> Option<ConversationMessage> {
-        // GATE: off by default (no GrowthBook in Rust) ⇒ no reminder, inline
-        // catalog stays byte-identical.
-        if !agent::should_inject_agent_list_in_messages() {
-            return None;
-        }
         // Gate on the Agent tool being available this turn (attachments.ts:1497).
-        // Dispatch lookup also matches the legacy `Task` alias. This is the ONLY
-        // structural gate in the binary's `aLe` — it does NOT gate on a wired
+        // This is the ONLY structural gate in the binary's `aLe` — it does NOT
+        // gate on a wired
         // DISK catalog (see below).
         self.find_dispatchable_tool("Agent")?;
 
@@ -2358,8 +2345,15 @@ message with multiple tool uses so they run concurrently."
         // non-stub prefetch derives the memdir from the post-swap worktree, not
         // the frozen boot cwd. Currently inert (the stub prefetch ignores its
         // cwd argument), so this is a no-behavior-change correctness fix.
+        let (model, profile) = self.current_prompt_route().await;
         let pending = prefetch
-            .start_for_session(query, self.session_cwd.cwd(), Some(session_id))
+            .start_for_session(
+                query,
+                model,
+                profile,
+                self.session_cwd.cwd(),
+                Some(session_id),
+            )
             .await;
         *self.prompt_runtime.pending_memory_prefetch.lock().await = Some(pending);
     }
@@ -2593,7 +2587,9 @@ message with multiple tool uses so they run concurrently."
         let body = delta.render_reminder()?;
         Some(ConversationMessage::user_meta(MessageId::new(), body))
     }
+}
 
+impl ConversationOrchestrator {
     pub(crate) async fn mod_prompt_attachment_with_detail(
         &self,
         kind: &str,

@@ -69,8 +69,8 @@ pub use events::{HookEvent, HookEventType, HookProgressEvent};
 pub use executor::{
     default_hook_shell, powershell_base_args, powershell_env_token_rewrite,
     powershell_missing_error, references_bare_project_dir_var, resolve_powershell_executable,
-    BuiltinHookHandler, HookExecutorImpl, HOOK_AGENT_TIMEOUT_MS, HOOK_COMMAND_TIMEOUT_MS,
-    HOOK_HTTP_TIMEOUT_MS,
+    AgentStopMetadata, BuiltinHookHandler, HookExecutorImpl, HOOK_AGENT_TIMEOUT_MS,
+    HOOK_COMMAND_TIMEOUT_MS, HOOK_HTTP_TIMEOUT_MS,
 };
 pub use file_changed_firer::{FileChangedFire, FileChangedFirer, OptionalFileChangedFirer};
 pub use hook_payload::{

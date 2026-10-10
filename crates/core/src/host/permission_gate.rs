@@ -1485,7 +1485,7 @@ pub trait PermissionGate: Send + Sync {
     /// selection of a denied subagent type with the byte-exact message
     /// `Agent type '<t>' has been denied by permission rule 'Agent(<t>)' from
     /// <source>.` (`AgentTypeError`). The deny rule keys on the `"Agent"` tool
-    /// name even when invoked via the legacy `Task` alias.
+    /// name.
     ///
     /// The default returns `None` — a gate with no rule layer denies no agent
     /// type. Only `PolicyPermissionGate` OVERRIDES it. Additive DEFAULTED
@@ -1596,5 +1596,31 @@ pub trait PermissionGate: Send + Sync {
     /// additive DEFAULTED (frozen-trait safe), returning `None`.
     fn permission_mode(&self) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod permission_outcome_source_tests {
+    use super::*;
+
+    #[test]
+    fn permission_outcome_clone_retains_utf16_updated_input() {
+        let updated = Utf16JsonProjection::parse(r#"{"text":"\udfff","\ud901":"value"}"#).unwrap();
+        let outcome = PermissionOutcome::Allow {
+            updated_input: Some(updated.clone()),
+            permission_updates: Vec::new(),
+            decision_classification: None,
+        };
+        let PermissionOutcome::Allow {
+            updated_input: Some(cloned),
+            ..
+        } = outcome.clone()
+        else {
+            panic!("allow")
+        };
+        assert_eq!(
+            cloned.to_json_string().unwrap(),
+            updated.to_json_string().unwrap()
+        );
     }
 }

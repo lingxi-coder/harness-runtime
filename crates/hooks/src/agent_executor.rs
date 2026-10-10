@@ -59,7 +59,7 @@ impl AgentExecutor {
 
     /// Execute one Agent hook.
     ///
-    /// `inherit` carries the parent's tool invoker + budget enforcer Arcs;
+    /// `ctx.inherit` carries the parent's tool invoker + budget enforcer Arcs;
     /// it MUST be the same Arc the parent orchestrator holds (the
     /// recursion-lock invariant — `Arc::ptr_eq` assertion in
     /// `lingxi-tools/tests/agent_tool_recursion_lock_test.rs` must keep
@@ -76,7 +76,7 @@ impl AgentExecutor {
         prompt_template: &Utf16JsonProjection,
         payload_json: &str,
         expected_event: &'static str,
-        inherit: Option<SubagentInheritance>,
+        ctx: &crate::registry::HookContext,
         model: Option<&str>,
     ) -> AgentExecutionOutcome {
         let Some(spawner) = self.spawner.clone() else {
@@ -94,7 +94,7 @@ impl AgentExecutor {
                 signal: AgentExecutionSignal::NotWired,
             };
         };
-        let Some(inherit) = inherit else {
+        let Some(inherit) = ctx.inherit.clone() else {
             return AgentExecutionOutcome {
                 result: HookResult {
                     outcome: HookOutcome::Error,
@@ -128,6 +128,8 @@ impl AgentExecutor {
             parent_native_query_depth: None,
             // Top-level spawn ⇒ the spawner's own default model anchors resolution.
             parent_model_override: None,
+            parent_model_profile_override: None,
+            stop_hook_scope: Default::default(),
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,
@@ -149,7 +151,7 @@ impl AgentExecutor {
             team_name: None,
             creator_teammate_name: None,
             creator_team_name: None,
-            creator_agent_id: None,
+            creator_agent_id: ctx.agent_id,
             mode: None,
             isolation: None,
             cwd: None,
@@ -170,7 +172,7 @@ impl AgentExecutor {
             max_turns_override: None,
             max_output_tokens_per_turn: None,
             max_input_bytes_per_turn: None,
-            origin_session_id: None,
+            origin_session_id: (!ctx.session_id.as_uuid().is_nil()).then_some(ctx.session_id),
             query_source_label: None,
             correlation_id: None,
             model_attempt: None,
@@ -485,7 +487,10 @@ mod tests {
                 &"vet this".into(),
                 "{}",
                 "PreToolUse",
-                Some(dummy_inherit()),
+                &crate::registry::HookContext {
+                    inherit: Some(dummy_inherit()),
+                    ..Default::default()
+                },
                 None,
             )
             .await;
@@ -663,7 +668,10 @@ mod tests {
                 &"vet".into(),
                 "{}",
                 "PreToolUse",
-                Some(dummy_inherit()),
+                &crate::registry::HookContext {
+                    inherit: Some(dummy_inherit()),
+                    ..Default::default()
+                },
                 None,
             )
             .await;
@@ -692,7 +700,10 @@ mod tests {
                 &"x".into(),
                 "{}",
                 "PreToolUse",
-                Some(dummy_inherit()),
+                &crate::registry::HookContext {
+                    inherit: Some(dummy_inherit()),
+                    ..Default::default()
+                },
                 None,
             )
             .await;

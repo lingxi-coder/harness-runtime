@@ -186,6 +186,7 @@ mod tests {
         };
         let mut messages = vec![
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: old,
                 content: vec![
                     thinking(),
@@ -203,6 +204,7 @@ mod tests {
                 resumable: None,
             },
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: fresh,
                 content: vec![thinking()],
                 stop_reason: None,
@@ -235,6 +237,7 @@ mod tests {
 
     fn assistant(content: Vec<ContentBlock>) -> Message {
         Message {
+            api_output_config: None,
             role: "assistant".into(),
             content,
         }
@@ -242,6 +245,7 @@ mod tests {
 
     fn user(content: Vec<ContentBlock>) -> Message {
         Message {
+            api_output_config: None,
             role: "user".into(),
             content,
         }
@@ -325,6 +329,7 @@ mod tests {
                 text("   "),
                 text("keep me"),
                 ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "t1".into(),
                     name: "Echo".into(),
                     input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
@@ -343,6 +348,7 @@ mod tests {
             vec![
                 text("keep me"),
                 ContentBlock::ToolCall {
+                    input_projection: None,
                     id: "t1".into(),
                     name: "Echo".into(),
                     input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),

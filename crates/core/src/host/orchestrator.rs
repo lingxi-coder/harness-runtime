@@ -646,6 +646,15 @@ pub struct PromptToolDescription {
     pub description: Utf16JsonProjection,
 }
 
+impl Default for PromptToolDescription {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            description: Utf16JsonProjection::from(""),
+        }
+    }
+}
+
 fn deserialize_prompt_tool_description<'de, D>(
     deserializer: D,
 ) -> Result<Utf16JsonProjection, D::Error>
@@ -821,6 +830,12 @@ pub struct ModelUsageRow {
     pub cache_read_input_tokens: u64,
     /// Cumulative tokens written into the prompt cache.
     pub cache_creation_input_tokens: u64,
+    /// Cumulative reasoning output from the model's settled ledger slice.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    /// Cumulative server-side searches from the same settled slice.
+    #[serde(default)]
+    pub web_search_requests: u64,
 }
 
 /// Result of a `force_compact` operation. M5-10 wires `/compact` against
@@ -3771,8 +3786,29 @@ pub struct ContextPressureBanner {
 /// The stdio CLI (M5-12) and the future TUI (M6) both implement this.
 /// M5-02 ships `MockOutputStream` (in `lingxi-orchestrator::test_support`)
 /// for unit tests.
+/// Monotonic timing facts from the main query's physical SDK dispatch and
+/// semantic stream events. These facts never change provider requests or wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseTimingEvent {
+    RequestStarted,
+    MessageStart,
+    ContentFrame,
+    AssistantMessage,
+}
+
 #[async_trait]
 pub trait OutputStream: Send + Sync {
+    /// Observe receipt before any asynchronous presentation or output delivery.
+    /// RequestStarted marks the admitted SDK transport dispatch; sinks may
+    /// retain the first fact across every request in one external query.
+    fn note_response_timing(&self, _event: ResponseTimingEvent, _at: std::time::Instant) {}
+    /// First main SSE response's admitted input usage, independent of whether
+    /// partial frames are presented. Later tool requests do not replace it.
+    fn note_first_request_input_tokens(&self, _input_tokens: u64) {}
+    /// Whether the sink retains timing observations for the admitted query.
+    fn wants_response_timing(&self) -> bool {
+        false
+    }
     /// Emit a session-scoped SDK `system/task_started` or `task_updated` frame.
     async fn emit_task_lifecycle(&self, _event: &Utf16JsonProjection) {}
 
@@ -3968,6 +4004,7 @@ pub trait OutputStream: Send + Sync {
         model_text: &Utf16JsonProjection,
         result: &Utf16JsonProjection,
         _denial_kind: &str,
+        _projection: Option<&ToolResultProjection>,
     ) {
         self.emit_tool_result(id, tool, model_text, result).await;
     }
@@ -4532,3 +4569,17 @@ mod source_carrier_tests {
 #[cfg(test)]
 #[path = "orchestrator_test.rs"]
 mod orchestrator_test;
+
+/// Associated exact images of an accepted tool result. Native output uses both
+/// the raw data and the provider-visible content, with no private wire fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolResultProjection {
+    /// Exact model-facing prose, independent of array-valued provider content.
+    pub model_text: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Exact MCP metadata attached to the accepted native user frame.
+    pub mcp_meta: Option<crate::types::utf16_json::Utf16JsonProjection>,
+    /// Raw tool data associated with the accepted `ToolCallResult.data`.
+    pub data: crate::types::utf16_json::Utf16JsonProjection,
+    /// Provider-visible content string or block array.
+    pub content: crate::types::utf16_json::Utf16JsonProjection,
+}

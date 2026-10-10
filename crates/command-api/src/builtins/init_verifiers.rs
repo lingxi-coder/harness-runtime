@@ -5,8 +5,8 @@
 //! 1:1 behavioral port of the claude-code `init-verifiers` slash command
 //! (`src/commands/init-verifiers.ts`, a `type: 'prompt'` builtin whose
 //! `getPromptForCommand()` returns the static text below). The TS template
-//! takes no arguments and performs no interpolation, so this is a pure
-//! static-template injection — `args.raw_args` is unused.
+//! takes no arguments; the template substitutes the runtime's product name
+//! into one user-facing instruction while leaving `args.raw_args` unused.
 
 use crate::builtin_support::names::core_description;
 use crate::model::{BuiltinCommandHandler, CommandResult};
@@ -33,7 +33,9 @@ impl InitVerifiersHandler {
 impl BuiltinCommandHandler for InitVerifiersHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
         CommandResult::InjectMessage {
-            content: INIT_VERIFIERS_PROMPT.to_string().into(),
+            content: INIT_VERIFIERS_PROMPT
+                .replace("{product_name}", branding::PRODUCT_NAME)
+                .into(),
         }
     }
 
@@ -198,7 +200,7 @@ Based on the areas detected in Phase 1, you may need to create multiple verifier
 
 ## Phase 4: Generate Verifier Skill
 
-**All verifier skills are created in the project root's `.lingxi/skills/` directory.** This ensures they are automatically loaded when Claude runs in the project.
+**All verifier skills are created in the project root's `.lingxi/skills/` directory.** This ensures they are automatically loaded when {product_name} runs in the project.
 
 Write the skill file to `.lingxi/skills/<verifier-name>/SKILL.md`.
 
@@ -319,6 +321,11 @@ mod tests {
                 assert!(content.contains(
                     "Write the skill file to `.lingxi/skills/<verifier-name>/SKILL.md`."
                 ));
+                assert!(content.contains(&format!(
+                    "when {} runs in the project",
+                    branding::PRODUCT_NAME
+                )));
+                assert!(!content.contains("when Claude runs"));
             }
             other => panic!("expected InjectMessage, got {other:?}"),
         }

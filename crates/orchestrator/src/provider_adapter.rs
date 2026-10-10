@@ -342,6 +342,7 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            api_message_override: None,
         };
         self.service
             .count_tokens_exact(model, None, None, vec![message], Vec::new())
@@ -352,6 +353,20 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
 
 #[async_trait]
 impl OrchestratorApiClient for ProviderApiAdapter {
+    fn is_first_party_route(&self, model: &str, profile: Option<&str>) -> bool {
+        self.service
+            .is_first_party_route(model, profile)
+            .unwrap_or(false)
+    }
+
+    async fn credential_source(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<llm_runtime::CredentialSource, LlmError> {
+        self.service.credential_source(model, profile).await
+    }
+
     fn native_computer_provider(
         &self,
         model: &str,
@@ -1641,6 +1656,7 @@ mod tests {
         let messages = vec![
             ConversationMessage::user_meta(pruned_id, "stale guarded pre-boundary row".into()),
             ConversationMessage::System {
+                api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: "Conversation compacted".into(),
                 subtype: Some("compact_boundary".into()),
@@ -2112,8 +2128,8 @@ mod tests {
                         feedback_eligible: feedback.load(std::sync::atomic::Ordering::SeqCst),
                         brand: RefusalBrandCopyOwned {
                             api_error_prefix: "API Error".into(),
-                            product_name: "LingXi Code".into(),
-                            generic_model_label: "LingXi".into(),
+                            product_name: format!("{} Code", branding::PRODUCT_NAME),
+                            generic_model_label: branding::PRODUCT_NAME.into(),
                         },
                     })
                 }
@@ -2320,6 +2336,7 @@ mod tests {
         )
         .with_jsonl_writer(writer);
         let old = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Thinking {
@@ -2445,6 +2462,7 @@ mod tests {
         });
         let adapter = make_adapter(transport.clone());
         let old = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Thinking {
@@ -2494,6 +2512,7 @@ mod tests {
         assert_eq!(a.messages().get(&old.id()), Some(&0));
         assert!(b.messages().is_empty());
         let fresh = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Thinking {
@@ -2799,7 +2818,7 @@ mod tests {
                         lingxi_core::types::MessageId::new(),
                         label.into(),
                     )],
-                    tools: tool_names.iter().map(|name| tool(name)).collect(),
+                    tools: tool_names.iter().map(|name| tool(*name)).collect(),
                     forced_tool: forced_tool.map(str::to_string),
                     effort: None,
                     opts: agent::api::SubagentApiCallOpts {

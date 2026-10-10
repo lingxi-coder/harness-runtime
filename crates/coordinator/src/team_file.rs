@@ -59,6 +59,9 @@ pub struct TeamMember {
     /// Model id resolved for the member.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub model: Option<String>,
+    /// Configured provider profile serving the resolved member model.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model_profile: Option<String>,
     /// Join timestamp (Unix milliseconds).
     #[serde(rename = "joinedAt")]
     pub joined_at: u64,
@@ -405,6 +408,7 @@ mod tests {
                 name: "team-lead".into(),
                 agent_type: Some("team-lead".into()),
                 model: Some("claude-x".into()),
+                model_profile: None,
                 joined_at: 123,
                 tmux_pane_id: String::new(),
                 cwd: "/work".into(),

@@ -791,7 +791,7 @@ impl BudgetEnforcer {
             Err(error) => {
                 return BudgetCheckResult::Unavailable {
                     reason: error.to_string(),
-                };
+                }
             }
         };
         let (session, state_cell) = self.session_context_for(session_id).await;
@@ -811,7 +811,7 @@ impl BudgetEnforcer {
             Err(error) => {
                 return BudgetCheckResult::Unavailable {
                     reason: error.to_string(),
-                }
+                };
             }
         };
         let realized = state.total_nano_usd;

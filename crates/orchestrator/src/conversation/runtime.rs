@@ -598,12 +598,22 @@ impl ConversationOrchestrator {
         }
     }
 
-    pub(super) fn complete_turn_metrics(&self) {
+    pub(super) fn complete_turn_metrics(&self, outcome: Option<&ConversationOutcome>) {
         let mut state = self
             .prompt_runtime
             .turn_execution_metrics
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let (
+            Some(active),
+            Some(
+                ConversationOutcome::EndTurn { turn_count, .. }
+                | ConversationOutcome::StopHookPrevented { turn_count, .. },
+            ),
+        ) = (state.active.as_mut(), outcome)
+        {
+            active.num_turns = *turn_count;
+        }
         state.complete_turn();
     }
 
@@ -651,6 +661,10 @@ pub(crate) struct PromptRuntime {
     /// carrier) and reuses it for the turn's `tool_result` `user` lines; non-`user`
     /// lines never read it. `None` until the first user prompt is persisted.
     pub(crate) current_prompt_id: Mutex<Option<String>>,
+    /// Reserved by cold-fork replay for the next admitted user prompt.
+    pub(crate) pending_prompt_id: Mutex<Option<String>>,
+    pub(crate) remote_ui_host:
+        std::sync::RwLock<Option<Arc<dyn lingxi_core::host::ModRemoteUiHost>>>,
     /// Live plugin output-style registry. Disk/builtin styles remain sourced
     /// from [`OrchestratorConfig`]; this optional registry makes plugin reloads
     /// visible to prompt assembly without rebuilding the orchestrator.
@@ -915,6 +929,8 @@ impl PromptRuntime {
             mod_tool_descriptions: Mutex::new(ModToolDescribeCache::default()),
             mod_command_descriptions: Arc::new(Mutex::new(ModCommandDescribeCache::default())),
             current_prompt_id: Mutex::new(None),
+            pending_prompt_id: Mutex::new(None),
+            remote_ui_host: std::sync::RwLock::new(None),
             output_style_registry: None,
             live_output_style: Mutex::new(None),
             wire_tool_schema_cache: Mutex::new(None),
@@ -1022,6 +1038,7 @@ impl PromptRuntime {
         self.invalidate_mod_tool_descriptions().await;
         self.invalidate_mod_command_descriptions().await;
         *self.current_prompt_id.lock().await = None;
+        *self.pending_prompt_id.lock().await = None;
         self.silent_turn_reminder_marks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1119,6 +1136,7 @@ mod prompt_runtime_tests {
             block: Some("old git status".to_string()),
         });
         *runtime.current_prompt_id.lock().await = Some("old-prompt".to_string());
+        *runtime.pending_prompt_id.lock().await = Some("reserved-prompt".to_string());
         runtime.mod_prompt_sections.lock().await.answers.insert(
             "memory".encode_utf16().collect(),
             (
@@ -1180,6 +1198,7 @@ mod prompt_runtime_tests {
 
         assert!(runtime.git_status_snapshot.lock().await.is_none());
         assert!(runtime.current_prompt_id.lock().await.is_none());
+        assert!(runtime.pending_prompt_id.lock().await.is_none());
         assert!(runtime.mod_prompt_sections.lock().await.answers.is_empty());
         assert!(runtime.mod_prompt_context.lock().await.resolved.is_none());
         assert!(runtime
@@ -2277,4 +2296,65 @@ pub(crate) struct ModPromptAttachmentCache {
             Option<Vec<u16>>,
         ),
     >,
+}
+
+#[cfg(test)]
+mod api_error_metrics_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+
+    #[tokio::test]
+    async fn final_api_assistant_marker_survives_without_jsonl_and_later_assistant_clears_it() {
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.begin_turn_metrics();
+        let error = ConversationMessage::Assistant {
+            per_turn_effort: None,
+            resumable: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "API Error: bad request".into(),
+                citations: None,
+            }],
+            stop_reason: Some("model_error".into()),
+        };
+        orch.persist_api_error_message_to_jsonl(&error, ApiErrorEnvelope::default())
+            .await;
+        orch.note_turn_api_error_status(Some(400));
+        {
+            let state = orch.prompt_runtime.turn_execution_metrics.lock().unwrap();
+            let active = state.active.as_ref().unwrap();
+            assert_eq!(
+                active.api_error_stop_reason.as_deref(),
+                Some("stop_sequence")
+            );
+            assert_eq!(active.api_error_status, Some(400));
+        }
+        let ordinary = ConversationMessage::Assistant {
+            per_turn_effort: None,
+            resumable: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::Text {
+                text: "recovered".into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+        };
+        orch.persist_message_to_jsonl(&ordinary).await;
+        orch.complete_turn_metrics(None);
+        let metrics = orch.completed_turn_metrics().unwrap();
+        assert_eq!(metrics.api_error_stop_reason, None);
+        assert_eq!(metrics.api_error_status, None);
+    }
 }

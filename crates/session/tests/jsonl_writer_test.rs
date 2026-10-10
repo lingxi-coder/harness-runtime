@@ -11,8 +11,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 fn make_msg(uuid: &str, parent: Option<&str>, n: u8) -> JsonlMessage {
-    JsonlMessage {
-        message_type: "user".into(),
+    JsonlMessage {         message_type: "user".into(),
         uuid: uuid.into(),
         parent_uuid: parent.map(str::to_string),
         session_id: "11111111-2222-3333-4444-555555555555".into(),

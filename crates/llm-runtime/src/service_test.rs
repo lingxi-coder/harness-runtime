@@ -174,6 +174,86 @@ mod tests {
     }
 
     #[test]
+    fn native_custom_system_prompt_matches_hwe_utf16_line_splitting() {
+        use lingxi_llm_client::providers::anthropic::system_prompt::{
+            PromptText, SystemPromptInput, DYNAMIC_BOUNDARY,
+        };
+
+        let marker = DYNAMIC_BOUNDARY.encode_utf16().collect::<Vec<_>>();
+        let mut exact_units = "before".encode_utf16().collect::<Vec<_>>();
+        exact_units.push(0xd800);
+        exact_units.push(b'\n' as u16);
+        exact_units.extend("\u{feff} \u{00a0}\t".encode_utf16());
+        exact_units.extend(marker.iter().copied());
+        exact_units.push(b'\r' as u16);
+        exact_units.push(0x2028);
+        exact_units.push(b'\n' as u16);
+        exact_units.extend("middle\n".encode_utf16());
+        exact_units.extend(marker.iter().copied());
+        exact_units.push(b'\n' as u16);
+        exact_units.push(0xdc00);
+
+        let original = PromptText::from_utf16(exact_units);
+        let parsed = native_custom_system_prompt(original.clone());
+        let SystemPromptInput::NativeCustomPrompt {
+            text,
+            source_elements,
+        } = parsed
+        else {
+            panic!("Native customSystemPrompt must retain its parsed source elements");
+        };
+        assert_eq!(text, original);
+        assert_eq!(source_elements.len(), 3);
+        assert_eq!(
+            source_elements[0].utf16_code_units(),
+            [
+                "before".encode_utf16().collect::<Vec<_>>(),
+                vec![0xd800, b'\n' as u16]
+            ]
+            .concat()
+        );
+        assert_eq!(source_elements[1].utf16_code_units(), marker);
+        let mut expected_after = vec![b'\n' as u16];
+        expected_after.extend("middle\n".encode_utf16());
+        expected_after.extend(marker.iter().copied());
+        expected_after.push(b'\n' as u16);
+        expected_after.push(0xdc00);
+        assert_eq!(source_elements[2].utf16_code_units(), expected_after);
+
+        let empty_sides = PromptText::from_string(format!("\n \t{DYNAMIC_BOUNDARY} \r\n"));
+        let parsed = native_custom_system_prompt(empty_sides);
+        let SystemPromptInput::NativeCustomPrompt {
+            source_elements, ..
+        } = parsed
+        else {
+            panic!("Native customSystemPrompt variant");
+        };
+        assert_eq!(source_elements.len(), 1);
+        assert!(source_elements[0].equals_ascii(DYNAMIC_BOUNDARY));
+
+        let no_marker = PromptText::from_utf16(vec![0xd800, b' ' as u16, b'x' as u16]);
+        let parsed = native_custom_system_prompt(no_marker.clone());
+        let SystemPromptInput::NativeCustomPrompt {
+            text,
+            source_elements,
+        } = parsed
+        else {
+            panic!("Native customSystemPrompt variant");
+        };
+        assert_eq!(text, no_marker);
+        assert_eq!(source_elements, vec![no_marker]);
+
+        let through_string_entry =
+            custom_system_prompt(Some(&format!("first\n{DYNAMIC_BOUNDARY}\nsecond")))
+                .expect("custom string input");
+        assert!(matches!(
+            through_string_entry,
+            SystemPromptInput::NativeCustomPrompt { source_elements, .. }
+                if source_elements.len() == 3
+        ));
+    }
+
+    #[test]
     fn frozen_stream_quote_stays_out_of_serialized_provider_metadata() {
         let mut events = vec![HistoryEvent::MessageDelta {
             delta: crate::HistoryMessageDelta {
@@ -1898,6 +1978,7 @@ mod tests {
 
     fn text_user_msg(s: &str) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: s.to_string(),
@@ -2108,6 +2189,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_request_samples_current_main_and_subagent_cache_ttl_settings() {
+        use lingxi_core::settings::schema::{
+            PromptCacheTtl as HostTtl, PromptCacheTtlSettings as HostSettings,
+        };
+        use lingxi_llm_client::protocol::{CachePosition, CacheTtl};
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "DISABLE_PROMPT_CACHING",
+            "FORCE_PROMPT_CACHING_5M",
+            "CLAUDE_CODE_PROMPT_CACHE_TTL",
+            "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
+            "ENABLE_PROMPT_CACHING_1H",
+            "ENABLE_PROMPT_CACHING_1H_BEDROCK",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "LINGXI_GLOBAL_CACHE_SCOPE",
+        ]);
+        let settings = Arc::new(std::sync::Mutex::new(HostSettings {
+            main: Some(HostTtl::OneHour),
+            subagent: Some(HostTtl::FiveMinutes),
+        }));
+        let source_settings = settings.clone();
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )))
+        .with_prompt_cache_ttl_settings_source(Arc::new(move || *source_settings.lock().unwrap()));
+        let system_text = format!("{HEADER}{SECTION_SEP}retained settings prompt");
+        let system = custom_system_prompt(Some(&system_text));
+
+        let main = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                system.as_ref(),
+                vec![text_user_msg("main")],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Named("sdk"),
+            )
+            .expect("main request");
+        let ttl_at_system = |request: &LlmRequest| {
+            request
+                .input
+                .prompt_cache
+                .breakpoints
+                .iter()
+                .find(|point| matches!(&point.position, CachePosition::System { index: 0 }))
+                .expect("system cache breakpoint")
+                .ttl
+        };
+        assert_eq!(ttl_at_system(&main), CacheTtl::OneHour);
+
+        *settings.lock().unwrap() = HostSettings {
+            main: Some(HostTtl::FiveMinutes),
+            subagent: Some(HostTtl::OneHour),
+        };
+        let subagent = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                system.as_ref(),
+                vec![text_user_msg("subagent")],
+                vec![],
+                false,
+                None,
+                false,
+                PromptCacheQuerySource::Subagent,
+            )
+            .expect("subagent request");
+        assert_eq!(ttl_at_system(&subagent), CacheTtl::OneHour);
+    }
+
     /// The `tool_reference` normalization branch is selected by the SESSION-scoped
     /// tool-search gate (Claude Code `$U()`), NOT by whether the request's own
     /// toolset carries a `ToolSearch` declaration. This is the compaction /
@@ -2123,8 +2282,10 @@ mod tests {
         let convo = || {
             vec![
                 ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolUse {
+                        input_projection: None,
                         id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         name: "ToolSearch".to_string(),
                         input: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
@@ -2135,8 +2296,10 @@ mod tests {
                     resumable: None,
                 },
                 ConversationMessage::User {
+                    api_message_override: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolResult {
+                        output_projection: None,
                         tool_use_id: lingxi_core::types::ToolUseId::from("toolu_ref"),
                         content: String::new().into(),
                         is_error: Some(false),
@@ -2659,6 +2822,110 @@ mod tests {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
 
+    #[tokio::test]
+    async fn sdk_request_body_emits_native_global_scope_without_subscription_or_opt_in() {
+        use lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY;
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
+        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![
+                PromptText::from_string(HEADER),
+                PromptText::from_string("static"),
+                PromptText::from_string(DYNAMIC_BOUNDARY),
+                PromptText::from_string("dynamic"),
+            ],
+            None,
+            None,
+        );
+        let request = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                Some(&system),
+                vec![text_user_msg("hi")],
+                vec![],
+                false,
+                Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .expect("global-cache request");
+        let prepared = adapter.client.prepare(&request).await.expect("SDK prepare");
+        let body = prepared.provider_request.body_json;
+        assert_eq!(body["system"].as_array().unwrap().len(), 3);
+        assert_eq!(body["system"][0]["text"], HEADER);
+        assert_eq!(body["system"][1]["text"], "static");
+        assert_eq!(body["system"][2]["text"], "dynamic");
+        assert_eq!(body["system"][1]["cache_control"]["scope"], "global");
+        assert!(!body.to_string().contains(DYNAMIC_BOUNDARY));
+    }
+
+    #[tokio::test]
+    async fn sdk_request_body_honors_native_process_base_url_gate() {
+        use lingxi_llm_client::providers::anthropic::system_prompt::DYNAMIC_BOUNDARY;
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        std::env::remove_var("DISABLE_PROMPT_CACHING");
+        std::env::remove_var("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS");
+        std::env::remove_var("LINGXI_GLOBAL_CACHE_SCOPE");
+        std::env::set_var("ANTHROPIC_BASE_URL", "https://proxy.example.test");
+        std::env::remove_var("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+        let system = lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput::source_vector(
+            vec![
+                PromptText::from_string(HEADER),
+                PromptText::from_string("static"),
+                PromptText::from_string(DYNAMIC_BOUNDARY),
+                PromptText::from_string("dynamic"),
+            ],
+            None,
+            None,
+        );
+        let request = adapter
+            .build_request(
+                "claude-sonnet-4-20250514",
+                None,
+                Some(&system),
+                vec![text_user_msg("hi")],
+                vec![],
+                false,
+                Some(1024),
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .expect("proxy-gated request");
+        let prepared = adapter.client.prepare(&request).await.expect("SDK prepare");
+        let body = prepared.provider_request.body_json;
+        assert_eq!(body["system"].as_array().unwrap().len(), 2);
+        assert_eq!(body["system"][0]["text"], HEADER);
+        assert_eq!(body["system"][1]["text"], "static\n\ndynamic");
+        assert!(body["system"][1].get("cache_control").is_some());
+        assert_eq!(
+            body["system"][1]
+                .get("cache_control")
+                .and_then(|value| value.get("scope")),
+            None
+        );
+        assert!(!body.to_string().contains(DYNAMIC_BOUNDARY));
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
     // ── 1P cache-EDITING (cache_edits / cache_reference, RESIDUAL 4) ───────────
 
     /// A multi-message conversation: an assistant tool_use, a user tool_result,
@@ -2672,8 +2939,10 @@ mod tests {
         let tool_id = ToolUseId::new();
         vec![
             CM::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![PB::ToolUse {
+                    input_projection: None,
                     id: tool_id.clone(),
                     name: "Read".to_string(),
                     input: core_projection(&serde_json::json!({"path": "/x"})),
@@ -2683,8 +2952,10 @@ mod tests {
                 resumable: None,
             },
             CM::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![PB::ToolResult {
+                    content_projection: None,
                     tool_use_id: tool_id,
                     content: "file body".to_string().into(),
                     is_error: Some(false),
@@ -2700,6 +2971,7 @@ mod tests {
                 turn_origin: None,
             },
             CM::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![PB::Text {
                     text: "ok".to_string(),
@@ -3725,6 +3997,7 @@ mod tests {
         };
         let messages = vec![
             crate::Message {
+                api_output_config: None,
                 role: "assistant".to_string(),
                 content: vec![
                     text(),
@@ -3742,6 +4015,7 @@ mod tests {
                 ],
             },
             crate::Message {
+                api_output_config: None,
                 role: "user".to_string(),
                 content: vec![crate::ContentBlock::Reasoning {
                     text: "leave non-assistant untouched".to_string(),
@@ -4308,6 +4582,7 @@ mod tests {
         let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
         let adapter = make_adapter(transport);
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Image {
                 source: ImageSource::Url {
@@ -5449,6 +5724,199 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anthropic_compatibility_version_keeps_neutral_product_identity() {
+        for (protocol, provider, url, expected) in [
+            (
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://api.anthropic.com",
+                "claude-cli/2.1.293 (external, sdk-cli)",
+            ),
+            (
+                ProtocolFamily::OpenAiChat,
+                ProviderId::OpenAICompatible {
+                    name: "openai".into(),
+                },
+                "https://api.openai.com/v1",
+                "LingXi-Code/0.12.0",
+            ),
+        ] {
+            let mut adapter = make_adapter_for_protocol(protocol, provider, url)
+                .with_anthropic_compatible_version("2.1.293")
+                .with_anthropic_client_metadata(lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin", "aarch64"));
+            adapter.ua = UserAgentEnv {
+                user_type: Some("external".into()),
+                entrypoint: Some("sdk-cli".into()),
+                ..Default::default()
+            };
+            adapter.version = "0.12.0".into();
+            let request = LlmRequest::new("model").with_user_text("hi");
+            let mut prepared = adapter.client.prepare(&request).await.unwrap();
+            adapter.apply_user_agent(&mut prepared);
+            assert_eq!(prepared.provider_request.headers["user-agent"], expected);
+            if protocol == ProtocolFamily::AnthropicMessages {
+                assert_eq!(
+                    prepared.provider_request.headers["x-stainless-package-version"],
+                    "0.128.0"
+                );
+                assert_eq!(
+                    prepared.provider_request.headers["x-stainless-runtime-version"],
+                    "v26.3.0"
+                );
+                assert_eq!(prepared.provider_request.headers["x-stainless-os"], "MacOS");
+                assert_eq!(
+                    prepared.provider_request.headers["x-stainless-arch"],
+                    "arm64"
+                );
+            } else {
+                assert!(!prepared
+                    .provider_request
+                    .headers
+                    .keys()
+                    .any(|name| name.to_ascii_lowercase().starts_with("x-stainless-")));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_api_identity_metadata_does_not_read_process_metadata() {
+        let extra = serde_json::json!({"scope":"embedding","device_id":"stale"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            ApiService::build_api_metadata_user_id_with_extra(
+                "device",
+                "account",
+                "session",
+                Some("parent"),
+                Some(extra)
+            ),
+            r#"{"scope":"embedding","device_id":"device","account_uuid":"account","session_id":"session","parent_session_id":"parent"}"#
+        );
+        assert_eq!(
+            ApiService::build_api_metadata_user_id_with_extra(
+                "device", "account", "session", None, None
+            ),
+            r#"{"device_id":"device","account_uuid":"account","session_id":"session"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn request_session_snapshot_survives_clear_and_new_admissions_refresh() {
+        let original = lingxi_core::types::SessionId::new().as_uuid().to_string();
+        let replacement = lingxi_core::types::SessionId::new().as_uuid().to_string();
+        let live = Arc::new(std::sync::Mutex::new(original.clone()));
+        let metadata = ApiService::build_api_metadata_user_id_with_extra(
+            "device", "account", "boot", None, None,
+        );
+        let adapter = make_adapter_for_protocol(ProtocolFamily::AnthropicMessages,ProviderId::AnthropicFirstParty,"https://api.anthropic.com")
+            .with_request_metadata(crate::RequestMetadata { user_id:metadata.clone() })
+            .with_anthropic_client_metadata(lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin","aarch64"));
+        let owner = live.clone();
+        adapter.set_request_session_id_source(Arc::new(move || {
+            let owner = owner.clone();
+            Box::pin(async move { Some(owner.lock().unwrap().clone()) })
+        }));
+        let mut admitted = LlmRequest::new("model").with_user_text("hi");
+        admitted.input.metadata = serde_json::json!({"user_id":metadata});
+        adapter.capture_request_session_id(&mut admitted).await;
+        *live.lock().unwrap() = replacement.clone();
+        adapter.capture_request_session_id(&mut admitted).await;
+        assert_eq!(
+            admitted.execution.request_session_id.as_deref(),
+            Some(original.as_str())
+        );
+        let mut prepared = adapter.client.prepare(&admitted).await.unwrap();
+        adapter.apply_user_agent(&mut prepared);
+        assert_eq!(
+            prepared.provider_request.headers["x-claude-code-session-id"],
+            original
+        );
+        let identity: serde_json::Value =
+            serde_json::from_str(admitted.input.metadata["user_id"].as_str().unwrap()).unwrap();
+        assert_eq!(identity["session_id"], original);
+        let mut next = LlmRequest::new("model").with_user_text("next");
+        adapter.capture_request_session_id(&mut next).await;
+        assert_eq!(
+            next.execution.request_session_id.as_deref(),
+            Some(replacement.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn request_parent_scope_takes_precedence_over_current_session_and_payload() {
+        let parent = lingxi_core::types::SessionId::new();
+        let current = lingxi_core::types::SessionId::new().as_uuid().to_string();
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        );
+        adapter.set_request_session_id_source(Arc::new(move || {
+            let current = current.clone();
+            Box::pin(async move { Some(current) })
+        }));
+        let mut request = LlmRequest::new("model").with_user_text("child");
+        request.input.metadata = serde_json::json!({"session_id":"provider-authored-id"});
+        lingxi_core::host::session_flags::scope_request_session_id(parent, async {
+            adapter.capture_request_session_id(&mut request).await;
+        })
+        .await;
+        assert_eq!(
+            request.execution.request_session_id,
+            Some(parent.as_uuid().to_string())
+        );
+    }
+
+    struct RegisteredRequestSession(lingxi_core::types::SessionId);
+    #[async_trait::async_trait]
+    impl crate::ModelAttemptHooks for RegisteredRequestSession {
+        fn request_session_id(
+            &self,
+            _: &lingxi_core::host::ModelAttemptContext,
+        ) -> Option<lingxi_core::types::SessionId> {
+            Some(self.0)
+        }
+        async fn begin(
+            &self,
+            _: &lingxi_core::host::ModelAttemptContext,
+            _: &LlmRequest,
+            _: &crate::PreparedLlmCall,
+        ) -> Result<Box<dyn crate::ModelAttemptLease>, LlmError> {
+            unreachable!("identity lookup does not dispatch")
+        }
+    }
+    #[tokio::test]
+    async fn registered_request_origin_precedes_live_and_unrelated_task_scope() {
+        let origin = lingxi_core::types::SessionId::new();
+        let current = lingxi_core::types::SessionId::new();
+        let adapter = make_adapter_for_protocol(
+            ProtocolFamily::AnthropicMessages,
+            ProviderId::AnthropicFirstParty,
+            "https://api.anthropic.com",
+        );
+        adapter.set_model_attempt_hooks(Arc::new(RegisteredRequestSession(origin)));
+        adapter.set_request_session_id_source(Arc::new(|| {
+            panic!("registered requests never consult current owner")
+        }));
+        let run = lingxi_core::host::ModelAttemptRun::new(Arc::new(()));
+        let mut request = LlmRequest::new("model");
+        request.execution.model_attempt = Some(
+            run.context(lingxi_core::host::ModelAttemptStage::Panel, Some(0))
+                .unwrap(),
+        );
+        lingxi_core::host::session_flags::scope_request_session_id(current, async {
+            adapter.capture_request_session_id(&mut request).await;
+        })
+        .await;
+        assert_eq!(
+            request.execution.request_session_id,
+            Some(origin.as_uuid().to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn authenticator_user_agent_is_not_duplicated() {
         // Simulate the Copilot authenticator having set `User-Agent` during
         // prepare(): inject_headers must NOT add a second lowercase `user-agent`.
@@ -5607,6 +6075,7 @@ mod tests {
         }];
         content.extend(range.map(img));
         ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content,
             is_meta: false,
@@ -5647,9 +6116,11 @@ mod tests {
     #[test]
     fn tool_result_string_content_contributes_no_media() {
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 ContentBlock::ToolResult {
+                    output_projection: None,
                     tool_use_id: lingxi_core::types::ToolUseId::new(),
                     content: "lots of text, no media".to_string().into(),
                     is_error: Some(false),
@@ -5675,8 +6146,10 @@ mod tests {
         // values; these MUST count toward the media cap (claude.ts:965-969), or an
         // image-heavy MCP transcript silently exceeds the API limit and 400s.
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                output_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see images".to_string().into(),
                 is_error: Some(false),
@@ -5701,8 +6174,10 @@ mod tests {
     #[test]
     fn count_media_includes_nested_openai_image_url_media() {
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                output_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "see image".to_string().into(),
                 is_error: Some(false),
@@ -5728,8 +6203,10 @@ mod tests {
         // Over the cap, nested tool_result media is stripped oldest-first
         // (claude.ts:982-999), leaving the text + the most-recent nested image.
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
+                output_projection: None,
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
                 content: "imgs".to_string().into(),
                 is_error: Some(false),
@@ -5811,6 +6288,7 @@ mod tests {
     #[test]
     fn strip_excess_media_no_images_is_noop() {
         let msgs = vec![ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "no media here".to_string(),
@@ -7073,6 +7551,7 @@ mod tests {
 
     fn assistant_with_thinking() -> lingxi_core::types::ConversationMessage {
         lingxi_core::types::ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 lingxi_core::types::ContentBlock::Thinking {
@@ -9576,6 +10055,60 @@ mod subscription_rate_limit_tests {
         // handled by the parity subscriber gate.
         assert!(!cannot_clear(Some("anthropic"), "claude-opus-5"));
         assert!(!cannot_clear(None, "claude-opus-5"));
+    }
+    #[tokio::test]
+    async fn headless_admission_preserves_native_effort_context_and_text_display_with_base_override(
+    ) {
+        let adapter=make_adapter_for_protocol_with_transport(
+            ProtocolFamily::AnthropicMessages,ProviderId::AnthropicFirstParty,
+            "http://configured-anthropic-base.test","native","claude-sonnet-5-5",
+            FakeTransport::always(ProviderResponse::json(200,ok_response_json())),
+        ).with_anthropic_client_metadata(lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata::claude_code_2_1_293("darwin","arm64"))
+            .with_native_thinking_display(lingxi_llm_client::providers::anthropic::thinking_display::ThinkingDisplayPolicy {omit_default:true,..Default::default()});
+        let request = adapter
+            .build_request(
+                "claude-sonnet-5-5",
+                None,
+                None,
+                vec![text_user_msg("Return marker.")],
+                vec![],
+                true,
+                None,
+                false,
+                PromptCacheQuerySource::Unspecified,
+            )
+            .unwrap();
+        assert!(request.execution.resolve_native_effort);
+        let mut prepared = adapter.client.prepare(&request).await.unwrap();
+        adapter
+            .inject_headers(&mut prepared, DispatchHeaderState::default())
+            .unwrap();
+        let body = &prepared.provider_request.body_json;
+        assert_eq!(body["thinking"]["display"], "omitted");
+        assert_eq!(body["output_config"]["effort"], "medium");
+        assert_eq!(
+            body["messages"][1],
+            serde_json::json!({"role":"system","content":[],"output_config":{"effort":"medium"}})
+        );
+        let betas: Vec<_> = prepared.provider_request.headers["anthropic-beta"]
+            .split(',')
+            .collect();
+        assert!(
+            betas
+                .iter()
+                .position(|beta| *beta == crate::model::betas::MID_CONVERSATION_SYSTEM)
+                .unwrap()
+                < betas
+                    .iter()
+                    .position(|beta| *beta == crate::model::betas::PER_TURN_CONTROL)
+                    .unwrap()
+        );
+        assert_eq!(
+            body["context_management"],
+            serde_json::json!({"edits":[{"type":"clear_thinking_20251015","keep":"all"}]})
+        );
+        assert!(!prepared.provider_request.headers["anthropic-beta"]
+            .contains("thinking-display-updates-2026-08-18"));
     }
 }
 

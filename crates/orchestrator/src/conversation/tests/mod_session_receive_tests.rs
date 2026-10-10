@@ -36,6 +36,7 @@ async fn uds_receive_gate_queues_rewrite_once_and_skips_consumed_delivery() {
     )
     .await
     .unwrap();
+
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let orch = ConversationOrchestrator::new(
@@ -56,6 +57,7 @@ async fn uds_receive_gate_queues_rewrite_once_and_skips_consumed_delivery() {
     let queued = Arc::new(std::sync::Mutex::new(Vec::<
         lingxi_core::types::utf16_json::Utf16JsonProjection,
     >::new()));
+
     let committed = queued.clone();
     let commit: lingxi_core::host::uds_inbox::PeerQueueCommit = Arc::new(move |text| {
         committed.lock().unwrap().push(text);
@@ -70,6 +72,7 @@ async fn uds_receive_gate_queues_rewrite_once_and_skips_consumed_delivery() {
             .await
     );
     assert_eq!(*queued.lock().unwrap(), vec![source_text("rewritten")]);
+
     assert!(orch.session.lock().await.history.is_empty());
 }
 
@@ -185,6 +188,7 @@ async fn session_receive_only_persists_the_first_core_delivery() {
     )
     .await
     .unwrap();
+
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host);
     let orch = ConversationOrchestrator::new(
@@ -217,6 +221,7 @@ async fn session_receive_only_persists_the_first_core_delivery() {
         orch.screen_mod_session_receive_source(&source_text("twice"), "peer")
             .await
     );
+
     let session = orch.session.lock().await;
     let deliveries = session
         .history
@@ -240,6 +245,7 @@ async fn session_receive_only_persists_the_first_core_delivery() {
                     vec![0xd800],
                 )
                 .unwrap(),
+
                 origin_kind: "peer",
                 already_screened: true,
             },
@@ -332,12 +338,14 @@ async fn external_prompts_are_received_before_prompt_submit_and_model_request() 
         vec![
             QueuedPromptInput {
                 text: source_text("drop"),
+
                 is_meta: true,
                 mod_origin: Some(serde_json::json!({"kind":"scheduled-trigger"})),
                 ..QueuedPromptInput::default()
             },
             QueuedPromptInput {
                 text: source_text("raw scheduled"),
+
                 is_meta: true,
                 mod_origin: Some(serde_json::json!({"kind":"scheduled-trigger"})),
                 ..QueuedPromptInput::default()

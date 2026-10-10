@@ -981,6 +981,20 @@ pub struct DiscoveryCacheEntry {
 }
 
 impl DiscoveryCacheEntry {
+    fn projected_json(
+        &self,
+    ) -> Result<lingxi_core::types::utf16_json::Utf16JsonProjection, String> {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
+        let raw = serde_json::to_string(self).map_err(|error| error.to_string())?;
+        Projection::parse(&raw).map_err(|error| error.to_string())
+    }
+
+    fn from_projected_json(raw: &str) -> Result<Self, String> {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
+        Projection::parse(raw).map_err(|error| error.to_string())?;
+        serde_json::from_str(raw).map_err(|error| error.to_string())
+    }
+
     /// Build a fresh entry for `cache_key`, saved "now" (`saved_at_ms`),
     /// with `consecutive_refresh_failures` reset to 0 and no `server_info`
     /// (see [`Self::with_server_info`] to attach the live handshake projection).
@@ -1320,7 +1334,7 @@ impl DiscoveryCacheStore {
         if raw.len() as u64 > MAX_ENTRY_BYTES {
             return EntryLookup::Corrupt;
         }
-        let Ok(entry) = serde_json::from_str::<DiscoveryCacheEntry>(&raw) else {
+        let Ok(entry) = DiscoveryCacheEntry::from_projected_json(&raw) else {
             return EntryLookup::Corrupt;
         };
         if entry.version != CACHE_SCHEMA_VERSION || entry.cache_key != expected_key {
@@ -1348,8 +1362,15 @@ impl DiscoveryCacheStore {
             let perms = std::fs::Permissions::from_mode(0o700);
             std::fs::set_permissions(&self.root, perms)?;
         }
-        let bytes = serde_json::to_vec(entry)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let bytes = entry
+            .projected_json()
+            .and_then(|projection| {
+                projection
+                    .to_json_string()
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+            .into_bytes();
         if u64::try_from(bytes.len())
             .ok()
             .is_some_and(|len| len > MAX_ENTRY_BYTES)
@@ -1900,6 +1921,50 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn persisted_catalog_restores_exact_schema_and_ui_metadata_without_private_wire_fields() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
+        let dir = tempfile::tempdir().unwrap();
+        let store = DiscoveryCacheStore::new(dir.path());
+        let schema = Projection::parse(r#"{"type":"object","properties":{"\ud800":{"enum":["\ud801"]}},"required":["\ud800"]}"#).unwrap();
+        let meta =
+            Projection::parse(r#"{"ui":{"resourceUri":"ui://fixture/view","\ud802":"\udfff"}}"#)
+                .unwrap();
+        let mut tools = sample_tools(1);
+        tools[0].input_schema = schema.clone();
+        tools[0].meta = Some(meta.clone());
+        let entry = DiscoveryCacheEntry::new(
+            "exact-catalog".into(),
+            1,
+            caps_tools(true),
+            tools,
+            vec![],
+            vec![],
+            vec![],
+        );
+        store.store(&entry).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("exact-catalog.json")).unwrap();
+        assert!(!raw.contains("input_schema_projection"));
+        assert!(!raw.contains("definition_projection"));
+        assert!(raw.contains(r#""\ud800""#));
+        let EntryLookup::Found(restored) = store.load("exact-catalog") else {
+            panic!("valid exact cache")
+        };
+        assert_eq!(
+            restored.tools[0].input_schema.to_json_string().unwrap(),
+            schema.to_json_string().unwrap()
+        );
+        assert_eq!(
+            restored.tools[0]
+                .meta
+                .as_ref()
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            meta.to_json_string().unwrap()
+        );
     }
 
     fn sample_tools(n: usize) -> Vec<McpToolDto> {

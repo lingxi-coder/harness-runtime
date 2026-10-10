@@ -12,20 +12,18 @@ use lingxi_core::host::handback::{
 use lingxi_core::host::orchestrator::MainReportWaker;
 use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 use serde::{Deserialize, Serialize};
-use session::jsonl::exact_json::{parse_exact_json, Utf16Overrides};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
-const INBOX_VERSION: u32 = 1;
+const INBOX_VERSION: u32 = 2;
 const MAX_INBOX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PendingReport {
     envelope: HandbackEnvelope,
     #[serde(default)]
-    prepared_row: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Utf16Overrides::is_empty")]
-    prepared_utf16_overrides: Utf16Overrides,
+    prepared_row: Option<Source>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -113,31 +111,28 @@ fn envelope_digest(envelope: &HandbackEnvelope) -> Result<String, HandbackAdmiss
 
 fn validate_prepared_report_row(
     envelope: &HandbackEnvelope,
-    row: &serde_json::Value,
-    utf16_overrides: &Utf16Overrides,
+    row: &Source,
 ) -> Result<(), HandbackAdmissionError> {
     let target = envelope.receipt.recipient.scope().session_id;
-    let valid = row.get("type").and_then(serde_json::Value::as_str) == Some("user")
-        && row.get("uuid").and_then(serde_json::Value::as_str)
+    let valid = row.string_at("/type") == Some("user")
+        && row.string_at("/uuid")
             == Some(envelope.receipt.message_id.as_uuid().to_string().as_str())
         && row
-            .get("sessionId")
-            .and_then(serde_json::Value::as_str)
+            .string_at("/sessionId")
             .and_then(SessionId::parse_prefixed)
             == Some(target)
-        && row.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true)
-        && row.get("origin") == Some(&native_peer_origin(envelope))
-        && row.get("queuePriority").is_none()
-        && utf16_overrides == &native_report_utf16_overrides(envelope)
+        && row.get_property("isMeta").and_then(|value| value.as_bool()) == Some(true)
+        && row.subprojection("/origin").ok() == Some(native_peer_origin(envelope))
+        && row.get_property("queuePriority").is_none()
         && row
-            .get("isModelContextExcluded")
-            .and_then(serde_json::Value::as_bool)
+            .get_property("isModelContextExcluded")
+            .and_then(|value| value.as_bool())
             != Some(true)
         && row
-            .get("isVisibleInTranscriptOnly")
-            .and_then(serde_json::Value::as_bool)
+            .get_property("isVisibleInTranscriptOnly")
+            .and_then(|value| value.as_bool())
             != Some(true)
-        && row.get("message") == Some(&native_report_message(envelope));
+        && row.subprojection("/message").ok() == Some(native_report_message(envelope));
     if valid {
         Ok(())
     } else {
@@ -147,60 +142,59 @@ fn validate_prepared_report_row(
     }
 }
 
-/// The transcript keeps native text blocks. Exact JavaScript string units are
-/// carried only in the private prepared claim and in the JSON string encoder.
-fn native_report_message(envelope: &HandbackEnvelope) -> serde_json::Value {
-    serde_json::json!({
-        "role": "user",
-        "content": [{"type": "text", "text": envelope.model_message_text()}],
-    })
+fn source_text(units: Vec<u16>) -> Source {
+    Source::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display comes from the exact source units")
 }
 
-fn native_report_utf16_overrides(envelope: &HandbackEnvelope) -> Utf16Overrides {
+/// Prepared claims and transcript messages retain the same exact peer text.
+fn native_report_message(envelope: &HandbackEnvelope) -> Source {
     let units = envelope
         .body
         .string_units("")
-        .expect("handback body is source text");
-    if String::from_utf16(&units).is_ok() {
-        return Utf16Overrides::new();
-    }
-    Utf16Overrides::from([
+        .expect("handback body is text");
+    let text = source_text(
+        lingxi_core::host::handback_wire::render_agent_message_utf16(&envelope.origin.from, &units),
+    );
+    let block = Source::object(vec![("type".into(), "text".into()), ("text".into(), text)])
+        .expect("native text block");
+    Source::object(vec![
+        ("role".into(), "user".into()),
         (
-            "/message/content/0/text".into(),
-            lingxi_core::host::handback_wire::render_agent_message_utf16(
-                &envelope.origin.from,
-                &units,
-            ),
-        ),
-        (
-            "/origin/body".into(),
-            lingxi_core::host::handback_wire::neutralize_peer_frames_utf16(&units),
+            "content".into(),
+            Source::array(vec![block]).expect("content array"),
         ),
     ])
+    .expect("native user message")
 }
 
-fn native_peer_origin(envelope: &HandbackEnvelope) -> serde_json::Value {
+fn native_peer_origin(envelope: &HandbackEnvelope) -> Source {
     let units = envelope
         .body
         .string_units("")
-        .expect("handback body is source text");
-    let body = String::from_utf16_lossy(
-        &lingxi_core::host::handback_wire::neutralize_peer_frames_utf16(&units),
-    );
-    let mut origin = serde_json::json!({
-        "kind": "peer",
-        "from": envelope.origin.from,
-        "senderTaskId": envelope.origin.sender_task_id,
-        "body": body,
-        "handback": true,
-    });
+        .expect("handback body is text");
+    let mut origin = Source::from_serde_value(&serde_json::json!({
+        "kind": "peer", "from": envelope.origin.from,
+        "senderTaskId": envelope.origin.sender_task_id, "body": "", "handback": true,
+    }))
+    .expect("generated peer metadata");
+    origin
+        .set_field(
+            "body",
+            source_text(lingxi_core::host::handback_wire::neutralize_peer_frames_utf16(&units)),
+        )
+        .expect("peer metadata is an object");
     if let Some(name) = &envelope.origin.name {
         if !name.is_empty() {
-            origin["name"] = serde_json::Value::String(name.clone());
+            origin
+                .set_field("name", name.as_str().into())
+                .expect("peer metadata is an object");
         }
     }
     if envelope.origin.flagged {
-        origin["flagged"] = serde_json::Value::Bool(true);
+        origin
+            .set_field("flagged", Source::parse("true").expect("boolean"))
+            .expect("peer metadata is an object");
     }
     origin
 }
@@ -341,15 +335,7 @@ impl ConversationOrchestrator {
                     ));
                 }
                 if let Some(row) = &pending.prepared_row {
-                    validate_prepared_report_row(
-                        &pending.envelope,
-                        row,
-                        &pending.prepared_utf16_overrides,
-                    )?;
-                } else if !pending.prepared_utf16_overrides.is_empty() {
-                    return Err(rejected(
-                        "unprepared report contains transcript string overrides",
-                    ));
+                    validate_prepared_report_row(&pending.envelope, row)?;
                 }
             }
             candidate.pending = stored.pending;
@@ -475,7 +461,6 @@ impl ConversationOrchestrator {
             candidate.pending.push_back(PendingReport {
                 envelope,
                 prepared_row: None,
-                prepared_utf16_overrides: Utf16Overrides::new(),
             });
             self.save_main_report_inbox(&candidate).await?;
             state.stored = candidate;
@@ -554,31 +539,15 @@ impl ConversationOrchestrator {
                         .unwrap_or_else(|| self.current_cwd())
                         .to_string_lossy()
                         .into_owned();
-                    row.message =
-                        Source::from_serde_value(&native_report_message(&pending.envelope))
-                            .expect("generated report display object");
-                    let origin = native_peer_origin(&pending.envelope);
+                    row.message = native_report_message(&pending.envelope);
                     row.extra
-                        .set_field(
-                            "origin",
-                            Source::from_serde_value(&origin)
-                                .expect("generated origin display object"),
-                        )
+                        .set_field("origin", native_peer_origin(&pending.envelope))
                         .expect("transcript metadata object");
-                    // The existing durable writer consumes a display value plus
-                    // exact leaves. Encode the source row before extracting that
-                    // pair, including any source-backed origin projection.
-                    session::jsonl::exact_json::set_message_utf16_overrides(
-                        &mut row,
-                        native_report_utf16_overrides(&pending.envelope),
-                    );
                     let prepared = candidate.pending.front_mut().expect("pending front");
-                    let row_source = serde_json::to_string(&row)
-                        .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
-                    let exact = parse_exact_json(&row_source)
-                        .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
-                    prepared.prepared_row = Some(exact.value);
-                    prepared.prepared_utf16_overrides = exact.utf16_overrides;
+                    prepared.prepared_row = Some(
+                        session::jsonl::exact_json::native_message_projection(&row)
+                            .map_err(|error| OrchestratorError::Internal(error.to_string()))?,
+                    );
                 }
                 self.save_main_report_inbox(&candidate)
                     .await
@@ -593,11 +562,10 @@ impl ConversationOrchestrator {
                     .expect("durable prepared report row");
                 let uuid = message_id.as_uuid().to_string();
                 let result = writer
-                    .append_json_once_durable_for_session_with_tip_exact(
+                    .append_native_json_once_durable_for_session_with_tip(
                         target.session_id,
                         &format!("subagent-handback:{uuid}"),
                         row,
-                        prepared.prepared_utf16_overrides.clone(),
                     )
                     .await;
                 self.reconcile_fusion_transcript_append(target.session_id, uuid, result)

@@ -91,6 +91,26 @@ fn test_model_selection(
 
 struct DummyInvoker;
 
+struct ModeReportingInvoker(&'static str);
+
+#[async_trait]
+impl ToolInvoker for ModeReportingInvoker {
+    fn permission_mode(&self) -> Option<String> {
+        Some(self.0.into())
+    }
+    async fn invoke(
+        &self,
+        name: &str,
+        input: Value,
+        context: SubagentInvocationContext,
+    ) -> Result<Value, ToolInvokerError> {
+        DummyInvoker.invoke(name, input, context).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[async_trait]
 impl ToolInvoker for DummyInvoker {
     async fn invoke(
@@ -270,6 +290,7 @@ fn restored_observer_index_counts_only_client_visible_messages() {
     let visible = ConversationMessage::user(MessageId::new(), "visible".to_string());
     let hidden_meta = ConversationMessage::user_meta(MessageId::new(), "meta".to_string());
     let compact_summary = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: Vec::new(),
         is_meta: false,
@@ -281,6 +302,7 @@ fn restored_observer_index_counts_only_client_visible_messages() {
         turn_origin: None,
     };
     let transcript_only = ConversationMessage::User {
+        api_message_override: None,
         id: MessageId::new(),
         content: Vec::new(),
         is_meta: false,
@@ -292,6 +314,7 @@ fn restored_observer_index_counts_only_client_visible_messages() {
         turn_origin: None,
     };
     let lifecycle = ConversationMessage::System {
+        api_system: None,
         id: MessageId::new(),
         content: "idle".to_string().into(),
         subtype: Some("agent_idle".to_string()),
@@ -328,8 +351,9 @@ async fn spawn_without_registry_cannot_launch_an_unmanaged_observer() {
     });
     let spawner = test_spawner(pool).with_api_client(api.clone());
     let request = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".into(),
         prompt: "do work".into(),
@@ -365,6 +389,7 @@ async fn spawn_without_registry_cannot_launch_an_unmanaged_observer() {
         depth: 1,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -847,10 +872,15 @@ async fn rejected_startup_reports_failure_instead_of_killed_without_calling_mode
         let spawner = test_spawner(pool)
             .with_api_client(api.clone())
             .with_spawn_observer(observer.clone());
+        let statistics =
+            Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+        let mut request = minimal_spawn_request("plan");
+        request.agent_spawn_token =
+            Some(statistics.prepare_spawn("general-purpose".into(), None, persistent, 1));
         let result = if persistent {
             spawner
                 .spawn_persistent_with_observer(
-                    minimal_spawn_request("plan"),
+                    request.clone(),
                     dummy_inherit(),
                     Arc::new(RejectStartup),
                 )
@@ -859,7 +889,7 @@ async fn rejected_startup_reports_failure_instead_of_killed_without_calling_mode
         } else {
             spawner
                 .spawn_with_observer(
-                    minimal_spawn_request("plan"),
+                    request.clone(),
                     dummy_inherit(),
                     None,
                     Some(Arc::new(RejectStartup)),
@@ -886,6 +916,11 @@ async fn rejected_startup_reports_failure_instead_of_killed_without_calling_mode
         );
         assert_eq!(api.calls.load(Ordering::SeqCst), 0);
         assert_eq!(observer.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            statistics.snapshot(),
+            Default::default(),
+            "a rejected startup never counts a spawn or terminal"
+        );
     }
 }
 
@@ -909,7 +944,10 @@ async fn observer_receives_resolved_type_and_ordered_terminal_event() {
         "prompt": "finish"
     }))
     .expect("minimal spawn request");
-    request.agent_spawn_token = Some(token);
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    request.agent_spawn_token =
+        Some(statistics.prepare_spawn("general-purpose".into(), Some(false), false, 1));
 
     spawner
         .spawn(
@@ -932,6 +970,9 @@ async fn observer_receives_resolved_type_and_ordered_terminal_event() {
     })
     .await
     .expect("observer events arrive");
+    assert_eq!(statistics.snapshot().spawned, 1);
+    assert_eq!(statistics.snapshot().completed, 1);
+    assert_eq!(statistics.snapshot().requested.foreground, 1);
     let events = observer.events.lock().unwrap();
     assert!(matches!(
         &events[0],
@@ -1199,9 +1240,6 @@ async fn persistent_stop_flushes_cancelled_transcript_before_deallocation() {
         4,
     ));
     let observer = Arc::new(RecordingLifecycleObserver::default());
-    let statistics =
-        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
-    let token = statistics.prepare_spawn("general-purpose".into(), Some(true), true, 1);
     let spawner = test_spawner(pool.clone())
         .with_api_client(Arc::new(HangingApi))
         .with_spawn_observer(observer.clone())
@@ -1305,16 +1343,16 @@ async fn dropped_spawn_future_lets_runner_reach_cancelled_before_hard_abort() {
             Some(dir.path().to_path_buf()),
         )
         .with_transcript_fs(fs);
-    let statistics =
-        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
-    let token = statistics.prepare_spawn("general-purpose".into(), Some(true), true, 1);
     let mut request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
         "subagent_type": "general-purpose",
         "prompt": "go",
         "run_in_background": true
     }))
     .expect("minimal spawn request");
-    request.agent_spawn_token = Some(token);
+    let statistics =
+        Arc::new(lingxi_core::host::agent_statistics::AgentSessionStatistics::default());
+    request.agent_spawn_token =
+        Some(statistics.prepare_spawn("general-purpose".into(), None, false, 1));
 
     let spawn_result = tokio::time::timeout(
         std::time::Duration::from_millis(50),
@@ -1332,6 +1370,9 @@ async fn dropped_spawn_future_lets_runner_reach_cancelled_before_hard_abort() {
         "the hanging API call must still be in flight when the caller times out"
     );
 
+    assert_eq!(statistics.snapshot().spawned, 1);
+    assert_eq!(statistics.snapshot().killed.user, 1);
+    assert_eq!(statistics.snapshot().completed, 0);
     let agent_id = match observer.events.lock().unwrap().first() {
         Some(SubagentObservation::Allocated { agent_id, .. }) => *agent_id,
         other => panic!("expected an Allocated observation first, got {other:?}"),
@@ -1608,6 +1649,10 @@ async fn handback_spawn_keeps_registered_sender_separate_from_anonymous_type_dis
             .expect("ordinary explicit opt-in builds private runtime");
         assert!(runtime.eligible);
         assert_eq!(
+            runtime.trusted_parent_permission_mode,
+            Some(PermissionMode::Auto)
+        );
+        assert_eq!(
             runtime.sender_name,
             name.clone()
                 .unwrap_or_else(|| ctx.agent_definition.agent_type.clone())
@@ -1619,8 +1664,32 @@ async fn handback_spawn_keeps_registered_sender_separate_from_anonymous_type_dis
         assert!(ctx
             .tool_schemas
             .iter()
-            .any(|tool| tool.name == lingxi_core::host::handback::HANDBACK_TOOL_NAME));
+            .any(|tool| tool["name"] == lingxi_core::host::handback::HANDBACK_TOOL_NAME));
     }
+    // A definition fallback is not an immediate-parent permission carrier.
+    let spawner = spawner
+        .with_permission_mode(PermissionMode::Default)
+        .with_agent_catalog(Arc::new(RwLock::new(vec![AgentDefinition {
+            agent_type: "general-purpose".into(),
+            ..agent_def_plan(AgentToolPolicy::All {
+                use_exact_tools: false,
+            })
+        }])));
+    let mut request = minimal_spawn_request("definition-owned plan work");
+    request.handback_opt_in = true;
+    let (ctx, _) = spawner
+        .build_subagent_context(
+            &request,
+            SubagentInheritance {
+                tool_invoker: Arc::new(ModeReportingInvoker("default")),
+                budget: Arc::new(DummyBudget),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(ctx.permission_mode_override.as_deref(), Some("plan"));
+    assert_eq!(ctx.handback.unwrap().trusted_parent_permission_mode, None);
 }
 
 /// Tokio-backed [`RuntimeSpawner`] whose `cancel` never resolves, which
@@ -2196,8 +2265,12 @@ impl Tool for StubTool {
     ) -> String {
         self.name.into()
     }
-    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
-        Utf16JsonProjection::from(format!("{} tool prompt", self.name))
+    async fn prompt(&self, opts: &PromptOptions) -> Utf16JsonProjection {
+        Utf16JsonProjection::from(if self.name == "RouteFacts" {
+            format!("model={:?}, profile={:?}", opts.model, opts.model_profile)
+        } else {
+            format!("{} tool prompt", self.name)
+        })
     }
     async fn call(
         &self,
@@ -2223,7 +2296,7 @@ impl CoordinatorModeHandle for StubCoordinatorMode {
 /// the spawn-path defaults).
 fn agent_def(tools: AgentToolPolicy) -> AgentDefinition {
     AgentDefinition {
-        omit_claude_md: false,
+        omit_instructions: false,
         cache_ttl: None,
         agent_type: "test".into(),
         when_to_use: String::new(),
@@ -3171,13 +3244,17 @@ async fn resolve_definition_resolves_family_alias_to_concrete_id() {
         crate::model_resolution::ModelProviderKind::FirstParty,
     )
     .model_resolution_context;
-    // statusline-setup is Alias("sonnet"); parent is opus (different tier)
-    // → resolves from the explicitly supplied route's sonnet family default,
-    // NOT the parent.
-    let spawner = test_spawner(pool);
+    let custom = AgentDefinition {
+        agent_type: "balanced".into(),
+        model: AgentModel::Alias("sonnet".into()),
+        ..agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        })
+    };
+    let spawner = test_spawner(pool).with_agent_catalog(Arc::new(RwLock::new(vec![custom])));
     let def = spawner
         .resolve_definition_with_profile(
-            "statusline-setup",
+            "balanced",
             Some("claude-opus-4-7"),
             Some("anthropic_user"),
             Some(&context),
@@ -3412,7 +3489,7 @@ async fn custom_anthropic_live_selection_keeps_first_party_explore_cap() {
         "subagent_type": "Explore",
         "prompt": "inspect",
         "parent_model_override": "claude-fable-5-1",
-        "model_profile": "anthropic_user"
+        "parent_model_profile_override": "anthropic_user"
     }))
     .expect("provider-qualified parent request");
 
@@ -3430,7 +3507,7 @@ async fn custom_anthropic_live_selection_keeps_first_party_explore_cap() {
         .0;
 
     assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-8");
-    assert_eq!(context.model_profile, None);
+    assert_eq!(context.model_profile.as_deref(), Some("anthropic_user"));
 }
 
 #[tokio::test]
@@ -3448,7 +3525,7 @@ async fn nested_custom_anthropic_parent_uses_catalog_identity_not_profile_name()
         "subagent_type": "Explore",
         "prompt": "inspect",
         "parent_model_override": "claude-fable-5-1",
-        "model_profile": "anthropic_user"
+        "parent_model_profile_override": "anthropic_user"
     }))
     .expect("nested provider-qualified request");
 
@@ -3466,11 +3543,11 @@ async fn nested_custom_anthropic_parent_uses_catalog_identity_not_profile_name()
         .0;
 
     assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-8");
-    assert_eq!(context.model_profile, None);
+    assert_eq!(context.model_profile.as_deref(), Some("anthropic_user"));
 }
 
 #[tokio::test]
-async fn parent_profile_is_not_reused_when_definition_changes_model() {
+async fn statusline_setup_inherits_parent_model_and_profile() {
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     let spawner = test_spawner(pool).with_default_model_selection_provider(Arc::new(|| {
@@ -3484,7 +3561,7 @@ async fn parent_profile_is_not_reused_when_definition_changes_model() {
         "subagent_type": "statusline-setup",
         "prompt": "configure status line",
         "parent_model_override": "deepseek-flash",
-        "model_profile": "deepseek"
+        "parent_model_profile_override": "deepseek"
     }))
     .expect("provider-qualified parent request");
 
@@ -3501,11 +3578,428 @@ async fn parent_profile_is_not_reused_when_definition_changes_model() {
         .expect("statusline child context")
         .0;
 
-    assert_eq!(crate::runner::resolve_model(&context), "claude-sonnet-5");
+    assert_eq!(crate::runner::resolve_model(&context), "deepseek-flash");
+    assert_eq!(context.model_profile.as_deref(), Some("deepseek"));
+}
+
+fn multi_profile_context(
+    model: &str,
+    profile: Option<&str>,
+) -> Result<
+    crate::model_resolution::ModelResolutionContext,
+    crate::model_resolution::ModelResolutionError,
+> {
+    use crate::model_resolution::{
+        FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+        ModelRouteFacts,
+    };
+    let (qualifier, model) = model
+        .split_once('/')
+        .map_or((None, model), |(profile, model)| (Some(profile), model));
+    if profile
+        .zip(qualifier)
+        .is_some_and(|(profile, qualifier)| profile != qualifier)
+    {
+        return Err(ModelResolutionError::RouteUnavailable {
+            model: model.into(),
+            profile: profile.map(str::to_owned),
+            reason: "conflicting profile".into(),
+        });
+    }
+    let profile = profile.or(qualifier);
+    let supports = |profile: &str| match profile {
+        "a" => matches!(model, "parent-a" | "shared-balanced" | "sonnet"),
+        "b" => matches!(model, "parent-b" | "shared-balanced" | "only-b" | "sonnet"),
+        "openai" => matches!(model, "gpt-model" | "best" | "opusplan"),
+        _ => false,
+    };
+    let selected = match profile {
+        Some(profile) if supports(profile) => profile,
+        Some(_) => {
+            return Err(ModelResolutionError::RouteUnavailable {
+                model: model.into(),
+                profile: profile.map(str::to_owned),
+                reason: "model unavailable in profile".into(),
+            });
+        }
+        None => {
+            let candidates: Vec<_> = ["a", "b", "openai"]
+                .into_iter()
+                .filter(|profile| supports(profile))
+                .collect();
+            match candidates.as_slice() {
+                [profile] => *profile,
+                [] => {
+                    return Err(ModelResolutionError::RouteUnavailable {
+                        model: model.into(),
+                        profile: None,
+                        reason: "model unavailable".into(),
+                    });
+                }
+                _ => {
+                    return Err(ModelResolutionError::AmbiguousRoute {
+                        model: model.into(),
+                        profiles: candidates.into_iter().map(str::to_owned).collect(),
+                    });
+                }
+            }
+        }
+    };
+    Ok(ModelResolutionContext {
+        route: ModelRouteFacts {
+            model: model.into(),
+            profile: Some(selected.into()),
+            provider: Some(ModelProviderKind::Other),
+            ..Default::default()
+        },
+        family_defaults: FamilyModelDefaults {
+            sonnet: (selected != "openai").then(|| "shared-balanced".into()),
+            ..Default::default()
+        },
+        catalog_aliases: if selected == "openai" {
+            std::collections::BTreeMap::from([
+                ("best".into(), vec!["gpt-model".into()]),
+                ("opusplan".into(), vec!["gpt-model".into()]),
+            ])
+        } else {
+            Default::default()
+        },
+        ..Default::default()
+    })
+}
+
+fn multi_profile_spawner(
+    pool: Arc<StateMachinePool>,
+    parent_model: &str,
+    parent_profile: &str,
+) -> PoolSubagentSpawner {
+    let parent = multi_profile_context(parent_model, Some(parent_profile)).unwrap();
+    let selection = DefaultModelSelection {
+        model: parent.route.model.clone(),
+        model_profile: parent.route.profile.clone(),
+        model_resolution_context: parent,
+    };
+    PoolSubagentSpawner::new(pool)
+        .with_api_client(Arc::new(PendingModel))
+        .with_model_resolution_context_provider(Arc::new(multi_profile_context))
+        .with_default_model_selection_provider(Arc::new(move || Ok(Some(selection.clone()))))
+}
+
+async fn build_test_spawn(
+    spawner: &PoolSubagentSpawner,
+    request: &SubagentSpawnRequest,
+) -> Result<crate::context::SubagentContext, SubagentSpawnError> {
+    spawner
+        .build_subagent_context(
+            request,
+            SubagentInheritance {
+                tool_invoker: Arc::new(DummyInvoker),
+                budget: Arc::new(DummyBudget),
+            },
+            false,
+        )
+        .await
+        .map(|(context, _)| context)
+}
+
+#[tokio::test]
+async fn configured_reserved_aliases_use_child_parent_catalog_in_plan_mode() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = multi_profile_spawner(pool, "gpt-model", "openai")
+        .with_permission_mode(permission::PermissionMode::Plan)
+        .with_model_setting("opusplan");
+    for model in [None, Some("best"), Some("opusplan")] {
+        let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": model })).unwrap();
+        let context = build_test_spawn(&spawner, &request).await.unwrap();
+        assert_eq!(crate::runner::resolve_model(&context), "gpt-model");
+        assert_eq!(context.model_profile.as_deref(), Some("openai"));
+    }
+}
+
+#[tokio::test]
+async fn definition_alias_model_change_keeps_selected_profile_with_duplicate_catalogs() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let custom = AgentDefinition {
+        agent_type: "balanced".into(),
+        model: AgentModel::Alias("sonnet".into()),
+        ..agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        })
+    };
+    let spawner = multi_profile_spawner(pool, "parent-a", "a")
+        .with_agent_catalog(Arc::new(RwLock::new(vec![custom])));
+    let request = serde_json::from_value(
+        serde_json::json!({ "subagent_type": "balanced", "prompt": "inspect" }),
+    )
+    .unwrap();
+    let context = build_test_spawn(&spawner, &request).await.unwrap();
+    assert_eq!(crate::runner::resolve_model(&context), "shared-balanced");
+    assert_eq!(context.model_profile.as_deref(), Some("a"));
+}
+
+#[tokio::test]
+async fn explicit_caller_model_precedes_unavailable_definition_default() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let custom = AgentDefinition {
+        agent_type: "balanced".into(),
+        model: AgentModel::Alias("sonnet".into()),
+        ..agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        })
+    };
+    let spawner = multi_profile_spawner(pool, "gpt-model", "openai")
+        .with_agent_catalog(Arc::new(RwLock::new(vec![custom])));
+    for profile in [None, Some("openai")] {
+        let request = serde_json::from_value(serde_json::json!({ "subagent_type": "balanced", "prompt": "inspect", "model": "gpt-model", "model_profile": profile })).unwrap();
+        let context = build_test_spawn(&spawner, &request).await.unwrap();
+        assert_eq!(crate::runner::resolve_model(&context), "gpt-model");
+        assert_eq!(context.model_profile.as_deref(), Some("openai"));
+    }
+    let no_override = serde_json::from_value(
+        serde_json::json!({ "subagent_type": "balanced", "prompt": "inspect" }),
+    )
+    .unwrap();
+    let error = build_test_spawn(&spawner, &no_override)
+        .await
+        .err()
+        .unwrap();
+    // The parent's profile has no Sonnet default, while the unqualified
+    // catalog has two Sonnet routes. Keep that genuine ambiguity explicit.
+    let expected = crate::model_resolution::ModelResolutionError::AmbiguousRoute {
+        model: "sonnet".into(),
+        profiles: vec!["a".into(), "b".into()],
+    };
+    let SubagentSpawnError::Runtime(reason) = error else {
+        panic!("expected a model route error, got {error:?}");
+    };
+    assert_eq!(reason, expected.to_string());
+}
+
+#[tokio::test]
+async fn qualified_child_model_changes_profile_with_duplicate_models() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = multi_profile_spawner(pool, "parent-a", "a");
+    let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "b/shared-balanced" })).unwrap();
+    let context = build_test_spawn(&spawner, &request).await.unwrap();
+    assert_eq!(crate::runner::resolve_model(&context), "shared-balanced");
+    assert_eq!(context.model_profile.as_deref(), Some("b"));
+}
+
+#[tokio::test]
+async fn child_tool_prompts_follow_admitted_route_instead_of_parent_defaults() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = multi_profile_spawner(pool, "parent-a", "a")
+        .with_tool_registry(registry_with(&["RouteFacts"]));
+    for (model, profile) in [("b/shared-balanced", "b"), ("a/shared-balanced", "a")] {
+        let request = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose", "prompt": "inspect", "model": model,
+        }))
+        .unwrap();
+        let context = build_test_spawn(&spawner, &request).await.unwrap();
+        assert_eq!(crate::runner::resolve_model(&context), "shared-balanced");
+        assert_eq!(context.model_profile.as_deref(), Some(profile));
+        assert_eq!(
+            context.tool_schemas[0]["description"],
+            format!("model=Some(\"shared-balanced\"), profile=Some(\"{profile}\")")
+        );
+    }
+}
+
+#[tokio::test]
+async fn direct_tool_resolver_uses_current_default_route_for_inherited_model() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = multi_profile_spawner(pool, "parent-b", "b")
+        .with_tool_registry(registry_with(&["RouteFacts"]));
+    let definition = agent_def(AgentToolPolicy::All {
+        use_exact_tools: false,
+    });
+    let (schemas, _) = spawner.resolve_tools(&definition, 0, &[]).await.unwrap();
     assert_eq!(
-        context.model_profile, None,
-        "a parent-provider hint must not pin a different child model"
+        schemas[0]["description"],
+        "model=Some(\"parent-b\"), profile=Some(\"b\")"
     );
+}
+
+#[tokio::test]
+async fn nested_alias_override_uses_immediate_parent_profile() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = multi_profile_spawner(pool, "parent-a", "a");
+    let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "sonnet", "parent_model_override": "parent-b", "parent_model_profile_override": "b" })).unwrap();
+    let context = build_test_spawn(&spawner, &request).await.unwrap();
+    assert_eq!(crate::runner::resolve_model(&context), "shared-balanced");
+    assert_eq!(context.model_profile.as_deref(), Some("b"));
+    let ambiguous = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "sonnet", "parent_model_override": "shared-balanced" })).unwrap();
+    let error = build_test_spawn(&spawner, &ambiguous).await.err().unwrap();
+    assert!(error.to_string().contains("multiple profiles"));
+}
+
+#[tokio::test]
+async fn barred_qualified_child_model_falls_back_to_parent_route() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let enforcement = llm_runtime::model::allowlist::ModelEnforcement::Active {
+        allowlist: vec!["parent-a".into()],
+        overrides: Default::default(),
+    };
+    let spawner = multi_profile_spawner(pool, "parent-a", "a").with_model_restriction_opt(Some((
+        enforcement,
+        vec!["parent-a".into(), "only-b".into()],
+    )));
+    let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "b/only-b" })).unwrap();
+    let context = build_test_spawn(&spawner, &request).await.unwrap();
+    assert_eq!(crate::runner::resolve_model(&context), "parent-a");
+    assert_eq!(context.model_profile.as_deref(), Some("a"));
+}
+
+#[tokio::test]
+async fn managed_allowlist_accepts_qualified_model_after_wire_model_resolution() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let enforcement = llm_runtime::model::allowlist::ModelEnforcement::Active {
+        allowlist: vec!["parent-a".into(), "only-b".into()],
+        overrides: Default::default(),
+    };
+    let spawner = multi_profile_spawner(pool, "parent-a", "a").with_model_restriction_opt(Some((
+        enforcement,
+        vec!["parent-a".into(), "only-b".into()],
+    )));
+    let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "b/only-b" })).unwrap();
+    let context = build_test_spawn(&spawner, &request).await.unwrap();
+    assert_eq!(crate::runner::resolve_model(&context), "only-b");
+    assert_eq!(context.model_profile.as_deref(), Some("b"));
+}
+
+#[tokio::test]
+async fn nested_parent_override_does_not_require_unrelated_live_root_route() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = PoolSubagentSpawner::new(pool)
+        .with_api_client(Arc::new(PendingModel))
+        .with_model_resolution_context_provider(Arc::new(multi_profile_context))
+        .with_default_model_selection_provider(Arc::new(|| {
+            Err(
+                crate::model_resolution::ModelResolutionError::RouteUnavailable {
+                    model: "removed-root-model".into(),
+                    profile: Some("root".into()),
+                    reason: "route removed".into(),
+                },
+            )
+        }));
+    let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "sonnet", "parent_model_override": "parent-b", "parent_model_profile_override": "b" })).unwrap();
+    let context = build_test_spawn(&spawner, &request).await.unwrap();
+    assert_eq!(crate::runner::resolve_model(&context), "shared-balanced");
+    assert_eq!(context.model_profile.as_deref(), Some("b"));
+}
+
+#[tokio::test]
+async fn explicit_child_route_can_run_when_unrelated_live_root_route_is_unavailable() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = PoolSubagentSpawner::new(pool)
+        .with_api_client(Arc::new(PendingModel))
+        .with_model_resolution_context_provider(Arc::new(multi_profile_context))
+        .with_default_model_selection_provider(Arc::new(|| {
+            Err(
+                crate::model_resolution::ModelResolutionError::RouteUnavailable {
+                    model: "removed-root-model".into(),
+                    profile: Some("root".into()),
+                    reason: "route removed".into(),
+                },
+            )
+        }));
+    let explicit = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "gpt-model", "model_profile": "openai" })).unwrap();
+    let context = build_test_spawn(&spawner, &explicit).await.unwrap();
+    assert_eq!(crate::runner::resolve_model(&context), "gpt-model");
+    assert_eq!(context.model_profile.as_deref(), Some("openai"));
+    let inherited = serde_json::from_value(
+        serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect" }),
+    )
+    .unwrap();
+    assert!(build_test_spawn(&spawner, &inherited)
+        .await
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("route removed"));
+}
+
+#[tokio::test]
+async fn direct_child_profile_without_model_is_rejected() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = multi_profile_spawner(pool, "parent-a", "a");
+    let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model_profile": "b" })).unwrap();
+    let error = build_test_spawn(&spawner, &request).await.err().unwrap();
+    assert!(error.to_string().contains("requires an explicit model"));
+}
+
+#[tokio::test]
+async fn spawn_hook_changes_child_model_and_profile_before_resolution() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = multi_profile_spawner(pool, "parent-a", "a");
+    let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "model": "parent-a", "model_profile": "a", "parent_model_override": "parent-a", "parent_model_profile_override": "a" })).unwrap();
+    let rewritten = apply_spawn_rewrite(&request, Some(&serde_json::json!({ "model": "shared-balanced", "model_profile": "b", "parent_model_profile_override": "b" }))).unwrap().unwrap();
+    assert_eq!(
+        rewritten.parent_model_profile_override.as_deref(),
+        Some("a")
+    );
+    let context = build_test_spawn(&spawner, &rewritten).await.unwrap();
+    assert_eq!(crate::runner::resolve_model(&context), "shared-balanced");
+    assert_eq!(context.model_profile.as_deref(), Some("b"));
+}
+
+#[tokio::test]
+async fn subagent_effort_override_supports_generic_levels_and_rejects_invalid_values() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = multi_profile_spawner(pool, "gpt-model", "openai");
+    for value in ["none", "minimal"] {
+        let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "effort": value })).unwrap();
+        let context = build_test_spawn(&spawner, &request).await.unwrap();
+        assert_eq!(
+            context.agent_definition.effort,
+            Some(crate::definition::AgentEffort::from_json(&serde_json::json!(value)).unwrap())
+        );
+    }
+    let request = serde_json::from_value(serde_json::json!({ "subagent_type": "general-purpose", "prompt": "inspect", "effort": "invalid" })).unwrap();
+    let error = build_test_spawn(&spawner, &request).await.err().unwrap();
+    assert!(error.to_string().contains("invalid subagent effort"));
 }
 
 #[tokio::test]
@@ -3676,8 +4170,9 @@ async fn build_subagent_context_inherit_resolves_to_parent_model_override() {
     // `AgentModel::Inherit` against THAT model, not the boot default.
     let spawner = test_spawner(pool).with_default_model("claude-opus-4-7");
     let req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -3711,6 +4206,7 @@ async fn build_subagent_context_inherit_resolves_to_parent_model_override() {
         depth: 1,
         origin_session_id: None,
         parent_model_override: Some("claude-sonnet-5".to_string()),
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -3754,8 +4250,9 @@ async fn effective_parent_model_precedence_override_then_live_then_boot() {
         .with_default_model("boot-model")
         .with_default_model_provider(Arc::new(|| Some("live-model".to_string())));
     let mut req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: Utf16JsonProjection::from(""),
@@ -3789,6 +4286,7 @@ async fn effective_parent_model_precedence_override_then_live_then_boot() {
         depth: 0,
         origin_session_id: None,
         parent_model_override: Some("override-model".to_string()),
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -4237,6 +4735,7 @@ fn make_subagent_context_fork_seeds_prefix_and_empty_prompt_messages() {
     let def = crate::builtins::fork_agent_definition();
     let prefix = vec![
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "assistant turn".to_string(),
@@ -4706,8 +5205,9 @@ async fn spawn_request_model_override_takes_precedence() {
     // general-purpose is Inherit; request a haiku override → resolves to the
     // concrete haiku id (different tier from the opus parent).
     let mut req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -4741,6 +5241,7 @@ async fn spawn_request_model_override_takes_precedence() {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -4768,12 +5269,21 @@ async fn spawn_request_model_override_takes_precedence() {
         .unwrap();
     if let Some(model_pref) = req.model.as_deref() {
         let requested = AgentModel::Alias(model_pref.to_string());
-        def.model = AgentModel::Explicit(crate::model_resolution::resolve_agent_model(
-            &requested,
-            "claude-opus-4-7",
-            permission::PermissionMode::Default,
-            None,
-        ));
+        def.model = AgentModel::Explicit(
+            crate::model_resolution::resolve_agent_model_with_context(
+                &requested,
+                "claude-opus-4-7",
+                permission::PermissionMode::Default,
+                None,
+                &test_model_selection(
+                    "claude-opus-4-7",
+                    None,
+                    crate::model_resolution::ModelProviderKind::FirstParty,
+                )
+                .model_resolution_context,
+            )
+            .unwrap(),
+        );
     }
     assert!(matches!(&def.model, AgentModel::Explicit(m) if m == "claude-haiku-4-5"));
     // Sanity: the request struct carries the rest of the parity params.
@@ -4850,8 +5360,9 @@ async fn build_subagent_context_ignores_deprecated_mode_param() {
         budget: Arc::new(DummyBudget),
     };
     let base_req = || SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -4885,6 +5396,7 @@ async fn build_subagent_context_ignores_deprecated_mode_param() {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -4959,6 +5471,126 @@ async fn build_subagent_context_ignores_deprecated_mode_param() {
     );
 }
 
+#[tokio::test]
+async fn build_subagent_context_trusted_parent_mode_replaces_root_dispatch_mode() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = test_spawner(pool)
+        .with_permission_mode(PermissionMode::Default)
+        .with_tool_registry(registry_with(&["Read", "Grep", "Write", "Edit", "Bash"]));
+    assert_eq!(
+        spawner
+            .lookup_definition("general-purpose")
+            .await
+            .permission_mode,
+        AgentPermissionMode::Bubble
+    );
+    for parent_mode in [None, Some("plan")] {
+        let mut request = minimal_spawn_request("inspect");
+        request.parent_permission_mode = parent_mode.map(str::to_owned);
+        let inherit = SubagentInheritance {
+            tool_invoker: Arc::new(ModeReportingInvoker("default")),
+            budget: Arc::new(DummyBudget),
+        };
+        let (context, _) = spawner
+            .build_subagent_context(&request, inherit, false)
+            .await
+            .unwrap();
+        assert_eq!(context.permission_mode_override.as_deref(), parent_mode);
+        assert!(context.allowed_tools.contains(&"Read".into()));
+        for write_tool in ["Write", "Edit", "Bash"] {
+            assert_eq!(
+                context.allowed_tools.contains(&write_tool.into()),
+                parent_mode.is_none(),
+                "{write_tool} follows the trusted parent mode"
+            );
+            assert_eq!(
+                context
+                    .tool_schemas
+                    .iter()
+                    .any(|tool| tool["name"] == write_tool),
+                parent_mode.is_none()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn build_subagent_context_trusted_auto_parent_suppresses_definition_plan_narrowing() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let plan_definition = AgentDefinition {
+        agent_type: "general-purpose".into(),
+        ..agent_def_plan(AgentToolPolicy::All {
+            use_exact_tools: false,
+        })
+    };
+    let spawner = test_spawner(pool)
+        .with_permission_mode(PermissionMode::Default)
+        .with_tool_registry(registry_with(&["Read", "Write"]))
+        .with_agent_catalog(Arc::new(RwLock::new(vec![plan_definition])));
+    let mut request = minimal_spawn_request("inspect");
+    request.parent_permission_mode = Some("auto".into());
+    let (context, _) = spawner
+        .build_subagent_context(
+            &request,
+            SubagentInheritance {
+                tool_invoker: Arc::new(ModeReportingInvoker("default")),
+                budget: Arc::new(DummyBudget),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(context.permission_mode_override.as_deref(), Some("auto"));
+    assert_eq!(
+        context.agent_definition.permission_mode,
+        AgentPermissionMode::Bubble
+    );
+    assert!(context.allowed_tools.contains(&"Write".into()));
+    assert!(context
+        .tool_schemas
+        .iter()
+        .any(|tool| tool["name"] == "Write"));
+}
+
+#[tokio::test]
+async fn build_subagent_context_fork_preserves_trusted_parent_mode_and_exact_tool_pool() {
+    let pool = Arc::new(StateMachinePool::new(
+        Arc::new(MockRuntimeSpawner::default()),
+        4,
+    ));
+    let spawner = test_spawner(pool)
+        .with_permission_mode(PermissionMode::Default)
+        .with_tool_registry(registry_with(&["Read", "Write"]));
+    let mut request = minimal_spawn_request("inspect");
+    request.subagent_type = lingxi_core::host::fork_subagent::FORK_SUBAGENT_TYPE.into();
+    request.parent_permission_mode = Some("plan".into());
+    request.fork_parent_system_prompt = Some("parent prompt".into());
+    request.fork_context_messages = Some(Vec::new());
+    let (context, _) = spawner
+        .build_subagent_context(
+            &request,
+            SubagentInheritance {
+                tool_invoker: Arc::new(ModeReportingInvoker("default")),
+                budget: Arc::new(DummyBudget),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(context.permission_mode_override.as_deref(), Some("plan"));
+    assert!(context.allowed_tools.contains(&"Write".into()));
+    assert_eq!(
+        context.rendered_system_prompt.as_deref(),
+        Some("parent prompt")
+    );
+}
+
 /// (parity 2.1.212) The agent-definition frontmatter mode override still
 /// applies even though the `mode` call param is deprecated: a `general-purpose`
 /// definition with `permission_mode: Plan` gates the child under Plan (threaded
@@ -4983,8 +5615,9 @@ async fn build_subagent_context_definition_plan_mode_overrides() {
     };
     // No `mode` call param — the override must come purely from frontmatter.
     let req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -5018,6 +5651,7 @@ async fn build_subagent_context_definition_plan_mode_overrides() {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -5073,8 +5707,9 @@ async fn build_subagent_context_plan_mode_narrows_advertised_schemas() {
         budget: Arc::new(DummyBudget),
     };
     let req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -5109,6 +5744,7 @@ async fn build_subagent_context_plan_mode_narrows_advertised_schemas() {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -5155,8 +5791,9 @@ async fn build_subagent_context_threads_persistent_flag() {
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     let spawner = test_spawner(pool);
     let req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -5190,6 +5827,7 @@ async fn build_subagent_context_threads_persistent_flag() {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -5280,8 +5918,9 @@ async fn build_subagent_context_copies_correlation_id() {
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     let spawner = test_spawner(pool);
     let req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -5315,6 +5954,7 @@ async fn build_subagent_context_copies_correlation_id() {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -5596,8 +6236,9 @@ async fn spawn_persistent_cancellation_cleans_up_runner_started_during_allocate(
     let spawner = Arc::new(test_spawner(pool.clone()));
 
     let req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -5631,6 +6272,7 @@ async fn spawn_persistent_cancellation_cleans_up_runner_started_during_allocate(
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -5717,8 +6359,9 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
         budget: Arc::new(DummyBudget),
     };
     let mut req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -5752,6 +6395,7 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -5840,8 +6484,9 @@ async fn build_subagent_context_preserves_spawn_name_and_team() {
     let pool = Arc::new(StateMachinePool::new(runtime, 1));
     let spawner = test_spawner(pool);
     let request = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".to_string(),
         prompt: "go".into(),
@@ -5875,6 +6520,7 @@ async fn build_subagent_context_preserves_spawn_name_and_team() {
         depth: 1,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -6472,8 +7118,9 @@ async fn spawn_async_default_returns_internal_error() {
     let invoker: Arc<dyn ToolInvoker> = Arc::new(DummyInvoker);
     let budget: Arc<dyn BudgetEnforcerHandle> = Arc::new(DummyBudget);
     let req = SubagentSpawnRequest {
-        agent_spawn_provenance: Default::default(),
         agent_spawn_token: None,
+        stop_hook_scope: Default::default(),
+        agent_spawn_provenance: Default::default(),
         teammate_color: None,
         subagent_type: "general-purpose".into(),
         prompt: "go".into(),
@@ -6507,6 +7154,7 @@ async fn spawn_async_default_returns_internal_error() {
         depth: 0,
         origin_session_id: None,
         parent_model_override: None,
+        parent_model_profile_override: None,
         forked_skill_name: None,
         forked_skill_attribution: None,
         forked_skill_effort: None,
@@ -6537,4 +7185,195 @@ async fn spawn_async_default_returns_internal_error() {
         .await
         .expect_err("default spawn_async is unwired → clear error");
     assert!(format!("{err}").contains("not wired"));
+}
+
+struct CapturedStopOwner {
+    epoch: lingxi_core::types::MessageId,
+    current: AtomicBool,
+    executor: std::sync::Weak<hooks::HookExecutorImpl>,
+    session: lingxi_core::types::SessionId,
+    seen: Mutex<
+        Vec<(
+            AgentId,
+            lingxi_core::host::subagent_spawn::SubagentStopStatus,
+            hooks::HookModelSelection,
+            Vec<String>,
+        )>,
+    >,
+}
+#[async_trait]
+impl lingxi_core::host::subagent_spawn::SubagentStopHookFirer for CapturedStopOwner {
+    fn epoch_id(&self) -> lingxi_core::types::MessageId {
+        self.epoch
+    }
+    fn retire(&self) {
+        self.current.store(false, Ordering::SeqCst);
+    }
+    fn is_current(&self) -> bool {
+        self.current.load(Ordering::SeqCst)
+    }
+    async fn fire(
+        &self,
+        child: AgentId,
+        _: &str,
+        status: lingxi_core::host::subagent_spawn::SubagentStopStatus,
+    ) {
+        let (route, transcript) = self
+            .executor
+            .upgrade()
+            .unwrap()
+            .take_agent_prompt_transcript(self.session, child)
+            .expect("persistent terminal publishes before the existing event forwarder fires Stop");
+        self.seen.lock().unwrap().push((
+            child,
+            status,
+            route,
+            transcript
+                .messages
+                .iter()
+                .map(ConversationMessage::text_content)
+                .collect(),
+        ));
+    }
+}
+struct TerminalFailureApi;
+#[async_trait]
+impl crate::api::SubagentApiClient for TerminalFailureApi {
+    async fn stream(
+        &self,
+        _: crate::api::SubagentApiRequest,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>,
+        >,
+        llm_runtime::LlmError,
+    > {
+        Err(llm_runtime::LlmError::InvalidRequest {
+            message: "terminal child provider failure".into(),
+        })
+    }
+}
+async fn receive_persistent_terminal(
+    rx: &mut tokio::sync::mpsc::Receiver<SubagentEvent>,
+) -> SubagentEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.expect("persistent terminal channel");
+            if matches!(
+                event,
+                SubagentEvent::Completed { .. }
+                    | SubagentEvent::Failed { .. }
+                    | SubagentEvent::Killed { .. }
+            ) {
+                return event;
+            }
+        }
+    })
+    .await
+    .unwrap()
+}
+#[tokio::test]
+async fn persistent_forwarder_owns_completed_failed_and_resumed_turns_but_never_killed() {
+    use lingxi_core::host::subagent_spawn::{SubagentStopScope, SubagentStopStatus};
+    for mode in ["completed", "failed", "killed"] {
+        let session = lingxi_core::types::SessionId::new();
+        let executor = Arc::new(hooks::HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(hooks::HookRegistry::new())),
+            Arc::new(test_harness::mocks::MockHttpTransport::new()),
+            Arc::new(MockRuntimeSpawner::default()),
+        ));
+        let owner = Arc::new(CapturedStopOwner {
+            epoch: lingxi_core::types::MessageId::new(),
+            current: AtomicBool::new(true),
+            executor: Arc::downgrade(&executor),
+            session,
+            seen: Mutex::new(Vec::new()),
+        });
+        executor.bind_subagent_stop_firer(session, owner.clone());
+        let api: Arc<dyn crate::api::SubagentApiClient> = match mode {
+            "completed" => Arc::new(QueueApi {
+                responses: Mutex::new(VecDeque::from([
+                    text_response("first child result"),
+                    text_response("second child result"),
+                ])),
+                calls: AtomicUsize::new(0),
+            }),
+            "failed" => Arc::new(TerminalFailureApi),
+            _ => Arc::new(HangingApi),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let spawner = test_spawner(Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            4,
+        )))
+        .with_api_client(api)
+        .with_hook_executor(executor.clone())
+        .with_hook_context(session, dir.path().to_path_buf(), None);
+        assert!(!spawner.owns_subagent_stop_hooks(
+            true,
+            Some(session),
+            SubagentStopScope::AgentScoped
+        ));
+        assert!(spawner.owns_subagent_stop_hooks(true, Some(session), SubagentStopScope::Session));
+        let mut request = minimal_spawn_request("first child instruction");
+        request.stop_hook_scope = SubagentStopScope::Session;
+        request.origin_session_id = Some(session);
+        request.model = Some("provider-child-model".into());
+        request.model_profile = Some("provider-child-profile".into());
+        let (id, mut events) = spawner
+            .spawn_persistent(request, dummy_inherit())
+            .await
+            .unwrap();
+        if mode == "killed" {
+            spawner.stop(&id).await.unwrap();
+            while events.recv().await.is_some() {}
+            assert!(
+                owner.seen.lock().unwrap().is_empty(),
+                "external cancellation has no Stop"
+            );
+            assert!(executor.take_agent_prompt_transcript(session, id).is_none());
+            continue;
+        }
+        let first = receive_persistent_terminal(&mut events).await;
+        assert!(matches!(first, SubagentEvent::Completed { .. }) == (mode == "completed"));
+        if mode == "completed" {
+            spawner
+                .resume(&id, "second child instruction".into())
+                .await
+                .unwrap();
+            assert!(matches!(
+                receive_persistent_terminal(&mut events).await,
+                SubagentEvent::Completed { .. }
+            ));
+        }
+        let seen = owner.seen.lock().unwrap();
+        assert_eq!(seen.len(), if mode == "completed" { 2 } else { 1 });
+        for (child, status, route, history) in seen.iter() {
+            assert_eq!(*child, id);
+            assert_eq!(
+                *status,
+                if mode == "completed" {
+                    SubagentStopStatus::Completed
+                } else {
+                    SubagentStopStatus::Failed
+                }
+            );
+            assert_eq!(route.model, "provider-child-model");
+            assert_eq!(
+                route.model_profile.as_deref(),
+                Some("provider-child-profile")
+            );
+            assert!(history.iter().any(|text| text == "first child instruction"));
+        }
+        if mode == "completed" {
+            assert!(seen[1]
+                .3
+                .iter()
+                .any(|text| text == "second child instruction"));
+        }
+        drop(seen);
+        assert!(executor.take_agent_prompt_transcript(session, id).is_none());
+        spawner.stop(&id).await.unwrap();
+    }
 }

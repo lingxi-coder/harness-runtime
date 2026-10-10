@@ -53,7 +53,7 @@ mod execution;
 mod execution_context;
 mod structured_output;
 pub use execution_context::{
-    ExecutionContext, PendingPromptCacheObservation, PromptCacheRequestContext,
+    ExecutionContext, PendingPromptCacheObservation, PromptCacheRequestContext, RequestCredentials,
     RequestDispatchAdmission, RequestDispatchObserver,
 };
 pub mod auth;
@@ -95,7 +95,7 @@ pub use auth::external_aws::{
 };
 pub use auth::provider::{
     AnthropicAuthSnapshot, CopilotExchangeCredentialProvider, Credential, CredentialProvider,
-    CredentialScope, EnvCredentialProvider, StaticCredentialProvider,
+    CredentialScope, CredentialSource, EnvCredentialProvider, StaticCredentialProvider,
 };
 pub use catalog::{builtin_presets, BuiltinCatalog};
 pub use client::{

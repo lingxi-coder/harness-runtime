@@ -563,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_maintenance_cannot_retain_writer_claim_after_shutdown_returns() {
-        use std::future::{Future, poll_fn};
+        use std::future::{poll_fn, Future};
         use std::task::Poll;
 
         let f = Fixture::new().await;

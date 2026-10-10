@@ -6,9 +6,9 @@
 //!
 //! Used by M6-06 to feed `HistoryResponse.usage` into `CostTracker`.
 
-use cost::ModelRef;
 use cost::pricing::{ProviderId, TokenClass};
 use cost::usage::{ApiSpeed, ServerToolUsage, TokenUsage, Usage};
+use cost::ModelRef;
 use llm_runtime::ExecutionUsage as LlmUsage;
 
 /// Adapt canonical SDK counters to the host cost ledger's disjoint buckets.

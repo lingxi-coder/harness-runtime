@@ -190,6 +190,7 @@ mod tests {
     #[test]
     fn oracle_261_estimates_each_wire_block_with_utf16_rounding() {
         let message = ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -222,6 +223,7 @@ mod tests {
     #[test]
     fn oracle_261_estimates_nested_wire_results_instead_of_display_text() {
         let message = ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
@@ -247,6 +249,7 @@ mod tests {
 
     fn assistant_with_id(id: MessageId, tool: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id,
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),
@@ -261,6 +264,7 @@ mod tests {
 
     fn user_result(tool_use_id: ToolUseId) -> ConversationMessage {
         ConversationMessage::User {
+            api_message_override: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id,

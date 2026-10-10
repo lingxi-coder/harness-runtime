@@ -19,6 +19,9 @@ use tool_api::tool_trait::Tool;
 use crate::error::OrchestratorError;
 use crate::turn_loop::{DeferredToolDispatch, ToolUseDispatchFacts};
 
+pub(crate) type ModelContextResolver =
+    Arc<dyn Fn(&ToolUseContext, ToolUseContext) -> Result<ToolUseContext, String> + Send + Sync>;
+
 pub(crate) struct OwnedToolCall {
     pub(crate) id: ToolUseId,
     pub(crate) presented_name: String,
@@ -200,7 +203,10 @@ struct Record {
 }
 
 #[derive(Debug)]
-pub(crate) struct SchedulerStopped;
+pub(crate) enum SchedulerStopped {
+    Unavailable,
+    ModelResolution(String),
+}
 
 enum Command {
     Add(
@@ -254,6 +260,7 @@ impl ToolScheduler {
         initial_tool_context_state: Option<ToolInvocationContextState>,
         session_root: CancellationToken,
         publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
+        model_context_resolver: Option<ModelContextResolver>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         // User interruption is per-tool (InterruptBehavior::Cancel). The root
@@ -284,6 +291,8 @@ impl ToolScheduler {
             base_tool_context_state: initial_tool_context_state.clone(),
             tool_context_state: initial_tool_context_state,
             model_context_changed: false,
+            model_context_resolver,
+            model_context_error: None,
             waiters: Vec::new(),
             #[cfg(test)]
             completed_count_waiters: Vec::new(),
@@ -296,11 +305,13 @@ impl ToolScheduler {
         let actor_terminated = Arc::new(tokio::sync::Notify::new());
         #[cfg(test)]
         let actor_terminated_task = Arc::clone(&actor_terminated);
-        tokio::spawn(async move {
-            actor.run().await;
-            #[cfg(test)]
-            actor_terminated_task.notify_one();
-        });
+        tokio::spawn(lingxi_core::host::model_safety::bind_current_model_safety(
+            async move {
+                actor.run().await;
+                #[cfg(test)]
+                actor_terminated_task.notify_one();
+            },
+        ));
         Self {
             tx,
             normal_finished,
@@ -338,8 +349,10 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::Add(call, reply))
-            .map_err(|_| SchedulerStopped)?;
-        let started = response.await.map_err(|_| SchedulerStopped)??;
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        let started = response
+            .await
+            .map_err(|_| SchedulerStopped::Unavailable)??;
         self.lifecycle.observe_assistant_row([(id, is_agent)]);
         Ok(started)
     }
@@ -354,8 +367,10 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::AddReady(meta, outcome, reply))
-            .map_err(|_| SchedulerStopped)?;
-        response.await.map_err(|_| SchedulerStopped)??;
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        response
+            .await
+            .map_err(|_| SchedulerStopped::Unavailable)??;
         self.lifecycle.observe_assistant_row([(id, is_agent)]);
         Ok(())
     }
@@ -366,8 +381,10 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::TakeReady(reply))
-            .map_err(|_| SchedulerStopped)?;
-        let completed = response.await.map_err(|_| SchedulerStopped)??;
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        let completed = response
+            .await
+            .map_err(|_| SchedulerStopped::Unavailable)??;
         for dispatch in &completed {
             self.lifecycle.observe_tool_result(&dispatch.meta.id);
         }
@@ -382,8 +399,10 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::TakeAllReady(reply))
-            .map_err(|_| SchedulerStopped)?;
-        let completed = response.await.map_err(|_| SchedulerStopped)??;
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        let completed = response
+            .await
+            .map_err(|_| SchedulerStopped::Unavailable)??;
         for dispatch in &completed {
             self.lifecycle.observe_tool_result(&dispatch.meta.id);
         }
@@ -394,16 +413,16 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::IsIdle(reply))
-            .map_err(|_| SchedulerStopped)?;
-        response.await.map_err(|_| SchedulerStopped)?
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        response.await.map_err(|_| SchedulerStopped::Unavailable)?
     }
 
     pub(crate) async fn statuses(&self) -> Result<Vec<(ToolUseId, Status)>, SchedulerStopped> {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::Statuses(reply))
-            .map_err(|_| SchedulerStopped)?;
-        response.await.map_err(|_| SchedulerStopped)?
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        response.await.map_err(|_| SchedulerStopped::Unavailable)?
     }
 
     /// Stop promoting queued calls as soon as the host enters a terminal
@@ -415,8 +434,8 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::StopScheduling(reply))
-            .map_err(|_| SchedulerStopped)?;
-        response.await.map_err(|_| SchedulerStopped)?
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        response.await.map_err(|_| SchedulerStopped::Unavailable)?
     }
 
     /// Reconcile the user interrupt into per-tool cancellation and queued
@@ -425,8 +444,8 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::ApplyUserInterrupt(reply))
-            .map_err(|_| SchedulerStopped)?;
-        response.await.map_err(|_| SchedulerStopped)?
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        response.await.map_err(|_| SchedulerStopped::Unavailable)?
     }
 
     #[cfg(test)]
@@ -434,8 +453,8 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::WaitForCompletedCount(count, reply))
-            .map_err(|_| SchedulerStopped)?;
-        response.await.map_err(|_| SchedulerStopped)?
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        response.await.map_err(|_| SchedulerStopped::Unavailable)?
     }
 
     #[cfg(test)]
@@ -451,16 +470,16 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::WaitForObservedDispatchCount(count, reply))
-            .map_err(|_| SchedulerStopped)?;
-        response.await.map_err(|_| SchedulerStopped)?
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        response.await.map_err(|_| SchedulerStopped::Unavailable)?
     }
 
     pub(crate) async fn wait_for_progress(&self) -> Result<(), SchedulerStopped> {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::Wait(reply))
-            .map_err(|_| SchedulerStopped)?;
-        response.await.map_err(|_| SchedulerStopped)?
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        response.await.map_err(|_| SchedulerStopped::Unavailable)?
     }
 
     pub(crate) async fn finish_normal(
@@ -469,8 +488,8 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::FinishNormal(reply))
-            .map_err(|_| SchedulerStopped)?;
-        response.await.map_err(|_| SchedulerStopped)?
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        response.await.map_err(|_| SchedulerStopped::Unavailable)?
     }
 
     pub(crate) async fn reset_after_server_fallback(
@@ -496,8 +515,10 @@ impl ToolScheduler {
         let (reply, response) = oneshot::channel();
         self.tx
             .send(Command::Reset(reason, reply))
-            .map_err(|_| SchedulerStopped)?;
-        let removal = response.await.map_err(|_| SchedulerStopped)??;
+            .map_err(|_| SchedulerStopped::Unavailable)?;
+        let removal = response
+            .await
+            .map_err(|_| SchedulerStopped::Unavailable)??;
         self.lifecycle.apply_removal(&removal);
         Ok(removal)
     }
@@ -547,10 +568,13 @@ struct Actor {
     /// reset; they must not erase or replace this immutable base.
     base_tool_context_state: Option<ToolInvocationContextState>,
     tool_context_state: Option<ToolInvocationContextState>,
-    /// True only if folding a one-shot modifier changed `main_loop_model`. A
-    /// constructor snapshot or a no-op modifier must never be projected back
-    /// over session state that may have changed during server fallback.
+    /// True when a modifier explicitly selected a model or provider. Even a
+    /// canonical selection equal to the frozen context must be compared with
+    /// live session state, which can change during a serving fallback. An
+    /// unchanged modifier never projects the old snapshot back.
     model_context_changed: bool,
+    model_context_resolver: Option<ModelContextResolver>,
+    model_context_error: Option<String>,
     waiters: Vec<oneshot::Sender<Result<(), SchedulerStopped>>>,
     #[cfg(test)]
     completed_count_waiters: Vec<(usize, oneshot::Sender<Result<(), SchedulerStopped>>)>,
@@ -702,13 +726,16 @@ impl Actor {
                         }
                         Command::FinishNormal(reply) => {
                             let result = if self.is_idle() {
-                                self.apply_safe_context_layers().map(|()| {
-                                    self.model_context_changed
+                                self.apply_safe_context_layers().and_then(|()| {
+                                    if let Some(reason) = self.model_context_error.as_ref() {
+                                        return Err(SchedulerStopped::ModelResolution(reason.clone()));
+                                    }
+                                    Ok(self.model_context_changed
                                         .then(|| self.tool_context_state.clone())
-                                        .flatten()
+                                        .flatten())
                                 })
                             } else {
-                                Err(SchedulerStopped)
+                                Err(SchedulerStopped::Unavailable)
                             };
                             if result.is_ok() {
                                 self.normal_finished.store(true, Ordering::Release);
@@ -816,13 +843,13 @@ impl Actor {
         self.apply_user_interrupts();
         let generation = self.generation;
         let Some(record) = self.records.get_mut(index) else {
-            return Err(SchedulerStopped);
+            return Err(SchedulerStopped::Unavailable);
         };
         if record.generation != generation || record.status != Status::Queued {
             return Ok(false);
         }
         let Some(mut call) = record.queued_call.take() else {
-            return Err(SchedulerStopped);
+            return Err(SchedulerStopped::Unavailable);
         };
         if record.status != Status::Queued {
             return Ok(false);
@@ -841,36 +868,43 @@ impl Actor {
         ));
         let (started_tx, started_rx) = oneshot::channel();
         let dispatch = Arc::clone(&self.dispatch);
-        self.tasks.spawn(async move {
-            let dispatch_future = async move { dispatch(call).await };
-            let mut dispatch_future =
-                Box::pin(std::panic::AssertUnwindSafe(dispatch_future).catch_unwind());
-            let mut started_tx = Some(started_tx);
-            let caught = poll_fn(|cx| {
-                let polled = dispatch_future.as_mut().poll(cx);
-                if let Some(started_tx) = started_tx.take() {
-                    let _ = started_tx.send(());
-                }
-                polled
-            })
-            .await;
-            let outcome = match caught {
-                Ok(outcome) => outcome,
-                Err(_panic) => Err(OrchestratorError::StreamingProtocol(
-                    "owned streaming tool dispatch panicked".into(),
-                )),
-            };
-            #[cfg(test)]
-            if let Some(finished) = dispatch_finished_tx {
-                let _ = finished.send(());
-            }
-            (generation, index, outcome)
-        });
+        self.tasks
+            .spawn(lingxi_core::host::model_safety::bind_current_model_safety(
+                async move {
+                    let dispatch_future = async move { dispatch(call).await };
+                    let mut dispatch_future =
+                        Box::pin(std::panic::AssertUnwindSafe(dispatch_future).catch_unwind());
+                    let mut started_tx = Some(started_tx);
+                    let caught = poll_fn(|cx| {
+                        let polled = dispatch_future.as_mut().poll(cx);
+                        if let Some(started_tx) = started_tx.take() {
+                            let _ = started_tx.send(());
+                        }
+                        polled
+                    })
+                    .await;
+                    let outcome = match caught {
+                        Ok(outcome) => outcome,
+                        Err(_panic) => Err(OrchestratorError::StreamingProtocol(
+                            "owned streaming tool dispatch panicked".into(),
+                        )),
+                    };
+                    #[cfg(test)]
+                    if let Some(finished) = dispatch_finished_tx {
+                        let _ = finished.send(());
+                    }
+                    (generation, index, outcome)
+                },
+            ));
         // Spawn alone does not guarantee the callback was polled. This waits
         // only to first poll, never through permission or tool completion.
-        started_rx.await.map_err(|_| SchedulerStopped)?;
+        started_rx
+            .await
+            .map_err(|_| SchedulerStopped::Unavailable)?;
         if let Some(dispatch_started_wait) = dispatch_started_wait {
-            dispatch_started_wait.await.map_err(|_| SchedulerStopped)?;
+            dispatch_started_wait
+                .await
+                .map_err(|_| SchedulerStopped::Unavailable)?;
         }
         Ok(true)
     }
@@ -914,6 +948,7 @@ impl Actor {
             );
         let recorded_context_state = record.context_state.clone();
         let mut pending_safe_modifiers = Vec::new();
+        let mut context_failure = None;
         if user_abort_wins {
             outcome = Err(OrchestratorError::StreamingProtocol(
                 "tool interrupted before its result was accepted".into(),
@@ -931,14 +966,42 @@ impl Actor {
                 if let Some(state) = returned_context_state {
                     self.tool_context_state = Some(state);
                 }
+                let previous_state = self.tool_context_state.clone();
+                let previously_changed = self.model_context_changed;
                 for modifier in std::mem::take(&mut outcome.context_modifiers) {
-                    let state = self.tool_context_state.as_ref().ok_or(SchedulerStopped)?;
-                    let (updated, model_changed) =
-                        apply_context_modifier_and_detect_model_change(state, modifier)?;
-                    self.tool_context_state = Some(updated);
-                    self.model_context_changed |= model_changed;
+                    let state = self
+                        .tool_context_state
+                        .as_ref()
+                        .ok_or(SchedulerStopped::Unavailable)?;
+                    let result = match self.model_context_error.as_ref() {
+                        Some(reason) => Err(SchedulerStopped::ModelResolution(reason.clone())),
+                        None => apply_context_modifier_and_detect_model_change(
+                            state,
+                            modifier,
+                            self.model_context_resolver.as_ref(),
+                        ),
+                    };
+                    match result {
+                        Ok((updated, model_changed)) => {
+                            self.tool_context_state = Some(updated);
+                            self.model_context_changed |= model_changed;
+                        }
+                        Err(SchedulerStopped::ModelResolution(reason)) => {
+                            self.tool_context_state = previous_state;
+                            self.model_context_changed = previously_changed;
+                            self.model_context_error = Some(reason.clone());
+                            context_failure = Some(reason);
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
             }
+        }
+        if let Some(reason) = context_failure {
+            outcome = Err(OrchestratorError::StreamingProtocol(format!(
+                "tool model preference could not be resolved: {reason}"
+            )));
         }
         let current_state = self.tool_context_state.clone();
         if let Some(record) = self.records.get_mut(index) {
@@ -1005,8 +1068,15 @@ impl Actor {
         }) {
             return Ok(());
         }
-        // Native applyEndedRunLayers scans executor registration order and runs
-        // only after every executing tool has settled.
+        if self.model_context_error.is_some() {
+            for record in &mut self.records {
+                record.pending_context_modifiers.clear();
+            }
+            return Ok(());
+        }
+        let previous_state = self.tool_context_state.clone();
+        let previously_changed = self.model_context_changed;
+        // Apply in registration order only after every executing tool settled.
         for index in 0..self.records.len() {
             let modifiers = {
                 let record = &mut self.records[index];
@@ -1017,12 +1087,34 @@ impl Actor {
                 }
             };
             for modifier in modifiers {
-                let state = self.tool_context_state.as_ref().ok_or(SchedulerStopped)?;
-                let (updated, model_changed) =
-                    apply_context_modifier_and_detect_model_change(state, modifier)?;
-                self.tool_context_state = Some(updated);
-                self.model_context_changed |= model_changed;
-                self.records[index].context_state = self.tool_context_state.clone();
+                let state = self
+                    .tool_context_state
+                    .as_ref()
+                    .ok_or(SchedulerStopped::Unavailable)?;
+                match apply_context_modifier_and_detect_model_change(
+                    state,
+                    modifier,
+                    self.model_context_resolver.as_ref(),
+                ) {
+                    Ok((updated, model_changed)) => {
+                        self.tool_context_state = Some(updated);
+                        self.model_context_changed |= model_changed;
+                        self.records[index].context_state = self.tool_context_state.clone();
+                    }
+                    Err(SchedulerStopped::ModelResolution(reason)) => {
+                        self.tool_context_state = previous_state;
+                        self.model_context_changed = previously_changed;
+                        self.model_context_error = Some(reason);
+                        for record in &mut self.records {
+                            record.pending_context_modifiers.clear();
+                            if record.generation == self.generation {
+                                record.context_state = self.tool_context_state.clone();
+                            }
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
         Ok(())
@@ -1123,7 +1215,7 @@ impl Actor {
 
     fn fail_waiters(&mut self) {
         for waiter in self.waiters.drain(..) {
-            let _ = waiter.send(Err(SchedulerStopped));
+            let _ = waiter.send(Err(SchedulerStopped::Unavailable));
         }
     }
 
@@ -1146,6 +1238,7 @@ impl Actor {
         self.normal_finished.store(false, Ordering::Release);
         self.tool_context_state = self.base_tool_context_state.clone();
         self.model_context_changed = false;
+        self.model_context_error = None;
         self.root = self.session_root.child_token();
         *self
             .root_cancel_slot
@@ -1155,7 +1248,7 @@ impl Actor {
         self.wake_waiters();
         #[cfg(test)]
         for (_, waiter) in self.completed_count_waiters.drain(..) {
-            let _ = waiter.send(Err(SchedulerStopped));
+            let _ = waiter.send(Err(SchedulerStopped::Unavailable));
         }
         removal
     }
@@ -1181,31 +1274,41 @@ fn apply_context_modifier(
 ) -> Result<ToolInvocationContextState, SchedulerStopped> {
     let context = state
         .downcast_arc::<ToolUseContext>()
-        .map_err(|_| SchedulerStopped)?;
+        .map_err(|_| SchedulerStopped::Unavailable)?;
     let updated = modifier
         .apply::<ToolUseContext>(context.as_ref().clone())
-        .map_err(|_| SchedulerStopped)?;
+        .map_err(|_| SchedulerStopped::Unavailable)?;
     Ok(ToolInvocationContextState::new(Arc::new(updated)))
 }
 
 fn apply_context_modifier_and_detect_model_change(
     state: &ToolInvocationContextState,
     modifier: ToolInvocationContextModifier,
+    resolver: Option<&ModelContextResolver>,
 ) -> Result<(ToolInvocationContextState, bool), SchedulerStopped> {
-    let previous_model = state
+    let previous = state
         .downcast_arc::<ToolUseContext>()
-        .map_err(|_| SchedulerStopped)?
-        .options
-        .main_loop_model
-        .clone();
+        .map_err(|_| SchedulerStopped::Unavailable)?;
     let updated = apply_context_modifier(state, modifier)?;
-    let updated_model = updated
+    let updated = updated
         .downcast_arc::<ToolUseContext>()
-        .map_err(|_| SchedulerStopped)?
-        .options
-        .main_loop_model
-        .clone();
-    Ok((updated, previous_model != updated_model))
+        .map_err(|_| SchedulerStopped::Unavailable)?;
+    let raw_changed = previous.options.main_loop_model != updated.options.main_loop_model
+        || previous.options.model_profile != updated.options.model_profile;
+    if !raw_changed {
+        return Ok((ToolInvocationContextState::new(updated), false));
+    }
+    let updated = match resolver {
+        Some(resolve) => resolve(previous.as_ref(), updated.as_ref().clone()).map_err(|error| {
+            tracing::warn!(%error, "tool model preference rejected before context publication");
+            SchedulerStopped::ModelResolution(error)
+        })?,
+        None => updated.as_ref().clone(),
+    };
+    Ok((
+        ToolInvocationContextState::new(Arc::new(updated)),
+        raw_changed,
+    ))
 }
 
 #[cfg(test)]
@@ -1332,6 +1435,7 @@ mod tests {
                 native_query_depth: 0,
                 query_history: Vec::new(),
                 assistant_message: ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: assistant_id,
                     content: vec![ContentBlock::ToolUse {
                         id,
@@ -1418,6 +1522,7 @@ mod tests {
             None,
             scheduler_session_root,
             publication_lock,
+            None,
         );
         bounded(scheduler.add(owned_call("toolu-normal-close")))
             .await
@@ -1477,8 +1582,15 @@ mod tests {
             })
         });
         let (session_root, publication_lock) = test_session_generation();
-        let mut scheduler =
-            ToolScheduler::spawn(dispatch, 1, None, None, session_root, publication_lock);
+        let mut scheduler = ToolScheduler::spawn(
+            dispatch,
+            1,
+            None,
+            None,
+            session_root,
+            publication_lock,
+            None,
+        );
         bounded(scheduler.add(owned_call(id.as_str())))
             .await
             .unwrap();
@@ -1532,8 +1644,15 @@ mod tests {
             })
         });
         let (session_root, publication_lock) = test_session_generation();
-        let mut scheduler =
-            ToolScheduler::spawn(dispatch, 1, None, None, session_root, publication_lock);
+        let mut scheduler = ToolScheduler::spawn(
+            dispatch,
+            1,
+            None,
+            None,
+            session_root,
+            publication_lock,
+            None,
+        );
         bounded(scheduler.add(owned_call(first.as_str())))
             .await
             .unwrap();
@@ -1577,7 +1696,7 @@ mod tests {
     }
 
     fn seed_context_state() -> ToolInvocationContextState {
-        ToolInvocationContextState::new(Arc::new(ToolUseContext::model_seed("seed".into())))
+        ToolInvocationContextState::new(Arc::new(ToolUseContext::model_seed("seed".into(), None)))
     }
 
     fn context_model(state: &ToolInvocationContextState) -> String {
@@ -1633,8 +1752,15 @@ mod tests {
             })
         });
         let (session_root, publication_lock) = test_session_generation();
-        let mut scheduler =
-            ToolScheduler::spawn(dispatch, 2, None, None, session_root, publication_lock);
+        let mut scheduler = ToolScheduler::spawn(
+            dispatch,
+            2,
+            None,
+            None,
+            session_root,
+            publication_lock,
+            None,
+        );
         bounded(scheduler.add(call_with_safety(first.as_str(), false)))
             .await
             .unwrap();
@@ -1679,8 +1805,15 @@ mod tests {
             })
         });
         let (session_root, publication_lock) = test_session_generation();
-        let mut scheduler =
-            ToolScheduler::spawn(dispatch, 2, None, None, session_root, publication_lock);
+        let mut scheduler = ToolScheduler::spawn(
+            dispatch,
+            2,
+            None,
+            None,
+            session_root,
+            publication_lock,
+            None,
+        );
         bounded(scheduler.add(call_with_safety(first.as_str(), true)))
             .await
             .unwrap();
@@ -1743,8 +1876,15 @@ mod tests {
             })
         });
         let (session_root, publication_lock) = test_session_generation();
-        let mut scheduler =
-            ToolScheduler::spawn(dispatch, 2, None, None, session_root, publication_lock);
+        let mut scheduler = ToolScheduler::spawn(
+            dispatch,
+            2,
+            None,
+            None,
+            session_root,
+            publication_lock,
+            None,
+        );
         bounded(scheduler.add(call_with_safety(first.as_str(), true)))
             .await
             .unwrap();
@@ -1816,6 +1956,7 @@ mod tests {
             Some(seed_context_state()),
             session_root,
             publication_lock,
+            None,
         );
         let first = ToolUseId::from("toolu-layer-a");
         let second = ToolUseId::from("toolu-layer-b");
@@ -1891,6 +2032,7 @@ mod tests {
             Some(seed_context_state()),
             session_root,
             publication_lock,
+            None,
         );
         let first = ToolUseId::from("toolu-safe-chain-a");
         let second = ToolUseId::from("toolu-safe-chain-b");
@@ -1952,6 +2094,7 @@ mod tests {
             Some(seed_context_state()),
             session_root,
             publication_lock,
+            None,
         );
         let id = ToolUseId::from("toolu-final-only-a");
         bounded(scheduler.add(call_with_safety(id.as_str(), true)))
@@ -1975,6 +2118,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_model_modifier_keeps_ready_results_and_reports_route_reason() {
+        for concurrency_safe in [false, true] {
+            let resolver: ModelContextResolver =
+                Arc::new(|_, _| Err("model missing is unavailable in provider-b".into()));
+            let dispatch: ToolDispatch = Arc::new(move |call| {
+                Box::pin(async move {
+                    let modifier =
+                        ToolInvocationContextModifier::new::<ToolUseContext, _>(|mut context| {
+                            context.options.main_loop_model = "missing".into();
+                            context.options.model_profile = Some("provider-b".into());
+                            context
+                        });
+                    payload_with_modifiers(&call.id, vec![modifier])
+                })
+            });
+            let (session_root, publication_lock) = test_session_generation();
+            let mut scheduler = ToolScheduler::spawn(
+                dispatch,
+                1,
+                None,
+                Some(seed_context_state()),
+                session_root,
+                publication_lock,
+                Some(resolver),
+            );
+            bounded(scheduler.add(call_with_safety("toolu-invalid-model", concurrency_safe)))
+                .await
+                .unwrap();
+            bounded(scheduler.wait_for_completed_count(1))
+                .await
+                .unwrap();
+            let ready = bounded(scheduler.take_ready()).await.unwrap();
+            assert_eq!(
+                ready.len(),
+                1,
+                "route rejection cannot drop the tool result"
+            );
+            assert_eq!(
+                context_model(ready[0].context_state.as_ref().unwrap()),
+                "seed"
+            );
+            if !concurrency_safe {
+                let error = ready[0].outcome.as_ref().err().unwrap().to_string();
+                assert!(error.contains("missing"));
+                assert!(error.contains("provider-b"));
+            }
+            let error = bounded(scheduler.finish_normal()).await.unwrap_err();
+            assert!(matches!(error, SchedulerStopped::ModelResolution(reason)
+                if reason.contains("missing") && reason.contains("provider-b")));
+        }
+    }
+
+    #[tokio::test]
+    async fn alias_reselection_is_projected_even_when_canonical_pair_matches_frozen_context() {
+        let initial = ToolInvocationContextState::new(Arc::new(ToolUseContext::model_seed(
+            "shared-model".into(),
+            Some("provider-a".into()),
+        )));
+        let resolver: ModelContextResolver = Arc::new(|previous, mut updated| {
+            assert_eq!(updated.options.main_loop_model, "balanced");
+            updated.options.main_loop_model = previous.options.main_loop_model.clone();
+            updated.options.model_profile = previous.options.model_profile.clone();
+            Ok(updated)
+        });
+        let dispatch: ToolDispatch = Arc::new(move |call| {
+            Box::pin(async move {
+                let modifier =
+                    ToolInvocationContextModifier::new::<ToolUseContext, _>(|mut context| {
+                        context.options.main_loop_model = "balanced".into();
+                        context.options.model_profile = None;
+                        context
+                    });
+                payload_with_modifiers(&call.id, vec![modifier])
+            })
+        });
+        let (session_root, publication_lock) = test_session_generation();
+        let mut scheduler = ToolScheduler::spawn(
+            dispatch,
+            1,
+            None,
+            Some(initial),
+            session_root,
+            publication_lock,
+            Some(resolver),
+        );
+        bounded(scheduler.add(call_with_safety("toolu-reselect", false)))
+            .await
+            .unwrap();
+        bounded(scheduler.wait_for_completed_count(1))
+            .await
+            .unwrap();
+        assert_eq!(bounded(scheduler.take_ready()).await.unwrap().len(), 1);
+        let projected = bounded(scheduler.finish_normal()).await.unwrap().unwrap();
+        let context = projected.downcast_arc::<ToolUseContext>().unwrap();
+        assert_eq!(context.options.main_loop_model, "shared-model");
+        assert_eq!(context.options.model_profile.as_deref(), Some("provider-a"));
+    }
+
+    #[tokio::test]
+    async fn provider_only_modifier_is_resolved_and_published_at_finish() {
+        let resolutions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&resolutions);
+        let resolver: ModelContextResolver = Arc::new(move |previous, updated| {
+            assert_eq!(previous.options.main_loop_model, "shared-model");
+            assert_eq!(
+                previous.options.model_profile.as_deref(),
+                Some("provider-a")
+            );
+            assert_eq!(updated.options.main_loop_model, "shared-model");
+            assert_eq!(updated.options.model_profile.as_deref(), Some("provider-b"));
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(updated)
+        });
+        let dispatch: ToolDispatch = Arc::new(move |call| {
+            Box::pin(async move {
+                let modifier =
+                    ToolInvocationContextModifier::new::<ToolUseContext, _>(|mut context| {
+                        context.options.model_profile = Some("provider-b".into());
+                        context
+                    });
+                payload_with_modifiers(&call.id, vec![modifier])
+            })
+        });
+        let initial = ToolInvocationContextState::new(Arc::new(ToolUseContext::model_seed(
+            "shared-model".into(),
+            Some("provider-a".into()),
+        )));
+        let (session_root, publication_lock) = test_session_generation();
+        let mut scheduler = ToolScheduler::spawn(
+            dispatch,
+            1,
+            None,
+            Some(initial),
+            session_root,
+            publication_lock,
+            Some(resolver),
+        );
+        bounded(scheduler.add(call_with_safety("toolu-profile-switch", false)))
+            .await
+            .unwrap();
+        bounded(scheduler.wait_for_completed_count(1))
+            .await
+            .unwrap();
+        let ready = bounded(scheduler.take_ready()).await.unwrap();
+        assert_eq!(ready.len(), 1);
+        let final_state = bounded(scheduler.finish_normal()).await.unwrap().unwrap();
+        let context = final_state.downcast_arc::<ToolUseContext>().unwrap();
+        assert_eq!(context.options.main_loop_model, "shared-model");
+        assert_eq!(context.options.model_profile.as_deref(), Some("provider-b"));
+        assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn safe_context_layers_apply_once_in_registration_order_at_barrier() {
         let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<ToolUseId>();
         let release = Arc::new(Mutex::new(
@@ -1988,7 +2284,7 @@ mod tests {
             release.lock().unwrap().insert(id.clone(), rx);
             release_senders.insert(id.clone(), tx);
         }
-        let mut shared_context = ToolUseContext::model_seed("seed".into());
+        let mut shared_context = ToolUseContext::model_seed("seed".into(), None);
         let request_history = vec![lingxi_core::types::ConversationMessage::user(
             MessageId::new(),
             "frozen shared request history".into(),
@@ -2073,6 +2369,7 @@ mod tests {
             Some(ToolInvocationContextState::new(Arc::new(shared_context))),
             session_root,
             publication_lock,
+            None,
         );
         bounded(scheduler.add(call_with_safety(first.as_str(), true)))
             .await
@@ -2148,6 +2445,7 @@ mod tests {
             Some(seed_context_state()),
             session_root,
             publication_lock,
+            None,
         );
         let first = ToolUseId::from("toolu-interrupt-a");
         let second = ToolUseId::from("toolu-interrupt-b");
@@ -2226,6 +2524,7 @@ mod tests {
             None,
             session_root,
             publication_lock,
+            None,
         );
         bounded(scheduler.add(call_with_safety(first.as_str(), false)))
             .await
@@ -2288,8 +2587,15 @@ mod tests {
             })
         });
         let (session_root, publication_lock) = test_session_generation();
-        let mut scheduler =
-            ToolScheduler::spawn(dispatch, 1, None, None, session_root, publication_lock);
+        let mut scheduler = ToolScheduler::spawn(
+            dispatch,
+            1,
+            None,
+            None,
+            session_root,
+            publication_lock,
+            None,
+        );
         let first = ToolUseId::from("toolu-error-a");
         let second = ToolUseId::from("toolu-error-b");
         bounded(scheduler.add(call_with_safety(first.as_str(), false)))
@@ -2369,6 +2675,7 @@ mod tests {
             Some(seed_context_state()),
             session_root,
             publication_lock,
+            None,
         );
         let first = ToolUseId::from("toolu-reset-a");
         let queued = ToolUseId::from("toolu-reset-b");
@@ -2438,6 +2745,7 @@ mod tests {
             Some(seed_context_state()),
             session_root,
             publication_lock,
+            None,
         );
         let old = ToolUseId::from("toolu-completed-before-reset");
         bounded(scheduler.add(call_with_safety(old.as_str(), false)))
@@ -2497,11 +2805,11 @@ mod tests {
         let modifier = ToolInvocationContextModifier::new::<ToolUseContext, _>(tool_api_modifier);
         let shared = modifier.clone();
         assert!(modifier
-            .apply(ToolUseContext::model_seed("seed".into()))
+            .apply(ToolUseContext::model_seed("seed".into(), None))
             .is_ok());
         assert_eq!(applications.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert!(matches!(
-            shared.apply(ToolUseContext::model_seed("seed".into())),
+            shared.apply(ToolUseContext::model_seed("seed".into(), None)),
             Err(
                 lingxi_core::host::tool_invoker::ToolInvocationContextModifierError::AlreadyApplied
             )

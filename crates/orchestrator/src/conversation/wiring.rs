@@ -128,6 +128,7 @@ impl ConversationOrchestrator {
             ide_handle: None,
             fork_spawner: None,
             fork_budget: None,
+            hook_agent_inheritance: None,
             bg_session_forker: None,
             repo_root_reloader: None,
             recap_runner: None,
@@ -711,12 +712,7 @@ impl ConversationOrchestrator {
     }
 
     fn coordinator_simple_mode() -> bool {
-        lingxi_core::host::env::is_env_truthy(
-            std::env::var("LINGXI_SIMPLE")
-                .or_else(|_| std::env::var("CLAUDE_CODE_SIMPLE"))
-                .ok()
-                .as_deref(),
-        )
+        lingxi_core::host::env::is_env_truthy(std::env::var(branding::SIMPLE_ENV).ok().as_deref())
     }
 
     #[cfg(test)]
@@ -1125,6 +1121,16 @@ impl ConversationOrchestrator {
         self
     }
 
+    /// Attach the owning session's enforced tool and shared budget handles for Agent hooks.
+    #[must_use]
+    pub fn with_hook_agent_inheritance(
+        mut self,
+        inheritance: lingxi_core::host::SubagentInheritance,
+    ) -> Self {
+        self.hook_agent_inheritance = Some(inheritance);
+        self
+    }
+
     /// Attach the budget enforcer a `/fork`-spawned background agent inherits
     /// (`SubagentInheritance::budget`). Pair with [`Self::with_fork_spawner`].
     #[must_use]
@@ -1303,13 +1309,21 @@ impl ConversationOrchestrator {
         Ok(())
     }
 
-    /// Return all registered tool names (alphabetical, same order as the
-    /// system-prompt listing). Used by stream-json `system/init` to populate
-    /// the `tools` array — mirrors `self.tools.all_names()` but through a
-    /// public seam that does not expose the `ToolRegistry` internals.
+    /// Return registered tool names in registry partition order, before the
+    /// model-visible enablement and permission filters.
     #[must_use]
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.all_names()
+    }
+
+    /// Names from the same ordered, filtered catalog used by model requests.
+    /// Headless initialization must not advertise disabled registered tools.
+    pub async fn advertised_tool_names(&self) -> Vec<String> {
+        self.filtered_available_tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name().to_owned())
+            .collect()
     }
 
     /// The session's DEFAULT main-loop model — the boot-configured model the

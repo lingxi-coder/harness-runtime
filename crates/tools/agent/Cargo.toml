@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+branding.workspace = true
 core = { path = "../../core" }
 tool-api = { path = "../../tool-api" }
 permission = { path = "../../permission" }
@@ -31,6 +32,7 @@ tracing = { workspace = true }
 agent-test-support = []
 
 [dev-dependencies]
+boon = "0.6"
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 core = { path = "../../core" }
 tempfile = "3"

@@ -292,8 +292,9 @@ mod main_transcript_identity_bootstrap_tests {
         );
         let writer = session::jsonl::JsonlWriter::new(transcript_path.clone(), filesystem);
         let sidecar_path = transcript_path.with_file_name(format!(
-            "{}.lingxi-message-identities",
-            transcript_path.file_name().unwrap().to_string_lossy()
+            "{}{}",
+            transcript_path.file_name().unwrap().to_string_lossy(),
+            branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX
         ));
 
         assert!(
@@ -340,6 +341,9 @@ pub async fn build_with_credential_stack(
     let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
         let mut seed = cfg.clone();
         seed.session_writer_lease = None;
+        seed.session_transcript_path = None;
+        seed.session_resume_snapshot = None;
+        seed.session_resume_cost = None;
         (seed, permission_sink.clone())
     });
     // Consume the construction-only writer claim before any config-derived
@@ -413,11 +417,13 @@ pub async fn build_with_credential_stack(
         cwd.clone(),
         main_session_uuid.clone(),
     ));
-    let main_transcript_path = orchestrator::transcript_paths::main_transcript_path(
-        &cfg.lingxi_home,
-        &cwd.to_string_lossy(),
-        &main_session_uuid,
-    );
+    let main_transcript_path = cfg.session_transcript_path.clone().unwrap_or_else(|| {
+        orchestrator::transcript_paths::main_transcript_path(
+            &cfg.lingxi_home,
+            &cwd.to_string_lossy(),
+            &main_session_uuid,
+        )
+    });
     // Create the one ordinary transcript writer before durable session setup.
     // Production later decorates this same writer with the coordinator's
     // durable transaction; legacy/no-persistence hosts keep compatibility.
@@ -430,14 +436,18 @@ pub async fn build_with_credential_stack(
     // tools and turn-start snapshotter share this in-memory instance. Leaving
     // it empty on resume caused the next edit to restart at version 1 and lose
     // the previously tracked-file set.
-    if let Ok(content) = std::fs::read_to_string(&main_transcript_path) {
+    if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
+        // A fork has a different backup-directory owner. Do not attach source
+        // checkpoint names to that empty directory without a backup transfer.
+        if snapshot.source_session_id == main_session_uuid {
+            file_history.restore_from_records(session::file_history::parse_snapshot_records(
+                &snapshot.content,
+            ));
+        }
+    } else if let Ok(content) = std::fs::read_to_string(&main_transcript_path) {
         file_history.restore_from_records(session::file_history::parse_snapshot_records(&content));
     }
-    let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
-        &cfg.lingxi_home,
-        &cwd.to_string_lossy(),
-        &main_session_uuid,
-    );
+    let main_subagents_dir = main_transcript_path.with_extension("").join("subagents");
 
     // The credential/provider half of boot lives in `resolve_llm_stack` so the
     // headless one-shot commands share it byte-for-byte. Everything below this
@@ -518,32 +528,48 @@ pub async fn build_with_credential_stack(
     // telemetry lands on the same sink set — 1:1 with claude-code, where
     // `logEvent` is a single global pipeline.
     let analytics_bus = Arc::new(telemetry::AnalyticsBus::new());
-    // metadata.user_id (getAPIMetadata, claude.ts:519): the JSON-string identity
-    // `{...extra, device_id, account_uuid, session_id}`. `device_id` =
-    // getOrCreateUserID (persisted, stable per install); `session_id` = the main
-    // session id (claude-code's getSessionId()); `account_uuid` = "" — the OAuth
-    // profile carrying the account UUID is fetched asynchronously in the
-    // background and is not available at construction, so this is the faithful
-    // `getOauthAccountInfo()?.accountUuid ?? ''` fallback (the value is per-account
-    // and never byte-matches claude-code regardless).
-    let request_metadata = llm_runtime::RequestMetadata {
-        user_id: llm_runtime::ApiService::build_api_metadata_user_id(
-            &migrations::global_config::get_or_create_user_id(),
-            "",
-            &main_session_uuid,
-            cfg.parent_session_id.as_deref(),
-        ),
+    // Headless embeddings provide request state explicitly; no install-wide
+    // identity or process environment is read on that path.
+    let explicit_headless = cfg.composition == Some(super::DesktopSessionComposition::HeadlessCli);
+    let request_metadata = if let Some(identity) = &cfg.request_identity {
+        Some(llm_runtime::RequestMetadata {
+            user_id: llm_runtime::ApiService::build_api_metadata_user_id_with_extra(
+                &identity.device_id,
+                &identity.account_uuid,
+                &main_session_uuid,
+                cfg.parent_session_id.as_deref(),
+                identity.extra_metadata.clone(),
+            ),
+        })
+    } else if explicit_headless {
+        None
+    } else {
+        Some(llm_runtime::RequestMetadata {
+            user_id: llm_runtime::ApiService::build_api_metadata_user_id(
+                &migrations::global_config::get_or_create_user_id(),
+                "",
+                &main_session_uuid,
+                cfg.parent_session_id.as_deref(),
+            ),
+        })
     };
+    let user_agent_environment = cfg.user_agent_environment.clone().unwrap_or_else(|| {
+        if explicit_headless {
+            UserAgentEnv::default()
+        } else {
+            UserAgentEnv::from_process_env()
+        }
+    });
     // Build the provider-neutral drive service (the retry/rate-limit/betas loop),
     // then wrap it in the thin `ProviderApiAdapter` that impls the orchestrator +
     // agent seams. The `with_*` builders live on `ApiService`.
     let session_composition = cfg.session_composition();
     let interactive_session = session_composition.is_interactive_session();
-    let service_built = llm_runtime::ApiService::new_with_routing(
+    let mut service_built = llm_runtime::ApiService::new_with_routing(
         llm_runtime,
         llm_transport.clone(),
         subscriber_state,
-        UserAgentEnv::from_process_env(),
+        user_agent_environment,
         env!("CARGO_PKG_VERSION"),
         Some(analytics_bus.clone()),
         cfg.fallback_model.clone(),
@@ -570,7 +596,6 @@ pub async fn build_with_credential_stack(
     .with_subscription(subscription.clone())
     .with_interactive_session(interactive_session)
     .with_custom_cli_betas(cfg.custom_betas.clone())
-    .with_request_metadata(request_metadata)
     // Boot SESSION thinking config, resolved host-side from MAX_THINKING_TOKENS
     // + --max-thinking-tokens + alwaysThinkingEnabled (claude-code `qIe()`+`wn`).
     // Default `Adaptive` keeps every existing session byte-identical; a fixed
@@ -598,15 +623,13 @@ pub async fn build_with_credential_stack(
     .with_retry_reporter(std::sync::Arc::new(OutputRetryReporter {
         output: output.clone(),
     }));
-    let service_built = if let Some(metadata) = &cfg.anthropic_client_metadata {
+    if let Some(metadata) = &cfg.anthropic_client_metadata {
         let mut metadata = metadata.clone();
         metadata.session_id = Some(main_session_uuid.clone());
-        service_built
+        service_built = service_built
             .with_anthropic_client_metadata(metadata)
             .with_native_anthropic_endpoint(cfg.api_base.clone())
-    } else {
-        service_built
-    };
+    }
     // M2 (2.1.198): attach the AWS auth-refresh driver (`ZBd`/`t2d`) when an
     // `awsAuthRefresh` / `awsCredentialExport` command is configured. Resolves
     // the merged settings value + its Project provenance (binary `mqe`: a
@@ -615,6 +638,46 @@ pub async fn build_with_credential_stack(
     // the global config). With the driver attached, a Bedrock 401/403
     // (expired STS) runs the refresh script and retries instead of
     // dead-ending — bounded at Ygf=2 inside the drive loops.
+    if let Some(metadata) = request_metadata {
+        service_built = service_built.with_request_metadata(metadata);
+    }
+    if let Some(version) = &cfg.anthropic_compatible_version {
+        service_built = service_built.with_anthropic_compatible_version(version.clone());
+    }
+    if let Some(policy) = &cfg.native_thinking_display {
+        service_built = service_built.with_native_thinking_display(policy.clone());
+    }
+    if cfg.composition == Some(super::DesktopSessionComposition::HeadlessCli) {
+        let ua = cfg.user_agent_environment.as_ref();
+        let lookup = cfg.oauth_environment_lookup.as_ref();
+        let attribution_enabled = !lookup
+            .and_then(|lookup| lookup.get("CLAUDE_CODE_ATTRIBUTION_HEADER"))
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+            });
+        service_built = service_built.with_native_system_prefix(
+            lingxi_llm_client::providers::anthropic::system_prompt::NativeSystemPrefix {
+                compatibility_version: cfg
+                    .anthropic_compatible_version
+                    .clone()
+                    .unwrap_or_else(|| crate::headless::CLAUDE_CODE_REFERENCE_VERSION.into()),
+                entrypoint: ua
+                    .and_then(|ua| ua.entrypoint.clone())
+                    .unwrap_or_else(|| "unknown".into()),
+                host_identity:
+                    lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
+                        orchestrator::prompt::locked_templates::HEADER,
+                    ),
+                attribution_enabled,
+                assume_first_party_base_url: lookup
+                    .and_then(|lookup| lookup.get("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL"))
+                    .is_some_and(|value| !value.is_empty()),
+            },
+        );
+    }
     let service_built = match aws_auth_refresher(&cfg, &cwd, analytics_bus.clone()) {
         Some(refresher) => service_built.with_aws_auth(refresher),
         None => service_built,
@@ -732,15 +795,8 @@ pub async fn build_with_credential_stack(
     if let Some(max_turns) = cfg.max_turns {
         orch_cfg.max_turns = max_turns;
     }
-    // Structured output forces `tool_choice` to `StructuredOutput`, which compels
-    // the model to call it on EVERY assistant turn — so cap the turn at a SINGLE
-    // model call: the model calls the tool once (capturing the result), then the
-    // cap ends the turn. The print path reads the captured slot regardless of the
-    // resulting MaxTurns stop and drives its own validate/retry loop. (Overrides
-    // any `--max-turns` here; structured output is inherently one-shot per turn.)
-    if cfg.json_schema.is_some() {
-        orch_cfg.max_turns = 1;
-    }
+    orch_cfg.max_structured_output_retries = cfg.max_structured_output_retries;
+    orch_cfg.structured_output_enabled = cfg.json_schema.is_some();
     orch_cfg.max_budget_nano_usd = cfg.max_budget_usd.map(|usd| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let nano = (usd.max(0.0) * 1_000_000_000.0) as u64;
@@ -988,6 +1044,9 @@ pub async fn build_with_credential_stack(
         let initialization: Result<_, cost::CostPersistError> = async {
             coordinator.start().await?;
             let _initial_hydration = coordinator.hydrate(main_session_id).await?;
+            if let Some(opening) = cfg.session_resume_cost.as_ref() {
+                coordinator.import_session_opening_state(opening).await?;
+            }
             coordinator
                 .import_legacy_opening_balance(
                     legacy_opening_balance
@@ -1557,7 +1616,9 @@ pub async fn build_with_credential_stack(
     // prints nothing.
     for w in mcp::config_diagnostics::collect_all_mcp_config_warnings(&cwd, Some(&global_mcp_path))
     {
-        eprintln!("{}", w.to_stderr_line());
+        if let Some(diagnostics) = &cfg.diagnostics {
+            diagnostics.stderr_line(&w.to_stderr_line()).await;
+        }
     }
 
     // (5.3) Agent catalog — load from project + user agents/. Project wins on
@@ -1602,7 +1663,8 @@ pub async fn build_with_credential_stack(
             &mut agents,
             cfg.cli_agents_json.as_deref(),
             cfg.customization_gates.safe_mode,
-        );
+        )
+        .map_err(BuildError::InvalidAgents)?;
     }
     // `Z$`'s TOP tier: `[built-in, plugin, userSettings, projectSettings,
     // flagSettings, policySettings]` applied later-wins, so an org-provisioned
@@ -1638,6 +1700,22 @@ pub async fn build_with_credential_stack(
         bool,
     ) = match cfg.cli_agent.clone() {
         Some(w) => (Some(w), None, false),
+        None if cfg.session_resume_snapshot.is_some() => {
+            let snapshot = cfg
+                .session_resume_snapshot
+                .as_ref()
+                .expect("checked resume snapshot");
+            let loaded = session::jsonl::route_lines(&snapshot.content);
+            let (persisted, definition) = session::jsonl::loader::agent_resume_state_from_loaded(
+                &loaded,
+                &snapshot.source_session_id,
+            );
+            (
+                persisted,
+                definition,
+                snapshot.source_session_id == main_session_uuid,
+            )
+        }
         None if cfg.session_id_override.is_some() => {
             let snapshot_fs = Arc::new(DesktopFileSystem::new(cwd.clone()))
                 as Arc<dyn lingxi_core::host::FileSystem>;
@@ -1711,15 +1789,19 @@ pub async fn build_with_credential_stack(
         // `Warning: agent frontmatter MCP ${Tt(len,"server")} blocked by
         // enterprise policy: ${names.join(", ")}` — `Tt` pluralizes WITHOUT a
         // count.
-        eprintln!(
-            "Warning: agent frontmatter MCP {} blocked by enterprise policy: {}",
-            if agent_mcp_blocked.len() == 1 {
-                "server"
-            } else {
-                "servers"
-            },
-            agent_mcp_blocked.join(", ")
-        );
+        if let Some(diagnostics) = &cfg.diagnostics {
+            diagnostics
+                .stderr_line(&format!(
+                    "Warning: agent frontmatter MCP {} blocked by enterprise policy: {}",
+                    if agent_mcp_blocked.len() == 1 {
+                        "server"
+                    } else {
+                        "servers"
+                    },
+                    agent_mcp_blocked.join(", ")
+                ))
+                .await;
+        }
     }
     // Apply the immutable project policy snapshot once more after the agent
     // merge. The earlier pass protects discovered/CLI candidates; this final
@@ -1736,6 +1818,14 @@ pub async fn build_with_credential_stack(
     // `WindowsMcpTransport`, whose remote IDE connections expose the same
     // shared JSON-RPC handle to the registry.
     let mcp_transport = new_desktop_mcp_transport();
+    let mcp_services = super::DesktopMcpServices {
+        transport: mcp_transport.clone() as Arc<dyn McpTransport>,
+        raw_connections: mcp_transport as Arc<dyn mcp::RawConnectionProvider>,
+    };
+    let mcp_services = match cfg.mcp_services_factory.as_ref() {
+        Some(factory) => factory(mcp_services),
+        None => mcp_services,
+    };
     // The registry is BUILT here but `connect_all` is deferred to (5.26),
     // after the real `hooks` executor exists: the elicitation hook dispatcher
     // (`OrchestratorHookDispatcher`) must be wired via `with_hook_dispatcher`
@@ -2324,6 +2414,7 @@ pub async fn build_with_credential_stack(
     // own model), and the session does not exist yet. `attach` below.
     let hook_prompt_runner = Arc::new(orchestrator::ApiClientHookPromptRunner::new(
         api_client.clone(),
+        model_resolution_context_provider.clone(),
     ));
     let hook_mcp_invoker = DesktopHookMcpInvoker::default();
     let hooks = Arc::new(
@@ -2483,7 +2574,15 @@ pub async fn build_with_credential_stack(
     // Tokio's broadcast receiver retains those early notifications until the
     // refresh driver below is installed.
     let mut mcp_catalog_changes = mcp_registry.subscribe_catalog_changes();
-    mcp_registry.connect_all(mcp_configs).await;
+    let (deferred_sdk_mcp_configs, startup_mcp_configs): (Vec<_>, Vec<_>) =
+        mcp_configs.into_iter().partition(|server| {
+            cfg.defer_session_start
+                && matches!(
+                    &server.spec,
+                    lingxi_core::host::McpTransportSpec::SdkControl { .. }
+                )
+        });
+    mcp_registry.connect_all(startup_mcp_configs).await;
     // Clone handles the runtime `/add-dir` live effect needs (the same registry
     // Arc is moved into the orchestrator builder below via `with_mcp_registry`).
     let runtime_mcp_registry = mcp_registry.clone();
@@ -2502,12 +2601,9 @@ pub async fn build_with_credential_stack(
     //       mid-session model switch moves the gate with it. This expression is
     //       only the seed for the model the session boots on.
     let cache_safe_slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
-    let side_query_client: Arc<dyn sidequery::SideQueryClient> =
-        Arc::new(sidequery::ProviderSideQueryClient::new(
-            cfg.api_key.clone(),
-            Some(cfg.api_base.clone()),
-            api_service.transport(),
-        ));
+    let side_query_client: Arc<dyn sidequery::SideQueryClient> = Arc::new(
+        sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
+    );
     let compaction_side_query: Arc<dyn sidequery::SideQueryClient> = Arc::new(
         sidequery::ProviderSideQueryClient::from_service(api_service.clone()),
     );
@@ -3513,13 +3609,20 @@ pub async fn build_with_credential_stack(
     if cfg.session_id_override.is_some() {
         let restore_fs: Arc<dyn lingxi_core::host::FileSystem> =
             Arc::new(DesktopFileSystem::new(cwd.clone()));
-        if let Some(payload) = session::jsonl::loader::read_worktree_state(
-            &main_transcript_path,
-            restore_fs,
-            &main_session_uuid,
-        )
-        .await
-        {
+        let worktree_state = if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
+            session::jsonl::route_lines(&snapshot.content)
+                .worktree_states
+                .get(&snapshot.source_session_id)
+                .cloned()
+        } else {
+            session::jsonl::loader::read_worktree_state(
+                &main_transcript_path,
+                restore_fs,
+                &main_session_uuid,
+            )
+            .await
+        };
+        if let Some(payload) = worktree_state {
             if let Some(restored) = tool_api::WorktreeSession::from_persisted_json(&payload) {
                 if restored.worktree_path.is_dir() {
                     // Move the session into the worktree exactly as EnterWorktree's
@@ -3748,7 +3851,13 @@ pub async fn build_with_credential_stack(
     // (Task 4) `cfg.tmux_launch` additionally creates a detached tmux session
     // for that worktree — independently inert when `None` (see the function
     // doc); a tmux failure is logged, not a hard boot failure.
-    apply_worktree_launch(&cfg.worktree_launch, &cfg.tmux_launch, &tool_ctx).await?;
+    apply_worktree_launch(
+        &cfg.worktree_launch,
+        &cfg.tmux_launch,
+        &tool_ctx,
+        cfg.diagnostics.as_deref(),
+    )
+    .await?;
     let coordinator_wiring = (lingxi_core::host::env::agent_swarms_enabled()
         || cfg.session_started_as_coordinator)
         .then(|| CoordinatorWiring {
@@ -4061,7 +4170,7 @@ pub async fn build_with_credential_stack(
                 .map_err(BuildError::StructuredOutputSchema)?;
             let slot: orchestrator::structured_output::StructuredOutputSlot =
                 Arc::new(std::sync::Mutex::new(None));
-            tools_inner.register_builtin(Arc::new(
+            tools_inner.register_required_builtin(Arc::new(
                 orchestrator::structured_output::StructuredOutputTool::new(
                     schema.clone(),
                     compiled,
@@ -4094,7 +4203,16 @@ pub async fn build_with_credential_stack(
             slot
         });
 
-    if cfg.restricted {
+    if cfg.customization_gates.bare && !coordinator_mode.is_enabled() {
+        // Native SIMPLE builds the platform shell, Read and Edit catalog
+        // before applying --tools selection; dynamic MCP remains separate.
+        tools_inner.set_builtin_catalog(if cfg!(windows) {
+            &["Bash", "PowerShell", "Read", "Edit"]
+        } else {
+            &["Bash", "Read", "Edit"]
+        });
+    }
+    if cfg.restricted || cfg.restricted_tools.is_some() {
         tools_inner.set_restricted_builtin_filter(cfg.restricted_tools.as_deref());
     }
 
@@ -4351,15 +4469,17 @@ pub async fn build_with_credential_stack(
     // Capture the fully-wired restore inheritance before `tools` and `perms`
     // move into the orchestrator. The actual cold restore runs later, after the
     // live model/provider selection cell is published.
-    let parked_agent_restore_inheritance = cfg.session_id_override.is_some().then(|| {
-        lingxi_core::host::subagent_spawn::SubagentInheritance {
-            tool_invoker: Arc::new(
-                tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
-                    .with_gate(perms.clone()),
-            ),
-            budget: budget_enforcer.clone(),
-        }
-    });
+    let hook_agent_inheritance = lingxi_core::host::subagent_spawn::SubagentInheritance {
+        tool_invoker: Arc::new(
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
+                .with_gate(perms.clone()),
+        ),
+        budget: budget_enforcer.clone(),
+    };
+    let parked_agent_restore_inheritance = cfg
+        .session_id_override
+        .is_some()
+        .then(|| hook_agent_inheritance.clone());
 
     // Clone `cwd` for the settings watcher before it is moved into the
     // orchestrator constructor below.
@@ -4582,6 +4702,7 @@ pub async fn build_with_credential_stack(
         // inherits, so `fork_conversation` can dispatch a detached background agent.
         .with_fork_spawner(subagent_spawner.clone())
         .with_fork_budget(budget_enforcer.clone())
+        .with_hook_agent_inheritance(hook_agent_inheritance)
         // `/recap` engine seam: the SAME forked runner the summarizer uses (cloned
         // above), so recap replays the identical cache-safe prefix, read-only.
         .with_recap_runner(recap_runner)
@@ -4652,7 +4773,7 @@ pub async fn build_with_credential_stack(
     // (`X$()`) guards `CLAUDE_MEMORY_STORES`, a different feature. So the port
     // shipped auto-memory OFF for everyone on a mis-mapped flag.
     //
-    // Costs a Haiku-class side query per turn over `side_query_client`; turn it
+    // Memory selection follows the live session's model and profile; turn it
     // off with `autoMemoryEnabled:false` or `*_DISABLE_AUTO_MEMORY` / `*_SIMPLE`.
     let (memory_prefetch_on, session_memory_on) = resolve_memory_feature_gates(
         memory::auto_memory_enabled(
@@ -4734,19 +4855,21 @@ pub async fn build_with_credential_stack(
 
     // P1 session-memory standalone trigger (§6.5, gated, default OFF). When
     // `LINGXI_SESSION_MEMORY` is truthy, wire the threshold-gated extractor
-    // so durable notes are background-distilled (a Haiku-class fork) once the
+    // so durable notes are background-distilled on the live session route once the
     // Claude-compatible token/activity gates cross and written to
     // `<configHome>/agents/session-memory/<id>.md`, which the Session-tier memdir
-    // scan re-loads next session. The builder's legacy tool-count parameters
-    // stay zero so its 10k/5k/3 defaults apply. Unset/false ⇒ no handle ⇒ inert,
+    // scan re-loads next session. The current 10k/5k/3 config defaults apply.
+    // Unset/false ⇒ no handle ⇒ inert,
     // so the locked fixtures stay byte-identical.
     let orch_builder = match (session_memory_on, dirs::home_dir()) {
         (true, Some(home)) => {
             orch_builder.with_session_memory(orchestrator::prompt::build_session_memory_handle(
                 side_query_client.clone(),
-                "claude-haiku-4-5".to_string(),
-                0,
-                0,
+                default_model_id.clone(),
+                memory::session_memory::SessionMemoryConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
                 &home,
                 Arc::new(PosixRuntime::new()) as Arc<dyn lingxi_core::host::RuntimeSpawner>,
             ))
@@ -4965,13 +5088,6 @@ pub async fn build_with_credential_stack(
                 })
             })
         }));
-    }
-    // TPM-C (Task 5 step 2): seed the initial model_profile from a
-    // profile-qualified default_model.  SessionState::empty starts model_profile
-    // at None; this is a no-op when default_model is a bare id.
-    if let Some(profile) = default_model_profile.as_deref() {
-        orch.seed_initial_model_profile(&default_model_id, profile)
-            .await;
     }
     orch.spawn_startup_responses_websocket_prewarm();
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
@@ -5304,6 +5420,7 @@ pub async fn build_with_credential_stack(
             .with_task_registry(task_registry.clone()
                 as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>),
         );
+        let mut plugin_load_order = Vec::new();
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
             // Materialise COMMANDS + HOOKS + MCP + LSP + AGENTS. The plugin's
@@ -5318,7 +5435,7 @@ pub async fn build_with_credential_stack(
             // removed rather than taking the whole plugin down. Pinned by
             // `plugin_runtime_refresh_strips_agent_escalation_from_live_catalog`.
             match pm.enable(&id, manifest, dir).await {
-                Ok(()) => {}
+                Ok(()) => plugin_load_order.push(id),
                 Err(e) => tracing::warn!(
                     plugin = %plugin_name,
                     error = %e,
@@ -5328,6 +5445,7 @@ pub async fn build_with_credential_stack(
         }
         plugin_runtime = Some(Arc::new(PluginRuntime {
             manager: pm,
+            load_order: RwLock::new(plugin_load_order),
             analytics_bus: analytics_bus.clone(),
             plugins_dir,
             home: cfg.lingxi_home.clone(),
@@ -5719,7 +5837,9 @@ pub async fn build_with_credential_stack(
     //       aggregate, so a failing/malformed `InstructionsLoaded` hook never
     //       breaks boot, and it is a strict no-op when none is registered (the
     //       common case) or when no instruction files are present.
-    orch.fire_instructions_loaded().await;
+    if !cfg.defer_session_start {
+        orch.fire_instructions_loaded().await;
+    }
 
     // (7.2) ConfigChange lifecycle: start the settings watcher now that the
     //       orchestrator + hook registry are wired. claude-code watches the
@@ -5877,7 +5997,24 @@ pub async fn build_with_credential_stack(
         fusion_recovery_task: tokio::sync::Mutex::new(fusion_recovery_task),
     });
 
+    // Startup reports and async hooks may have completed while agent, command,
+    // and lifecycle wiring was still in progress. Publish their wake targets
+    // only after the selected main agent and SessionStart hooks are ready.
+    let deferred_startup = if cfg.defer_session_start {
+        Some(super::DeferredDesktopStartup {
+            async_hook_responses: async_hook_response_buffer,
+            sdk_mcp_configs: deferred_sdk_mcp_configs,
+            mcp_tool_context: mcp_tool_ctx,
+        })
+    } else {
+        super::activate_startup_producers(&orch, &async_hook_response_buffer).await;
+        None
+    };
+
     Ok(DesktopRuntime {
+        deferred_startup: tokio::sync::Mutex::new(deferred_startup),
+        fork_writer: cfg.session_persistence.then_some(main_agent_setting_writer),
+        pending_fork_history: tokio::sync::Mutex::new(None),
         catalog_registry,
         provider_region,
         orchestrator: orch,

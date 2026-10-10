@@ -741,6 +741,7 @@ impl OutputStream for MockOutputStream {
         model_text: &Utf16JsonProjection,
         result: &Utf16JsonProjection,
         denial_kind: &str,
+        _projection: Option<&lingxi_core::host::ToolResultProjection>,
     ) {
         self.denials
             .lock()

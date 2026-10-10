@@ -154,7 +154,7 @@ async fn autocompact_with_no_env_reports_auto_window() {
 #[tokio::test]
 async fn fork_without_prompt_copies_to_background_session() {
     // Ensure the default (agent-view enabled) surface regardless of ambient env.
-    std::env::remove_var("CLAUDE_CODE_DISABLE_AGENT_VIEW");
+    std::env::remove_var(branding::DISABLE_AGENT_VIEW_ENV);
     let (d, _h, root) = fresh("fork");
     assert_eq!(
         handled(&d, "/fork").await,

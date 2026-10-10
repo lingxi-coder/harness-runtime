@@ -7,10 +7,9 @@
 use crate::jsonl::durable_writer::{
     DurableTranscriptWriter, TranscriptAppendOutcome, TranscriptWriterError,
 };
-#[cfg(test)]
-use crate::jsonl::exact_json::{message_utf16_overrides, to_vec_with_overrides};
 use crate::jsonl::exact_json::{
-    native_message_bytes, parse_exact_json, stringify_projection, ExactJsonError, Utf16Overrides,
+    native_message_bytes, native_message_projection, parse_exact_json, stringify_projection,
+    to_vec_with_overrides, ExactJsonError, Utf16Overrides,
 };
 use crate::jsonl::message_identity::{self, IdentityLogStore, SessionMessageIdentitySnapshot};
 use crate::jsonl::re_append::{
@@ -24,7 +23,7 @@ use crate::jsonl::transcript_compact::{
 use lingxi_core::host::{FileSystem, FlockGuard, FsError};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::SessionId;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -44,9 +43,6 @@ pub enum WriterError {
     /// Exact native string encoding failed.
     #[error(transparent)]
     ExactJson(#[from] ExactJsonError),
-    /// Source-backed metadata JSON could not be materialized as JSON text.
-    #[error(transparent)]
-    Projection(#[from] lingxi_core::types::utf16_json::Utf16JsonProjectionError),
     /// Underlying filesystem error.
     #[error(transparent)]
     Fs(#[from] FsError),
@@ -56,6 +52,15 @@ pub enum WriterError {
     /// The production composition root's durable transcript transaction.
     #[error(transparent)]
     Durable(#[from] TranscriptWriterError),
+}
+
+fn queue_journal_error(error: WriterError) -> TranscriptWriterError {
+    match error {
+        WriterError::ExactJson(error) => TranscriptWriterError::ExactJson(error),
+        WriterError::Fs(error) => TranscriptWriterError::Fs(error),
+        WriterError::Serialize(error) => TranscriptWriterError::ExactJson(error.into()),
+        WriterError::Durable(error) => error,
+    }
 }
 
 /// SC-07 — stamp `sessionKind` on a chain entry that does not carry one.
@@ -101,6 +106,7 @@ struct DurableTranscriptTarget {
 /// (cross-process locking is delegated to the `FileSystem` flock impl when
 /// the orchestrator wants it; the spec only mandates in-process for M5-07).
 pub struct JsonlWriter {
+    queued_operations: std::sync::OnceLock<(SessionId, QueueOperationBuffer, PathBuf)>,
     path: PathBuf,
     active_path: Arc<std::sync::RwLock<PathBuf>>,
     fs: Arc<dyn FileSystem>,
@@ -153,6 +159,33 @@ pub struct JsonlWriter {
     /// reclaimed under 10 %, and is reset to the base every time a compact
     /// boundary is written (@296794903).
     compact_backstop_bytes: AtomicU64,
+}
+
+/// Producer-owned operations staged before a session writer is available.
+/// The writer drains this same FIFO under its normal append lease.
+pub type QueueOperationBuffer =
+    Arc<std::sync::Mutex<VecDeque<lingxi_core::types::utf16_json::Utf16JsonProjection>>>;
+
+struct QueueOperationDrain {
+    source: QueueOperationBuffer,
+    records: VecDeque<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    current: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+}
+impl Drop for QueueOperationDrain {
+    fn drop(&mut self) {
+        if let Some(current) = self.current.take() {
+            self.records.push_front(current);
+        }
+        if self.records.is_empty() {
+            return;
+        }
+        let mut pending = self
+            .source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.records.append(&mut pending);
+        *pending = std::mem::take(&mut self.records);
+    }
 }
 
 /// `eI(e)` — the compact-boundary predicate, applied to an outgoing chain entry.
@@ -430,6 +463,7 @@ impl JsonlWriter {
     #[must_use]
     pub fn new(path: PathBuf, fs: Arc<dyn FileSystem>) -> Self {
         Self {
+            queued_operations: std::sync::OnceLock::new(),
             active_path: Arc::new(std::sync::RwLock::new(path.clone())),
             path,
             fs,
@@ -455,6 +489,102 @@ impl JsonlWriter {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(durable_lock);
         self
+    }
+
+    pub fn bind_queue_operations(&self, session: SessionId, operations: QueueOperationBuffer) {
+        let owner = self
+            .queued_operations
+            .get_or_init(|| (session, operations.clone(), self.active_path()));
+        assert!(
+            owner.0 == session && Arc::ptr_eq(&owner.1, &operations),
+            "queue journal already belongs to another source"
+        );
+    }
+
+    pub async fn flush_queue_operations(&self) -> Result<(), WriterError> {
+        {
+            let _guard = self.lock.lock().await;
+            self.flush_queue_operations_locked().await?;
+        }
+        self.maybe_re_append_metadata().await;
+        Ok(())
+    }
+
+    async fn flush_queue_operations_locked(&self) -> Result<(), WriterError> {
+        let Some((session, source, initial_path)) = self.queued_operations.get() else {
+            return Ok(());
+        };
+        let mut operations = QueueOperationDrain {
+            records: std::mem::take(
+                &mut *source
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
+            source: source.clone(),
+            current: None,
+        };
+        let target = self
+            .session_targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session)
+            .cloned();
+        while let Some(operation) = operations.records.pop_front() {
+            operations.current = Some(operation.clone());
+            let operation_bytes = if target.is_some() {
+                Some(
+                    operation
+                        .to_json_string()
+                        .map_err(|error| {
+                            WriterError::ExactJson(ExactJsonError::InvalidOverride(
+                                error.to_string(),
+                            ))
+                        })?
+                        .len()
+                        + 1,
+                )
+            } else {
+                None
+            };
+            let result = if let Some(target) = &target {
+                self.append_json_durable_locked(
+                    target.path.clone(),
+                    target.writer.clone(),
+                    operation,
+                    None,
+                )
+                .await
+                .map_err(WriterError::Durable)
+            } else {
+                match operation.to_json_string() {
+                    Ok(mut line) => {
+                        if let Some(parent) = initial_path.parent() {
+                            tokio::fs::create_dir_all(parent)
+                                .await
+                                .map_err(|error| FsError::Io(error.to_string()))?;
+                        }
+                        let _identity_guard =
+                            self.append_identity_non_durable(initial_path, None).await?;
+                        line.push('\n');
+                        self.append_payload_to_path(initial_path, &line, true).await
+                    }
+                    Err(error) => Err(WriterError::ExactJson(ExactJsonError::InvalidOverride(
+                        error.to_string(),
+                    ))),
+                }
+            };
+            if let Err(error) = result {
+                return Err(error);
+            }
+            if let Some(bytes) = operation_bytes {
+                self.bytes_since_metadata_re_append
+                    .fetch_add(bytes, Ordering::Relaxed);
+                self.bytes_since_compact
+                    .fetch_add(bytes as u64, Ordering::Relaxed);
+            }
+            operations.current = None;
+        }
+        Ok(())
     }
 
     /// Replace the active session's durable lock after a validated hot
@@ -602,7 +732,7 @@ impl JsonlWriter {
     async fn append_identity_non_durable(
         &self,
         transcript_path: &Path,
-        uuid: &str,
+        uuid: Option<&str>,
     ) -> Result<Box<dyn FlockGuard>, WriterError> {
         let root = transcript_path
             .parent()
@@ -625,15 +755,25 @@ impl JsonlWriter {
         let identity = lingxi_core::host::rooted_fs::root_identity(&root)?;
         let store = self.identity_store.clone();
         let transcript_path = transcript_path.to_path_buf();
-        let uuid = uuid.to_owned();
+        let uuid = uuid.map(str::to_owned);
         tokio::task::spawn_blocking(move || {
-            message_identity::append_row_identity_at(
-                &store,
-                &transcript_path,
-                &root,
-                &identity,
-                &uuid,
-            )
+            if let Some(uuid) = uuid {
+                message_identity::append_row_identity_at(
+                    &store,
+                    &transcript_path,
+                    &root,
+                    &identity,
+                    &uuid,
+                )
+                .map(|_| ())
+            } else {
+                message_identity::initialize_empty_host_log_at(
+                    &store,
+                    &transcript_path,
+                    &root,
+                    &identity,
+                )
+            }
         })
         .await
         .map_err(|error| FsError::Io(error.to_string()))??;
@@ -1307,8 +1447,12 @@ impl JsonlWriter {
         if self.active_durable_target().is_some() {
             let stamped = stamp_session_kind(msg);
             let msg = stamped.as_ref().unwrap_or(msg);
-            let payload = native_message_bytes(msg)?;
-            let payload_bytes = payload.len() + 1;
+            let payload = native_message_projection(msg)?;
+            let payload_bytes = payload
+                .to_json_string()
+                .map_err(crate::jsonl::exact_json::projection_error)?
+                .len()
+                + 1;
             self.append_json_durable(payload, Some(msg.uuid.clone()))
                 .await?;
             self.bytes_since_metadata_re_append
@@ -1317,6 +1461,7 @@ impl JsonlWriter {
                 .fetch_add(payload_bytes as u64, Ordering::Relaxed);
         } else {
             let _g = self.lock.lock().await;
+            self.flush_queue_operations_locked().await?;
             let stamped = stamp_session_kind(msg);
             let line = String::from_utf8(native_message_bytes(stamped.as_ref().unwrap_or(msg))?)
                 .expect("native JSON encoder emits UTF-8");
@@ -1324,7 +1469,9 @@ impl JsonlWriter {
             payload.push_str(&line);
             payload.push('\n');
             let path = self.active_path();
-            let _identity_guard = self.append_identity_non_durable(&path, &msg.uuid).await?;
+            let _identity_guard = self
+                .append_identity_non_durable(&path, Some(&msg.uuid))
+                .await?;
             self.append_payload(&payload).await?;
         }
         // Drive both backstops from the ordinary append path. Deliberately
@@ -1348,7 +1495,7 @@ impl JsonlWriter {
     pub async fn append_json_once_durable(
         &self,
         delivery_id: &str,
-        payload: serde_json::Value,
+        payload: Utf16JsonProjection,
     ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
         let _guard = self.lock.lock().await;
         let Some(target) = self.active_durable_target() else {
@@ -1361,11 +1508,48 @@ impl JsonlWriter {
             target.writer,
             delivery_id,
             payload,
-            Utf16Overrides::new(),
             false,
         )
         .await
         .map(|(outcome, _)| outcome)
+    }
+
+    /// Publish a prepared native row once by its immutable outer UUID. Exact
+    /// tool-input keys/strings stay attached through duplicate comparison and
+    /// the same bound session transaction; no deliveryId is added to the row.
+    pub async fn append_native_message_once(
+        &self,
+        message: &JsonlMessage,
+    ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
+        let session_id = SessionId::parse_prefixed(&message.session_id).ok_or_else(|| {
+            TranscriptWriterError::Fs(FsError::Io("native row has an invalid session id".into()))
+        })?;
+        let _guard = self.lock.lock().await;
+        self.flush_queue_operations_locked()
+            .await
+            .map_err(queue_journal_error)?;
+        let target = self
+            .session_targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| {
+                TranscriptWriterError::Fs(FsError::Io(format!(
+                    "durable transcript target is not bound for session {session_id}"
+                )))
+            })?;
+        let stamped = stamp_session_kind(message);
+        let message = stamped.as_ref().unwrap_or(message);
+        let payload = native_message_projection(message)?;
+        self.append_json_once_durable_locked(
+            target.path,
+            target.writer,
+            &message.uuid,
+            payload,
+            true,
+        )
+        .await
     }
 
     /// Append once for a run pinned to its originating session. The target is
@@ -1376,7 +1560,7 @@ impl JsonlWriter {
         &self,
         session_id: SessionId,
         delivery_id: &str,
-        payload: serde_json::Value,
+        payload: Utf16JsonProjection,
     ) -> Result<TranscriptAppendOutcome, TranscriptWriterError> {
         self.append_json_once_durable_for_session_with_tip(session_id, delivery_id, payload)
             .await
@@ -1391,33 +1575,28 @@ impl JsonlWriter {
         &self,
         session_id: SessionId,
         delivery_id: &str,
-        payload: serde_json::Value,
+        payload: Utf16JsonProjection,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         self.append_json_once_durable_for_session_with_tip_mode(
             session_id,
             delivery_id,
             payload,
-            Utf16Overrides::new(),
             false,
         )
         .await
     }
 
-    /// Append exact JavaScript string leaves to the originating session. The
-    /// private override map is encoded into native JSON strings before the
-    /// same rooted append, conflict scan, and durability acknowledgement.
-    pub async fn append_json_once_durable_for_session_with_tip_exact(
+    /// Append a prepared Native row without adding the Fusion deliveryId.
+    pub async fn append_native_json_once_durable_for_session_with_tip(
         &self,
         session_id: SessionId,
         delivery_id: &str,
-        payload: serde_json::Value,
-        utf16_overrides: Utf16Overrides,
+        payload: Utf16JsonProjection,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         self.append_json_once_durable_for_session_with_tip_mode(
             session_id,
             delivery_id,
             payload,
-            utf16_overrides,
             true,
         )
         .await
@@ -1427,8 +1606,7 @@ impl JsonlWriter {
         &self,
         session_id: SessionId,
         delivery_id: &str,
-        payload: serde_json::Value,
-        utf16_overrides: Utf16Overrides,
+        payload: Utf16JsonProjection,
         native_uuid_only: bool,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         let _guard = self.lock.lock().await;
@@ -1448,7 +1626,6 @@ impl JsonlWriter {
             target.writer,
             delivery_id,
             payload,
-            utf16_overrides,
             native_uuid_only,
         )
         .await
@@ -1460,10 +1637,13 @@ impl JsonlWriter {
     /// established last-write-wins semantics for repeated UUID updates.
     async fn append_json_durable(
         &self,
-        payload: Vec<u8>,
+        payload: Utf16JsonProjection,
         identity_uuid: Option<String>,
     ) -> Result<(), TranscriptWriterError> {
         let _guard = self.lock.lock().await;
+        self.flush_queue_operations_locked()
+            .await
+            .map_err(queue_journal_error)?;
         let Some(target) = self.active_durable_target() else {
             return Err(TranscriptWriterError::Fs(FsError::Io(
                 "durable transcript target is not configured".into(),
@@ -1476,7 +1656,7 @@ impl JsonlWriter {
     async fn append_json_durable_for_session(
         &self,
         session_id: SessionId,
-        payload: Vec<u8>,
+        payload: Utf16JsonProjection,
         identity_uuid: Option<String>,
     ) -> Result<(), TranscriptWriterError> {
         let _guard = self.lock.lock().await;
@@ -1499,7 +1679,7 @@ impl JsonlWriter {
         &self,
         active_path: PathBuf,
         durable_lock: Arc<DurableTranscriptWriter>,
-        payload: Vec<u8>,
+        payload: Utf16JsonProjection,
         identity_uuid: Option<String>,
     ) -> Result<(), TranscriptWriterError> {
         let identity_store = self.identity_store.clone();
@@ -1526,8 +1706,15 @@ impl JsonlWriter {
                         &identity,
                         uuid,
                     )?;
+                } else if payload.string_at("/type") == Some("queue-operation") {
+                    message_identity::initialize_empty_host_log_at(
+                        &identity_store,
+                        &active_path,
+                        parent,
+                        &identity,
+                    )?;
                 }
-                transaction.append_serialized_json_at(parent, &identity, &relative, payload)
+                transaction.append_raw_json_at(parent, &identity, &relative, payload)
             })
         })
         .await
@@ -1539,8 +1726,7 @@ impl JsonlWriter {
         active_path: PathBuf,
         durable_lock: Arc<DurableTranscriptWriter>,
         delivery_id: &str,
-        payload: serde_json::Value,
-        utf16_overrides: Utf16Overrides,
+        payload: Utf16JsonProjection,
         native_uuid_only: bool,
     ) -> Result<(TranscriptAppendOutcome, bool), TranscriptWriterError> {
         let delivery_id = delivery_id.to_string();
@@ -1561,13 +1747,12 @@ impl JsonlWriter {
                     ))
                 })?;
                 if native_uuid_only {
-                    transaction.append_json_once_at_with_tip_exact_identity(
+                    transaction.append_native_json_once_at_with_tip_identity(
                         parent,
                         &identity,
                         &relative,
                         &delivery_id,
                         payload,
-                        &utf16_overrides,
                         &identity_store,
                         &active_path,
                     )
@@ -1605,7 +1790,7 @@ impl JsonlWriter {
             })?;
             let stamped = stamp_session_kind(msg);
             let msg = stamped.as_ref().unwrap_or(msg);
-            let payload = native_message_bytes(msg)?;
+            let payload = native_message_projection(msg)?;
             self.append_json_durable_for_session(session_id, payload, Some(msg.uuid.clone()))
                 .await?;
             return Ok(());
@@ -1618,7 +1803,9 @@ impl JsonlWriter {
         let mut payload = String::with_capacity(line.len() + 1);
         payload.push_str(&line);
         payload.push('\n');
-        let _identity_guard = self.append_identity_non_durable(path, &msg.uuid).await?;
+        let _identity_guard = self
+            .append_identity_non_durable(path, Some(&msg.uuid))
+            .await?;
         self.append_payload_to_path(path, &payload, false).await
     }
 
@@ -1940,6 +2127,25 @@ impl JsonlWriter {
         self.append_payload(&payload).await
     }
 
+    /// Append a host-consumed queue operation through the canonical writer
+    /// lease, preserving its source content/identity projection.
+    pub async fn append_queue_operation(
+        &self,
+        record: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<(), WriterError> {
+        let mut line = record.to_json_string().map_err(|error| {
+            WriterError::ExactJson(ExactJsonError::InvalidOverride(error.to_string()))
+        })?;
+        line.push('\n');
+        {
+            let _guard = self.lock.lock().await;
+            self.flush_queue_operations_locked().await?;
+            self.append_payload(&line).await?;
+        }
+        self.maybe_re_append_metadata().await;
+        Ok(())
+    }
+
     pub async fn append_custom_title(
         &self,
         session_id: &str,
@@ -2156,18 +2362,17 @@ impl JsonlWriter {
             .map_err(|e| FsError::Io(e.to_string()))?;
         let mut removed = std::collections::HashMap::new();
         for line in source.lines() {
-            let Ok(row) = Utf16JsonProjection::parse(line) else {
-                continue;
-            };
-            if row.string_at("/type") == Some("assistant")
-                && (row.string_at("/uuid") == Some(message_id)
-                    || row.string_at("/message/id") == Some(message_id))
-            {
-                if let Some(id) = row.string_at("/uuid") {
-                    removed.insert(
-                        id.to_owned(),
-                        row.string_at("/parentUuid").map(str::to_owned),
-                    );
+            if let Ok(row) = Utf16JsonProjection::parse(line) {
+                if row.string_at("/type") == Some("assistant")
+                    && (row.string_at("/uuid") == Some(message_id)
+                        || row.string_at("/message/id") == Some(message_id))
+                {
+                    if let Some(id) = row.string_at("/uuid") {
+                        removed.insert(
+                            id.to_owned(),
+                            row.string_at("/parentUuid").map(str::to_owned),
+                        );
+                    }
                 }
             }
         }
@@ -2198,19 +2403,16 @@ impl JsonlWriter {
                 parent = previous.clone();
             }
             if parent != original_parent {
-                let value = if let Some(parent) = parent {
-                    Utf16JsonProjection::root_string(
-                        parent.clone(),
-                        parent.encode_utf16().collect(),
-                    )
-                    .map_err(crate::jsonl::exact_json::projection_error)?
-                } else {
-                    Utf16JsonProjection::parse("null")
-                        .map_err(crate::jsonl::exact_json::projection_error)?
-                };
-                row.set_field("parentUuid", value)
+                let parent_value = parent.map_or_else(
+                    || Utf16JsonProjection::parse("null").expect("null is valid source JSON"),
+                    Utf16JsonProjection::from,
+                );
+                row.set_field("parentUuid", parent_value)
                     .map_err(crate::jsonl::exact_json::projection_error)?;
-                output.push_str(&stringify_projection(&row)?);
+                output.push_str(
+                    &row.to_json_string()
+                        .map_err(crate::jsonl::exact_json::projection_error)?,
+                );
                 if line.ends_with('\n') {
                     output.push('\n');
                 }
@@ -2581,7 +2783,9 @@ impl JsonlWriter {
         &self,
         value: &Utf16JsonProjection,
     ) -> Result<(), WriterError> {
-        let line = value.to_json_string()?;
+        let line = value
+            .to_json_string()
+            .map_err(crate::jsonl::exact_json::projection_error)?;
         {
             let _g = self.lock.lock().await;
             let mut payload = String::with_capacity(line.len() + 1);
@@ -2599,14 +2803,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn read_message(value: serde_json::Value) -> JsonlMessage {
-        crate::jsonl::reader::route_lines(&value.to_string())
-            .messages_in_order
-            .into_iter()
-            .next()
-            .expect("transcript row")
-    }
-
     fn temp_writer(tag: &str) -> (PathBuf, PathBuf, JsonlWriter) {
         let dir = std::env::temp_dir().join(format!(
             "lingxi-writer-{tag}-{}-{:?}",
@@ -2622,7 +2818,7 @@ mod tests {
     }
 
     fn identity_row(uuid: &str, content: &str) -> JsonlMessage {
-        read_message(json!({
+        serde_json::from_value(json!({
             "parentUuid": null,
             "isSidechain": false,
             "type": "assistant",
@@ -2633,6 +2829,138 @@ mod tests {
             "sessionId": "11111111-2222-3333-4444-555555555555",
             "version": "test"
         }))
+        .expect("identity test row")
+    }
+
+    fn source_value(value: &serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value)
+            .expect("generated fixture JSON is representable as a source projection")
+    }
+
+    #[test]
+    fn queue_drain_restores_unfinished_records_before_concurrent_arrivals() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
+        let source: QueueOperationBuffer = Default::default();
+        let mut drain = QueueOperationDrain {
+            source: source.clone(),
+            records: VecDeque::from([source_value(&json!("second"))]),
+            current: Some(source_value(&json!("first"))),
+        };
+        source
+            .lock()
+            .unwrap()
+            .push_back(source_value(&json!("later")));
+        // The same guard restores pending records on cancellation and I/O failure.
+        drain.records.push_back(source_value(&json!("third")));
+        drop(drain);
+        let values = source
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|projection| {
+                serde_json::from_str::<serde_json::Value>(&projection.to_json_string().unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            [
+                json!("first"),
+                json!("second"),
+                json!("third"),
+                json!("later")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_operations_flush_before_native_message_with_exact_utf16() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
+        let (dir, path, writer) = temp_writer("queue-before-message");
+        let session = SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555").unwrap();
+        let queued = Projection::parse(r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-04T12:00:00.000Z","sessionId":"11111111-2222-3333-4444-555555555555","content":"\ud800"}"#).unwrap();
+        let dequeued = source_value(&json!({
+            "type":"queue-operation",
+            "operation":"dequeue",
+            "timestamp":"2026-10-04T12:00:00.001Z",
+            "sessionId":session.as_uuid().to_string()
+        }));
+        let pending: QueueOperationBuffer = Arc::new(std::sync::Mutex::new(VecDeque::from([
+            queued.clone(),
+            dequeued.clone(),
+        ])));
+        writer.bind_queue_operations(session, pending.clone());
+        writer
+            .append(&identity_row(
+                "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                "done",
+            ))
+            .await
+            .unwrap();
+        let raw = std::fs::read_to_string(path).unwrap();
+        let lines = raw.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], queued.to_json_string().unwrap());
+        assert_eq!(lines[1], dequeued.to_json_string().unwrap());
+        assert!(pending.lock().unwrap().is_empty());
+        writer.flush_queue_operations().await.unwrap();
+        assert_eq!(std::fs::read_to_string(writer.path()).unwrap(), raw);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn native_once_round_trips_tool_key_units_and_rejects_equal_display_conflict() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let (dir, path, mut writer) = temp_writer("native-once-exact-tool-keys");
+        let state_root = dir.join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        writer = writer.with_durable_lock(Arc::new(
+            DurableTranscriptWriter::open(&state_root).unwrap(),
+        ));
+        let session_id = SessionId::parse_prefixed("11111111-2222-3333-4444-555555555555").unwrap();
+        writer
+            .activate_session_target(session_id, path.clone(), dir.clone())
+            .unwrap();
+        let input = Utf16JsonProjection::parse(r#"{"\ud800":"\udfff"}"#).unwrap();
+        let mut row = identity_row("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "");
+        row.message = Utf16JsonProjection::parse(&format!(
+            r#"{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_exact","name":"Echo","input":{}}}]}}"#,
+            input.to_json_string().unwrap()
+        ))
+        .unwrap();
+        writer.append_native_message_once(&row).await.unwrap();
+        writer.append_native_message_once(&row).await.unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw.lines().count(), 1);
+        assert!(!raw.contains("deliveryId"));
+        assert!(!raw.contains("lingxi_exact_json_utf16"));
+        let loaded = crate::jsonl::reader::route_lines(&raw);
+        assert_eq!(loaded.malformed_line_count, 0);
+        let recovered = loaded.messages_in_order[0]
+            .message
+            .subprojection("/content/0/input")
+            .unwrap();
+        assert_eq!(
+            recovered.to_json_string().unwrap(),
+            input.to_json_string().unwrap()
+        );
+        let other = Utf16JsonProjection::parse(r#"{"\ud801":"\udfff"}"#).unwrap();
+        let input_key = input.object_entries().unwrap().remove(0);
+        let other_key = other.object_entries().unwrap().remove(0);
+        assert_eq!(input_key.display_key, other_key.display_key);
+        assert_ne!(input_key.code_units, other_key.code_units);
+        let mut conflicting = row.clone();
+        conflicting.message = Utf16JsonProjection::parse(&format!(
+            r#"{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_exact","name":"Echo","input":{}}}]}}"#,
+            other.to_json_string().unwrap()
+        ))
+        .unwrap();
+        assert!(writer
+            .append_native_message_once(&conflicting)
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -2744,8 +3072,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), native);
         let loaded = crate::jsonl::reader::route_lines(native);
         assert_eq!(
-            loaded.by_uuid["native-user"].message.string_at("/content"),
-            Some("updated"),
+            loaded.by_uuid["native-user"].message["content"], "updated",
             "Native JSONL keeps last-write-wins content while Host identity keeps first index"
         );
         writer
@@ -2906,11 +3233,18 @@ mod tests {
         let (dir, path, writer) = temp_writer("retry-exact-reparent");
         let fixture = include_str!("../../tests/fixtures/handback_exact_utf16_2_1_286.jsonl");
         let first = fixture.lines().next().unwrap();
-        let mut child = parse_exact_json(first).unwrap();
-        child.value["parentUuid"] = serde_json::json!("rejected");
-        let child_line =
-            String::from_utf8(to_vec_with_overrides(&child.value, &child.utf16_overrides).unwrap())
-                .unwrap();
+        let mut child = Utf16JsonProjection::parse(first).unwrap();
+        child
+            .set_field("parentUuid", Utf16JsonProjection::from("rejected"))
+            .unwrap();
+        child
+            .set_field(
+                "opaque",
+                Utf16JsonProjection::parse(r#"{"\ud800":"opaque value"}"#).unwrap(),
+            )
+            .unwrap();
+        let opaque = child.subprojection("/opaque").unwrap();
+        let child_line = child.to_json_string().unwrap();
         let body = format!(
             "{{\"type\":\"user\",\"uuid\":\"root\",\"parentUuid\":null}}\n{{\"type\":\"assistant\",\"uuid\":\"rejected\",\"parentUuid\":\"root\",\"message\":{{\"id\":\"rejected-model-id\"}}}}\n{child_line}\n"
         );
@@ -2925,20 +3259,38 @@ mod tests {
                 .await
                 .unwrap()
                 .as_deref(),
-            child.value["uuid"].as_str()
+            child.string_at("/uuid")
         );
         let output = std::fs::read_to_string(&path).unwrap();
         assert_eq!(output.lines().count(), 2);
-        let repaired = parse_exact_json(output.lines().last().unwrap()).unwrap();
-        assert_eq!(repaired.value["parentUuid"], "root");
-        assert_eq!(repaired.value["origin"], child.value["origin"]);
-        assert_eq!(repaired.utf16_overrides, child.utf16_overrides);
+        let repaired = Utf16JsonProjection::parse(output.lines().last().unwrap()).unwrap();
+        assert_eq!(repaired.string_at("/parentUuid"), Some("root"));
+        assert_eq!(
+            repaired
+                .subprojection("/origin")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            child
+                .subprojection("/origin")
+                .unwrap()
+                .to_json_string()
+                .unwrap()
+        );
+        let repaired_opaque = repaired.subprojection("/opaque").unwrap();
+        assert_eq!(
+            repaired_opaque.to_json_string().unwrap(),
+            opaque.to_json_string().unwrap()
+        );
+        assert_eq!(
+            repaired_opaque.object_entries().unwrap()[0].code_units,
+            [0xd800]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
     async fn native_exact_append_cold_retry_preserves_units_uuid_and_pinned_session() {
-        use crate::jsonl::exact_json::{message_utf16_overrides, parse_exact_json};
         let dir = tempfile::tempdir().unwrap();
         let state_root = dir.path().join("session-state");
         std::fs::create_dir_all(&state_root).unwrap();
@@ -2960,17 +3312,16 @@ mod tests {
         let fixture = include_str!("../../tests/fixtures/handback_exact_utf16_2_1_286.jsonl");
         let prepared: Vec<_> = fixture
             .lines()
-            .map(|line| parse_exact_json(line).unwrap())
+            .map(|line| Utf16JsonProjection::parse(line).unwrap())
             .collect();
         for row in &prepared {
-            let delivery = format!("subagent-handback:{}", row.value["uuid"].as_str().unwrap());
+            let delivery = format!("subagent-handback:{}", row.string_at("/uuid").unwrap());
             assert_eq!(
                 writer
-                    .append_json_once_durable_for_session_with_tip_exact(
+                    .append_native_json_once_durable_for_session_with_tip(
                         session_a,
                         &delivery,
-                        row.value.clone(),
-                        row.utf16_overrides.clone()
+                        row.clone()
                     )
                     .await
                     .unwrap(),
@@ -2995,13 +3346,12 @@ mod tests {
         cold.activate_session_target(session_b, path_b.clone(), dir.path().to_path_buf())
             .unwrap();
         for (index, row) in prepared.iter().enumerate() {
-            let delivery = format!("subagent-handback:{}", row.value["uuid"].as_str().unwrap());
+            let delivery = format!("subagent-handback:{}", row.string_at("/uuid").unwrap());
             assert_eq!(
-                cold.append_json_once_durable_for_session_with_tip_exact(
+                cold.append_native_json_once_durable_for_session_with_tip(
                     session_a,
                     &delivery,
-                    row.value.clone(),
-                    row.utf16_overrides.clone()
+                    row.clone()
                 )
                 .await
                 .unwrap(),
@@ -3012,24 +3362,28 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read_to_string(&path_a).unwrap(), raw);
-        let mut different_units = prepared[0].utf16_overrides.clone();
-        different_units.insert("/origin/body".into(), vec![0xde00]);
+        let mut different_units = prepared[0].clone();
+        different_units
+            .set_string_units("/origin/body", &[0xde00])
+            .unwrap();
         assert!(matches!(
-            cold.append_json_once_durable_for_session_with_tip_exact(
+            cold.append_native_json_once_durable_for_session_with_tip(
                 session_a,
                 "subagent-handback:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-                prepared[0].value.clone(),
                 different_units
             )
             .await,
             Err(TranscriptWriterError::DeliveryConflict { .. })
         ));
+        let mut display_only = prepared[0].clone();
+        display_only
+            .set_string_units("/origin/body", &[0xfffd])
+            .unwrap();
         assert!(matches!(
-            cold.append_json_once_durable_for_session_with_tip_exact(
+            cold.append_native_json_once_durable_for_session_with_tip(
                 session_a,
                 "subagent-handback:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-                prepared[0].value.clone(),
-                Utf16Overrides::new()
+                display_only
             )
             .await,
             Err(TranscriptWriterError::DeliveryConflict { .. })
@@ -3038,8 +3392,10 @@ mod tests {
         assert_eq!(loaded.malformed_line_count, 0);
         assert_eq!(loaded.messages_in_order.len(), 4);
         assert_eq!(
-            message_utf16_overrides(&loaded.messages_in_order[0])["/origin/body"],
-            vec![0xd83d]
+            loaded.messages_in_order[0]
+                .extra
+                .string_units("/origin/body"),
+            Some(vec![0xd83d])
         );
         assert_eq!(
             loaded.messages_in_order[0].extra.string_at("/origin/kind"),
@@ -3199,13 +3555,13 @@ mod tests {
             .append_json_once_durable_for_session(
                 session_a,
                 "fusion-delivery:fu_0123456789abcdef0123456789abcdef",
-                serde_json::json!({
+                source_value(&json!({
                     "uuid": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
                     "parentUuid": null,
                     "type": "user",
                     "sessionId": session_a.as_uuid().to_string(),
                     "message": {"role": "user", "content": "late Fusion A"}
-                }),
+                })),
             )
             .await
             .unwrap();

@@ -1,0 +1,111 @@
+{
+  "version": "2.1.293",
+  "researchOnly": true,
+  "nativeRepetitions": 1,
+  "parityEstablished": false,
+  "captureRoot": "/tmp/headless-baseline-293-mcp-ui-metadata/probe-mcp-ui-metadata/native-a",
+  "exit": {
+    "code": 0,
+    "signal": null
+  },
+  "initializeRequest": {
+    "type": "control_request",
+    "request_id": "fixture-initialize",
+    "request": {
+      "subtype": "initialize",
+      "hooks": {},
+      "sdkMcpServers": [
+        "fixture"
+      ],
+      "sdkMcpServerManifests": {
+        "fixture": {
+          "initializeResult": {
+            "protocolVersion": "2025-11-25",
+            "serverInfo": {
+              "name": "headless-sdk-fixture",
+              "version": "1.0.0"
+            },
+            "capabilities": {
+              "tools": {}
+            }
+          },
+          "toolsListResult": {
+            "tools": [
+              {
+                "name": "uiTool",
+                "description": "Controlled metadata-only SDK tool",
+                "inputSchema": {
+                  "type": "object",
+                  "properties": {}
+                },
+                "_meta": {
+                  "ui": {
+                    "resourceUri": "ui://fixture/view",
+                    "visibility": [
+                      "model",
+                      "app"
+                    ],
+                    "custom": "x"
+                  },
+                  "ui/resourceUri": "ui://fixture/legacy",
+                  "private": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "statusRequest": {
+    "type": "control_request",
+    "request_id": "fixture-mcp-status-ui-meta",
+    "request": {
+      "subtype": "mcp_status"
+    }
+  },
+  "statusResponse": {
+    "type": "control_response",
+    "response": {
+      "subtype": "success",
+      "request_id": "fixture-mcp-status-ui-meta",
+      "response": {
+        "mcpServers": [
+          {
+            "name": "fixture",
+            "status": "connected",
+            "serverInfo": {
+              "name": "headless-sdk-fixture",
+              "version": "1.0.0"
+            },
+            "scope": "dynamic",
+            "source": "sdk",
+            "tools": [
+              {
+                "name": "uiTool",
+                "annotations": {},
+                "_meta": {
+                  "ui": {
+                    "resourceUri": "ui://fixture/view",
+                    "visibility": [
+                      "model",
+                      "app"
+                    ],
+                    "custom": "x"
+                  },
+                  "ui/resourceUri": "ui://fixture/legacy"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "stdoutSha256": "68bc4b849e25df23b7332055d7db038fea9a8c6ca0c3606036b57a3f02bb62ae",
+  "unverified": [
+    "Invalid resource URI or visibility projection",
+    "Dynamic SDK tool catalog invalidation",
+    "Native-Harness metadata equality"
+  ]
+}

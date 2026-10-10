@@ -156,6 +156,7 @@ mod tests {
 
     fn assistant(text: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: text.into(),
@@ -168,6 +169,7 @@ mod tests {
 
     fn assistant_tool(id: MessageId, tool: &str) -> ConversationMessage {
         ConversationMessage::Assistant {
+            per_turn_effort: None,
             id,
             content: vec![ContentBlock::ToolUse {
                 id: ToolUseId::new(),

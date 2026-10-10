@@ -60,7 +60,7 @@ use mobile_linux_api::ProcessError;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -282,12 +282,43 @@ type AgentPromptTranscripts = HashMap<
     (
         crate::registry::HookModelSelection,
         crate::PromptHookTranscript,
+        AgentStopMetadata,
     ),
 >;
+
+/// Trusted child metadata published with its logical route and transcript.
+#[derive(Clone, Default)]
+pub struct AgentStopMetadata {
+    pub agent_transcript_path: PathBuf,
+    pub cwd: PathBuf,
+    pub last_assistant_message: Option<String>,
+    pub depth: Option<u32>,
+    pub owner: Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>>,
+}
+
+enum AgentSpawnerBinding {
+    Owned(Arc<dyn SubagentSpawner>),
+    Borrowed(Weak<dyn SubagentSpawner>),
+}
+
+impl AgentSpawnerBinding {
+    fn snapshot(&self) -> Option<Arc<dyn SubagentSpawner>> {
+        match self {
+            Self::Owned(spawner) => Some(spawner.clone()),
+            Self::Borrowed(spawner) => spawner.upgrade(),
+        }
+    }
+}
 
 pub struct HookExecutorImpl {
     model_safety_provider: std::sync::Mutex<Option<HookModelSafetyProvider>>,
     agent_prompt_transcripts: std::sync::Mutex<AgentPromptTranscripts>,
+    subagent_stop_firers: std::sync::Mutex<
+        HashMap<
+            lingxi_core::types::SessionId,
+            Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>,
+        >,
+    >,
     registry: Arc<RwLock<HookRegistry>>,
     http: Arc<dyn HttpTransport>,
     /// Background spawner. The Command arm's child runs on the `ProcessRunner`;
@@ -299,7 +330,7 @@ pub struct HookExecutorImpl {
     /// Optional subagent spawner — attached via [`Self::with_agent_spawner`].
     /// When `None`, the `Agent` arm returns `HookOutcome::Error` with
     /// `stderr: "Hook {id} failed: agent executor not wired"`. M5-06.
-    agent_spawner: Option<Arc<dyn SubagentSpawner>>,
+    agent_spawner: std::sync::OnceLock<AgentSpawnerBinding>,
     /// Optional single-turn LLM runner — attached via
     /// [`Self::with_prompt_runner`]. When `None`, the `Prompt` arm returns a
     /// structured "not wired" no-op (never blocks). The orchestrator wires this
@@ -431,12 +462,13 @@ impl HookExecutorImpl {
         Self {
             model_safety_provider: std::sync::Mutex::new(None),
             agent_prompt_transcripts: std::sync::Mutex::new(HashMap::new()),
+            subagent_stop_firers: std::sync::Mutex::new(HashMap::new()),
             registry,
             http,
             runtime,
             builtin_handlers: HashMap::new(),
             ssrf_guard: SsrfGuard::with_defaults(),
-            agent_spawner: None,
+            agent_spawner: std::sync::OnceLock::new(),
             prompt_runner: None,
             process: None,
             sandbox: None,
@@ -604,9 +636,18 @@ impl HookExecutorImpl {
     /// Without this, `HookExecutor::Agent` hooks return a structured
     /// "not wired" error. M5-06.
     #[must_use]
-    pub fn with_agent_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
-        self.agent_spawner = Some(spawner);
+    pub fn with_agent_spawner(self, spawner: Arc<dyn SubagentSpawner>) -> Self {
+        let _ = self.agent_spawner.set(AgentSpawnerBinding::Owned(spawner));
         self
+    }
+
+    /// Borrow the session-owned spawner after constructing the hook/tool graph.
+    /// A weak binding avoids a spawner → hook executor → spawner ownership cycle.
+    /// Each active dispatch upgrades it only for that hook invocation.
+    pub fn attach_agent_spawner(&self, spawner: Weak<dyn SubagentSpawner>) {
+        let _ = self
+            .agent_spawner
+            .set(AgentSpawnerBinding::Borrowed(spawner));
     }
 
     /// Attach a [`HookPromptRunner`] so the `Prompt` arm can evaluate inline
@@ -667,7 +708,10 @@ impl HookExecutorImpl {
             ssrf_guard: self.ssrf_guard.clone(),
             http_hook_policy: self.http_hook_policy.clone(),
             builtin_handlers: self.builtin_handlers.clone(),
-            agent_spawner: self.agent_spawner.clone(),
+            agent_spawner: self
+                .agent_spawner
+                .get()
+                .and_then(AgentSpawnerBinding::snapshot),
             prompt_runner: self.prompt_runner.clone(),
             process: self.process.clone(),
             sandbox: self.sandbox.clone(),
@@ -762,11 +806,41 @@ impl HookExecutorImpl {
         agent_id: lingxi_core::types::AgentId,
         model_selection: crate::registry::HookModelSelection,
         transcript: crate::PromptHookTranscript,
+        metadata: AgentStopMetadata,
     ) {
-        self.agent_prompt_transcripts
+        if metadata
+            .owner
+            .as_ref()
+            .is_some_and(|owner| !owner.is_current())
+        {
+            return;
+        }
+        let mut snapshots = self
+            .agent_prompt_transcripts
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert((session_id, agent_id), (model_selection, transcript));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if metadata
+            .owner
+            .as_ref()
+            .is_some_and(|owner| !owner.is_current())
+        {
+            return;
+        }
+        let owner = metadata.owner.clone();
+        snapshots.insert(
+            (session_id, agent_id),
+            (model_selection, transcript, metadata),
+        );
+        if owner.as_ref().is_some_and(|owner| !owner.is_current())
+            && snapshots
+                .get(&(session_id, agent_id))
+                .is_some_and(|(_, _, metadata)| match (&metadata.owner, &owner) {
+                    (Some(current), Some(retired)) => Arc::ptr_eq(current, retired),
+                    _ => false,
+                })
+        {
+            snapshots.remove(&(session_id, agent_id));
+        }
     }
 
     pub fn take_agent_prompt_transcript(
@@ -777,10 +851,111 @@ impl HookExecutorImpl {
         crate::registry::HookModelSelection,
         crate::PromptHookTranscript,
     )> {
+        self.take_agent_stop_snapshot(session_id, agent_id, None, None)
+            .map(|(model, transcript, _)| (model, transcript))
+    }
+
+    fn take_agent_stop_snapshot(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        agent_id: lingxi_core::types::AgentId,
+        expected_epoch: Option<lingxi_core::types::MessageId>,
+        publication_guard: Option<&dyn HookPublicationGuard>,
+    ) -> Option<(
+        crate::registry::HookModelSelection,
+        crate::PromptHookTranscript,
+        AgentStopMetadata,
+    )> {
+        let mut snapshots = self
+            .agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if publication_guard.is_some_and(|guard| !guard.is_current()) {
+            return None;
+        }
+        if let Some(expected) = expected_epoch {
+            if snapshots
+                .get(&(session_id, agent_id))?
+                .2
+                .owner
+                .as_ref()
+                .map(|owner| owner.epoch_id())
+                != Some(expected)
+            {
+                return None;
+            }
+        }
+        snapshots
+            .remove(&(session_id, agent_id))
+            .filter(|(_, _, metadata)| {
+                metadata
+                    .owner
+                    .as_ref()
+                    .is_none_or(|owner| owner.is_current())
+            })
+    }
+
+    /// Discard only the cancelled producer's own snapshot. Reused identities
+    /// and a newer session epoch must not be erased by an old worker's Drop.
+    pub fn discard_agent_prompt_transcript(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        agent_id: lingxi_core::types::AgentId,
+        owner: Option<&Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>>,
+    ) {
+        let mut snapshots = self
+            .agent_prompt_transcripts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let expected = owner.map(|owner| owner.epoch_id());
+        if snapshots
+            .get(&(session_id, agent_id))
+            .is_some_and(|(_, _, metadata)| {
+                metadata.owner.as_ref().map(|owner| owner.epoch_id()) == expected
+            })
+        {
+            snapshots.remove(&(session_id, agent_id));
+        }
+    }
+
+    /// Bind the finalized host owner for one session epoch. Different session
+    /// ids may share the executor; retired owners never claim a new spawn.
+    pub fn bind_subagent_stop_firer(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        firer: Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>,
+    ) {
+        let mut firers = self
+            .subagent_stop_firers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        firers.retain(|_, owner| owner.is_current());
+        if let Some(previous) = firers.insert(session_id, firer) {
+            previous.retire();
+        }
         self.agent_prompt_transcripts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(session_id, agent_id))
+            .retain(|_, (_, _, metadata)| {
+                metadata
+                    .owner
+                    .as_ref()
+                    .is_none_or(|owner| owner.is_current())
+            });
+    }
+
+    /// Capture the exact owner at admission/restore. A retained producer must
+    /// keep this Arc instead of consulting a later session binding at stop.
+    pub fn subagent_stop_firer(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+    ) -> Option<Arc<dyn lingxi_core::host::subagent_spawn::SubagentStopHookFirer>> {
+        self.subagent_stop_firers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .filter(|owner| owner.is_current())
+            .cloned()
     }
 
     /// Remove every named runtime hook scoped to `session_id`.
@@ -1357,13 +1532,30 @@ impl HookExecutorImpl {
         if matches!(&event, HookEvent::SubagentStop { agent_id, .. } if *agent_id == exclude_agent_id)
         {
             // Consume even if hooks are disabled or none match.
-            if let Some((model_selection, transcript)) =
-                self.take_agent_prompt_transcript(ctx.session_id, exclude_agent_id)
-            {
-                ctx.model_selection = Some(model_selection);
-                ctx.prompt_transcript = Some(transcript);
-            } else {
-                ctx.prompt_transcript = None;
+            match self.take_agent_stop_snapshot(
+                ctx.session_id,
+                exclude_agent_id,
+                ctx.subagent_stop_epoch.clone(),
+                ctx.publication_guard.as_deref(),
+            ) {
+                Some((model_selection, transcript, metadata)) => {
+                    ctx.model_selection = Some(model_selection);
+                    ctx.prompt_transcript = Some(transcript);
+                    ctx.last_assistant_message = metadata.last_assistant_message;
+                    if let Some(depth) = metadata.depth {
+                        ctx.agent_depth = Some(depth);
+                    }
+                    if !metadata.agent_transcript_path.as_os_str().is_empty() {
+                        ctx.agent_transcript_path = Some(metadata.agent_transcript_path);
+                    }
+                    if !metadata.cwd.as_os_str().is_empty() {
+                        ctx.cwd = metadata.cwd;
+                    }
+                }
+                None if ctx.subagent_stop_epoch.is_some() => {
+                    return AggregateHookResult::default();
+                }
+                None => ctx.prompt_transcript = None,
             }
         }
         // #41 runner-head gate (`h$`).
@@ -2315,7 +2507,7 @@ impl Dispatcher {
                         prompt,
                         &body,
                         expected_event,
-                        ctx.inherit.clone(),
+                        ctx,
                         model.as_deref(),
                     )
                     .await;
@@ -2348,6 +2540,7 @@ impl Dispatcher {
                     _ => Duration::from_millis(HOOK_PROMPT_TIMEOUT_MS),
                 };
                 let exec = PromptExecutor {
+                    model_selection: ctx.model_selection.clone(),
                     transcript: ctx.prompt_transcript.clone(),
                     runner: self.prompt_runner.clone(),
                     timeout: effective_timeout,
@@ -3378,7 +3571,11 @@ fn build_lifecycle_envelope_body(
                 prompt: prompt.clone(),
                 session_title: b.session_title,
             };
-            Some(("UserPromptSubmit", serde_json::to_string(&payload).ok()?))
+            let encoded = serde_json::to_vec(&payload).ok()?;
+            let source = std::str::from_utf8(&encoded).ok()?;
+            let projected =
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source).ok()?;
+            Some(("UserPromptSubmit", projected.to_json_string().ok()?))
         }
         HookEvent::SessionStart { source, .. } => {
             let payload = SessionStartPayload {
@@ -3648,6 +3845,7 @@ fn build_lifecycle_envelope_body(
         HookEvent::AgentSpawn {
             agent_type,
             model,
+            model_profile,
             cwd,
             background,
             parent_agent_id,
@@ -3661,6 +3859,7 @@ fn build_lifecycle_envelope_body(
                 permission_mode: b.permission_mode,
                 agent_type: agent_type.clone(),
                 model: model.clone(),
+                model_profile: model_profile.clone(),
                 background: *background,
                 parent_agent_id: parent_agent_id.as_ref().map(ToString::to_string),
             };

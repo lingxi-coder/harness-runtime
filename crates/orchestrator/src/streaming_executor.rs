@@ -180,6 +180,17 @@ fn scheduler_stopped(operation: &str) -> crate::error::OrchestratorError {
     ))
 }
 
+fn scheduler_error(error: SchedulerStopped, operation: &str) -> crate::error::OrchestratorError {
+    match error {
+        SchedulerStopped::Unavailable => scheduler_stopped(operation),
+        SchedulerStopped::ModelResolution(reason) => {
+            crate::error::OrchestratorError::StreamingProtocol(format!(
+                "tool model preference could not be resolved: {reason}"
+            ))
+        }
+    }
+}
+
 // ============================================================================
 // StreamingToolExecutor — Task 6: struct + new() + add_tool()
 // ============================================================================
@@ -307,6 +318,15 @@ impl<'a> StreamingToolExecutor<'a> {
             .lifecycle_runtime
             .session_tool_hook_generation
             .current();
+        let model_provider = orch.model_resolution_context_provider.clone();
+        let model_context_resolver: crate::autonomous_tool_scheduler::ModelContextResolver =
+            Arc::new(move |previous, updated| {
+                crate::turn_loop::resolve_model_context_modifier(
+                    previous,
+                    updated,
+                    model_provider.as_deref(),
+                )
+            });
         let scheduler = ToolScheduler::spawn(
             dispatch,
             max_tool_use_concurrency(),
@@ -318,6 +338,7 @@ impl<'a> StreamingToolExecutor<'a> {
             ),
             session_root,
             publication_commit_lock,
+            Some(model_context_resolver),
         );
         let publication_fence = scheduler.current_publication_fence();
         Ok(Self {
@@ -411,10 +432,9 @@ impl<'a> StreamingToolExecutor<'a> {
                     tool_context_state: None,
                     context_modifiers: Vec::new(),
                 });
-                scheduler
-                    .add_ready(meta, outcome)
-                    .await
-                    .map_err(|_| scheduler_stopped("registering an unknown streamed tool"))?;
+                scheduler.add_ready(meta, outcome).await.map_err(|error| {
+                    scheduler_error(error, "registering an unknown streamed tool")
+                })?;
             }
             Some(resolved_tool) => {
                 let safe =
@@ -460,7 +480,7 @@ impl<'a> StreamingToolExecutor<'a> {
                         tool_context_state: None,
                     })
                     .await
-                    .map_err(|_| scheduler_stopped("admitting a streamed tool"))?;
+                    .map_err(|error| scheduler_error(error, "admitting a streamed tool"))?;
                 if started {
                     if let Some(tool) = self.tools.last_mut() {
                         tool.status = ToolStatus::Executing;
@@ -501,6 +521,7 @@ impl<'a> StreamingToolExecutor<'a> {
             native_query_depth: self.native_query_depth,
             query_history: Vec::new(),
             assistant_message: ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: assistant_id,
                 content: vec![ContentBlock::ToolUse {
                     id: id.clone(),
@@ -601,7 +622,7 @@ impl<'a> StreamingToolExecutor<'a> {
             .scheduler
             .finish_normal()
             .await
-            .map_err(|_| scheduler_stopped("finishing context layers"))?;
+            .map_err(|error| scheduler_error(error, "finishing context layers"))?;
         if let Some(state) = state {
             crate::turn_loop::apply_model_context_state(self.orch, state).await?;
         }

@@ -104,7 +104,9 @@ async fn main_fast_toggle_reaches_sdk_using_the_explicit_profile() {
                     None,
                     vec![],
                     vec![],
-                    "sdk", false, None,
+                    "sdk",
+                    false,
+                    None,
                 )
                 .await;
                 let calls = capture.0.lock().unwrap();

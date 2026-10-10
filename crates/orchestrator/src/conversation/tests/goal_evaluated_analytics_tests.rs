@@ -384,24 +384,16 @@ async fn a_goal_set_in_this_session_reports_its_origin_as_user() {
     assert_eq!(str_field(&the_event(&sink).await, "origin"), "user");
 }
 
-// ── who SUPPLIES `parentAborted` ─────────────────────────────────────────────
+// ── batched cancellation and Stop dispatch ───────────────────────────────────
 //
-// Every test above calls `stop_dispatch(orch, parent_aborted)` with the flag
-// chosen by hand. That pins what the handler DOES with it and nothing at all
-// about who supplies it — and the two batched entries supply different things.
-// `run_turn` has no user-cancel token and can only ever pass `false`;
-// `run_turn_with_cancel` passes its token's live state. Both entries now reach
-// the Stop hooks through ONE shared round, so that difference is a single
-// argument at two adjacent call sites, which is the shape a later "these are
-// the same, merge them" tidy-up reaches for. Passing `None` from the cancelable
-// site left every test in this file — and the rest of the suite — green.
+// A cancellation during the model step now ends the cancelable driver before
+// Stop dispatch, even if the API also returns a successful response. The old
+// fixture relied on a select race allowing that response to reach Stop with an
+// already-cancelled token. Keep public cancellation and successful Stop
+// dispatch as separate contracts; the direct Stop tests above cover an aborted
+// parent's outcome classification when Stop dispatch actually occurs.
 
-/// Cancels the turn's token as a side effect, then answers successfully.
-///
-/// This is what puts a LIVE cancellation in front of the Stop hooks without a
-/// race: the token is already set when the step resolves, and the cancelable
-/// entry's `select!` still takes the step branch because the token was not yet
-/// cancelled when the loop first polled it.
+/// Cancels while producing a model response, then returns that response.
 struct CancelsThenAnswers(tokio_util::sync::CancellationToken);
 
 #[async_trait::async_trait]
@@ -459,12 +451,8 @@ fn orch_with_api(
     .with_analytics_bus(bus)
 }
 
-/// `run_turn_with_cancel` reports its live token to the Stop hooks; `run_turn`,
-/// which has no token, reports `false`. Asserted as the DIFFERENCE, because
-/// either half alone stays green when the two are flattened into one.
 #[tokio::test]
-async fn the_two_batched_entries_supply_different_parent_aborted_flags() {
-    // Cancelable, with a cancellation that lands before the Stop hooks.
+async fn a_cancelled_model_response_does_not_dispatch_stop_goal_analytics() {
     let (bus, sink) = bus_and_sink().await;
     let token = tokio_util::sync::CancellationToken::new();
     let cancelable = orch_with_api(bus, Arc::new(CancelsThenAnswers(token.clone())));
@@ -479,43 +467,55 @@ async fn the_two_batched_entries_supply_different_parent_aborted_flags() {
     );
     assert_eq!(
         outcome,
-        crate::TurnOutcome::EndTurn,
-        "the step won its race and the turn reached the Stop hooks — if this is \
-         Cancelled the dispatch below never happened and the assertions are vacuous"
-    );
-    let cancelable_md = the_event(&sink).await;
-
-    // Non-cancelable, same shape of turn, no token to report.
-    let (bus, sink) = bus_and_sink().await;
-    let plain = orch_with_api(
-        bus,
-        Arc::new(MockApiClient::new(vec![
-            crate::test_support::mock_message_response(
-                vec![llm_runtime::ContentBlock::Text {
-                    text: "done".into(),
-                    cache_control: None,
-                    citations: None,
-                }],
-                Some("end_turn"),
-            ),
-        ])),
-    );
-    set_goal(&plain, 0).await;
-    plain.run_turn("hi").await.expect("turn");
-    let plain_md = the_event(&sink).await;
-
-    assert!(
-        bool_field(&cancelable_md, "parentAborted"),
-        "run_turn_with_cancel must report its live token to the Stop hooks"
+        crate::TurnOutcome::Cancelled,
+        "cancellation during the model step must end the public driver before Stop"
     );
     assert!(
-        !bool_field(&plain_md, "parentAborted"),
-        "run_turn has no user-cancel token, so parentAborted can never be true"
+        !sink
+            .events()
+            .await
+            .iter()
+            .any(|event| event.name == "tengu_goal_evaluated"),
+        "a model-step cancellation must not emit analytics for an unrun Stop dispatch"
     );
-    assert_eq!(
-        str_field(&cancelable_md, "outcome"),
-        "cancelled",
-        "and the flag reaches the outcome classification: `Qe ? \"cancelled\" : \"absent\"`"
-    );
-    assert_eq!(str_field(&plain_md, "outcome"), "absent");
+}
+
+#[tokio::test]
+async fn successful_batched_entries_dispatch_goal_analytics_without_parent_abort() {
+    for cancelable in [false, true] {
+        let (bus, sink) = bus_and_sink().await;
+        let orch = orch_with_api(
+            bus,
+            Arc::new(MockApiClient::new(vec![
+                crate::test_support::mock_message_response(
+                    vec![llm_runtime::ContentBlock::Text {
+                        text: "done".into(),
+                        cache_control: None,
+                        citations: None,
+                    }],
+                    Some("end_turn"),
+                ),
+            ])),
+        );
+        set_goal(&orch, 0).await;
+        if cancelable {
+            assert_eq!(
+                orch.run_turn_with_cancel("hi", tokio_util::sync::CancellationToken::new())
+                    .await
+                    .expect("cancelable turn"),
+                crate::TurnOutcome::EndTurn,
+            );
+        } else {
+            assert!(matches!(
+                orch.run_turn("hi").await.expect("plain turn"),
+                crate::ConversationOutcome::EndTurn { turn_count: 1, .. }
+            ));
+        }
+        let md = the_event(&sink).await;
+        assert!(
+            !bool_field(&md, "parentAborted"),
+            "a successful batched turn has no parent abort: cancelable={cancelable}"
+        );
+        assert_eq!(str_field(&md, "outcome"), "absent");
+    }
 }

@@ -32,17 +32,12 @@ fn mode_rank(mode: PermissionMode) -> u8 {
     }
 }
 
-/// Parse a spawn-mode WIRE string — the Agent tool `mode` enum
-/// (`acceptEdits`/`auto`/`bypassPermissions`/`default`/`dontAsk`/`plan`) — into a
-/// [`PermissionMode`]. Returns `None` for an unrecognized string (the schema enum
-/// forbids one, so this is defensive). `bubble` is engine-internal and never
-/// appears on the wire.
-///
-/// Retained (and unit-tested) for back-compat even though its production call
-/// site was removed in 2.1.212: the Agent/Task `mode` call param is now
-/// DEPRECATED and ignored, so the spawner no longer parses it into an override.
+/// Parse the trusted host's canonical permission-mode carrier into a
+/// [`PermissionMode`]. Spawn admission uses this for the immediate parent's
+/// enforcing mode and the bound invoker's current gate. Model-authored spawn
+/// `mode` values are ignored. Unknown strings return `None`; `bubble` remains
+/// an engine-internal inheritance sentinel.
 #[must_use]
-#[allow(dead_code)]
 pub(crate) fn parse_wire_mode(s: &str) -> Option<PermissionMode> {
     match s {
         "default" => Some(PermissionMode::Default),

@@ -5,6 +5,13 @@
 
 #![forbid(unsafe_code)]
 
+/// Supported stack budget for host threads polling complete Harness sessions.
+/// Configure Tokio workers with this size when embedding the desktop/headless
+/// runtime. The debug execution pipeline exceeds Tokio's default 2 MiB stack;
+/// the mobile host uses the same 8 MiB budget. This reserves address space,
+/// rather than committing the entire allocation as resident memory.
+pub const RUNTIME_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 #[cfg(feature = "engine")]
 pub mod api;
 #[cfg(feature = "engine")]
@@ -45,6 +52,9 @@ pub use workflow;
 /// Existing desktop product assembly.
 #[cfg(feature = "desktop")]
 pub mod desktop;
+/// Claude-compatible headless sessions with host-owned byte I/O.
+#[cfg(feature = "desktop")]
+pub mod headless;
 /// Build an embedded desktop Harness from the production composition.
 #[cfg(feature = "desktop")]
 pub use desktop::build_harness;

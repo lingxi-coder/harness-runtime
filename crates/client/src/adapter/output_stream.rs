@@ -753,6 +753,7 @@ impl OutputStream for AdapterOutputStream {
         _model_text: &Utf16JsonProjection,
         result: &Utf16JsonProjection,
         denial_kind: &str,
+        _projection: Option<&lingxi_core::host::ToolResultProjection>,
     ) {
         // Keep the frozen `ClientEvent` shape while carrying the engine's
         // structured interruption provenance inside the already-extensible JSON
@@ -2146,8 +2147,10 @@ mod tests {
         // ── resumed ───────────────────────────────────────────────────────
         let history = vec![
             ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolUse {
+                    input_projection: None,
                     id: id.clone(),
                     name: tool.to_string(),
                     input: input_source.clone(),
@@ -2157,8 +2160,10 @@ mod tests {
                 resumable: None,
             },
             ConversationMessage::User {
+                api_message_override: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
+                    content_projection: None,
                     tool_use_id: id.clone(),
                     content: content.to_string().into(),
                     is_error: Some(false),

@@ -1311,13 +1311,15 @@ function toolCallForwarded(original, forwarded) {
 }
 
 function agentSpawnForwarded(original, forwarded) {
+  const validRouteValue = value => value === undefined || value === null || typeof value === 'string';
   if (!forwarded || typeof forwarded !== 'object' || Array.isArray(forwarded)
       || typeof forwarded.prompt !== 'string'
       || (forwarded.prompt !== original?.prompt && forwarded.prompt.trim() === '')
       || typeof forwarded.description !== 'string'
       || typeof forwarded.subagentType !== 'string'
       || typeof forwarded.background !== 'boolean'
-      || (forwarded.model !== undefined && typeof forwarded.model !== 'string')
+      || !validRouteValue(forwarded.model)
+      || !validRouteValue(forwarded.model_profile)
       || (forwarded.cwd !== original?.cwd
         && forwarded.cwd !== undefined
         && (typeof forwarded.cwd !== 'string' || !isAbsolute(forwarded.cwd)))) return undefined;
@@ -2663,6 +2665,7 @@ function makeApi(plugin, storageId, tier, root, requestId, budget, hookId, heldE
           description: input.description ?? prompt.split(/\s+/).slice(0, 5).join(' '),
           run_in_background: true,
           ...(input.model !== undefined ? { model: input.model } : {}),
+          ...(input.model_profile !== undefined ? { model_profile: input.model_profile } : {}),
           ...(input.subagentType !== undefined ? { subagent_type: input.subagentType } : {}),
           ...(input.name !== undefined ? { name: input.name } : {}),
           ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
@@ -2777,6 +2780,17 @@ function makeApi(plugin, storageId, tier, root, requestId, budget, hookId, heldE
       },
     },
     prompt: {
+      read: () => call('prompt.read', {}),
+      fill: input => {
+        const error = remotePromptArgumentError('prompt.fill', input);
+        if (error) return Promise.reject(new Error(`${plugin}: $.prompt.fill ${error}`));
+        return call('prompt.fill', { text: input.text, ...(input.mode !== undefined ? {mode: input.mode} : {}), ...(input.decorations !== undefined ? {decorations: input.decorations} : {}) });
+      },
+      suggest: input => {
+        const error = remotePromptArgumentError('prompt.suggest', input);
+        if (error) return Promise.reject(new Error(`${plugin}: $.prompt.suggest ${error}`));
+        return call('prompt.suggest', {text: input.text});
+      },
       submit: input => {
         const held = activeDispatch.has(requestId) ? heldEvent : undefined;
         if (held === 'prompt.submit') {
@@ -2889,6 +2903,10 @@ function makeApi(plugin, storageId, tier, root, requestId, budget, hookId, heldE
             : undefined);
       },
       selection: () => call('ui.selection', {}),
+      copy: input => {
+        if (!input || typeof input.text !== 'string' || (input.surface !== undefined && !['terminal','desktop','mobile','vscode'].includes(input.surface))) return Promise.reject(new Error(`${plugin}: $.ui.copy takes { text, surface? } (a string text)`));
+        return call('ui.copy', {text: input.text, ...(input.surface !== undefined ? {surface: input.surface} : {})});
+      },
       log: (text, options) => {
         // Claude Code's log() is void: enqueue the operation and report a
         // refusal through the worker's debug channel, never as a thrown call.
@@ -3219,6 +3237,9 @@ async function dispatch(message) {
     uiInputSelectActionAvailable = uiInputSelectActionMatches(
       message.input, message.pressToken, 'Select', message.input.value,
     );
+  } else if (message.event === 'prompt.fill' || message.event === 'prompt.suggest') {
+    const error = remotePromptArgumentError(message.event, message.input);
+    if (error) throw new Error(error);
   } else if (message.event === 'ui.selection') {
     const error = uiSelectionArgumentError(message.input);
     if (error) throw new Error(error);
@@ -3585,6 +3606,12 @@ async function dispatch(message) {
         if (message.event === 'ui.select' && !uiSelectForwarded(event, nextEvent)) {
           return Promise.reject(new Error('ui.select identity is pinned; value must remain valid'));
         }
+        if (['prompt.fill','prompt.suggest'].includes(message.event)
+            && (!nextEvent || typeof nextEvent.text !== 'string'
+              || !equalJson(nextEvent.origin, event.origin)
+              || (message.event === 'prompt.fill' && nextEvent.mode !== event.mode))) {
+          return Promise.reject(new Error(`${message.event} origin and mode are pinned`));
+        }
         if (message.event === 'ui.selection' && !uiSelectionForwarded(event, nextEvent)) {
           return Promise.reject(new Error('ui.selection takes no arguments'));
         }
@@ -3671,6 +3698,12 @@ async function dispatch(message) {
         }
         if (message.event === 'ui.select' && !uiSelectForwarded(event, nextEvent)) {
           return Promise.reject(new Error('ui.select identity is pinned; value must remain valid'));
+        }
+        if (['prompt.fill','prompt.suggest'].includes(message.event)
+            && (!nextEvent || typeof nextEvent.text !== 'string'
+              || !equalJson(nextEvent.origin, event.origin)
+              || (message.event === 'prompt.fill' && nextEvent.mode !== event.mode))) {
+          return Promise.reject(new Error(`${message.event} origin and mode are pinned`));
         }
         if (message.event === 'ui.selection' && !uiSelectionForwarded(event, nextEvent)) {
           return Promise.reject(new Error('ui.selection takes no arguments'));

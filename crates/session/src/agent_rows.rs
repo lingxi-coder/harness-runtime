@@ -416,6 +416,7 @@ mod tests {
             // Cold restore resumes an existing agent row; it does not create
             // a new Agent-tool admission or a persisted statistics token.
             agent_spawn_token: None,
+            stop_hook_scope: Default::default(),
             agent_spawn_provenance: Default::default(),
             teammate_color: None,
             subagent_type: subagent_type.into(),
@@ -453,6 +454,7 @@ mod tests {
             depth: 1,
             origin_session_id: None,
             parent_model_override: None,
+            parent_model_profile_override: None,
             forked_skill_name: None,
             forked_skill_attribution: None,
             forked_skill_effort: None,

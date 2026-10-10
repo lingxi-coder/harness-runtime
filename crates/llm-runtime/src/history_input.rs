@@ -129,6 +129,9 @@ fn acknowledged_computer_receipts(
     messages: &[Message],
 ) -> Result<ComputerMarkerBoundaries, LlmError> {
     let mut ids = BTreeMap::new();
+    if crate::computer::uses_auxiliary_history_projection() {
+        return Ok(ids);
+    }
     for (message_index, block) in messages
         .iter()
         .enumerate()
@@ -153,6 +156,9 @@ fn acknowledged_computer_receipts(
 
 fn abandoned_computer_calls(messages: &[Message]) -> Result<BTreeSet<(String, String)>, LlmError> {
     let mut ids = BTreeSet::new();
+    if crate::computer::uses_auxiliary_history_projection() {
+        return Ok(ids);
+    }
     for block in messages.iter().flat_map(|message| &message.content) {
         if let Some(("lingxi_computer_abandoned", value, _)) = computer_marker(block) {
             let allowed_fields = ["type", "call_ids", "call_identities", "reason"];
@@ -352,46 +358,17 @@ fn block(block: &ContentBlock) -> Result<wire::ContentBlock, LlmError> {
             tool_call_id,
             output,
             is_error,
-            cache_control,
             cache_reference,
+            ..
         } => {
-            if cache_reference.is_some() {
-                let content = if output.is_root_string() || output.is_root_array() {
-                    output.clone()
-                } else {
-                    wire::JsonPayload::string(&stringify_payload(output)?)
-                };
-                let mut fields = vec![
-                    ("type", wire::JsonPayload::string("tool_result")),
-                    ("tool_use_id", wire::JsonPayload::string(tool_call_id)),
-                    ("content", content),
-                ];
-                if let Some(is_error) = is_error {
-                    fields.push((
-                        "is_error",
-                        wire::JsonPayload::parse(if *is_error { "true" } else { "false" })
-                            .expect("boolean literal is valid JSON"),
-                    ));
-                }
-                if let Some(control) = cache_control {
-                    fields.push((
-                        "cache_control",
-                        serialized_payload(&cache(control).wire_value())?,
-                    ));
-                }
-                if let Some(reference) = cache_reference {
-                    fields.push(("cache_reference", wire::JsonPayload::string(reference)));
-                }
-                native(object_payload(fields)?)
-            } else {
-                let (content, blocks) = tool_result_content_payload(output)?;
-                wire::ContentBlock::ToolResult {
-                    tool_use_id: wire::ToolUseId::new(tool_call_id),
-                    content,
-                    is_error: *is_error,
-                    blocks,
-                    toolset_name: None,
-                }
+            let (content, blocks) = tool_result_content_payload(output)?;
+            wire::ContentBlock::ToolResult {
+                tool_use_id: wire::ToolUseId::new(tool_call_id),
+                content,
+                is_error: *is_error,
+                blocks,
+                cache_reference: cache_reference.clone(),
+                toolset_name: None,
             }
         }
         ContentBlock::Reasoning { text, signature } => wire::ContentBlock::Thinking {
@@ -711,7 +688,10 @@ pub fn history_input(
                     && matches!(block, wire::ContentBlock::ToolUse { .. })
             });
         }
-        if projected.is_empty() {
+        if projected.is_empty()
+            && !(native_family(protocol) == wire::ProtocolFamily::AnthropicMessages
+                && message.api_output_config.is_some())
+        {
             continue;
         }
         // Retain malformed UTF-16 text at a protocol-neutral message/content
@@ -774,11 +754,27 @@ pub fn history_input(
                 }
             }
         }
-        result.messages.push(wire::ConversationMessage {
+        let mut wire_message = wire::ConversationMessage {
             role: serde_json::from_value(json!(message.role)).map_err(invalid)?,
             content: projected.into_iter().map(|(_, block)| block).collect(),
             native_options: Vec::new(),
-        });
+        };
+        if native_family(protocol) == wire::ProtocolFamily::AnthropicMessages {
+            if let Some(config) = &message.api_output_config {
+                if let Some(effort) = config.effort.as_ref() {
+                    wire_message = wire_message.with_anthropic_options(
+                        lingxi_llm_client::providers::anthropic::types::AnthropicMessageOptions {
+                            effort: Some(
+                                serde_json::from_str(&effort.to_json_string().map_err(invalid)?)
+                                    .map_err(invalid)?,
+                            ),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+        result.messages.push(wire_message);
     }
     let toolsets: BTreeMap<_, _> = result
         .messages
@@ -862,11 +858,41 @@ pub fn history_input(
     result.tools = tools
         .iter()
         .map(|tool| {
+            let input_schema = if let Some(projection) = &tool.input_schema_projection {
+                let source =
+                    wire::JsonPayload::parse(&projection.to_json_string().map_err(invalid)?)
+                        .map_err(invalid)?;
+                if !source
+                    .semantically_eq(&tool.input_schema)
+                    .map_err(crate::upstream::error)?
+                {
+                    return Err(invalid(
+                        "Tool schema projection does not match its source schema",
+                    ));
+                }
+                source
+            } else {
+                tool.input_schema.clone()
+            };
+            let mut strict = tool.strict;
+            let input_schema = if strict {
+                match lingxi_llm_client::providers::anthropic::strict_schema::to_strict_schema(
+                    &input_schema,
+                ) {
+                    Ok(schema) => schema,
+                    Err(_) => {
+                        strict = false;
+                        input_schema
+                    }
+                }
+            } else {
+                input_schema
+            };
             Ok(wire::ToolSpec {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                input_schema: tool.input_schema.clone(),
-                strict: tool.strict,
+                input_schema,
+                strict,
                 tool_type: tool.tool_type.clone(),
                 defer_loading: tool.defer_loading,
                 native_options: Vec::new(),
@@ -882,20 +908,38 @@ pub fn history_input(
                 .without_object_field("allowed_callers")
                 .map_err(invalid)?;
         }
-        if tool.strict {
-            match lingxi_llm_client::providers::anthropic::strict_schema::to_strict_schema(
-                &tool.input_schema,
-            ) {
-                Ok(schema) => tool.input_schema = schema,
-                Err(_) => tool.strict = false,
-            }
-        }
     }
     Ok((result, overrides))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exact_tool_result_uses_typed_sdk_carrier_and_rejects_stale_output() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let output =
+            Utf16JsonProjection::parse(r#"[{"type":"text","text":"\udfff","\ud800":1}]"#).unwrap();
+        let source = super::ContentBlock::ToolResult {
+            tool_call_id: "toolu_exact".into(),
+            output: wire::JsonPayload::parse(output.as_json_source()).unwrap(),
+            is_error: Some(false),
+            cache_control: None,
+            cache_reference: Some("cache-result".into()),
+        };
+        let wire = super::block(&source).unwrap();
+        let lingxi_llm_client::protocol::ContentBlock::ToolResult {
+            content,
+            blocks,
+            cache_reference,
+            ..
+        } = wire
+        else {
+            panic!("typed tool result required");
+        };
+        assert_eq!(cache_reference.as_deref(), Some("cache-result"));
+        assert!(content.is_root_string());
+        assert_eq!(blocks.unwrap().as_json_source(), output.as_json_source());
+    }
     use super::*;
 
     fn host_payload(value: Value) -> wire::JsonPayload {
@@ -914,6 +958,40 @@ mod tests {
 
         assert!(blocks.is_none());
         assert_eq!(content.root_string_code_units(), Some(vec![65, 0xd83d, 10]));
+    }
+
+    #[test]
+    fn strict_tool_schema_rebases_exact_keys_required_and_distinct_enum_values() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection as Projection;
+        let schema = Projection::parse(r#"{"type":"object","properties":{"\ud800":{"type":"string","enum":["\ud801","\ud802"]}},"required":["\ud800"]}"#).unwrap();
+        let tool = ToolDeclaration {
+            input_schema_projection: Some(schema.clone()),
+            name: "Exact".into(),
+            description: wire::JsonPayload::string("Exact schema"),
+            input_schema: wire::JsonPayload::parse(schema.as_json_source()).unwrap(),
+            tool_type: None,
+            extra: serde_json::Map::new(),
+            strict: true,
+            defer_loading: false,
+        };
+        let (request, _) = history_input(
+            "claude",
+            &[],
+            &[],
+            &[tool],
+            wire::ProtocolFamily::AnthropicMessages,
+        )
+        .unwrap();
+        assert!(request.tools[0].strict);
+        assert_eq!(
+            request.tools[0]
+                .input_schema
+                .bool_at("/additionalProperties"),
+            Some(false)
+        );
+        let raw = request.tools[0].input_schema.as_json_source();
+        assert!(raw.contains(r#""required":["\ud800"]"#));
+        assert!(raw.contains(r#""enum":["\ud801","\ud802"]"#));
     }
 
     fn encoded_body(request: &wire::ChatRequest, protocol: wire::ProtocolFamily) -> Value {
@@ -1074,10 +1152,12 @@ mod tests {
         }
         (
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content,
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![
                     ContentBlock::ToolResult {
@@ -1277,6 +1357,7 @@ mod tests {
                 old_call,
                 old_receipt,
                 Message {
+                    api_output_config: None,
                     role: "user".into(),
                     content: vec![
                         ContentBlock::ProviderContent {
@@ -1367,10 +1448,12 @@ mod tests {
         })).unwrap();
         let messages = vec![
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![synthetic, unrelated, computer_binding(&["synthetic"])],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![
                     result("synthetic"),
@@ -1411,6 +1494,7 @@ mod tests {
     #[test]
     fn computer_history_rejects_protocol_switch_and_malformed_binding() {
         let message = Message {
+            api_output_config: None,
             role: "assistant".into(),
             content: vec![computer_binding(&["synthetic"])],
         };
@@ -1426,6 +1510,7 @@ mod tests {
         assert!(history_input(
             "model",
             &[Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![malformed.clone()]
             }],
@@ -1444,6 +1529,7 @@ mod tests {
         assert!(history_input(
             "model",
             &[Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![malformed]
             }],
@@ -1470,6 +1556,7 @@ mod tests {
                 .to_owned();
             let messages = [
                 Message {
+                    api_output_config: None,
                     role: "user".into(),
                     content: vec![ContentBlock::ProviderContent {
                         protocol: source.clone(),
@@ -1479,6 +1566,7 @@ mod tests {
                     }],
                 },
                 Message {
+                    api_output_config: None,
                     role: "assistant".into(),
                     content: vec![ContentBlock::ProviderContent {
                         protocol: source,
@@ -1500,10 +1588,12 @@ mod tests {
         })).unwrap();
         let messages = [
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![computer_binding(&["synthetic"])],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::ProviderContent {
                     protocol: "anthropic_messages".into(),
@@ -1513,6 +1603,7 @@ mod tests {
                 }],
             },
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![ContentBlock::ProviderContent {
                     protocol: "anthropic_messages".into(),
@@ -1522,6 +1613,7 @@ mod tests {
                 }],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::Text {
                     text: "Check access again".into(),
@@ -1608,6 +1700,7 @@ mod tests {
             let receipt:wire::ContentBlock = serde_json::from_value(json!({"type":"tool_result","tool_use_id":"native-call","content":"obsolete receipt","toolset_name":"computer"})).unwrap();
             let messages = [
                 Message {
+                    api_output_config: None,
                     role: "assistant".into(),
                     content: vec![
                         ContentBlock::ToolCall {
@@ -1624,6 +1717,7 @@ mod tests {
                     ],
                 },
                 Message {
+                    api_output_config: None,
                     role: "user".into(),
                     content: vec![
                         ContentBlock::ToolResult {
@@ -1649,6 +1743,7 @@ mod tests {
                     ],
                 },
                 Message {
+                    api_output_config: None,
                     role: "user".into(),
                     content: vec![
                         ContentBlock::ProviderContent {
@@ -1699,6 +1794,7 @@ mod tests {
         .map(host_payload)
         {
             let message = Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::ProviderContent {
                     protocol: "anthropic_messages".into(),
@@ -1724,6 +1820,7 @@ mod tests {
         })).unwrap();
         let messages = [
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::Text {
                     text: "old user input".into(),
@@ -1732,6 +1829,7 @@ mod tests {
                 }],
             },
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![
                     ContentBlock::ToolCall {
@@ -1748,6 +1846,7 @@ mod tests {
                 ],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::ToolResult {
                     tool_call_id: "current-call".into(),
@@ -1805,6 +1904,7 @@ mod tests {
         };
         let messages = [
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![ContentBlock::ToolCall {
                     id: "old-call".into(),
@@ -1813,10 +1913,12 @@ mod tests {
                 }],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![result("old-call", "old accepted output")],
             },
             Message {
+                api_output_config: None,
                 role: "assistant".into(),
                 content: vec![
                     ContentBlock::ToolCall {
@@ -1833,6 +1935,7 @@ mod tests {
                 ],
             },
             Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![result("current-call", "new output")],
             },
@@ -1881,6 +1984,7 @@ mod tests {
             ),
         ] {
             let message = Message {
+                api_output_config: None,
                 role: "user".into(),
                 content: vec![ContentBlock::Text {
                     text: "prompt".into(),
@@ -1923,6 +2027,7 @@ mod tests {
             thought_signature: None,
         };
         let history = vec![Message {
+            api_output_config: None,
             role: "assistant".into(),
             content: vec![
                 ContentBlock::ToolCall {
@@ -1965,6 +2070,7 @@ mod tests {
     #[test]
     fn filtered_history_remaps_exact_strings_and_typed_cache_positions_together() {
         let history = vec![Message {
+            api_output_config: None,
             role: "user".into(),
             content: vec![
                 ContentBlock::ProviderContent {

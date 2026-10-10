@@ -82,6 +82,7 @@ async fn mod_attachment_rewrites_the_outgoing_style_reminder_and_caches_by_messa
     )
     .await
     .unwrap();
+
     let mut registry = hooks::HookRegistry::new();
     registry.set_mod_host(host.clone());
     let orch = ConversationOrchestrator::new(

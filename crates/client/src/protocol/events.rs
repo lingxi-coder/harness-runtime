@@ -78,6 +78,7 @@ impl std::fmt::Debug for OpenAiOAuthSessionDto {
 // but still have no live engine source in the foundation (decisions §0.7 /
 // §0.9) and round-trip only.
 // Boxing the app payload would change the generated Swift/Kotlin protocol API.
+#[allow(clippy::large_enum_variant)]
 // UniFFI 0.32.2 stores an enum's variant/field documentation in the same
 // fixed-size metadata buffer as its wire schema. Keep this high-cardinality
 // envelope undocumented at the derive site; the payload DTOs and protocol

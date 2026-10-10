@@ -87,6 +87,64 @@ fn is_zero_parse_retries(value: &u32) -> bool {
     *value == 0
 }
 
+fn deserialize_source_text<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let projection = crate::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    if projection.string_units("").is_some() {
+        Ok(projection)
+    } else {
+        Err(serde::de::Error::custom("expected a root JSON string"))
+    }
+}
+
+fn serialize_source_text<S>(
+    projection: &Utf16JsonProjection,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if projection.string_units("").is_none() {
+        return Err(serde::ser::Error::custom("expected a root JSON string"));
+    }
+    crate::types::utf16_json::raw_json_serde::serialize(projection, serializer)
+}
+
+fn deserialize_optional_source_text<'de, D>(
+    deserializer: D,
+) -> Result<Option<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+    if raw.get().trim() == "null" {
+        return Ok(None);
+    }
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+    if projection.string_units("").is_some() {
+        Ok(Some(projection))
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a root JSON string or null",
+        ))
+    }
+}
+
+fn serialize_optional_source_text<S>(
+    projection: &Option<Utf16JsonProjection>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match projection {
+        Some(projection) => serialize_source_text(projection, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 /// Trusted plugin identity attached by the host before an `agent.spawn` hook
 /// can rewrite its JSON input. The identity is retained for task-list
 /// provenance, never accepted from a plugin-returned spawn payload.
@@ -98,15 +156,30 @@ pub struct AgentSpawnProvenance {
     pub hook_origin: crate::host::task_registry::FieldPresence<Value>,
 }
 
-/// Locked subagent input passed to [`SubagentSpawner::spawn`].
+/// Host-selected terminal hook scope. Scoped hook agents and named teammates
+/// run their local lifecycle without publishing an unused session-stop buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SubagentStopScope {
+    /// An admitted dispatcher, foreground worker, or persistent forwarder owns
+    /// the session/plugin terminal hooks and consumes the child's snapshot.
+    Session,
+    /// Only child-scoped hooks run; no global snapshot is retained.
+    #[default]
+    AgentScoped,
+}
+
+/// Internal spawn request shared by Agent tools, skills, and host lifecycle paths.
 ///
-/// Mirrors `AgentToolInput` in `lingxi-tools::builtin::agent` byte-for-byte
-/// so the trait surface stays insulated from `lingxi-tools`.
+/// This contract carries host metadata in addition to the model-facing Agent
+/// input, keeping the spawner independent of the tool implementation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentSpawnRequest {
     /// Agent-tool admission capability; absent for skills, workflows and internal agents.
     #[serde(skip)]
     pub agent_spawn_token: Option<crate::host::agent_statistics::AgentSpawnToken>,
+    /// Trusted consumer scope; model/plugin JSON cannot claim lifecycle ownership.
+    #[serde(skip)]
+    pub stop_hook_scope: SubagentStopScope,
     /// The subagent type to resolve (built-in or user/project catalog). NOT
     /// validated here — the spawner resolves it with claude-code precedence
     /// (catalog overrides built-ins; unknown → `general-purpose`).
@@ -117,7 +190,8 @@ pub struct SubagentSpawnRequest {
     /// the prompt becomes the child's first model-visible message.
     #[serde(
         default = "empty_prompt_projection",
-        with = "crate::types::utf16_json::raw_json_serde"
+        serialize_with = "serialize_source_text",
+        deserialize_with = "deserialize_source_text"
     )]
     pub prompt: Utf16JsonProjection,
     /// Host-only Native query depth captured at the Agent tool call. The child
@@ -144,8 +218,8 @@ pub struct SubagentSpawnRequest {
     /// required in the model-facing schema). Carried for telemetry / display.
     #[serde(
         default,
-        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
-        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+        serialize_with = "serialize_optional_source_text",
+        deserialize_with = "deserialize_optional_source_text"
     )]
     pub description: Option<Utf16JsonProjection>,
     /// Model-family override (`"sonnet"` | `"opus"` | `"haiku"`). Takes
@@ -153,13 +227,10 @@ pub struct SubagentSpawnRequest {
     /// (TS `model`). The spawner maps this onto the agent model override.
     #[serde(default)]
     pub model: Option<String>,
-    /// Provider profile name for routing the child's model, e.g. the candidate's
-    /// resolved profile; `None` = default/unscoped resolution. When set, the
-    /// spawner uses [`Self::model`] verbatim as the explicit wire model and
-    /// threads this profile through to the subagent api client so the round-trip
-    /// targets the named provider (the dual-LLM dual-PROVIDER routing). When
-    /// `None`, model resolution + provider selection are unchanged (the legacy
-    /// default-provider path).
+    /// Configured provider profile for the child's model selection. Model and
+    /// profile are resolved together; aliases remain scoped to this profile.
+    /// The immediate parent's route is carried separately by
+    /// [`Self::parent_model_profile_override`].
     #[serde(default)]
     pub model_profile: Option<String>,
     /// Session-assigned teammate display color. Internal runtime metadata,
@@ -179,8 +250,7 @@ pub struct SubagentSpawnRequest {
     /// (TS `name`). Carried through; teammate routing is deferred.
     #[serde(default)]
     pub name: Option<String>,
-    /// Team name for spawning (TS `team_name`). Carried through; teammate
-    /// routing is deferred.
+    /// Host-internal team scope. Ordinary Agent input uses the session team.
     #[serde(default)]
     pub team_name: Option<String>,
     /// DISPLAY name of the teammate / subagent that created this spawn request.
@@ -197,8 +267,7 @@ pub struct SubagentSpawnRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creator_agent_id: Option<AgentId>,
     /// Internal inherited permission mode for a persistent teammate. The Agent
-    /// tool resolves this from the live parent mode, never from its deprecated
-    /// model-facing `mode` parameter. The teammate runtime uses it for plan-mode
+    /// tool resolves this from the live parent mode. The teammate runtime uses it for plan-mode
     /// requirements and child permission inheritance; ordinary Agent calls send
     /// `None` and inherit through their regular runtime context.
     #[serde(default)]
@@ -251,8 +320,8 @@ pub struct SubagentSpawnRequest {
     /// onto `ToolUseContext`) keeps the existing body+trailer behavior.
     #[serde(
         default,
-        serialize_with = "crate::types::utf16_json::raw_json_serde::serialize_option",
-        deserialize_with = "crate::types::utf16_json::raw_json_serde::deserialize_option"
+        serialize_with = "serialize_optional_source_text",
+        deserialize_with = "deserialize_optional_source_text"
     )]
     pub fork_parent_system_prompt: Option<Utf16JsonProjection>,
     /// Private live instruction state. Forks treat this as an explicit context
@@ -322,7 +391,7 @@ pub struct SubagentSpawnRequest {
     /// The CHILD's recursion depth = the spawning agent's depth + 1 (claude
     /// `spawnDepth = z6(parentContext) + 1`). The spawner stamps it onto the
     /// child's `SubagentContext.depth`, which the tool-resolver consults against
-    /// `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 3). `#[serde(default)]` ⇒
+    /// `LINGXI_MAX_SUBAGENT_SPAWN_DEPTH` (default 3). `#[serde(default)]` ⇒
     /// `0` for legacy/serialized payloads, so a child that deserializes without
     /// it behaves like a top-level spawn (the conservative direction).
     #[serde(default)]
@@ -345,6 +414,11 @@ pub struct SubagentSpawnRequest {
     /// default is used (non-`AgentTool` spawn paths / legacy serialized payloads).
     #[serde(default)]
     pub parent_model_override: Option<String>,
+    /// Provider profile of the immediate parent's model. This pins the parent
+    /// route independently from the child's optional `model_profile` override,
+    /// including when multiple providers expose the same parent model ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_model_profile_override: Option<String>,
     /// The SKILL this background agent IS, when it was launched by a
     /// `context: fork` skill (claude `forkedSkillName`).
     ///
@@ -1062,32 +1136,6 @@ pub fn format_agent_line(entry: &SubagentListingEntry, lean: bool) -> String {
     )
 }
 
-/// Whether the Agent catalog should be conveyed as a per-turn
-/// `<system-reminder>` attachment (the `agent_listing_delta` path) instead of
-/// embedded inline in the `AgentTool` description.
-///
-/// Port of claude-code `shouldInjectAgentListInMessages`
-/// (`AgentTool/prompt.ts`): honor the `LINGXI_AGENT_LIST_IN_MESSAGES`
-/// override (`isEnvTruthy` ⇒ true, `isEnvDefinedFalsy` ⇒ false), else the
-/// default. **Default is now ON**: in claude-code v2.1.193 the agent catalog is
-/// ALWAYS externalized to the per-turn `<system-reminder>` attachment (the
-/// `AgentTool` description carries only the static pointer line — there is no
-/// inline-catalog variant left). An explicit
-/// `LINGXI_AGENT_LIST_IN_MESSAGES=false` opts back into a LEGACY inline
-/// catalog (not a 2.1.193 form), retained only as an escape hatch.
-#[must_use]
-pub fn should_inject_agent_list_in_messages() -> bool {
-    let v = std::env::var("LINGXI_AGENT_LIST_IN_MESSAGES").ok();
-    if crate::host::env::is_env_truthy(v.as_deref()) {
-        return true;
-    }
-    if crate::host::env::is_env_defined_falsy(v.as_deref()) {
-        return false;
-    }
-    // v2.1.193: catalog is always externalized ⇒ default ON.
-    true
-}
-
 /// Sentinel key wrapping a forwarded subagent assistant message on the
 /// [`SubagentSpawner::spawn_with_progress`] `String` channel
 /// (`--forward-subagent-text`, 2.1.212).
@@ -1122,7 +1170,7 @@ pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: usize = 20;
 /// A top-level caller has depth 0, so 3 permits main → child → grandchild →
 /// great-grandchild. This was 1 through 2.1.217 (main could spawn one child,
 /// and that child could spawn nothing); 2.1.219 raised it to 3, and
-/// `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` is how you get the old behaviour
+/// `LINGXI_MAX_SUBAGENT_SPAWN_DEPTH=1` is how you get the old behaviour
 /// back.
 ///
 /// Leaving it at 1 made the port's depth-2+ stream-json forwarding
@@ -1131,7 +1179,7 @@ pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: usize = 20;
 ///
 /// ORACLE (`bee()`, 2.1.220 @230685726):
 /// ```js
-/// let e = Z.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH;
+/// let e = Z.LINGXI_MAX_SUBAGENT_SPAWN_DEPTH;
 /// if (e !== void 0) return e;                     // env wins outright
 /// let r = getFeatureValue(pt_, aHu);              // "tengu_hazel_trellis"
 /// Ous = (typeof r === "number" && Number.isInteger(r) && r >= 1) ? r : aHu;
@@ -1153,29 +1201,76 @@ fn max_subagent_spawn_depth_from(raw: Option<&str>) -> u32 {
         .unwrap_or(DEFAULT_MAX_SUBAGENT_SPAWN_DEPTH)
 }
 
-/// Resolve `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`, defaulting to 20.
+/// Resolve `LINGXI_MAX_CONCURRENT_SUBAGENTS`, defaulting to 20.
 #[must_use]
 pub fn max_concurrent_subagents() -> usize {
     max_concurrent_subagents_from(
-        std::env::var("CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS")
+        std::env::var(branding::MAX_CONCURRENT_SUBAGENTS_ENV)
             .ok()
             .as_deref(),
     )
 }
 
-/// Resolve `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`, defaulting to 1.
+/// Resolve `LINGXI_MAX_SUBAGENT_SPAWN_DEPTH`, defaulting to 3.
 #[must_use]
 pub fn max_subagent_spawn_depth() -> u32 {
     max_subagent_spawn_depth_from(
-        std::env::var("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH")
+        std::env::var(branding::MAX_SUBAGENT_SPAWN_DEPTH_ENV)
             .ok()
             .as_deref(),
     )
+}
+
+/// Natural child statuses that admit global stop hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentStopStatus {
+    /// One real child turn-set completed or came to rest.
+    Completed,
+    /// An allocated child failed.
+    Failed,
+}
+
+impl SubagentStopStatus {
+    /// Canonical hook status. Cancellation deliberately has no stop status.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Captured host owner for one session's subagent terminal hooks. A producer
+/// retains this capability across foreground/background transitions and normal
+/// turns; session reset retires its generation rather than retargeting it.
+#[async_trait]
+pub trait SubagentStopHookFirer: Send + Sync {
+    /// Host-minted process-local epoch identity, never accepted from model JSON.
+    fn epoch_id(&self) -> crate::types::MessageId;
+    /// Retire a replaced session binding, including hooks already awaiting I/O.
+    fn retire(&self);
+    /// Whether this binding still belongs to a live session epoch.
+    fn is_current(&self) -> bool;
+    /// Fire session/plugin stop hooks for this allocated child. The executor
+    /// consumes its already-published route and transcript snapshot.
+    async fn fire(&self, agent_id: AgentId, agent_type: &str, status: SubagentStopStatus);
 }
 
 /// Spawn-a-subagent seam used by `AgentTool`.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
+    /// Explicit terminal ownership for this execution producer. Custom
+    /// spawners that already fire global stop hooks advertise that fact;
+    /// otherwise the calling foreground task or main dispatcher owns them.
+    fn owns_subagent_stop_hooks(
+        &self,
+        _persistent: bool,
+        _session_id: Option<SessionId>,
+        _scope: SubagentStopScope,
+    ) -> bool {
+        false
+    }
     /// Wrap the child tool invoker with session-owned dispatch middleware.
     /// Desktop seats Mod `tool.call` here so every child tool call, including
     /// nested Agent calls, traverses the same plugin worker as the main loop.
@@ -1683,6 +1778,29 @@ mod tests {
     }
 
     #[test]
+    fn terminal_hook_scope_is_host_owned_and_defaults_to_scoped() {
+        let scoped = super::SubagentSpawnRequest::default();
+        assert_eq!(
+            scoped.stop_hook_scope,
+            super::SubagentStopScope::AgentScoped
+        );
+        let mut owned = scoped;
+        owned.stop_hook_scope = super::SubagentStopScope::Session;
+        let serialized = serde_json::to_value(&owned).unwrap();
+        assert!(serialized.get("stop_hook_scope").is_none());
+        let forged: super::SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "inspect the delegated task",
+            "stop_hook_scope": "Session"
+        }))
+        .unwrap();
+        assert_eq!(
+            forged.stop_hook_scope,
+            super::SubagentStopScope::AgentScoped
+        );
+    }
+
+    #[test]
     fn structured_output_parse_retries_defaults_and_round_trips() {
         let request = super::SubagentSpawnRequest::default();
         let value = serde_json::to_value(&request).unwrap();
@@ -1719,6 +1837,7 @@ mod tests {
 
         let request = super::SubagentSpawnRequest {
             parent_native_query_depth: None,
+            stop_hook_scope: Default::default(),
             agent_spawn_provenance: super::AgentSpawnProvenance {
                 hook_caller: FieldPresence::Value(serde_json::json!("host-plugin")),
                 hook_origin: FieldPresence::Value(serde_json::json!(["host-plugin"])),
@@ -1799,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_agent_limits_resolve_defaults_and_overrides() {
+    fn agent_limits_resolve_defaults_and_overrides() {
         assert_eq!(max_concurrent_subagents_from(None), 20);
         assert_eq!(max_concurrent_subagents_from(Some(" 7 ")), 7);
         assert_eq!(max_concurrent_subagents_from(Some("0")), 0);
@@ -1815,32 +1934,6 @@ mod tests {
         // Unparseable ⇒ the default, not a panic and not 0 (0 would silently
         // disable subagents entirely).
         assert_eq!(max_subagent_spawn_depth_from(Some("invalid")), 3);
-    }
-
-    /// The gate defaults ON in v2.1.193 (catalog always externalized). Guarded by
-    /// a process-wide lock because it mutates a shared env var.
-    #[test]
-    fn agent_list_gate_default_on_and_env_override() {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
-        assert!(
-            should_inject_agent_list_in_messages(),
-            "v2.1.193 default must be ON (catalog externalized)"
-        );
-
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "1");
-        assert!(should_inject_agent_list_in_messages(), "truthy ⇒ ON");
-
-        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
-        assert!(
-            !should_inject_agent_list_in_messages(),
-            "explicit defined-falsy ⇒ OFF (legacy inline escape hatch)"
-        );
-
-        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
     }
 
     #[test]

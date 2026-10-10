@@ -201,7 +201,8 @@ fn error_text_next_line_boundaries_match_2_1_286_oracle_bytes() {
             expected
         );
         assert_eq!(
-            Redactor.redact_headers(&BTreeMap::from([("x-diagnostic".into(), input.into())]))["x-diagnostic"],
+            Redactor.redact_headers(&BTreeMap::from([("x-diagnostic".into(), input.into())]))
+                ["x-diagnostic"],
             expected
         );
     }

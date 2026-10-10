@@ -484,6 +484,7 @@ impl PosixMcpTransport {
                 Ok(reply) => {
                     return Ok((parse_modern_discovery(source_from_payload(reply)?), false));
                 }
+
                 Err(ConnectionError::Router(RouterError::Remote(error))) => {
                     match modern_probe_error(&error, corrective_retry)? {
                         ModernProbeErrorAction::Legacy => return Ok((None, false)),
@@ -546,6 +547,7 @@ impl PosixMcpTransport {
                 (handshake_error(&error), remote)
             })?;
         let result = source_from_payload(result).map_err(|error| (error, None))?;
+
         let (dto, selected_version, metadata) =
             parse_legacy_initialize(result).map_err(|error| (error, None))?;
         if let Ok(mut map) = self.negotiated.lock() {
@@ -571,6 +573,7 @@ impl PosixMcpTransport {
                     None,
                 )
             })?;
+
         Ok(dto)
     }
 }
@@ -1346,6 +1349,7 @@ impl McpTransport for PosixMcpTransport {
             source_from_payload(result)?
         };
         let parsed: ToolCallResult = decode_source(&raw)?;
+
         Ok(McpToolResultDto {
             content: parsed.content,
             is_error: parsed.is_error,
@@ -1780,6 +1784,7 @@ mod initialize_params_tests {
     //! `services/mcp/client.ts:985-1002`.
     use super::{initialize_params, CLIENT_DESCRIPTION, MCP_PROTOCOL_VERSION};
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
     use serde_json::json;
     // Imported here, not at file scope: the lib target has no other user, so a
     // file-level `use` reads as an unused import and gets deleted — which then
@@ -2182,6 +2187,7 @@ mod protocol_era_tests {
         let value = modern_probe_params(lingxi_core::host::McpElicitationMode::FormAndUrl);
         let meta = value.subprojection("/_meta").unwrap();
         let meta_fields = meta.object_entries().unwrap();
+
         assert_eq!(
             meta_fields.len(),
             3,
@@ -2208,6 +2214,7 @@ mod protocol_era_tests {
         let complete = source_from_test_json(
             &json!({"resultType": "complete", "ttlMs":0,"cacheScope":"private","tools": []}),
         );
+
         let DecodedMcpResult::Complete(complete) =
             decode_modern_result("tools/list", complete).expect("complete envelope")
         else {

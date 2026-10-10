@@ -75,6 +75,20 @@ impl HookPromptRequest {
 /// Minimal current contract the orchestrator needs from the API client.
 #[async_trait]
 pub trait OrchestratorApiClient: Send + Sync {
+    /// Exact native route identity. Unavailable route metadata admits no Fast mode.
+    fn is_first_party_route(&self, _model: &str, _profile: Option<&str>) -> bool {
+        false
+    }
+
+    /// Inspect the selected credential's redacted origin without executing auth.
+    async fn credential_source(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<llm_runtime::CredentialSource, LlmError> {
+        Ok(llm_runtime::CredentialSource::Unknown)
+    }
+
     /// Provider wire chosen by the host route, independent of model name guesses.
     fn native_computer_provider(
         &self,
@@ -509,11 +523,12 @@ pub enum TurnOutcome {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ConversationOutcome {
-    /// Model emitted `stop_reason == "end_turn"` after `turn_count` API
-    /// calls. `final_message_id` is the id of the final assistant message
+    /// The query completed after `turn_count` admitted query cycles.
+    /// `final_message_id` is the id of the final assistant message
     /// appended to the session.
     EndTurn {
-        /// Number of API round-trips it took to reach `end_turn`.
+        /// Admitted query cycles, including a StructuredOutput terminal cycle
+        /// that finishes from the accepted tool result without another API call.
         turn_count: u32,
         /// Stable identifier of the final assistant message.
         final_message_id: MessageId,
@@ -523,7 +538,7 @@ pub enum ConversationOutcome {
     /// (hooks B4, TS `query.ts:1278`). Distinct from [`Self::EndTurn`] so callers
     /// can tell a hook-forced stop from a natural `end_turn`.
     StopHookPrevented {
-        /// Number of API round-trips before the Stop hook forced termination.
+        /// Admitted query cycles before the Stop hook forced termination.
         turn_count: u32,
         /// Stable identifier of the final assistant message, if any.
         final_message_id: MessageId,
@@ -750,7 +765,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         }
         // Generic-Error fallthrough (`Flp`: `if(e instanceof $o)→"unknown"`;
         // generic Error → "unknown"). These orchestrator-internal variants never
-        // carry a status. `MaxTurnsReached`/`MaxBudgetReached` are handled
+        // carry a status. Turn/budget/structured-output retry limits are handled
         // upstream and never reach `surface_model_error` — dead arms kept for
         // totality.
         OrchestratorError::Internal(_)
@@ -763,6 +778,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         | OrchestratorError::RepeatedOverloaded
         | OrchestratorError::RateLimitRejected { .. }
         | OrchestratorError::MaxTurnsReached { .. }
+        | OrchestratorError::MaxStructuredOutputRetries { .. }
         | OrchestratorError::MaxBudgetReached { .. } => (Some("unknown"), None),
     };
     ApiErrorEnvelope {
@@ -1051,6 +1067,7 @@ pub(crate) struct MainThreadAgentState {
 struct WireToolSchemaCacheKey {
     tool_names: Vec<String>,
     dynamic_schema_revisions: Vec<(String, String)>,
+    exact_schema_identities: Vec<(String, String)>,
     model: String,
     model_profile: Option<String>,
     /// Whether the `workflow-authoring` skill was loadable when this entry was
@@ -1299,6 +1316,8 @@ pub struct ConversationOrchestrator {
     pub(crate) computer_runtime: crate::native_computer::ComputerRuntime,
     pub(crate) tool_execution_journal: Option<Arc<dyn lingxi_core::host::ToolExecutionJournal>>,
     pub(crate) hooks: Arc<HookExecutor>, // = hooks::HookExecutorImpl (M5-06)
+    /// Exact enforced tool and shared budget handles inherited by Agent hooks.
+    pub(crate) hook_agent_inheritance: Option<lingxi_core::host::SubagentInheritance>,
     pub(crate) perms: Arc<dyn PermissionGate>,
     pub(crate) output: Arc<dyn OutputStream>,
     pub(crate) session: Arc<Mutex<SessionState>>,
@@ -1576,6 +1595,12 @@ impl ConversationOrchestrator {
     pub fn into_shared(this: Self) -> Arc<Self> {
         let shared = Arc::new(this);
         Self::bind_streaming_tool_dispatch_owner(&shared);
+        let session_id = shared
+            .session
+            .try_lock()
+            .expect("finalized orchestrator binds before turn publication")
+            .session_id;
+        shared.bind_subagent_stop_hook_owner(session_id);
         shared
     }
 
@@ -1661,6 +1686,11 @@ mod wiring_impl;
 mod output_accounting_impl;
 #[path = "conversation/runtime.rs"]
 mod runtime_impl;
+
+#[path = "conversation/headless_mcp.rs"]
+mod headless_mcp;
+#[path = "conversation/headless_ui.rs"]
+mod headless_ui;
 
 use drivers_impl::parse_generated_session_name;
 pub(crate) use runtime_impl::TurnTimingCapture;

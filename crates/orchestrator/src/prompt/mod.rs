@@ -39,9 +39,8 @@ pub mod large_memory;
 pub use large_memory::{large_memory_warning_rows, shorten_memory_path};
 
 pub use memory_block::{
-    build_memdir_prefetch, build_memdir_prefetch_from_anthropic, build_session_memory_handle,
-    real_provider, real_provider_with_excludes, MemoryHierarchyProvider,
-    RealMemoryHierarchyProvider,
+    build_memdir_prefetch, build_session_memory_handle, real_provider, real_provider_with_excludes,
+    MemoryHierarchyProvider, RealMemoryHierarchyProvider,
 };
 
 /// Re-export of the LINGXI.md tier enum so consumers that depend on
@@ -494,7 +493,7 @@ pub(crate) fn named_prompt_sections_with_style(
 
     // R-P1c/R-P1d: the LINGXI.md memory block is NO LONGER spliced into the
     // MAIN system prompt. claude-code v2.1.183 carries it as an additional-
-    // context `<system-reminder>` meta user message (the `claudeMd` key of
+    // context `<system-reminder>` meta user message (the `instructions` key of
     // `A6n(re, userContext)`), prepended to each turn's messages — NOT a system-
     // prompt section. The orchestrator builds that message from
     // `memory_block::format` (see `conversation.rs::additional_context_message`).

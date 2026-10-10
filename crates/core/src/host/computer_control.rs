@@ -16,6 +16,27 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
+/// Shared key identities for host grants, held-input tracking and platform parsing.
+pub fn canonical_computer_key(key: &str) -> String {
+    match key.to_ascii_lowercase().as_str() {
+        "command" | "meta" | "super" | "win" | "windows" => "cmd".into(),
+        "control" => "ctrl".into(),
+        "option" | "opt" => "alt".into(),
+        "enter" => "return".into(),
+        "esc" => "escape".into(),
+        "spacebar" | " " => "space".into(),
+        "del" => "delete".into(),
+        "uparrow" => "up".into(),
+        "downarrow" => "down".into(),
+        "leftarrow" => "left".into(),
+        "rightarrow" => "right".into(),
+        "page_up" => "pageup".into(),
+        "page_down" => "pagedown".into(),
+        "caps_lock" => "capslock".into(),
+        _ => key.to_ascii_lowercase(),
+    }
+}
+
 /// A captured screen image (PNG-encoded) plus its pixel dimensions. Reused for
 /// both `screenshot` (full display) and `zoom` (region capture) — parity with
 /// upstream's shared `ScreenshotResult` shape.
@@ -27,6 +48,26 @@ pub struct Screenshot {
     pub height: u32,
     /// PNG-encoded image bytes.
     pub png_bytes: Vec<u8>,
+}
+
+/// Geometry of the selected display in capture pixels and global OS points.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputerFrameGeometry {
+    pub display_id: u32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub origin_x: f64,
+    pub origin_y: f64,
+    pub scale: f64,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ComputerBackendCapabilities {
+    pub held_keys: bool,
+    pub pixel_scroll: bool,
+    pub side_buttons: bool,
+    pub frame_geometry: bool,
 }
 
 /// One connected display (`executor.ts` `listDisplays`/`DisplayGeometry`).
@@ -75,6 +116,77 @@ pub enum ComputerError {
 /// Coordinates are in screen pixels with the origin at the top-left.
 #[async_trait]
 pub trait ComputerControl: Send + Sync {
+    /// Stable lock directory for the physical desktop controlled by this backend.
+    /// A real desktop backend must use an OS-owned identity independent of
+    /// application config directories. `None` permits isolated fake backends.
+    fn desktop_lock_scope(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+    fn capabilities(&self) -> ComputerBackendCapabilities {
+        ComputerBackendCapabilities::default()
+    }
+    async fn frame_geometry(&self) -> Result<Option<ComputerFrameGeometry>, ComputerError> {
+        Ok(None)
+    }
+    async fn validate_keys(&self, keys: &[String]) -> Result<(), ComputerError> {
+        let _ = keys;
+        Err(ComputerError::Unsupported("validate_keys".into()))
+    }
+    async fn key_down(&self, key: String) -> Result<(), ComputerError> {
+        let _ = key;
+        Err(ComputerError::Unsupported("key_down".into()))
+    }
+    async fn key_up(&self, key: String) -> Result<(), ComputerError> {
+        let _ = key;
+        Err(ComputerError::Unsupported("key_up".into()))
+    }
+    /// Retry release of keys left by a failed compound keyboard operation.
+    /// The caller must still own the exclusive desktop lease.
+    async fn release_held_keys(&self) -> Result<(), ComputerError> {
+        Err(ComputerError::Unsupported("release_held_keys".into()))
+    }
+    /// Retry all buttons left pressed by an interrupted compound click.
+    /// The caller must retain the exclusive desktop lease until this succeeds.
+    async fn release_held_buttons(&self) -> Result<(), ComputerError> {
+        Err(ComputerError::Unsupported("release_held_buttons".into()))
+    }
+    async fn key_chord(&self, keys: Vec<String>) -> Result<(), ComputerError> {
+        let _ = keys;
+        Err(ComputerError::Unsupported("key_chord".into()))
+    }
+    async fn mouse_click(&self, x: u32, y: u32, button: &str) -> Result<(), ComputerError> {
+        match button {
+            "left" => self.left_click(x, y).await,
+            "right" => self.right_click(x, y).await,
+            "middle" => self.middle_click(x, y).await,
+            _ => Err(ComputerError::Unsupported(format!("mouse button {button}"))),
+        }
+    }
+    /// Click at the actual cursor without selecting/repositioning a display.
+    async fn click_current(&self, button: &str, count: u32) -> Result<(), ComputerError> {
+        let (x, y) = self.cursor_position().await?;
+        match (button, count) {
+            ("left", 2) => self.double_click(x, y).await,
+            ("left", 3) => self.triple_click(x, y).await,
+            (_, 1) => self.mouse_click(x, y, button).await,
+            _ => Err(ComputerError::Unsupported(
+                "current cursor click count".into(),
+            )),
+        }
+    }
+    /// Scroll at the actual cursor without repositioning it.
+    async fn scroll_current(&self, dx: i32, dy: i32, pixels: bool) -> Result<(), ComputerError> {
+        let (x, y) = self.cursor_position().await?;
+        if pixels {
+            self.scroll_pixels(x, y, dx, dy).await
+        } else {
+            self.scroll(x, y, dx, dy).await
+        }
+    }
+    async fn scroll_pixels(&self, x: u32, y: u32, dx: i32, dy: i32) -> Result<(), ComputerError> {
+        let _ = (x, y, dx, dy);
+        Err(ComputerError::Unsupported("scroll_pixels".into()))
+    }
     /// Capture the current (primary or last-targeted) display.
     async fn screenshot(&self) -> Result<Screenshot, ComputerError>;
     /// Return the primary display size in pixels `(width, height)`.
@@ -197,116 +309,4 @@ pub trait ComputerControl: Send + Sync {
     async fn check_os_permissions(&self) -> Option<(bool, bool)> {
         None
     }
-    /// Stable lock directory for the physical desktop controlled by this backend.
-    /// A real desktop backend must use an OS-owned identity independent of
-    /// application config directories. `None` permits isolated fake backends.
-    fn desktop_lock_scope(&self) -> Option<std::path::PathBuf> {
-        None
-    }
-    fn capabilities(&self) -> ComputerBackendCapabilities {
-        ComputerBackendCapabilities::default()
-    }
-    async fn frame_geometry(&self) -> Result<Option<ComputerFrameGeometry>, ComputerError> {
-        Ok(None)
-    }
-    async fn validate_keys(&self, keys: &[String]) -> Result<(), ComputerError> {
-        let _ = keys;
-        Err(ComputerError::Unsupported("validate_keys".into()))
-    }
-    async fn key_down(&self, key: String) -> Result<(), ComputerError> {
-        let _ = key;
-        Err(ComputerError::Unsupported("key_down".into()))
-    }
-    async fn key_up(&self, key: String) -> Result<(), ComputerError> {
-        let _ = key;
-        Err(ComputerError::Unsupported("key_up".into()))
-    }
-    /// Retry release of keys left by a failed compound keyboard operation.
-    /// The caller must still own the exclusive desktop lease.
-    async fn release_held_keys(&self) -> Result<(), ComputerError> {
-        Err(ComputerError::Unsupported("release_held_keys".into()))
-    }
-    /// Retry all buttons left pressed by an interrupted compound click.
-    /// The caller must retain the exclusive desktop lease until this succeeds.
-    async fn release_held_buttons(&self) -> Result<(), ComputerError> {
-        Err(ComputerError::Unsupported("release_held_buttons".into()))
-    }
-    async fn key_chord(&self, keys: Vec<String>) -> Result<(), ComputerError> {
-        let _ = keys;
-        Err(ComputerError::Unsupported("key_chord".into()))
-    }
-    async fn mouse_click(&self, x: u32, y: u32, button: &str) -> Result<(), ComputerError> {
-        match button {
-            "left" => self.left_click(x, y).await,
-            "right" => self.right_click(x, y).await,
-            "middle" => self.middle_click(x, y).await,
-            _ => Err(ComputerError::Unsupported(format!("mouse button {button}"))),
-        }
-    }
-    /// Click at the actual cursor without selecting/repositioning a display.
-    async fn click_current(&self, button: &str, count: u32) -> Result<(), ComputerError> {
-        let (x, y) = self.cursor_position().await?;
-        match (button, count) {
-            ("left", 2) => self.double_click(x, y).await,
-            ("left", 3) => self.triple_click(x, y).await,
-            (_, 1) => self.mouse_click(x, y, button).await,
-            _ => Err(ComputerError::Unsupported(
-                "current cursor click count".into(),
-            )),
-        }
-    }
-    /// Scroll at the actual cursor without repositioning it.
-    async fn scroll_current(&self, dx: i32, dy: i32, pixels: bool) -> Result<(), ComputerError> {
-        let (x, y) = self.cursor_position().await?;
-        if pixels {
-            self.scroll_pixels(x, y, dx, dy).await
-        } else {
-            self.scroll(x, y, dx, dy).await
-        }
-    }
-    async fn scroll_pixels(&self, x: u32, y: u32, dx: i32, dy: i32) -> Result<(), ComputerError> {
-        let _ = (x, y, dx, dy);
-        Err(ComputerError::Unsupported("scroll_pixels".into()))
-    }
-}
-
-/// Shared key identities for host grants, held-input tracking and platform parsing.
-pub fn canonical_computer_key(key: &str) -> String {
-    match key.to_ascii_lowercase().as_str() {
-        "command" | "meta" | "super" | "win" | "windows" => "cmd".into(),
-        "control" => "ctrl".into(),
-        "option" | "opt" => "alt".into(),
-        "enter" => "return".into(),
-        "esc" => "escape".into(),
-        "spacebar" | " " => "space".into(),
-        "del" => "delete".into(),
-        "uparrow" => "up".into(),
-        "downarrow" => "down".into(),
-        "leftarrow" => "left".into(),
-        "rightarrow" => "right".into(),
-        "page_up" => "pageup".into(),
-        "page_down" => "pagedown".into(),
-        "caps_lock" => "capslock".into(),
-        _ => key.to_ascii_lowercase(),
-    }
-}
-
-/// Geometry of the selected display in capture pixels and global OS points.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ComputerFrameGeometry {
-    pub display_id: u32,
-    pub pixel_width: u32,
-    pub pixel_height: u32,
-    pub origin_x: f64,
-    pub origin_y: f64,
-    pub scale: f64,
-    pub version: String,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ComputerBackendCapabilities {
-    pub held_keys: bool,
-    pub pixel_scroll: bool,
-    pub side_buttons: bool,
-    pub frame_geometry: bool,
 }
