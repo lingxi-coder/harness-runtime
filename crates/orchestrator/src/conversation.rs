@@ -1594,7 +1594,10 @@ pub(crate) use compaction_impl::{
 };
 #[path = "conversation/drivers/mod.rs"]
 mod drivers_impl;
-pub use drivers_impl::QueuedPromptInput;
+pub use drivers_impl::{
+    realtime_history, QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
+    RealtimeAgentLimits,
+};
 #[path = "conversation/context_announcements.rs"]
 pub(crate) mod context_announcements_impl;
 #[path = "conversation/goal_retry.rs"]

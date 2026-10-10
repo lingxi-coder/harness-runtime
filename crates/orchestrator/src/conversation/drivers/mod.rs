@@ -22,6 +22,10 @@ mod loop_state;
 mod prepare;
 mod projected_content;
 mod streaming;
+mod realtime;
+pub use realtime::{
+    realtime_history, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits,
+};
 
 use super::hooks_impl::ModPromptScreen;
 use super::*;

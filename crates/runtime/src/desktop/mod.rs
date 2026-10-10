@@ -1695,6 +1695,27 @@ pub struct DesktopAudio {
 }
 
 impl DesktopAudio {
+    /// Compose device-only audio, installed offline backends and hosted cloud
+    /// routes. A native service already implementing complete v4 policy should
+    /// continue using `from_single` to resolve routing only once.
+    pub fn from_unified(
+        device: Arc<dyn lingxi_core::host::audio::AudioService>,
+        offline: Vec<audio_runtime::OfflineAudioBackend>,
+        cloud_host: Option<Arc<dyn audio_runtime::CloudAudioHost>>,
+        settings: audio_runtime::AudioRoutingSettings,
+        owner: Option<lingxi_core::host::audio::AudioOwner>,
+    ) -> Self {
+        let service = Arc::new(audio_runtime::UnifiedAudioService::new(
+            device, offline, cloud_host, settings,
+        ));
+        Self {
+            service: match owner {
+                Some(owner) => service.for_owner(owner),
+                None => service,
+            },
+        }
+    }
+
     /// Build from one app-scoped audio service.
     #[must_use]
     pub fn from_single<T>(implementation: Arc<T>) -> Self
@@ -2351,6 +2372,8 @@ pub struct DesktopRuntime {
     pub catalog_registry: FusionCatalogRegistry,
     /// Product region actually selected by the running client.
     pub provider_region: llm_runtime::Region,
+    audio_services: llm_runtime::services::ProviderServices,
+    audio_credential_ids: std::collections::BTreeMap<String, String>,
     /// The fully-constructed orchestrator (cost tracker + MCP/hook/agent
     /// registries + compaction wired), bound to the supplied output stream and
     /// permission gate.
@@ -2593,6 +2616,20 @@ pub struct DesktopRuntime {
 }
 
 impl DesktopRuntime {
+    /// Actual assembled SDK services and credential sources for native audio.
+    pub fn audio_provider_services(
+        &self,
+    ) -> (
+        llm_runtime::services::ProviderServices,
+        std::collections::BTreeMap<String, String>,
+        Arc<secret::CredentialManager>,
+    ) {
+        (
+            self.audio_services.clone(),
+            self.audio_credential_ids.clone(),
+            self.credentials.clone(),
+        )
+    }
     /// Current local Agent statistics, sampled when a result is published.
     /// Hosts without the Agent tool omit the field instead of inventing zeros.
     pub async fn agent_session_statistics(

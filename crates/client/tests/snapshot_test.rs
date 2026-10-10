@@ -183,6 +183,8 @@ where
 #[allow(clippy::too_many_lines)] // a flat data table: one row per ClientEvent variant
 fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
     vec![
+        ("event/audio_session_context.json", ClientEvent::AudioSessionContext {session_id:"session-1".into(),profile_id:"profile-1".into(),account_scope:"profile:profile-1".into()}),
+        ("event/realtime_audio_event.json", ClientEvent::RealtimeAudioEvent {session_id:"session-1".into(),event_json:r#"{"type":"closed","reason":"Cancelled"}"#.into()}),
         ("event/cron_run_bound.json", ClientEvent::CronRunBound {run_id: "run-1".into(), error: None}),
         ("event/scheduled_run_finished.json", ClientEvent::ScheduledRunFinished {run_id: "run-1".into(), summary: Some("Completed".into()), error: None}),
         ("event/cron_run_requested.json", ClientEvent::CronRunRequested {run_id: "run-1".into(), task: client::protocol::events::CronJobDto {
@@ -1566,6 +1568,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
 #[allow(clippy::too_many_lines)]
 fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
     vec![
+        ("command/get_audio_session_context.json", ClientCommand::GetAudioSessionContext),
+        ("command/start_realtime_audio.json", ClientCommand::StartRealtimeAudio {request_json:r#"{"operationId":"audio-1"}"#.into()}),
+        ("command/realtime_audio_input.json", ClientCommand::RealtimeAudioInput {input_json:r#"{"type":"commit_input"}"#.into()}),
+        ("command/stop_realtime_audio.json", ClientCommand::StopRealtimeAudio),
         ("command/cron_run_started.json", ClientCommand::CronRunStarted {run_id: "run-1".into(), session_id: "session-1".into()}),
         ("command/cron_run_completed.json", ClientCommand::CronRunCompleted {run_id: "run-1".into(), session_id: Some("session-1".into()), summary: Some("Completed".into()), error: None}),
         ("command/scheduled_run_turn.json", ClientCommand::ScheduledRunTurn {run_id: "run-1".into(), prompt: "Daily brief".into(), model: "openai/model".into(), reasoning: ReasoningSelectionDto::Automatic}),

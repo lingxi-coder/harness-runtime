@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "crates/runtime",
     "crates/branding",
+    "crates/audio-runtime",
     "crates/client",
     "crates/configuration-admin",
     "crates/tool-api",
@@ -82,6 +83,7 @@ members = [
 default-members = [
     "crates/runtime",
     "crates/branding",
+    "crates/audio-runtime",
     "crates/client",
     "crates/tool-api",
     "crates/tools/file",

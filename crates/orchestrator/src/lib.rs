@@ -115,7 +115,10 @@ pub use conversation::{
     OrchestratorApiClient, OrchestratorApiRequest, SessionMemoryHandle, StreamingApiClient,
     TurnOutcome, TurnExecutionMetrics,
 };
-pub use conversation::{QueuedPromptInput, ScheduledLoopFire};
+pub use conversation::{
+    realtime_history, QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
+    RealtimeAgentLimits, ScheduledLoopFire,
+};
 pub use cwd_changed_firer::OrchestratorCwdChangedFirer;
 pub use error::OrchestratorError;
 pub use file_changed_firer::OrchestratorFileChangedFirer;

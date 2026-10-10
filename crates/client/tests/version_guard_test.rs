@@ -812,6 +812,16 @@ fn current_contract_index() -> ContractIndex {
     put("AudioOperationRequestDto.max_payload_bytes", "u64");
     put("AudioOperationRequestDto.operation", "AudioOperationDto");
 
+    put("AudioOperationDto::Capture", "capture");
+    put("AudioOperationDto::Capture.sample_rate_hz", "u32");
+    put("AudioOperationDto::Capture.format", "String");
+    put("AudioOperationDto::Play", "play");
+    put("AudioOperationDto::Play.pcm_base64", "String");
+    put("AudioOperationDto::Play.sample_rate_hz", "u32");
+    put("AudioOperationDto::Transcribe", "transcribe");
+    put("AudioOperationDto::Transcribe.audio_base64", "String");
+    put("AudioOperationDto::Transcribe.mime_type", "String");
+    put("AudioOperationDto::Transcribe.language", "Option<String>");
     put("AudioOperationDto::StartRecording", "start_recording");
     put("AudioOperationDto::StartRecording.sample_rate_hz", "u32");
     put("AudioOperationDto::StartRecording.format", "String");
@@ -1272,6 +1282,19 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::RemoveMcpServer.scope", "WritableScopeDto");
     put("ClientCommand::RemoveMcpServer.name", "String");
 
+    put("ClientCommand::GetAudioSessionContext", "get_audio_session_context");
+    put("ClientEvent::AudioSessionContext", "audio_session_context");
+    put("ClientEvent::AudioSessionContext.session_id", "String");
+    put("ClientEvent::AudioSessionContext.profile_id", "String");
+    put("ClientEvent::AudioSessionContext.account_scope", "String");
+    put("ClientCommand::StartRealtimeAudio", "start_realtime_audio");
+    put("ClientCommand::StartRealtimeAudio.request_json", "String");
+    put("ClientCommand::RealtimeAudioInput", "realtime_audio_input");
+    put("ClientCommand::RealtimeAudioInput.input_json", "String");
+    put("ClientCommand::StopRealtimeAudio", "stop_realtime_audio");
+    put("ClientEvent::RealtimeAudioEvent", "realtime_audio_event");
+    put("ClientEvent::RealtimeAudioEvent.session_id", "String");
+    put("ClientEvent::RealtimeAudioEvent.event_json", "String");
     put("ClientCommand::AudioResponse", "audio_response");
     put(
         "ClientCommand::AudioResponse.identity",
@@ -1344,6 +1367,9 @@ fn current_contract_index() -> ContractIndex {
     put("AudioOperationResultDto::Failed", "failed");
     put("AudioOperationResultDto::Failed.error", "AudioErrorDto");
 
+    put("AudioOperationKindDto::Capture", "capture");
+    put("AudioOperationKindDto::Play", "play");
+    put("AudioOperationKindDto::Transcribe", "transcribe");
     put("AudioOperationKindDto::Record", "record");
     put("AudioOperationKindDto::Listen", "listen");
     put("AudioOperationKindDto::Synthesize", "synthesize");
@@ -3217,6 +3243,8 @@ fn contract_index_covers_every_dto() {
             sequence: 0,
             event_json: String::new(),
         },
+        ClientEvent::AudioSessionContext { session_id: String::new(), profile_id: String::new(), account_scope: String::new() },
+        ClientEvent::RealtimeAudioEvent { session_id: String::new(), event_json: String::new() },
         ClientEvent::AudioRequest {
             request: AudioOperationRequestDto {
                 identity: AudioOperationIdDto {
@@ -3296,6 +3324,19 @@ fn contract_index_covers_every_dto() {
     let _outcome = TurnOutcomeDto::EndTurn;
     // Every AudioOperationDto variant, so a removed operation fails THIS compile.
     let _audio_ops: Vec<AudioOperationDto> = vec![
+        AudioOperationDto::Capture {
+            sample_rate_hz: 24_000,
+            format: "m4a".into(),
+        },
+        AudioOperationDto::Play {
+            pcm_base64: String::new(),
+            sample_rate_hz: 24_000,
+        },
+        AudioOperationDto::Transcribe {
+            audio_base64: String::new(),
+            mime_type: String::new(),
+            language: None,
+        },
         AudioOperationDto::StartRecording {
             sample_rate_hz: 16_000,
             format: String::new(),
@@ -3457,6 +3498,10 @@ fn contract_index_covers_every_dto() {
             scope: WritableScopeDto::Project,
             name: String::new(),
         },
+        ClientCommand::GetAudioSessionContext,
+        ClientCommand::StartRealtimeAudio { request_json: String::new() },
+        ClientCommand::RealtimeAudioInput { input_json: String::new() },
+        ClientCommand::StopRealtimeAudio,
         ClientCommand::AudioResponse {
             identity: AudioOperationIdDto {
                 id: String::new(),
@@ -3582,6 +3627,9 @@ fn contract_index_covers_every_dto() {
         request_id: None,
     };
     let _audio_kinds = [
+        AudioOperationKindDto::Capture,
+        AudioOperationKindDto::Play,
+        AudioOperationKindDto::Transcribe,
         AudioOperationKindDto::Record,
         AudioOperationKindDto::Listen,
         AudioOperationKindDto::Synthesize,

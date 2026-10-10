@@ -253,6 +253,18 @@ pub enum UiSurfaceDto {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClientCommand {
+    /// Start native Agent realtime on this authenticated connection.
+    StartRealtimeAudio {
+        request_json: String,
+    },
+    /// Bounded microphone/playback controls; tools/history remain host-owned.
+    RealtimeAudioInput {
+        input_json: String,
+    },
+    /// Stop capture, provider generation, and native realtime tools.
+    StopRealtimeAudio,
+    /// Read the current session's exact, non-secret audio provider binding.
+    GetAudioSessionContext,
     // ── Turn driving ──────────────────────────────────────────────────────
     // Submit a user prompt to drive a turn. Carries the text, an optional
     // [`PromptModeDto`], inline image bytes (decision §0.8), and an optional

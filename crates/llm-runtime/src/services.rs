@@ -18,13 +18,14 @@ use std::sync::Arc;
 /// services and their request, response, error and resource-scope types.
 pub use lingxi_llm_client as sdk;
 pub use sdk::ClientSnapshot as ProviderServiceSnapshot;
-pub use sdk::{files, providers, realtime};
+pub use sdk::{audio, files, providers, realtime};
 
 /// Shared service client using an explicitly selected usage region and transport.
 #[derive(Clone)]
 pub struct ProviderServices {
     client: sdk::LlmClient,
     transport: Arc<dyn sdk::Transport>,
+    credential_source: Option<crate::ModelRuntime>,
 }
 
 impl ProviderServices {
@@ -52,7 +53,28 @@ impl ProviderServices {
         Ok(Self {
             client: builder.build()?,
             transport,
+            credential_source: None,
         })
+    }
+
+    pub(crate) fn with_credential_source(mut self, source: crate::ModelRuntime) -> Self {
+        self.credential_source = Some(source);
+        self
+    }
+
+    /// Resolve the exact configured key/token for an independent operation.
+    /// This stays in Rust and uses the same source as inference, including
+    /// authorized environment and host-managed sources. It never guesses an ID.
+    pub async fn service_credential(
+        &self,
+        profile: &str,
+    ) -> Result<sdk::protocol::Secret<String>, crate::LlmError> {
+        let source = self.credential_source.as_ref().ok_or_else(|| {
+            crate::LlmError::UnsupportedCapability {
+                capability: "independent services have no configured host credential source".into(),
+            }
+        })?;
+        source.service_credential(profile).await
     }
 
     /// Access all SDK services without duplicating their provider-specific APIs.

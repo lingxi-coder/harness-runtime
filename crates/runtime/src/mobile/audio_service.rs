@@ -43,6 +43,30 @@ pub fn from_native_audio_service(callback: Arc<dyn NativeAudioService>) -> Arc<d
     Arc::new(NativeAudioServiceAdapter { callback })
 }
 
+/// Compose device-only native callbacks with offline installations and hosted
+/// cloud audio. The callback passed here must expose local device operations;
+/// a callback which already resolves the complete v4 policy should instead use
+/// `from_native_audio_service` so the policy is resolved exactly once.
+/// `owner` binds the tool catalog to a trusted current session when supplied.
+pub fn from_unified_audio_services(
+    callback: Arc<dyn NativeAudioService>,
+    offline: Vec<audio_runtime::OfflineAudioBackend>,
+    cloud_host: Option<Arc<dyn audio_runtime::CloudAudioHost>>,
+    settings: audio_runtime::AudioRoutingSettings,
+    owner: Option<AudioOwner>,
+) -> Arc<dyn AudioService> {
+    let service = Arc::new(audio_runtime::UnifiedAudioService::new(
+        from_native_audio_service(callback),
+        offline,
+        cloud_host,
+        settings,
+    ));
+    match owner {
+        Some(owner) => service.for_owner(owner),
+        None => service,
+    }
+}
+
 /// Shared native-facing audio collection ceiling derived from the bridge's
 /// existing frame budget and framing allowance.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
@@ -65,6 +89,71 @@ impl AudioService for NativeAudioServiceAdapter {
         context: AudioOperationContext,
         operation: AudioOperation,
     ) -> Result<AudioOperationSuccess, AudioError> {
+        let capabilities = self.capabilities_for(&context.owner);
+        if context.identity.service_epoch != capabilities.service_epoch {
+            return Err(AudioError::new(
+                AudioErrorKind::InvalidRequest,
+                "stale native audio service epoch",
+            ));
+        }
+        if context.timeout_budget_ms == Some(0) {
+            return Err(AudioError::new(
+                AudioErrorKind::Timeout,
+                "audio deadline has elapsed",
+            ));
+        }
+        if let Some(kind) = operation.kind() {
+            if !capabilities.supported_operations.contains(&kind) {
+                return Err(AudioError::new(
+                    AudioErrorKind::Unsupported,
+                    "native audio operation is unsupported",
+                ));
+            }
+            if let Some(entry) = capabilities
+                .readiness
+                .iter()
+                .find(|entry| entry.operation == kind)
+            {
+                let error = match entry.state {
+                    AudioReadinessState::Busy => Some(AudioErrorKind::Busy),
+                    AudioReadinessState::MissingModel => Some(AudioErrorKind::ModelMissing),
+                    AudioReadinessState::Unavailable => Some(AudioErrorKind::Unavailable),
+                    _ => None,
+                };
+                if let Some(kind) = error {
+                    return Err(AudioError::new(kind, "native audio backend is not ready"));
+                }
+            }
+        }
+        let max_payload_bytes = context
+            .max_payload_bytes
+            .min(capabilities.max_payload_bytes)
+            .min(MAX_AUDIO_PAYLOAD_BYTES as u64);
+        let input_bytes = match &operation {
+            AudioOperation::Play { audio } => {
+                if audio.pcm.is_empty()
+                    || audio.pcm.len() % 2 != 0
+                    || audio.sample_rate_hz == 0
+                    || audio.sample_rate_hz > MAX_AUDIO_SAMPLE_RATE_HZ
+                {
+                    return Err(AudioError::new(
+                        AudioErrorKind::InvalidRequest,
+                        "playback requires nonempty PCM16 mono and a valid sample rate",
+                    ));
+                }
+                audio.pcm.len()
+            }
+            AudioOperation::Transcribe { recording, .. } => recording.audio_bytes.len(),
+            _ => 0,
+        };
+        if input_bytes as u64 > max_payload_bytes
+            || (max_payload_bytes == 0 && operation.kind().is_some())
+        {
+            return Err(AudioError::new(
+                AudioErrorKind::MediaTooLarge,
+                "audio input exceeds the device transfer limit",
+            ));
+        }
         let expected_result = expected_result_for(&operation);
         let identity = identity_to_dto(&context.identity);
         let request = AudioOperationRequestDto {
@@ -72,9 +161,7 @@ impl AudioService for NativeAudioServiceAdapter {
             owner: owner_to_dto(&context.owner),
             initiator: context.initiator.as_ref().map(initiator_to_dto),
             timeout_budget_ms: context.timeout_budget_ms,
-            max_payload_bytes: context
-                .max_payload_bytes
-                .min(MAX_AUDIO_PAYLOAD_BYTES as u64),
+            max_payload_bytes,
             operation: operation_to_dto(operation),
         };
         let mut cancel_on_drop = NativeCancelOnDrop {
@@ -93,7 +180,7 @@ impl AudioService for NativeAudioServiceAdapter {
                 "native service returned a result for a different audio operation",
             ));
         }
-        let converted = operation_result_from_dto(result, context.max_payload_bytes);
+        let converted = operation_result_from_dto(result, max_payload_bytes);
         if converted.is_ok() {
             cancel_on_drop.armed = false;
         }
@@ -168,6 +255,25 @@ fn initiator_to_dto(value: &AudioInitiator) -> AudioInitiatorDto {
 
 fn operation_to_dto(value: AudioOperation) -> AudioOperationDto {
     match value {
+        AudioOperation::Capture {
+            sample_rate_hz,
+            format,
+        } => AudioOperationDto::Capture {
+            sample_rate_hz,
+            format,
+        },
+        AudioOperation::Play { audio } => AudioOperationDto::Play {
+            pcm_base64: STANDARD.encode(audio.pcm),
+            sample_rate_hz: audio.sample_rate_hz,
+        },
+        AudioOperation::Transcribe {
+            recording,
+            language,
+        } => AudioOperationDto::Transcribe {
+            audio_base64: STANDARD.encode(recording.audio_bytes),
+            mime_type: recording.mime_type,
+            language,
+        },
         AudioOperation::StartRecording {
             sample_rate_hz,
             format,
@@ -231,6 +337,9 @@ fn capabilities_from_dto(value: AudioCapabilitySnapshotDto) -> AudioCapabilitySn
 
 fn operation_kind_from_dto(value: AudioOperationKindDto) -> AudioOperationKind {
     match value {
+        AudioOperationKindDto::Capture => AudioOperationKind::Capture,
+        AudioOperationKindDto::Play => AudioOperationKind::Play,
+        AudioOperationKindDto::Transcribe => AudioOperationKind::Transcribe,
         AudioOperationKindDto::Record => AudioOperationKind::Record,
         AudioOperationKindDto::Listen => AudioOperationKind::Listen,
         AudioOperationKindDto::Synthesize => AudioOperationKind::Synthesize,
@@ -354,6 +463,9 @@ enum ExpectedResult {
 
 fn expected_result_for(operation: &AudioOperation) -> ExpectedResult {
     match operation {
+        AudioOperation::Capture { .. } => ExpectedResult::Recording,
+        AudioOperation::Play { .. } => ExpectedResult::PlaybackCompleted,
+        AudioOperation::Transcribe { .. } => ExpectedResult::Transcript,
         AudioOperation::StartRecording { .. } => ExpectedResult::RecordingStarted,
         AudioOperation::StopRecording { .. } => ExpectedResult::Recording,
         AudioOperation::Listen { .. } => ExpectedResult::Transcript,
@@ -463,7 +575,15 @@ mod tests {
             AudioCapabilitySnapshotDto {
                 service_epoch: 7,
                 support_revision: 1,
-                supported_operations: vec![AudioOperationKindDto::Record],
+                supported_operations: vec![
+                    AudioOperationKindDto::Record,
+                    AudioOperationKindDto::Capture,
+                    AudioOperationKindDto::Play,
+                    AudioOperationKindDto::Transcribe,
+                    AudioOperationKindDto::Listen,
+                    AudioOperationKindDto::Speak,
+                    AudioOperationKindDto::Synthesize,
+                ],
                 readiness: vec![AudioOperationReadinessDto {
                     operation: AudioOperationKindDto::Record,
                     state: AudioReadinessStateDto::Ready,

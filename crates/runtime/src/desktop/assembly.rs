@@ -546,6 +546,14 @@ pub async fn build_with_credential_stack(
     // agent seams. The `with_*` builders live on `ApiService`.
     let session_composition = cfg.session_composition();
     let interactive_session = session_composition.is_interactive_session();
+    let audio_services = llm_runtime
+        .provider_services(provider_region, llm_transport.clone())
+        .map_err(|error| BuildError::ApiBase(format!("audio provider services: {error}")))?;
+    let audio_credential_ids = fusion_catalog_refresher
+        .credential_sources
+        .iter()
+        .map(|source| (source.profile_name.clone(), source.credential_id.clone()))
+        .collect();
     let mut service_built = llm_runtime::ApiService::new_with_routing(
         llm_runtime,
         llm_transport.clone(),
@@ -5949,6 +5957,8 @@ pub async fn build_with_credential_stack(
         pending_fork_history: tokio::sync::Mutex::new(None),
         catalog_registry,
         provider_region,
+        audio_services,
+        audio_credential_ids,
         orchestrator: orch,
         session_state,
         fusion_recorder,

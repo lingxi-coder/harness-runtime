@@ -1,0 +1,4 @@
+{
+  "type": "realtime_audio_input",
+  "input_json": "{\"type\":\"commit_input\"}"
+}

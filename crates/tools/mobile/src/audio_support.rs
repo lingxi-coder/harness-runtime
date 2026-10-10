@@ -48,6 +48,37 @@ pub(crate) async fn execute_operation(
     context: AudioOperationContext,
     operation: AudioOperation,
 ) -> Result<AudioOperationSuccess, ToolError> {
+    if let Some(kind) = operation.kind() {
+        let capabilities = service.capabilities_for(&context.owner);
+        if !capabilities.supported_operations.contains(&kind) {
+            return Err(map_audio_error(AudioError::new(
+                AudioErrorKind::Unsupported,
+                "selected audio operation is unsupported",
+            )));
+        }
+        if let Some(readiness) = capabilities
+            .readiness
+            .iter()
+            .find(|entry| entry.operation == kind)
+        {
+            let kind = match readiness.state {
+                lingxi_core::host::audio::AudioReadinessState::Busy => Some(AudioErrorKind::Busy),
+                lingxi_core::host::audio::AudioReadinessState::MissingModel => {
+                    Some(AudioErrorKind::ModelMissing)
+                }
+                lingxi_core::host::audio::AudioReadinessState::Unavailable => {
+                    Some(AudioErrorKind::Unavailable)
+                }
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return Err(map_audio_error(AudioError::new(
+                    kind,
+                    "selected audio backend is not ready",
+                )));
+            }
+        }
+    }
     let budget = context.timeout_budget_ms.unwrap_or(30_000);
     if use_context
         .cancel

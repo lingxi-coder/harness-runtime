@@ -81,6 +81,15 @@ pub struct AudioRecordingHandle(pub String);
 /// One device-local audio intent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioOperation {
+    /// Capture one bounded clip using device endpoint detection.
+    Capture { sample_rate_hz: u32, format: String },
+    /// Play supplied PCM and complete after actual playback.
+    Play { audio: TtsAudio },
+    /// Transcribe an already captured recording.
+    Transcribe {
+        recording: VoiceRecording,
+        language: Option<String>,
+    },
     /// Start raw capture with the exact requested format.
     StartRecording { sample_rate_hz: u32, format: String },
     /// Stop the matching owner's capture.
@@ -110,8 +119,14 @@ pub enum AudioOperation {
 }
 
 /// Operation exposed by the device service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AudioOperationKind {
+    /// Single bounded clip capture.
+    Capture,
+    /// Supplied PCM playback.
+    Play,
+    /// Recorded-file recognition.
+    Transcribe,
     /// Raw recording.
     Record,
     /// Live recognition.
@@ -270,6 +285,11 @@ pub trait AudioService: Send + Sync {
     /// Current support and transient readiness. Must not request permission.
     fn capabilities(&self) -> AudioCapabilitySnapshot;
 
+    /// Owner-specific capability projection, including trusted session routing.
+    fn capabilities_for(&self, _owner: &AudioOwner) -> AudioCapabilitySnapshot {
+        self.capabilities()
+    }
+
     /// Execute an owner-scoped operation. A returned recording handle outlives
     /// this future; dropping an unfinished call cancels only its identity.
     async fn execute(
@@ -280,4 +300,20 @@ pub trait AudioService: Send + Sync {
 
     /// Cancel only the matching in-flight operation.
     async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError>;
+}
+
+impl AudioOperation {
+    /// Capability kind required by this operation; lifecycle controls need none.
+    pub fn kind(&self) -> Option<AudioOperationKind> {
+        Some(match self {
+            Self::Capture { .. } => AudioOperationKind::Capture,
+            Self::Play { .. } => AudioOperationKind::Play,
+            Self::Transcribe { .. } => AudioOperationKind::Transcribe,
+            Self::StartRecording { .. } | Self::StopRecording { .. } => AudioOperationKind::Record,
+            Self::Listen { .. } => AudioOperationKind::Listen,
+            Self::Synthesize { .. } => AudioOperationKind::Synthesize,
+            Self::Speak { .. } => AudioOperationKind::Speak,
+            Self::Status { .. } | Self::EndOwner => return None,
+        })
+    }
 }

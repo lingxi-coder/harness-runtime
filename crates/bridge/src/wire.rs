@@ -30,6 +30,9 @@ pub const BRIDGE_PROTOCOL_VERSION: &str = "0.2.0";
 #[allow(clippy::struct_excessive_bools)] // mirrors the wire protocol's flag list verbatim
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
+    /// Actual connection-scoped native Agent realtime controller is installed.
+    #[serde(default)]
+    pub realtime_audio: bool,
     /// Endpoint can stream incremental turn events.
     pub supports_streaming: bool,
     /// Endpoint exposes the tool surface.
@@ -52,6 +55,7 @@ pub struct Capabilities {
 impl Default for Capabilities {
     fn default() -> Self {
         Self {
+            realtime_audio: false,
             supports_streaming: true,
             supports_tools: true,
             supports_skills: true,

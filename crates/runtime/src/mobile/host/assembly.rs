@@ -698,6 +698,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     // subscriber (`SubscriberState::default()` — api-key-only inference), and
     // binds no live subscription slot / availability map / CostTracker (out of
     // scope; mobile parity did not).
+    let audio_services = llm_runtime.provider_services(provider_region, llm_transport.clone())
+        .map_err(|error| MobileBuildError::ApiBase(format!("audio service configuration: {error}")))?;
+    let audio_credential_ids = assembled.credential_sources.iter()
+        .map(|source| (source.profile_name.clone(), source.credential_id.clone())).collect();
     let api_service = Arc::new(
         llm_runtime::ApiService::new_with_routing(
             llm_runtime,
@@ -2877,6 +2881,8 @@ pub(super) async fn build_mobile_inner_with_ask(
 
     Ok(MobileRuntime {
         provider_region,
+        audio_services,
+        audio_credential_ids,
         interactive_launch,
         orchestrator: orch,
         wakeup_scheduler,

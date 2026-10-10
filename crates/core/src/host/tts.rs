@@ -1,7 +1,7 @@
 //! PCM synthesis payload returned by the unified [`AudioService`].
 
 /// Synthesized audio: 16-bit signed little-endian PCM, mono.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TtsAudio {
     /// Raw PCM16 frames.
     pub pcm: Vec<u8>,

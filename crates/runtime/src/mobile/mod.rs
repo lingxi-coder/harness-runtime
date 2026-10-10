@@ -154,7 +154,7 @@ pub mod test_support;
 // `client-adapter` import for these types — the shared host is the single seam.
 #[cfg(feature = "mobile")]
 pub use audio_service::{
-    from_native_audio_service, max_audio_payload_bytes, AudioFfiError, NativeAudioService,
+    from_native_audio_service, from_unified_audio_services, max_audio_payload_bytes, AudioFfiError, NativeAudioService,
 };
 #[cfg(feature = "mobile")]
 pub use client::adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};

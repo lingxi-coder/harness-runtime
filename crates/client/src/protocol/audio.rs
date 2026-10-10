@@ -107,6 +107,29 @@ pub struct AudioOperationRequestDto {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AudioOperationDto {
+    /// Capture a bounded microphone clip, returning Recording.
+    Capture {
+        /// Sample rate.
+        sample_rate_hz: u32,
+        /// Exact requested encoding.
+        format: String,
+    },
+    /// Play bounded PCM16 mono audio.
+    Play {
+        /// PCM encoded in base64.
+        pcm_base64: String,
+        /// Sample rate.
+        sample_rate_hz: u32,
+    },
+    /// Recognize an existing recording.
+    Transcribe {
+        /// Encoded recording.
+        audio_base64: String,
+        /// MIME type.
+        mime_type: String,
+        /// Language hint.
+        language: Option<String>,
+    },
     /// Start raw capture and return an owner-bound handle.
     StartRecording {
         /// Requested sample rate in Hz.
@@ -279,6 +302,12 @@ pub enum AudioOperationResultDto {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
 pub enum AudioOperationKindDto {
+    /// Bounded microphone clip.
+    Capture,
+    /// Supplied PCM playback.
+    Play,
+    /// Recorded-file recognition.
+    Transcribe,
     /// Raw recording.
     Record,
     /// Live microphone transcription.

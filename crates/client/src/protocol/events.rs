@@ -88,6 +88,17 @@ impl std::fmt::Debug for OpenAiOAuthSessionDto {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ClientEvent {
+    /// Native realtime JSON with authoritative current-session identity.
+    RealtimeAudioEvent {
+        session_id: String,
+        event_json: String,
+    },
+    /// Authoritative session selection for host-owned, follow-session audio.
+    AudioSessionContext {
+        session_id: String,
+        profile_id: String,
+        account_scope: String,
+    },
     Error {
         kind: ErrorKindDto,
         message: String,

@@ -405,18 +405,7 @@ impl ModelRuntime {
         region: lingxi_llm_client::protocol::Region,
         transport: Arc<dyn Transport>,
     ) -> Result<crate::services::ProviderServices, lingxi_llm_client::BuildError> {
-        let profiles = self
-            .routes
-            .values()
-            .map(|entry| {
-                let mut profile = entry.profile.clone();
-                // Conversation preparation disables SDK auth until host sealing.
-                // Independent SDK calls must select the host authenticator, and
-                // file services still need the original explicit-key strategy.
-                profile.auth = entry.auth;
-                profile
-            })
-            .collect::<Vec<_>>();
+        let profiles = self.provider_service_profiles();
         let authenticator: Arc<dyn lingxi_llm_client::Authenticator> =
             Arc::new(ServiceAuthenticator(self.clone()));
         crate::services::ProviderServices::with_configured_transport(
@@ -429,6 +418,65 @@ impl ModelRuntime {
                 }
             },
         )
+        .map(|services| services.with_credential_source(self.clone()))
+    }
+
+    /// Capture a configured profile's key/token through the original resolver.
+    /// Signing and account-specific OAuth authentication cannot be represented
+    /// by a lone service token and must keep their full SDK authenticator.
+    pub async fn service_credential(
+        &self,
+        profile: &str,
+    ) -> Result<lingxi_llm_client::protocol::Secret<String>, LlmError> {
+        let entry = self.routes.get(profile).ok_or(LlmError::ModelUnavailable)?;
+        if !matches!(
+            entry.auth,
+            AuthStrategy::ApiKey
+                | AuthStrategy::Bearer
+                | AuthStrategy::OAuthBearer
+                | AuthStrategy::GcpToken
+        ) {
+            return Err(LlmError::UnsupportedCapability {
+                capability: "this profile's authentication cannot be reduced to a service key/token"
+                    .into(),
+            });
+        }
+        let credential = self.load_credential(entry, profile).await?.ok_or_else(|| {
+            LlmError::Authentication {
+                message: "the selected service profile has no configured credential".into(),
+            }
+        })?;
+        let token = match credential {
+            Credential::ApiKey(token)
+            | Credential::BearerToken(token)
+            | Credential::AnthropicOAuth {
+                access_token: token,
+                ..
+            } => token,
+            Credential::ChatGptOAuth { .. } | Credential::AwsSigV4 { .. } => {
+                return Err(LlmError::UnsupportedCapability {
+                    capability: "the selected credential requires account headers or signing".into(),
+                })
+            }
+        };
+        if token.is_empty() {
+            return Err(LlmError::Authentication {
+                message: "the selected service credential is empty".into(),
+            });
+        }
+        Ok(lingxi_llm_client::protocol::Secret::new(token))
+    }
+    /// Export exact independent-service profiles with their original authentication.
+    /// This does not dispatch requests or read host credentials.
+    pub fn provider_service_profiles(&self) -> Vec<lingxi_llm_client::protocol::ProviderProfile> {
+        self.routes
+            .values()
+            .map(|entry| {
+                let mut profile = entry.profile.clone();
+                profile.auth = entry.auth;
+                profile
+            })
+            .collect()
     }
 
     #[must_use]

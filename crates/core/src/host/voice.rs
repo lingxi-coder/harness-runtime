@@ -1,7 +1,7 @@
 //! Encoded recording payload returned by the unified [`AudioService`].
 
 /// A finished recording.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VoiceRecording {
     /// Encoded audio bytes.
     pub audio_bytes: Vec<u8>,

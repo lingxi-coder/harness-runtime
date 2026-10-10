@@ -38,6 +38,8 @@ mod automation;
 mod configuration;
 mod linux_runtime;
 mod provider_services;
+mod audio_context;
+mod audio_realtime_owner;
 mod restoration;
 
 pub use assembly::{
@@ -226,6 +228,8 @@ use crate::mobile::{
 pub struct MobileRuntime {
     /// Product region captured with the running model client.
     pub provider_region: llm_runtime::Region,
+    pub(super) audio_services: llm_runtime::services::ProviderServices,
+    pub(super) audio_credential_ids: std::collections::BTreeMap<String, String>,
     /// Only interactive hosts inherit device-owned permission preferences.
     interactive_launch: bool,
     /// The fully-constructed orchestrator, bound to the adapter output stream
@@ -5439,6 +5443,22 @@ impl MobileEngineHandle {
         }
         match command {
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
+            ClientCommand::GetAudioSessionContext => {
+                let snapshot = self.inner.orchestrator.get_status_snapshot().await;
+                if let Some(profile) = snapshot.model_profile.filter(|profile| !profile.is_empty()) {
+                    self.connection_sink.emit(ClientEvent::AudioSessionContext {
+                        session_id: snapshot.session_id,
+                        account_scope: format!("profile:{profile}"),
+                        profile_id: profile,
+                    }).await;
+                } else {
+                    self.connection_sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: "audio requires an exact session provider profile".into(),
+                    }).await;
+                }
+                Ok(())
+            }
             ClientCommand::SendPrompt {
                 text,
                 prompt_mode,

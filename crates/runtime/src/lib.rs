@@ -21,6 +21,8 @@ pub use api::{
     ShutdownReport, TurnOutcome,
 };
 pub mod models;
+/// Unified audio composition usable without a conversation engine.
+pub use audio_runtime as audio;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 pub mod session_agent_transcript;

@@ -181,6 +181,15 @@ impl ComputerAccessBroker {
         sender.send(ComputerAccessResponse::default()).is_ok()
     }
 
+    /// Remove only requests whose owning tool has dropped its reply receiver.
+    /// A new Agent owner or a background workflow keeps its live request.
+    pub async fn cancel_closed(&self) -> usize {
+        let mut pending = self.pending.lock().await;
+        let before = pending.len();
+        pending.retain(|_, reply| !reply.is_closed());
+        before - pending.len()
+    }
+
     /// Fail-closed drain: drop every parked sender so all in-flight
     /// `TuiBridgeResolver::resolve` awaits resolve to the fully-denied default
     /// (a dropped `oneshot::Sender` resolves its receiver to `Err`, which
@@ -233,6 +242,23 @@ mod tests {
         async fn emit_request(&self, request: ComputerAccessRequestDto) {
             self.requests.lock().await.push(request);
         }
+    }
+
+    #[tokio::test]
+    async fn cancel_closed_preserves_another_owners_live_access_request() {
+        let broker = ComputerAccessBroker::new(Arc::new(MockSink::default()));
+        let (old_tx, old_rx) = oneshot::channel();
+        let (live_tx, live_rx) = oneshot::channel();
+        broker.pending.lock().await.insert(1, old_tx);
+        broker.pending.lock().await.insert(2, live_tx);
+        drop(old_rx);
+        assert_eq!(broker.cancel_closed().await, 1);
+        assert_eq!(broker.pending_count().await, 1);
+        assert!(!broker.deny(1).await);
+        assert!(broker.deny(2).await);
+        let denied = live_rx.await.unwrap();
+        assert!(denied.granted_apps.is_empty());
+        assert!(!denied.clipboard_read && !denied.clipboard_write && !denied.system_key_combos);
     }
 
     fn sample_request() -> ComputerAccessRequest {

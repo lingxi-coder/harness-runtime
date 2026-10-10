@@ -175,6 +175,7 @@ collaboration = [
 ]
 
 [dependencies]
+audio-runtime = { path = "../audio-runtime" }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
 
 mobile-linux-api.workspace = true
@@ -278,6 +279,7 @@ platform-ios = { path = "../platforms/ios", optional = true }
 platform-android = { path = "../platforms/android", optional = true }
 
 [dev-dependencies]
+bytes.workspace = true
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 toml = "0.8"
 async-trait = { workspace = true }
@@ -372,6 +374,11 @@ required-features = ["mobile"]
 [[test]]
 name = "skeleton_test"
 path = "tests/mobile/skeleton_test.rs"
+required-features = ["mobile"]
+
+[[test]]
+name = "realtime_owner"
+path = "tests/mobile/realtime_owner.rs"
 required-features = ["mobile"]
 
 [lints]
