@@ -9,6 +9,20 @@ evidence is reusable only for the exact behavior/source it covered; old
 `Missing`/`Partial` labels are not current findings. Versions after 2.1.295
 are explicitly out of scope.
 
+## Current integration status — 2026-10-09
+
+- Target: Native 2.1.295 only. Local Apps behavior/acceptance is excluded by the user's latest instruction; only current-build interface adaptation remains.
+- SDK: committed clean `4a54a1de338ee3b5a95c03b5b3800b6fc73543d2`.
+- Harness: `8478dcec2bb05d777e07018e8690df61939b5258`; Product's complete runtime feature union compiles, client raw-text 8/8 and activity 3/3 pass. Six frozen-main Fusion exports are restored and the complete feature union passes again. Native 295 refusal replay passes 1/1 (two cases) with a self-contained 64 MiB test thread and RUST_MIN_STACK unset; the initial default-thread stack overflow and diagnostic 16 MiB rerun are separately retained.
+- Product: `37c119252d6702f363c7e4c13dfa4d22f1e27c22`, frozen-main `20c7801275dfbf468c61b4708f52cfe5997b227d` merge pending. All 39 manifest pins and 73 lock package rows consume Harness8478; canonical locked metadata/source gate pass and all 806 registry pins are unchanged. TUI now compiles; downstream workspace r4 reached CLI host and exposed 149 current-API errors in 15 files (including macro expansions). These are under parallel scoped repair, not a passed Product build.
+- Newly confirmed open semantic gap: ClientCommand prompt/slash String fields and bridge Value parameters cannot carry the lone-surrogate inputs demonstrated by the 295 CLI fixtures. Output-carrier tests do not close this input transport/UniFFI contract.
+- Remaining whole-workspace tests, other Native candidate replay, platform checks and signed macOS package acceptance remain open. No push or main merge-back is authorized.
+
+The dated sections below are scoped historical checkpoints. The external
+`acceptance/COMPACT-CURRENT.md` and `acceptance/resume-state-20261009.json`
+identify the active batch; old successful checks are not combined into final
+candidate acceptance.
+
 ## Resume checkpoint — 2026-10-09
 
 The user explicitly resumed the remaining task. Target remains frozen at

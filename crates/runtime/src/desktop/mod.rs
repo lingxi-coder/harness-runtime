@@ -5796,7 +5796,12 @@ use fusion_services::FusionCatalogRefreshingOAuthConnect;
 pub use fusion_services::FusionCatalogRegistry;
 use fusion_services::{
     desktop_fusion_attempts, desktop_fusion_catalog_row, desktop_fusion_runtime_config,
-    filter_fusion_catalog, fusion_route_flag, register_fusion_catalog_refresher,
+    filter_fusion_catalog, fusion_route_flag,
+};
+pub use fusion_services::{
+    fusion_credential_restart_required_message, publish_fusion_catalog_credential,
+    refresh_fusion_catalog_after_credential_delete, refresh_fusion_catalog_after_credential_write,
+    register_fusion_catalog_refresher, spawn_fusion_catalog_refresh,
 };
 pub use orchestrator::config::ModRenderSurface;
 use permission_config::append_mcp_permission_rules;

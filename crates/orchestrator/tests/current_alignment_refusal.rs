@@ -1,4 +1,4 @@
-//! Replay the pinned Native 2.1.293 refusal stop-details cases through the
+//! Replay the pinned Native 2.1.295 refusal stop-details cases through the
 //! production SDK -> provider adapter -> orchestrator -> OutputStream/JSONL
 //! path. This test intentionally compares the full Native CLI result and the
 //! source-preserving persisted stop_details field; it does not use a mock
@@ -18,11 +18,32 @@ use orchestrator::{
 use platform_posix::fs::PosixFileSystem;
 use serde_json::json;
 use session::jsonl::{reader::JsonlReader, writer::JsonlWriter};
+use sha2::{Digest, Sha256};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 use tool_api::registry::ToolRegistry;
 
 const MODEL: &str = "claude-sonnet-4-5";
+
+fn run_with_large_stack<F, Fut>(build: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()>,
+{
+    let handle = std::thread::Builder::new()
+        .name("current-alignment-refusal".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build refusal-test runtime")
+                .block_on(build());
+        })
+        .expect("spawn large-stack refusal test thread");
+    handle.join().expect("refusal test thread panicked");
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RequestShape {
@@ -126,6 +147,78 @@ fn result_units(baseline_case: &std::path::Path) -> Vec<u16> {
         .expect("Native result text")
 }
 
+fn verify_fixture_checksums(fixture_root: &std::path::Path) {
+    let manifest = std::fs::read_to_string(fixture_root.join("SHA256SUMS"))
+        .expect("pinned Native 2.1.295 fixture checksums");
+    let mut checked = 0;
+    for line in manifest.lines() {
+        let (expected, relative_path) = line
+            .split_once("  ")
+            .expect("sha256sum entry uses two-space separator");
+        let relative_path = std::path::Path::new(relative_path);
+        assert!(
+            !relative_path.is_absolute(),
+            "fixture checksum path must stay relative: {relative_path:?}"
+        );
+        let raw = std::fs::read(fixture_root.join(relative_path))
+            .unwrap_or_else(|error| panic!("read fixture artifact {relative_path:?}: {error}"));
+        let actual = format!("{:x}", Sha256::digest(raw));
+        assert_eq!(
+            actual, expected,
+            "fixture artifact changed: {relative_path:?}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "fixture checksum manifest must not be empty");
+}
+
+fn verify_native_295_receipt(
+    baseline_case: &std::path::Path,
+    case: &str,
+    session_id: &str,
+    response_id: &str,
+    stdout_result_units: &[u16],
+) {
+    let receipt: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(baseline_case.join("native-receipt.json"))
+            .expect("captured Native receipt bytes"),
+    )
+    .expect("valid Native receipt JSON");
+    assert_eq!(
+        receipt["native_version"].as_str(),
+        Some("2.1.295 (Claude Code)")
+    );
+    assert_eq!(
+        receipt["native_sha256"].as_str(),
+        Some("0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70")
+    );
+    assert_eq!(receipt["case_id"].as_str(), Some(case));
+    assert_eq!(receipt["fixed_inputs"]["model"].as_str(), Some(MODEL));
+    assert_eq!(
+        receipt["fixed_inputs"]["session_id"].as_str(),
+        Some(session_id)
+    );
+    assert_eq!(
+        receipt["fixed_inputs"]["response_id"].as_str(),
+        Some(response_id)
+    );
+    assert_eq!(receipt["native_exit_code"].as_i64(), Some(1));
+    assert_eq!(receipt["timed_out"].as_bool(), Some(false));
+
+    let receipt_result_units: Vec<u16> = serde_json::from_value(
+        receipt["stop_details_observation"]["native_cli_result_utf16_units"].clone(),
+    )
+    .expect("receipt contains the raw Native result UTF-16 units");
+    assert_eq!(receipt_result_units.as_slice(), stdout_result_units);
+    assert_eq!(
+        receipt["stop_details_observation"]["native_session_stop_details"]
+            .as_array()
+            .map(Vec::len),
+        Some(3),
+        "Native 2.1.295 persisted three stop-details rows: {case}"
+    );
+}
+
 fn explanation_units_hex(fixture_root: &std::path::Path) -> Vec<u16> {
     let raw =
         std::fs::read_to_string(fixture_root.join("cases.json")).expect("fixed stop-details cases");
@@ -142,10 +235,17 @@ fn explanation_units_hex(fixture_root: &std::path::Path) -> Vec<u16> {
         .collect()
 }
 
-#[tokio::test]
-async fn native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl() {
+#[test]
+fn native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl() {
+    run_with_large_stack(
+        native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl_inner,
+    );
+}
+
+async fn native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl_inner() {
     let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/parity/current-alignment/fixtures/stop-details");
+        .join("../../docs/parity/current-alignment/fixtures/stop-details-295");
+    verify_fixture_checksums(&fixture_root);
     let explanation_units = explanation_units_hex(&fixture_root);
     let cases = [
         (
@@ -167,6 +267,7 @@ async fn native_refusal_results_and_source_stop_details_reach_real_host_output_a
         let response_body = std::fs::read(baseline.join("native-response-01.sse.raw"))
             .expect("original Native SSE response bytes");
         let expected_result = result_units(&baseline);
+        verify_native_295_receipt(&baseline, case, session_id, response_id, &expected_result);
         let expected_result_text =
             String::from_utf16(&expected_result).expect("Native CLI refusal result is scalar text");
         assert!(
