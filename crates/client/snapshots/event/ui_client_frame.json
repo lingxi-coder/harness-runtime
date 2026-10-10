@@ -1,5 +1,5 @@
 {
   "type": "ui_client_frame",
   "runtime_id": "runtime-1",
-  "frame_json": "{\"type\":\"ui.render\",\"tree\":{}}"
+  "frame_json": "{\"renderRevision\":1,\"frameSequence\":1,\"hasPointerListener\":false,\"hasKeyListener\":false,\"tree\":null,\"parent\":{\"surface\":\"desktop\",\"component\":\"AbovePrompt\",\"instance_id\":\"above-prompt-1\"},\"client\":{\"plugin\":\"review\",\"key\":\"card\",\"module\":\"surface.js\"}}"
 }

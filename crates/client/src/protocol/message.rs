@@ -9,7 +9,9 @@
 //! TUI `UserToolResult` at `tui/src/state.rs:73-89`.
 
 use crate::protocol::text::ClientTextDto;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
+use std::collections::HashMap;
 
 /// A complete conversation message — a role plus an ordered list of content
 /// blocks. Reproduces the assistant message a turn produced (or a resumed
@@ -110,7 +112,7 @@ pub struct MessageImageDto {
 /// CompactBoundary | ToolUse | ToolResult`). `#[non_exhaustive]` so a future
 /// block kind is additive (no major bump). Internally tagged on `type`,
 /// `snake_case` (the frozen serde convention, decision §0.1).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -196,4 +198,170 @@ pub enum MessageBlockDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<VisualizationRefDto>,
     },
+}
+
+/// Externally tagged carrier used only to deserialize one raw block envelope.
+/// The public `MessageBlockDto` keeps its internally tagged serialized shape.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MessageBlockDtoWire {
+    Text {
+        text: ClientTextDto,
+    },
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
+    RedactedThinking {
+        data: String,
+    },
+    CompactBoundary {
+        messages_before: u32,
+        messages_after: u32,
+        summary: String,
+    },
+    ToolUse {
+        id: String,
+        tool: String,
+        input_json: String,
+        #[serde(default)]
+        header: Option<crate::protocol::tool_display::ToolHeaderDto>,
+    },
+    ToolResult {
+        id: String,
+        tool: String,
+        result_json: String,
+        is_error: bool,
+        #[serde(default)]
+        old_string: Option<String>,
+        #[serde(default)]
+        new_string: Option<String>,
+        #[serde(default)]
+        file_path: Option<String>,
+        #[serde(default)]
+        display: Option<crate::protocol::tool_display::ToolResultDisplayDto>,
+    },
+    Visualization {
+        #[serde(default)]
+        reference: Option<VisualizationRefDto>,
+    },
+}
+
+impl From<MessageBlockDtoWire> for MessageBlockDto {
+    fn from(wire: MessageBlockDtoWire) -> Self {
+        match wire {
+            MessageBlockDtoWire::Text { text } => Self::Text { text },
+            MessageBlockDtoWire::Thinking {
+                thinking,
+                signature,
+            } => Self::Thinking {
+                thinking,
+                signature,
+            },
+            MessageBlockDtoWire::RedactedThinking { data } => Self::RedactedThinking { data },
+            MessageBlockDtoWire::CompactBoundary {
+                messages_before,
+                messages_after,
+                summary,
+            } => Self::CompactBoundary {
+                messages_before,
+                messages_after,
+                summary,
+            },
+            MessageBlockDtoWire::ToolUse {
+                id,
+                tool,
+                input_json,
+                header,
+            } => Self::ToolUse {
+                id,
+                tool,
+                input_json,
+                header,
+            },
+            MessageBlockDtoWire::ToolResult {
+                id,
+                tool,
+                result_json,
+                is_error,
+                old_string,
+                new_string,
+                file_path,
+                display,
+            } => Self::ToolResult {
+                id,
+                tool,
+                result_json,
+                is_error,
+                old_string,
+                new_string,
+                file_path,
+                display,
+            },
+            MessageBlockDtoWire::Visualization { reference } => Self::Visualization { reference },
+        }
+    }
+}
+
+struct RawBlockFields(HashMap<String, Box<RawValue>>);
+
+impl<'de> Deserialize<'de> for RawBlockFields {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawBlockVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RawBlockVisitor {
+            type Value = RawBlockFields;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object with raw message-block fields")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut fields = HashMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    fields.insert(key, map.next_value::<Box<RawValue>>()?);
+                }
+                Ok(RawBlockFields(fields))
+            }
+        }
+
+        deserializer.deserialize_map(RawBlockVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageBlockDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let RawBlockFields(mut fields) = RawBlockFields::deserialize(deserializer)?;
+        let raw_tag = fields
+            .remove("type")
+            .ok_or_else(|| serde::de::Error::missing_field("type"))?;
+        let tag: String = serde_json::from_str(raw_tag.get()).map_err(serde::de::Error::custom)?;
+        let mut json = String::from("{");
+        json.push_str(&serde_json::to_string(&tag).map_err(serde::de::Error::custom)?);
+        json.push_str(":{");
+        let mut first = true;
+        for (key, value) in fields {
+            if !first {
+                json.push(',');
+            }
+            first = false;
+            json.push_str(&serde_json::to_string(&key).map_err(serde::de::Error::custom)?);
+            json.push(':');
+            json.push_str(value.get());
+        }
+        json.push_str("}}");
+        let wire: MessageBlockDtoWire =
+            serde_json::from_str(&json).map_err(serde::de::Error::custom)?;
+        Ok(wire.into())
+    }
 }

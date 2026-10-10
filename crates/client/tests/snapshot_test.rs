@@ -285,7 +285,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/ui_client_frame.json",
             ClientEvent::UiClientFrame {
                 runtime_id: "runtime-1".into(),
-                frame_json: r#"{"type":"ui.render","tree":{}}"#.into(),
+                frame_json: r#"{"renderRevision":1,"frameSequence":1,"hasPointerListener":false,"hasKeyListener":false,"tree":null,"parent":{"surface":"desktop","component":"AbovePrompt","instance_id":"above-prompt-1"},"client":{"plugin":"review","key":"card","module":"surface.js"}}"#.into(),
             },
         ),
         (

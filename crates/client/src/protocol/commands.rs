@@ -290,7 +290,6 @@ define_client_command! {
         // Inline visualization the user is following up on. The runtime
         // attaches its confirmed `modelContent` at send time.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[cfg_attr(feature = "uniffi", uniffi(default = None))]
         visualization_context: Option<crate::protocol::message::VisualizationRefDto>,
     },
 

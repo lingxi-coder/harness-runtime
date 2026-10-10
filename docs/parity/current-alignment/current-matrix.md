@@ -51,6 +51,30 @@ Log: `/private/tmp/claude-alignment-harness-client-empty-delta-adapter-tests-rep
 The initial default-feature run selected zero tests and is not acceptance.
 Product pins and its frozen main delta remain outstanding.
 
+## Product integration findings — 2026-10-09
+
+Canonical Product metadata and the official source gate passed with Harness
+695fb328 / SDK 4a54 and the existing Mobile Linux pin; registry versions were
+preserved. Product production compile then exposed the invalid UniFFI command
+attribute and the iOS tool's older API signatures. The attribute was repaired
+and `client --features adapter,uniffi` checks passed. The iOS tool adapter is
+ready for the next Product compile after repinning.
+
+The actual Host Mod UI success frame includes exact `parent` and `client`
+identities. These producer fields are preserved; Product's strict success-frame
+DTO/validator now consumes them, separately from RPC replies and worker-fault
+frames. The stale Harness UI frame golden was updated to that producer shape.
+Event golden testing exposed private Serde tagged-enum buffering of raw text;
+private deserialization now preserves original field JSON while public formats
+remain unchanged. New raw-text regressions passed 5/5, including ordinary Value
+input, lone UTF-16 units and nested/flattened event messages. The complete event
+variant golden target passed 1/1 (7 unrelated snapshot tests filtered out).
+Logs: `/private/tmp/claude-alignment-harness-raw-text-protocol-tests-20261009.stdout.log`
+and `/private/tmp/claude-alignment-harness-client-event-snapshot-post-raw-fix20261009.stdout.log`.
+These are current scoped contract tests, not final Native/whole-workspace or
+macOS package acceptance. Product must be repinned to the resulting Harness
+commit before its production gate is rerun.
+
 ## Main-merge pause snapshot — 2026-10-08
 
 The user requested a pause after this integration round. Current repository

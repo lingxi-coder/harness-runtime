@@ -97,7 +97,11 @@ macro_rules! define_client_event {
 
         #[allow(clippy::large_enum_variant)]
         #[derive(Deserialize)]
-        #[serde(tag = "type", rename_all = "snake_case")]
+        // Deserialize through an externally tagged private carrier. The
+        // public `ClientEvent` remains internally tagged for serialization,
+        // while this carrier avoids serde's internally-tagged `Content`
+        // buffering, which cannot deserialize `RawValue`-backed text fields.
+        #[serde(rename_all = "snake_case")]
         #[allow(dead_code)]
         enum ClientEventWire { $($variants)* }
 
@@ -1467,21 +1471,33 @@ where
     }
 }
 
-fn event_raw_fallback_json<E>(
-    tag: &str,
-    fields: HashMap<String, Box<RawValue>>,
-) -> Result<String, E>
+fn event_raw_object_json<E>(fields: HashMap<String, Box<RawValue>>) -> Result<String, E>
 where
     E: serde::de::Error,
 {
-    let mut json = String::from("{\"type\":");
-    json.push_str(&serde_json::to_string(tag).map_err(E::custom)?);
+    let mut json = String::from("{");
+    let mut first = true;
     for (key, value) in fields {
-        json.push(',');
+        if !first {
+            json.push(',');
+        }
+        first = false;
         json.push_str(&serde_json::to_string(&key).map_err(E::custom)?);
         json.push(':');
         json.push_str(value.get());
     }
+    json.push('}');
+    Ok(json)
+}
+
+fn event_raw_wire_json<E>(tag: &str, fields: HashMap<String, Box<RawValue>>) -> Result<String, E>
+where
+    E: serde::de::Error,
+{
+    let mut json = String::from("{");
+    json.push_str(&serde_json::to_string(tag).map_err(E::custom)?);
+    json.push(':');
+    json.push_str(&event_raw_object_json::<E>(fields)?);
     json.push('}');
     Ok(json)
 }
@@ -1515,8 +1531,20 @@ impl<'de> Deserialize<'de> for ClientEvent {
             "app_event" => Ok(Self::AppEvent {
                 event: event_raw_required(&mut fields, "event")?,
             }),
+            "session_agent_message" => {
+                let session_id = event_raw_required(&mut fields, "session_id")?;
+                let agent_id = event_raw_required(&mut fields, "agent_id")?;
+                let row_json = event_raw_object_json::<D::Error>(fields)?;
+                let row = serde_json::from_str(&row_json).map_err(serde::de::Error::custom)?;
+                Ok(Self::SessionAgentMessage {
+                    session_id,
+                    agent_id,
+                    row,
+                })
+            }
+            "session_ended" => Ok(Self::SessionEnded),
             _ => {
-                let json = event_raw_fallback_json::<D::Error>(&tag, fields)?;
+                let json = event_raw_wire_json::<D::Error>(&tag, fields)?;
                 let wire: ClientEventWire =
                     serde_json::from_str(&json).map_err(serde::de::Error::custom)?;
                 Ok(wire.into())
