@@ -63,7 +63,7 @@ use super::{
     CoordinatorTeammateDefinitionResolver, CoordinatorWiring, CredentialStoreAuthProvider,
     DeferredToolInvoker, DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker,
     DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle,
-    DesktopWebSearchConfigProvider, DesktopWorkflowEvent, DesktopWorkflowEventSink,
+    DesktopWorkflowEvent, DesktopWorkflowEventSink,
     DesktopWorktreeCommandHandler, FusionCatalogRefreshingChatGptConnect,
     FusionCatalogRefreshingCopilotConnect, FusionCatalogRefreshingCredentialWriter,
     FusionCatalogRefreshingOAuthConnect, JsonlWorktreeStatePersister, LlmStack,
@@ -3702,10 +3702,6 @@ pub async fn build_with_credential_stack(
         hosted_search: Some(provider_adapter.clone()),
         mcp_token_counter: Some(provider_adapter.clone()),
         default_model: orch_cfg.model.clone(),
-        web_search_config: Some(Arc::new(DesktopWebSearchConfigProvider {
-            lingxi_home: cfg.lingxi_home.clone(),
-            credentials: credentials.clone(),
-        })),
         // The SAME manager the LocalAgent handler judges background-agent
         // worktrees with (created above) — one creation/judgment surface.
         worktree: worktree_manager.clone(),

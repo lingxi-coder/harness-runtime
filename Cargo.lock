@@ -7430,7 +7430,6 @@ dependencies = [
  "branding",
  "chrono",
  "core",
- "futures-util",
  "htmd",
  "once_cell",
  "permission",

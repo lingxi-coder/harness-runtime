@@ -161,9 +161,6 @@ pub struct BuiltinToolContext {
     /// Model used by `WebSearch` when calling `POST /v1/messages` (M4-03).
     /// Sourced from the session's `coordinator_model` at registration time.
     pub default_model: String,
-    /// Runtime `/web` config loader for provider-agnostic client-side WebSearch.
-    /// `None` preserves env-only fallback behavior.
-    pub web_search_config: Option<Arc<dyn lingxi_core::host::WebSearchConfigProvider>>,
     /// Worktree manager (M2-01 trait) — backs `EnterWorktree` + `ExitWorktree`
     /// (M4-04). Tests inject `MockWorktreeManager`; production uses
     /// `platform_posix::PosixWorktreeManager`.

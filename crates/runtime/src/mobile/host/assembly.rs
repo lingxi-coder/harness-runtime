@@ -1888,10 +1888,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         hosted_search: Some(provider_adapter.clone()),
         mcp_token_counter: Some(provider_adapter.clone()),
         default_model: orch_cfg.model.clone(),
-        // Mobile has no settings.json-backed WebSearch config provider (desktop
-        // injects `DesktopWebSearchConfigProvider`); WebSearch falls back to its
-        // built-in defaults here. `None` matches the tool-api test-support host.
-        web_search_config: None,
         worktree,
         // v3 Phase 1 (workflow-on-mobile): the real subagent spawner + task
         // registry + budget enforcer built above — the `Workflow` tool and

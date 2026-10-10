@@ -221,43 +221,6 @@ mod desktop_hook_mcp_invoker_tests;
 #[path = "tests/mcp_transport_wiring_tests.rs"]
 mod mcp_transport_wiring_tests;
 
-struct DesktopWebSearchConfigProvider {
-    lingxi_home: std::path::PathBuf,
-    credentials: Arc<secret::CredentialManager>,
-}
-
-#[async_trait::async_trait]
-impl lingxi_core::host::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
-    async fn load_web_search_config(&self) -> lingxi_core::host::WebSearchRuntimeConfig {
-        let settings_path = self.lingxi_home.join("settings.json");
-        let parsed = std::fs::read_to_string(&settings_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .map(|v| tool_web::web_search_config::WebSearchConfig::from_settings_json(&v))
-            .unwrap_or_default();
-        let tavily_key = self
-            .credentials
-            .get_provider_key("web:tavily")
-            .await
-            .ok()
-            .flatten()
-            .map(|s| s.expose_secret().clone());
-        let brave_key = self
-            .credentials
-            .get_provider_key("web:brave")
-            .await
-            .ok()
-            .flatten()
-            .map(|s| s.expose_secret().clone());
-        lingxi_core::host::WebSearchRuntimeConfig {
-            provider: Some(parsed.provider.as_str().to_string()),
-            searxng_url: parsed.searxng_url,
-            tavily_key,
-            brave_key,
-        }
-    }
-}
-
 async fn emit_mcp_servers_inventory(
     bus: &telemetry::AnalyticsBus,
     payload: &telemetry::tengu::mcp::ServersPayload,

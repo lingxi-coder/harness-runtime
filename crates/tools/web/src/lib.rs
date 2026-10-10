@@ -32,8 +32,6 @@ mod testsupport;
 pub mod url_safety;
 pub mod web_fetch;
 pub mod web_search;
-pub mod web_search_client;
-pub mod web_search_config;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 /// Register the web fetch + search tools against `reg`.

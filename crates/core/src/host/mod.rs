@@ -189,7 +189,6 @@ pub mod traffic_mode;
 pub mod tts;
 pub mod uds_inbox;
 pub mod voice;
-pub mod web_search;
 pub mod workflow_output;
 pub use session_retention::{
     SessionRetentionError, SessionRetentionGate, SessionRetentionPin, SessionRetirement,
@@ -368,7 +367,6 @@ pub use tool_invoker::{
 pub use tool_use_lifecycle::{ToolUseLifecycleTracker, ToolUseRemoval, ToolUseRemovalReason};
 pub use tts::TtsAudio;
 pub use voice::VoiceRecording;
-pub use web_search::{WebSearchConfigProvider, WebSearchRuntimeConfig};
 pub use workflow_output::{
     WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope, WorkflowOutputScopes,
 };

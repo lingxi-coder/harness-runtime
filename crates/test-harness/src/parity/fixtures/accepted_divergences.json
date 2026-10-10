@@ -71,18 +71,6 @@
       ]
     },
     {
-      "id": "own-web-tooling",
-      "kind": "divergence",
-      "finding": "Claude Code ships its own web search stack.",
-      "reason": "LingXi retains client-side WebSearch providers, including Tavily, for models without hosted search. Do not replace that path with Claude's hosted-only stack.",
-      "decided_on": "2026-07-02",
-      "decided_by": "user",
-      "status": "active",
-      "anchors": [
-        { "kind": "present", "path": "crates/tools/web/src/web_search_client.rs", "text": "Tavily" }
-      ]
-    },
-    {
       "id": "mobile-surfaces",
       "kind": "divergence",
       "finding": "Claude Code has no mobile host.",

@@ -1,6 +1,5 @@
-//! `WebSearchTool` — routes the agent's query through Anthropic's Messages
-//! API with the `web-search-2025-03-05` anthropic-beta header and a
-//! `web_search_20250305` tool block. Spec §7 web wire identifiers.
+//! `WebSearchTool` — delegates search to the selected LLM provider through
+//! the hosted-search service. Provider wire formats are owned by llm-client.
 //!
 //! Wire-locked constants (asserted byte-for-byte by `parity_web_tools.json`):
 //! - `WEB_SEARCH_TOOL_BLOCK_TYPE = "web_search_20250305"` (tool block `type`)
@@ -203,9 +202,7 @@ fn budget_capped_result(query: &str, used: u32, max: u32) -> ToolCallResult {
     }
 }
 
-/// `WebSearchTool` — routes the agent's query through Anthropic's Messages
-/// API with `anthropic-beta: web-search-2025-03-05` and the
-/// `web_search_20250305` tool block. Never self-retries.
+/// Search through the selected provider's hosted-search service. Never self-retries.
 pub struct WebSearchTool {
     ctx: BuiltinToolContext,
 }
@@ -325,117 +322,6 @@ impl WebSearchTool {
         );
         self.ctx.bus.log_event(TENGU_FEATURE_BAD, md).await;
     }
-
-    /// Provider-agnostic client-side search path (non-Anthropic providers).
-    /// Runs the search over `ctx.http` and returns markdown result blocks.
-    async fn run_client_side(&self, input: &WebSearchInput) -> Result<ToolCallResult, ToolError> {
-        use crate::web_search_client::{
-            format_results_for_model, resolve_client_search_provider_with_credentials,
-            run_client_web_search, ClientSearchProvider, EnvSearchConfig, ResolvedWebCredentials,
-        };
-        use crate::web_search_config::WebSearchConfig;
-        let invocation_id = tool_api::util::ids::ulid_or_uuid();
-        let allowed = input.allowed_domains.clone().unwrap_or_default();
-        let blocked = input.blocked_domains.clone().unwrap_or_default();
-        self.emit_started(&invocation_id, &input.query, allowed.len(), blocked.len())
-            .await;
-        let started = Instant::now();
-        let (web_cfg, providers) = if let Some(loader) = &self.ctx.web_search_config {
-            let cfg = loader.load_web_search_config().await;
-            let web_cfg = WebSearchConfig {
-                provider: cfg
-                    .provider
-                    .as_deref()
-                    .and_then(crate::web_search_config::WebSearchProvider::parse)
-                    .unwrap_or(crate::web_search_config::WebSearchProvider::Auto),
-                searxng_url: cfg.searxng_url,
-            };
-            let creds = ResolvedWebCredentials {
-                tavily_key: cfg.tavily_key,
-                brave_key: cfg.brave_key,
-            };
-            let env = EnvSearchConfig::from_env();
-            let providers = if web_cfg.provider == crate::web_search_config::WebSearchProvider::Auto
-            {
-                crate::web_search_client::resolve_client_search_candidates(&web_cfg, &creds, &env)
-            } else {
-                resolve_client_search_provider_with_credentials(&web_cfg, &creds, &env)
-                    .map(|p| vec![p])
-                    .unwrap_or_else(|_| vec![ClientSearchProvider::DuckDuckGo])
-            };
-            (web_cfg, providers)
-        } else {
-            let web_cfg = WebSearchConfig::default();
-            let creds = ResolvedWebCredentials::from_env();
-            let env = EnvSearchConfig::from_env();
-            (
-                web_cfg.clone(),
-                crate::web_search_client::resolve_client_search_candidates(&web_cfg, &creds, &env),
-            )
-        };
-        let mut last_error = None;
-        let mut success = None;
-        for provider in providers {
-            let label = provider.label();
-            match run_client_web_search(
-                &self.ctx.http,
-                &provider,
-                &input.query,
-                &allowed,
-                &blocked,
-                0,
-            )
-            .await
-            {
-                Ok(hits) => {
-                    success = Some((provider, hits));
-                    break;
-                }
-                Err(msg) => {
-                    last_error = Some(format!("{label}: {msg}"));
-                    if web_cfg.provider != crate::web_search_config::WebSearchProvider::Auto {
-                        break;
-                    }
-                }
-            }
-        }
-        let elapsed_ms = started.elapsed().as_millis() as u64;
-        match success {
-            Some((provider, hits)) => {
-                self.emit_completed(&invocation_id, hits.len() as u64, 0, 0, elapsed_ms)
-                    .await;
-                let model_content = format_results_for_model(&input.query, &hits, provider.label());
-                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
-                    data: serde_json::json!({
-                        "query": input.query,
-                        "provider": provider.label(),
-                        "result_count": hits.len(),
-                    }),
-                    model_content: Some(model_content),
-                    new_messages: vec![],
-                    context_modifier: None,
-                    is_error: false,
-                    mcp_meta: None,
-                })
-            }
-            None => {
-                let msg = last_error.unwrap_or_else(|| {
-                    "No web search provider is configured and DuckDuckGo fallback was unavailable"
-                        .to_string()
-                });
-                self.emit_failed(&invocation_id, "client_search", None, elapsed_ms)
-                    .await;
-                Ok(ToolCallResult { mcp_meta_projection: None, model_content_projection: None, data_projection: None,
-                    data: serde_json::json!({ "query": input.query, "error": msg }),
-                    model_content: Some(msg),
-                    new_messages: vec![],
-                    context_modifier: None,
-                    is_error: true,
-                    mcp_meta: None,
-                })
-            }
-        }
-    }
 }
 
 static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
@@ -474,7 +360,8 @@ static OUTPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
     })
 });
 
-/// Verbatim claude-code v2.1.181 WebSearch tool description. The "current month"
+/// Provider-neutral WebSearch description retaining source citation guidance.
+/// The "current month"
 /// is a RUNTIME slot (claude-code computes it at render time); the format is
 /// "<Month> <Year>" (e.g. "June 2026"), matching the knowledge-cutoff date style
 /// — the only non-static byte in the whole string.
@@ -484,15 +371,15 @@ fn web_search_description() -> String {
     // strips the leading "  " of each bullet, so it must NOT be used here. The
     // content is flush-left in the source so the only indentation is the text's.
     // The binary's DESCRIPTION template literal begins with a leading newline and
-    // prefixes EVERY bullet with `- ` (incl. the first): `\n- Allows Claude...`.
+    // prefixes every bullet with `- ` (including the first).
     // It also ends with a trailing `\n`. Both are reproduced here (raw string
     // opens with a newline, first line is `- Allows...`, closes after a newline).
     format!(
         r#"
-- Allows Claude to search the web and use the results to inform responses
+- Allows the assistant to search the web and use the results to inform responses
 - Provides up-to-date information for current events and recent data
 - Returns search result information formatted as search result blocks, including links as markdown hyperlinks
-- Use this tool for accessing information beyond Claude's knowledge cutoff
+- Use this tool for accessing information beyond the model's knowledge cutoff
 - Searches are performed automatically within a single API call
 
 CRITICAL REQUIREMENT - You MUST follow this:
@@ -508,8 +395,8 @@ CRITICAL REQUIREMENT - You MUST follow this:
     - [Source Title 2](https://example.com/2)
 
 Usage notes:
-  - Domain filtering is supported to include or block specific websites
-  - Web search is only available in the US
+  - Domain filtering can include or block specific websites when supported by the provider
+  - Unsupported providers or search options return an error
 
 IMPORTANT - Use the correct year in search queries:
   - The current month is {month_year}. You MUST use this year when searching for recent information, documentation, or current events.
@@ -518,11 +405,11 @@ IMPORTANT - Use the correct year in search queries:
     )
 }
 
-/// CONCISE WebSearch prompt — the `Dh(model)`-true branch of claude-code's
-/// `CNi(model)` (binary offset ~197074996). Extracted verbatim from the binary:
+/// Concise hosted-search prompt, selected by the shared simple-prompt gate.
+/// Adapted for provider-neutral search support:
 ///
 /// ```text
-/// Search the web. Returns result blocks with titles and URLs. US-only.
+/// Search the web. Returns result blocks with titles and URLs.
 ///
 /// - The current month is ${t} — use this when searching for recent information.
 /// - `allowed_domains` / `blocked_domains` filter results.
@@ -537,7 +424,7 @@ IMPORTANT - Use the correct year in search queries:
 fn web_search_description_concise() -> String {
     let month_year = chrono::Local::now().format("%B %Y").to_string();
     format!(
-        r#"Search the web. Returns result blocks with titles and URLs. US-only.
+        r#"Search the web. Returns result blocks with titles and URLs.
 
 - The current month is {month_year} — use this when searching for recent information.
 - `allowed_domains` / `blocked_domains` filter results.
@@ -581,11 +468,7 @@ impl Tool for WebSearchTool {
         map_web_search_result_text(result)
     }
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
-        // Always offered: on Anthropic first-party (and Vertex/Foundry per
-        // `hosted_search_enabled`) `call` runs the hosted `web_search_20250305`
-        // tool; on every other provider it runs the provider-agnostic
-        // CLIENT-SIDE search (see `web_search_client`). The provider split lives
-        // in `call`, so the model always sees a WebSearch tool.
+        // Keep callable so unsupported routes receive an explicit tool error.
         true
     }
     fn max_result_size_chars(&self) -> usize {
@@ -665,23 +548,6 @@ impl Tool for WebSearchTool {
         web_search_description()
     }
     async fn prompt(&self, opts: &PromptOptions) -> String {
-        // On non-hosted providers WebSearch runs CLIENT-SIDE (see `call` /
-        // `web_search_client`), so advertise it as a plain, callable web search
-        // instead of the Anthropic-hosted framing ("automatic", "US only") that
-        // would otherwise make the model think it can't invoke it.
-        if !self.ctx.hosted_search.as_ref().is_some_and(|client| {
-            client.supports(
-                opts.model.as_deref().unwrap_or(&self.ctx.default_model),
-                opts.model_profile.as_deref(),
-            )
-        }) {
-            return "Search the web and return result blocks (title + URL + snippet) as \
-                    markdown links. Use this whenever you need up-to-date or real-time \
-                    information you don't already know \u{2014} current events, weather, \
-                    prices, release notes, documentation, or anything past your training \
-                    cutoff. After answering, end with a \"Sources:\" list of the URLs you used."
-                .to_string();
-        }
         // 1:1 with claude-code `async prompt({model:e}){return CNi(e)}`
         // (binary @202215633), where `CNi(model)=Dh(model)?CONCISE:VERBOSE`
         // (@~197074952). The session/subagent model is threaded via
@@ -708,26 +574,6 @@ impl Tool for WebSearchTool {
             ));
         }
 
-        // Session-wide WebSearch budget (parity 2.1.212): claude-code reads the
-        // session counter off the task registry BEFORE every search
-        // (`l=t.taskRegistry.getWebSearchCalls(); if(l>=a) return <notice>`); on
-        // `>= max` (default 200, `CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION`) it
-        // returns a budget notice WITHOUT searching, else increments the counter
-        // (`incrementWebSearchCalls()`) and proceeds. Placed BEFORE the provider
-        // split so it gates BOTH the hosted and the LingXi client-side paths (1:1
-        // with CC where the gate is the first logic in `call`). No registry wired
-        // (`None`, e.g. library/unit callers) ⇒ never caps — byte-identical to the
-        // binary's null-registry `getWebSearchCalls(){return 0}` stub.
-        if let Some(registry) = &self.ctx.task_registry {
-            let max = resolve_max_web_searches_per_session();
-            let used = registry.web_search_calls();
-            if used >= max {
-                self.emit_web_search_session_cap(max).await;
-                return Ok(budget_capped_result(&parsed_input.query, used, max));
-            }
-            registry.increment_web_search_calls();
-        }
-
         let request = tool_api::HostedSearchRequest {
             model: if ctx.options.main_loop_model.is_empty() {
                 self.ctx.default_model.clone()
@@ -745,7 +591,24 @@ impl Tool for WebSearchTool {
             .as_ref()
             .is_some_and(|client| client.supports_request(&request))
         {
-            return self.run_client_side(&parsed_input).await;
+            return Err(ToolError::InvalidInput(format!(
+                "WebSearch is not supported by the selected LLM provider/model/profile or the requested search options (model: {}, profile: {}).",
+                request.model,
+                request.profile.as_deref().unwrap_or("default"),
+            )));
+        }
+
+        // Reject unsupported requests before charging the session budget.
+        // Supported requests retain the session cap and increment once before
+        // execution. Library callers without a registry have no session cap.
+        if let Some(registry) = &self.ctx.task_registry {
+            let max = resolve_max_web_searches_per_session();
+            let used = registry.web_search_calls();
+            if used >= max {
+                self.emit_web_search_session_cap(max).await;
+                return Ok(budget_capped_result(&parsed_input.query, used, max));
+            }
+            registry.increment_web_search_calls();
         }
 
         let invocation_id = tool_api::util::ids::ulid_or_uuid();
@@ -959,20 +822,20 @@ mod tests {
     }
 
     #[test]
-    fn description_is_verbatim_v2_1_183() {
+    fn description_is_provider_neutral_and_requires_sources() {
         let d = web_search_description();
         // Opening + the CRITICAL Sources requirement (byte-exact anchors). The
         // binary's literal starts with a leading newline and a `- ` on the first
         // bullet (`\n- Allows...`) and ends with a trailing newline.
         assert!(d.starts_with(
-            "\n- Allows Claude to search the web and use the results to inform responses\n"
+            "\n- Allows the assistant to search the web and use the results to inform responses\n"
         ));
         assert!(d.contains("CRITICAL REQUIREMENT - You MUST follow this:\n"));
         assert!(
             d.contains("  - This is MANDATORY - never skip including sources in your response\n")
         );
         assert!(d.contains("  - Example format:\n"));
-        assert!(d.contains("Usage notes:\n  - Domain filtering is supported to include or block specific websites\n  - Web search is only available in the US\n"));
+        assert!(d.contains("Usage notes:\n  - Domain filtering can include or block specific websites when supported by the provider\n  - Unsupported providers or search options return an error\n"));
         // Runtime month/year slot: "<Month> <Year>" (e.g. "June 2026").
         let my = chrono::Local::now().format("%B %Y").to_string();
         assert!(d.contains(&format!(
@@ -981,7 +844,7 @@ mod tests {
         assert!(d.ends_with("with the current year, NOT last year\n"));
     }
     #[test]
-    fn concise_description_is_verbatim_cni_dh_true_branch() {
+    fn concise_description_preserves_sources_and_date() {
         // claude-code `CNi(model)` Dh-true branch (binary @~197074996). No
         // leading and no trailing newline; em-dash (`—`); literal backticks
         // around the domain-filter param names; `${t}` resolves to "<Month>
@@ -991,7 +854,7 @@ mod tests {
         assert_eq!(
             c,
             format!(
-                "Search the web. Returns result blocks with titles and URLs. US-only.\n\
+                "Search the web. Returns result blocks with titles and URLs.\n\
                  \n\
                  - The current month is {my} \u{2014} use this when searching for recent information.\n\
                  - `allowed_domains` / `blocked_domains` filter results.\n\
@@ -1000,7 +863,7 @@ mod tests {
         );
         // No leading/trailing newline (distinct from the VERBOSE variant).
         assert!(
-            c.starts_with("Search the web. Returns result blocks with titles and URLs. US-only.\n")
+            c.starts_with("Search the web. Returns result blocks with titles and URLs.\n")
         );
         assert!(c.ends_with("as markdown links."));
         // Real em-dash byte (e2 80 94), not a hyphen.
@@ -1330,7 +1193,11 @@ mod tests {
     #[async_trait]
     impl tool_api::HostedWebSearchClient for Hosted {
         fn supports(&self, _: &str, profile: Option<&str>) -> bool {
-            profile != Some("client-only")
+            profile != Some("unsupported")
+        }
+        fn supports_request(&self, request: &tool_api::HostedSearchRequest) -> bool {
+            self.supports(&request.model, request.profile.as_deref())
+                && request.allowed_domains.len() <= 1
         }
         async fn search(
             &self,
@@ -1363,6 +1230,42 @@ mod tests {
         ctx.hosted_search = Some(hosted);
         ctx
     }
+    #[tokio::test]
+    async fn unsupported_search_fails_without_network_or_budget_use() {
+        for (missing_client, unsupported_options) in [(false, false), (true, false), (false, true)] {
+            let hosted = Arc::new(Hosted::default());
+            let mut builtin = hosted_context(hosted.clone());
+            let registry = BudgetRegistry::at(0);
+            builtin.task_registry = Some(registry.clone());
+            if missing_client {
+                builtin.hosted_search = None;
+            }
+            let mut ctx = fresh_ctx();
+            ctx.options.main_loop_model = "no-search-model".into();
+            let profile = if unsupported_options {
+                "limited-options"
+            } else {
+                "unsupported"
+            };
+            ctx.options.model_profile = Some(profile.into());
+            let (tx, _) = progress_channel();
+            let input = if unsupported_options {
+                json!({"query":"rust language", "allowed_domains":["rust-lang.org", "docs.rs"]})
+            } else {
+                json!({"query":"rust language"})
+            };
+            let error = WebSearchTool::new(builtin)
+                .call(input, ctx, tx)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("WebSearch is not supported"));
+            assert!(error.to_string().contains("no-search-model"));
+            assert!(error.to_string().contains(profile));
+            assert_eq!(hosted.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(registry.increments(), 0);
+        }
+    }
+
     #[tokio::test]
     async fn hosted_search_uses_live_profile_domains_and_reports_progress() {
         let hosted = Arc::new(Hosted::default());
