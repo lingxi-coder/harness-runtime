@@ -91,6 +91,18 @@ fn native_audio_uses_mobile_listener_owner_and_drains_permissions_before_release
             .await
             .unwrap();
         let expected_session = prepared.session_id.clone();
+        let expected_profile = prepared.profile_name.as_ref().unwrap();
+        engine
+            .submit(ClientCommand::GetAudioSessionContext)
+            .await
+            .unwrap();
+        assert!(listener.received.lock().await.iter().any(|event| {
+            matches!(event, ClientEvent::AudioSessionContext {
+                session_id, profile_id, account_scope,
+            } if session_id == &expected_session
+                && profile_id == expected_profile
+                && account_scope == &format!("profile:{expected_profile}"))
+        }));
         let (session, driver) = RealtimeSession::connect(
             &Transport,
             RealtimeConnectRequest {
