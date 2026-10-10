@@ -613,8 +613,8 @@ mod tests {
     #[tokio::test]
     async fn every_command_branch_preserves_original_request_and_reply() {
         use orchestrator::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
         let dir = tempfile::tempdir().unwrap();
         let transcript_path = dir.path().join("session.jsonl");
@@ -808,12 +808,10 @@ mod tests {
             lingxi_core::host::FusionPublicationStatus::OutboxFailed
         );
         assert_eq!(duplicate, first);
-        assert!(
-            first
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("not durably queued"))
-        );
+        assert!(first
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not durably queued")));
 
         let counter = Arc::new(CountingSink(AtomicUsize::new(0)));
         deferred.bind(counter.clone()).await;
@@ -1093,12 +1091,10 @@ mod tests {
             receipt.status,
             lingxi_core::host::FusionPublicationStatus::StorageFailure
         );
-        assert!(
-            receipt
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("requires session persistence"))
-        );
+        assert!(receipt
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("requires session persistence")));
         assert!(
             mock.background_notices().is_empty(),
             "the defensive guard returns before attempting append/notification work"

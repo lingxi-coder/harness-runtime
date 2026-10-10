@@ -349,7 +349,6 @@ fn live_agent_tool_dispatch(ctx: &SubagentContext) -> Option<live_tools::LiveAge
                             &call.name,
                             call.input,
                             call.context,
-                            None,
                             std::sync::Arc::new(tool_api::tool_invoker_impl::SuppliedTool(tool)),
                         )
                         .await
@@ -360,7 +359,7 @@ fn live_agent_tool_dispatch(ctx: &SubagentContext) -> Option<live_tools::LiveAge
                 }
             } else {
                 invoker
-                    .invoke_detailed(&call.name, call.input, call.context, None)
+                    .invoke_detailed(&call.name, call.input, call.context)
                     .await
             }
         }) as futures::future::BoxFuture<'static, _>
@@ -1994,7 +1993,7 @@ async fn run_subagent_inner(
 /// byte-exact part is the `Output does not match required schema: ` WRAPPER the
 /// caller prepends. A schema that fails to COMPILE is treated as PASS (a LingXi
 /// schema bug must not block the model), matching the binary's stance.
-fn validate_structured_output(
+pub fn validate_structured_output(
     schema_json: Option<&str>,
     input: &serde_json::Value,
 ) -> Result<(), String> {
@@ -4225,7 +4224,7 @@ async fn run_subagent_loop(
                             ..
                         } = &e
                         {
-                            // The Host enables this policy only for Create Local App.
+                            // The Host enables this policy only for a host-managed app creation run.
                             // Ordinary agents keep the existing StructuredOutput-only
                             // recovery policy, even when parse retries are configured.
                             let create_local_tool = retry_response_body

@@ -174,7 +174,7 @@ pub fn catalog_sessions(catalog: &Path) -> Vec<uuid::Uuid> {
     sessions.into_iter().collect()
 }
 
-/// Remove every visualization of `sessions` (a deleted Local App's catalog).
+/// Remove every visualization of `sessions` (a deleted session catalog).
 /// Best effort: a directory that refuses to go is a leak the sweep retries.
 pub async fn delete_sessions(store: &VisualizationStore, sessions: &[uuid::Uuid]) {
     for &session in sessions {

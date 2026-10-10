@@ -3,9 +3,9 @@
 //! The runner owns protocol, operation and transcript state. Its embedding
 //! host owns environment overlays, account metadata and background-job identity.
 
+pub use llm_runtime::auth::anthropic::environment::OAuthDescriptorCredential;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-pub use llm_runtime::auth::anthropic::environment::OAuthDescriptorCredential;
 
 /// Host capabilities that cannot be implemented by the protocol runner.
 /// Defaults express an absent optional product capability.
@@ -22,9 +22,7 @@ pub trait HeadlessHostServices: Send + Sync {
 
     /// Model OAuth descriptor/file material acquired by the host. The runtime
     /// selects this before stored OAuth and never opens a process descriptor.
-    fn oauth_descriptor_credential(
-        &self,
-    ) -> Option<OAuthDescriptorCredential> {
+    fn oauth_descriptor_credential(&self) -> Option<OAuthDescriptorCredential> {
         None
     }
 

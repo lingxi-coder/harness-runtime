@@ -191,7 +191,9 @@ impl NativeQueryResultPublisher<'_> {
     fn begin_query(&mut self) {
         self.last_error_published = false;
         self.last_result_failed = false;
-        self.runtime.execution_interrupted.store(false, std::sync::atomic::Ordering::Release);
+        self.runtime
+            .execution_interrupted
+            .store(false, std::sync::atomic::Ordering::Release);
         self.stream.begin_query_timing();
     }
 
@@ -214,9 +216,17 @@ impl NativeQueryResultPublisher<'_> {
             );
         }
         let limit_error = match result {
-            Ok(orchestrator::TurnOutcome::MaxTurns) => Some(Err(orchestrator::OrchestratorError::MaxTurnsReached {
-                max_turns: self.runtime.max_turns.unwrap_or_else(|| self.runtime.orchestrator.completed_turn_metrics().map(|metrics| metrics.num_turns).unwrap_or_default()),
-            })),
+            Ok(orchestrator::TurnOutcome::MaxTurns) => {
+                Some(Err(orchestrator::OrchestratorError::MaxTurnsReached {
+                    max_turns: self.runtime.max_turns.unwrap_or_else(|| {
+                        self.runtime
+                            .orchestrator
+                            .completed_turn_metrics()
+                            .map(|metrics| metrics.num_turns)
+                            .unwrap_or_default()
+                    }),
+                }))
+            }
             _ => None,
         };
         let result = limit_error.as_ref().unwrap_or(result);
@@ -225,31 +235,67 @@ impl NativeQueryResultPublisher<'_> {
             self.runtime.orchestrator.as_ref(),
             self.runtime.task_registry.as_ref(),
             &self.runtime.output,
-        ).await;
+        )
+        .await;
         let cost = self.runtime.orchestrator.snapshot_cost().await;
-        let model = self.runtime.orchestrator.session().lock().await.model.clone();
+        let model = self
+            .runtime
+            .orchestrator
+            .session()
+            .lock()
+            .await
+            .model
+            .clone();
         set_result_position(self.runtime, self.stream, queued, self.next_index).await;
-        self.last_result_failed = result.is_err() || self.runtime.orchestrator.completed_turn_metrics()
-            .and_then(|metrics| metrics.api_error_stop_reason).is_some();
+        self.last_result_failed = result.is_err()
+            || self
+                .runtime
+                .orchestrator
+                .completed_turn_metrics()
+                .and_then(|metrics| metrics.api_error_stop_reason)
+                .is_some();
         match result {
             Ok(_) => {
                 let text = self.stream.get_last_result_text().await;
                 if self.last_result_failed {
-                    self.runtime.record_execution_error(self.runtime.orchestrator.session().lock().await.history.last()
-                        .map(|message| message.text_content()).unwrap_or_default());
+                    self.runtime.record_execution_error(
+                        self.runtime
+                            .orchestrator
+                            .session()
+                            .lock()
+                            .await
+                            .history
+                            .last()
+                            .map(|message| message.text_content())
+                            .unwrap_or_default(),
+                    );
                 }
-                self.stream.emit_result_success(
-                    &text, "end_turn", &cost, &model, self.fast_mode_state,
-                    self.fast_mode_disabled_reason, self.betas,
-                ).await;
+                self.stream
+                    .emit_result_success(
+                        &text,
+                        "end_turn",
+                        &cost,
+                        &model,
+                        self.fast_mode_state,
+                        self.fast_mode_disabled_reason,
+                        self.betas,
+                    )
+                    .await;
                 self.last_error_published = false;
             }
             Err(error) => {
                 self.runtime.record_execution_error(error);
-                self.stream.emit_result_error(
-                    stream_json_error_subtype(error), vec![error.to_string()], &cost,
-                    &model, self.fast_mode_state, self.fast_mode_disabled_reason, self.betas,
-                ).await;
+                self.stream
+                    .emit_result_error(
+                        stream_json_error_subtype(error),
+                        vec![error.to_string()],
+                        &cost,
+                        &model,
+                        self.fast_mode_state,
+                        self.fast_mode_disabled_reason,
+                        self.betas,
+                    )
+                    .await;
                 self.last_error_published = true;
             }
         }
@@ -353,7 +399,10 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
             ),
     )
     .await;
-    runtime.execution_interrupted.store(matches!(&turn_result, Ok(orchestrator::TurnOutcome::Cancelled)), std::sync::atomic::Ordering::Release);
+    runtime.execution_interrupted.store(
+        matches!(&turn_result, Ok(orchestrator::TurnOutcome::Cancelled)),
+        std::sync::atomic::Ordering::Release,
+    );
     let turn_result = match turn_result {
         Ok(outcome) => wind_down_print_tasks(
             runtime,
@@ -464,8 +513,12 @@ pub async fn run_stream_json_print(
         let cost = runtime.orchestrator.snapshot_cost().await;
         let model = runtime.orchestrator.session().lock().await.model.clone();
         stream.refresh_held_result_totals(
-            &cost, &model, &argv.betas.clone().unwrap_or_default(),
-            runtime.agent_session_statistics().await.map(|stats| serde_json::to_value(stats).expect("agent statistics are JSON scalars")),
+            &cost,
+            &model,
+            &argv.betas.clone().unwrap_or_default(),
+            runtime.agent_session_statistics().await.map(|stats| {
+                serde_json::to_value(stats).expect("agent statistics are JSON scalars")
+            }),
         );
         if stream.publish_json().await.is_err() {
             exit_codes::RUNTIME_ERROR
@@ -685,9 +738,15 @@ async fn run_stream_json_print_inner(
         };
     let betas = argv.betas.clone().unwrap_or_default();
     let mut publisher = NativeQueryResultPublisher {
-        runtime, stream: &stream, max_budget_usd: argv.max_budget_usd,
-        fast_mode_state, fast_mode_disabled_reason, betas: &betas,
-        next_index: 0, last_error_published: false, last_result_failed: false,
+        runtime,
+        stream: &stream,
+        max_budget_usd: argv.max_budget_usd,
+        fast_mode_state,
+        fast_mode_disabled_reason,
+        betas: &betas,
+        next_index: 0,
+        last_error_published: false,
+        last_result_failed: false,
     };
     // Native publishes the parent result while delegated work may still be
     // running. Each notification query below owns a separate later result.
@@ -698,14 +757,18 @@ async fn run_stream_json_print_inner(
     }
     emit_prompt_suggestion_if_enabled(argv, runtime, &stream).await;
     match wind_down_print_tasks(
-        runtime, argv.max_budget_usd, runtime.shutdown.child_token(), None,
+        runtime,
+        argv.max_budget_usd,
+        runtime.shutdown.child_token(),
+        None,
         Some(&mut publisher),
-    ).await {
+    )
+    .await
+    {
         Ok(()) if !publisher.last_result_failed => exit_codes::SUCCESS,
         Ok(()) => exit_codes::RUNTIME_ERROR,
         Err(_) => exit_codes::RUNTIME_ERROR,
     }
-
 }
 
 /// Drive a multi-turn `--input-format stream-json` conversation (P3).
@@ -893,10 +956,11 @@ async fn run_stream_json_input_loop_inner(
     for task in prepared_tasks {
         auxiliary_tasks.push(task);
     }
-    let journal_ready = match queue_lifecycle.bind_journal(runtime.orchestrator.session_transcript_writer()) {
-        Ok(())=>queue_lifecycle.flush_journal().await,
-        Err(error)=>Err(error),
-    };
+    let journal_ready =
+        match queue_lifecycle.bind_journal(runtime.orchestrator.session_transcript_writer()) {
+            Ok(()) => queue_lifecycle.flush_journal().await,
+            Err(error) => Err(error),
+        };
     if let Err(error) = journal_ready {
         reader.stop();
         let _ = reader.join().await;
@@ -907,8 +971,13 @@ async fn run_stream_json_input_loop_inner(
         return exit_codes::RUNTIME_ERROR;
     }
     let input_rx = Arc::new(super::queued_commands::SdkInputQueue::new(
-        input_rx, input_pending, queue_lifecycle.clone(), stream.clone(), runtime.orchestrator.clone(),
-        argv.replay_user_messages, session_id_str.clone(),
+        input_rx,
+        input_pending,
+        queue_lifecycle.clone(),
+        stream.clone(),
+        runtime.orchestrator.clone(),
+        argv.replay_user_messages,
+        session_id_str.clone(),
     ));
     runtime.orchestrator.set_mid_turn_input(input_rx.clone());
 
@@ -1028,7 +1097,10 @@ async fn run_stream_json_input_loop_inner(
             match frame {
                 StdinControlFrame::UpdateEnvironmentVariables(values) => {
                     if let Err(error) = ctrl_services.update_environment_variables(values) {
-                        ctrl_execution_errors.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(error.clone());
+                        ctrl_execution_errors
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(error.clone());
                         ctrl_plane_busy.shutdown(&error).await;
                         end_notify_ctrl.notify_one();
                         break;
@@ -1067,7 +1139,10 @@ async fn run_stream_json_input_loop_inner(
                     )
                     .await
                     {
-                        ctrl_execution_errors.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(error.to_string());
+                        ctrl_execution_errors
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(error.to_string());
                         ctrl_plane_busy.shutdown(&error.to_string()).await;
                         end_notify_ctrl.notify_one();
                         break;
@@ -1085,9 +1160,15 @@ async fn run_stream_json_input_loop_inner(
     let mut last_turn_err: Option<orchestrator::OrchestratorError> = None;
     let mut had_any_turn = false;
     let mut publisher = NativeQueryResultPublisher {
-        runtime, stream: &stream, max_budget_usd: argv.max_budget_usd,
-        fast_mode_state, fast_mode_disabled_reason, betas: &betas,
-        next_index: 0, last_error_published: false, last_result_failed: false,
+        runtime,
+        stream: &stream,
+        max_budget_usd: argv.max_budget_usd,
+        fast_mode_state,
+        fast_mode_disabled_reason,
+        betas: &betas,
+        next_index: 0,
+        last_error_published: false,
+        last_result_failed: false,
     };
     let mut prompt_suggestion_task: Option<(
         tokio_util::sync::CancellationToken,
@@ -1207,8 +1288,8 @@ async fn run_stream_json_input_loop_inner(
         // with the interrupt receipt. `on_dequeued` also retires the uuid from
         // the `still_queued` shadow registry.
         queue_lifecycle.record_dequeued();
-        if let Err(error)=queue_lifecycle.flush_journal().await {
-            last_turn_err=Some(orchestrator::OrchestratorError::Internal(error));
+        if let Err(error) = queue_lifecycle.flush_journal().await {
+            last_turn_err = Some(orchestrator::OrchestratorError::Internal(error));
             break;
         }
         if let Some(uuid) = turn.uuid.as_deref() {
@@ -1246,7 +1327,10 @@ async fn run_stream_json_input_loop_inner(
             break;
         }
         publisher.begin_query();
-        let primary = turn.frame_projection.subprojection("/uuid").ok()
+        let primary = turn
+            .frame_projection
+            .subprojection("/uuid")
+            .ok()
             .filter(|value| value.value.as_str().is_some_and(|uuid| !uuid.is_empty()));
         let consumed = primary.iter().cloned().collect();
         if let Err(error) = stream.begin_request_markers(primary, consumed, false) {
@@ -1390,12 +1474,23 @@ async fn run_stream_json_input_loop_inner(
         // and the next turn subscribes its own.
         cancel_bridge.abort();
         let consumed_uuids = queue_lifecycle.queued.take_current_turn_uuids();
-        for uuid in consumed_uuids.iter().filter(|uuid| turn.uuid.as_deref() != Some(uuid.as_str())) {
-            emit_turn_terminal_lifecycle(&queue_lifecycle, Some(uuid), &turn_result, cancel_probe.is_cancelled());
+        for uuid in consumed_uuids
+            .iter()
+            .filter(|uuid| turn.uuid.as_deref() != Some(uuid.as_str()))
+        {
+            emit_turn_terminal_lifecycle(
+                &queue_lifecycle,
+                Some(uuid),
+                &turn_result,
+                cancel_probe.is_cancelled(),
+            );
         }
         publisher.publish(&turn_result, input_rx.len().await).await;
         emit_turn_terminal_lifecycle(
-            &queue_lifecycle, turn.uuid.as_deref(), &turn_result, cancel_probe.is_cancelled(),
+            &queue_lifecycle,
+            turn.uuid.as_deref(),
+            &turn_result,
+            cancel_probe.is_cancelled(),
         );
         match turn_result {
             Ok(_) => {
@@ -1449,8 +1544,8 @@ async fn run_stream_json_input_loop_inner(
     input_rx.close().await;
     reader.stop();
     let _ = reader.join().await;
-    if let Err(error)=queue_lifecycle.flush_journal().await {
-        last_turn_err=Some(orchestrator::OrchestratorError::Internal(error));
+    if let Err(error) = queue_lifecycle.flush_journal().await {
+        last_turn_err = Some(orchestrator::OrchestratorError::Internal(error));
     }
     transport_stop.cancel();
     control_plane.shutdown("Session ended").await;
@@ -1503,9 +1598,12 @@ async fn run_stream_json_input_loop_inner(
         // Every admitted query, including EOF notification wakes, was already
         // published. Closing input does not create a duplicate terminal frame.
         let _ = stream.flush().await;
-        if publisher.last_result_failed { exit_codes::RUNTIME_ERROR } else { exit_codes::SUCCESS }
+        if publisher.last_result_failed {
+            exit_codes::RUNTIME_ERROR
+        } else {
+            exit_codes::SUCCESS
+        }
     }
-
 }
 
 /// The oracle terminal reason (`In` at the stream-json call site @240906553)
@@ -1631,7 +1729,10 @@ async fn execute_structured_output(
     max_budget_usd: Option<f64>,
     cancel: tokio_util::sync::CancellationToken,
     sink: Option<&dyn OutputSink>,
-) -> Result<Option<lingxi_core::types::utf16_json::Utf16JsonProjection>, orchestrator::OrchestratorError> {
+) -> Result<
+    Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    orchestrator::OrchestratorError,
+> {
     if let Ok(mut value) = slot.lock() {
         *value = None;
     }
@@ -1674,8 +1775,11 @@ async fn execute_structured_output(
         &runtime.output,
     )
     .await;
-    let interrupted = matches!(outcome, Ok(orchestrator::TurnOutcome::Cancelled)) || cancel.is_cancelled();
-    runtime.execution_interrupted.store(interrupted, std::sync::atomic::Ordering::Release);
+    let interrupted =
+        matches!(outcome, Ok(orchestrator::TurnOutcome::Cancelled)) || cancel.is_cancelled();
+    runtime
+        .execution_interrupted
+        .store(interrupted, std::sync::atomic::Ordering::Release);
     if interrupted {
         return Err(orchestrator::OrchestratorError::Internal(
             "Structured output execution interrupted".into(),
@@ -1751,7 +1855,10 @@ async fn run_slash_command_with_budget(
                 &runtime.output,
             )
             .await;
-            runtime.execution_interrupted.store(matches!(&turn_result, Ok(orchestrator::TurnOutcome::Cancelled)), std::sync::atomic::Ordering::Release);
+            runtime.execution_interrupted.store(
+                matches!(&turn_result, Ok(orchestrator::TurnOutcome::Cancelled)),
+                std::sync::atomic::Ordering::Release,
+            );
             match turn_result {
                 Ok(_outcome) => exit_codes::SUCCESS,
                 Err(e) => {
@@ -1807,7 +1914,9 @@ async fn set_result_position(
 ) {
     let metrics = runtime.orchestrator.completed_turn_metrics();
     let subagent_stats = runtime.agent_session_statistics().await;
-    let api_error_stop_reason = metrics.as_ref().and_then(|metrics| metrics.api_error_stop_reason.clone());
+    let api_error_stop_reason = metrics
+        .as_ref()
+        .and_then(|metrics| metrics.api_error_stop_reason.clone());
     let api_error = api_error_stop_reason.is_some();
     stream
         .set_result_metadata(crate::headless::stream_json::StreamJsonResultMetadata {
@@ -1817,8 +1926,11 @@ async fn set_result_position(
             result_index: index,
             num_turns: metrics.as_ref().map(|value| u64::from(value.num_turns)),
             api_error_status: metrics.as_ref().and_then(|value| value.api_error_status),
-            stop_reason: api_error_stop_reason.or_else(|| metrics.and_then(|value| value.stop_reason)),
-            subagent_stats: subagent_stats.map(|stats| serde_json::to_value(stats).expect("agent statistics are JSON scalars")),
+            stop_reason: api_error_stop_reason
+                .or_else(|| metrics.and_then(|value| value.stop_reason)),
+            subagent_stats: subagent_stats.map(|stats| {
+                serde_json::to_value(stats).expect("agent statistics are JSON scalars")
+            }),
             ..Default::default()
         })
         .await;
@@ -1839,17 +1951,34 @@ mod result_publication_tests {
         let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(output)));
         let mut runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
         let api = Arc::new(MockStreamingApiClient::with_open_error(
-            llm_runtime::LlmError::InvalidRequest { message: "400 HEADLESS_LOCAL_PROVIDER_ERROR".into() }, vec![],
+            llm_runtime::LlmError::InvalidRequest {
+                message: "400 HEADLESS_LOCAL_PROVIDER_ERROR".into(),
+            },
+            vec![],
         ));
         runtime.inner.orchestrator = orchestrator::ConversationOrchestrator::into_shared(
             orchestrator::ConversationOrchestrator::new_with_streaming(
-                Default::default(), Arc::new(MockApiClient::new(vec![])), api,
-                Arc::new(tool_api::ToolRegistry::new()), noop_hook_executor(),
-                Arc::new(NoOpPermissionGate), stream.clone(),
-                Arc::new(StaticMemoryProvider::empty()), root.path().join("project"),
+                Default::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                api,
+                Arc::new(tool_api::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                stream.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().join("project"),
             ),
         );
-        let code = run_stream_json_print(&Argv { prompt: Some("go".into()), ..Default::default() }, &runtime, stream.clone(), permission::PermissionMode::Default).await;
+        let code = run_stream_json_print(
+            &Argv {
+                prompt: Some("go".into()),
+                ..Default::default()
+            },
+            &runtime,
+            stream.clone(),
+            permission::PermissionMode::Default,
+        )
+        .await;
         assert_eq!(code, exit_codes::RUNTIME_ERROR);
         stream.finish().await.unwrap();
         let mut lines = tokio::io::BufReader::new(receive).lines();
@@ -1858,7 +1987,10 @@ mod result_publication_tests {
         assert_eq!(result["is_error"], true);
         assert_eq!(result["terminal_reason"], "api_error");
         assert_eq!(result["stop_reason"], "stop_sequence");
-        assert_eq!(result["result"], "API Error: 400 HEADLESS_LOCAL_PROVIDER_ERROR");
+        assert_eq!(
+            result["result"],
+            "API Error: 400 HEADLESS_LOCAL_PROVIDER_ERROR"
+        );
         assert_eq!(result["api_error_status"], 400);
         let errors = runtime.execution_errors.lock().unwrap();
         assert_eq!(errors.len(), 1);
@@ -1868,21 +2000,50 @@ mod result_publication_tests {
     #[tokio::test]
     async fn execution_errors_are_recorded_separately_from_shutdown_failures() {
         let root = tempfile::tempdir().unwrap();
-        let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(tokio::io::sink())));
+        let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+            tokio::io::sink(),
+        )));
         let runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
         let mut publisher = NativeQueryResultPublisher {
-            runtime: &runtime, stream: &stream, max_budget_usd: None,
-            fast_mode_state: "off", fast_mode_disabled_reason: None, betas: &[],
-            next_index: 0, last_error_published: false, last_result_failed: false,
+            runtime: &runtime,
+            stream: &stream,
+            max_budget_usd: None,
+            fast_mode_state: "off",
+            fast_mode_disabled_reason: None,
+            betas: &[],
+            next_index: 0,
+            last_error_published: false,
+            last_result_failed: false,
         };
-        publisher.publish(&Err(orchestrator::OrchestratorError::Internal("controlled failure".into())), 0).await;
-        assert_eq!(*runtime.execution_errors.lock().unwrap(), vec!["orchestrator internal error: controlled failure"]);
+        publisher
+            .publish(
+                &Err(orchestrator::OrchestratorError::Internal(
+                    "controlled failure".into(),
+                )),
+                0,
+            )
+            .await;
+        assert_eq!(
+            *runtime.execution_errors.lock().unwrap(),
+            vec!["orchestrator internal error: controlled failure"]
+        );
         assert!(runtime.failures.lock().unwrap().is_empty());
         assert!(publisher.last_result_failed);
-        publisher.publish(&Ok(orchestrator::TurnOutcome::Cancelled), 0).await;
-        assert!(runtime.execution_interrupted.load(std::sync::atomic::Ordering::Acquire));
-        publisher.publish(&Ok(orchestrator::TurnOutcome::EndTurn), 0).await;
-        assert!(!runtime.execution_interrupted.load(std::sync::atomic::Ordering::Acquire), "a later completed query has its own execution outcome");
+        publisher
+            .publish(&Ok(orchestrator::TurnOutcome::Cancelled), 0)
+            .await;
+        assert!(runtime
+            .execution_interrupted
+            .load(std::sync::atomic::Ordering::Acquire));
+        publisher
+            .publish(&Ok(orchestrator::TurnOutcome::EndTurn), 0)
+            .await;
+        assert!(
+            !runtime
+                .execution_interrupted
+                .load(std::sync::atomic::Ordering::Acquire),
+            "a later completed query has its own execution outcome"
+        );
         stream.finish().await.unwrap();
     }
 
@@ -1894,11 +2055,19 @@ mod result_publication_tests {
         let mut runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
         runtime.max_turns = Some(3);
         let mut publisher = NativeQueryResultPublisher {
-            runtime: &runtime, stream: &stream, max_budget_usd: None,
-            fast_mode_state: "off", fast_mode_disabled_reason: None, betas: &[],
-            next_index: 0, last_error_published: false, last_result_failed: false,
+            runtime: &runtime,
+            stream: &stream,
+            max_budget_usd: None,
+            fast_mode_state: "off",
+            fast_mode_disabled_reason: None,
+            betas: &[],
+            next_index: 0,
+            last_error_published: false,
+            last_result_failed: false,
         };
-        publisher.publish(&Ok(orchestrator::TurnOutcome::MaxTurns), 0).await;
+        publisher
+            .publish(&Ok(orchestrator::TurnOutcome::MaxTurns), 0)
+            .await;
         let mut lines = tokio::io::BufReader::new(receive).lines();
         let result = next_result(&mut lines, &mut Vec::new()).await;
         assert_eq!(result["subtype"], "error_max_turns");
@@ -1916,14 +2085,21 @@ mod result_publication_tests {
         let (started, admitted) = tokio::sync::oneshot::channel();
         let (release, wait) = tokio::sync::oneshot::channel();
         group.push(tokio::spawn(async move {
-            child_group.push(tokio::spawn(async move { let _ = wait.await; }));
+            child_group.push(tokio::spawn(async move {
+                let _ = wait.await;
+            }));
             let _ = started.send(());
         }));
         let drain_group = group.clone();
-        let drain = tokio::spawn(async move { drain_group.join().await; });
+        let drain = tokio::spawn(async move {
+            drain_group.join().await;
+        });
         admitted.await.unwrap();
         tokio::task::yield_now().await;
-        assert!(!drain.is_finished(), "the child remains owned after the parent batch joins");
+        assert!(
+            !drain.is_finished(),
+            "the child remains owned after the parent batch joins"
+        );
         release.send(()).unwrap();
         drain.await.unwrap();
         assert!(group.tasks.lock().unwrap().is_empty());
@@ -1935,12 +2111,20 @@ mod result_publication_tests {
     ) -> Value {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let line = lines.next_line().await.unwrap().expect("output remains open");
+                let line = lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("output remains open");
                 let frame: Value = serde_json::from_str(&line).unwrap();
                 observed.push(frame.clone());
-                if frame["type"] == "result" { return frame; }
+                if frame["type"] == "result" {
+                    return frame;
+                }
             }
-        }).await.expect("result must not wait for the still-running delegated task")
+        })
+        .await
+        .expect("result must not wait for the still-running delegated task")
     }
 
     async fn background_result_case(sdk_eof: bool) {
@@ -1948,40 +2132,103 @@ mod result_publication_tests {
         let (output, receive) = tokio::io::duplex(128 * 1024);
         let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(output)));
         let mut runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
-        let responses = ["parent", "after child"].into_iter().enumerate().map(|(index, text)| vec![
-            message_start(&format!("result-{index}"), "claude-opus-4-7"),
-            content_block_start_text(0), text_delta(0, text), content_block_stop(0),
-            message_delta_stop("end_turn"), message_stop(),
-        ]).collect();
+        let responses = ["parent", "after child"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                vec![
+                    message_start(&format!("result-{index}"), "claude-opus-4-7"),
+                    content_block_start_text(0),
+                    text_delta(0, text),
+                    content_block_stop(0),
+                    message_delta_stop("end_turn"),
+                    message_stop(),
+                ]
+            })
+            .collect();
         let api = Arc::new(MockStreamingApiClient::with_turns(responses));
         runtime.inner.orchestrator = orchestrator::ConversationOrchestrator::into_shared(
             orchestrator::ConversationOrchestrator::new_with_streaming(
-                Default::default(), Arc::new(MockApiClient::new(vec![])), api.clone(),
-                Arc::new(tool_api::ToolRegistry::new()), noop_hook_executor(),
-                Arc::new(NoOpPermissionGate), stream.clone(),
-                Arc::new(StaticMemoryProvider::empty()), root.path().join("project"),
-            ).with_task_registry(runtime.task_registry.clone())
-             .with_task_notifications(Arc::new(orchestrator::task_notifications_provider::RegistryTaskNotifications::new(runtime.task_registry.clone()))),
+                Default::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                api.clone(),
+                Arc::new(tool_api::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                stream.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().join("project"),
+            )
+            .with_task_registry(runtime.task_registry.clone())
+            .with_task_notifications(Arc::new(
+                orchestrator::task_notifications_provider::RegistryTaskNotifications::new(
+                    runtime.task_registry.clone(),
+                ),
+            )),
         );
-        let task = TaskRegistryHandle::create(runtime.task_registry.as_ref(), TaskCreateInput {
-            task_type: "local_agent".into(), description: "controlled late completion".into(),
-        }).await.unwrap();
+        let task = TaskRegistryHandle::create(
+            runtime.task_registry.as_ref(),
+            TaskCreateInput {
+                task_type: "local_agent".into(),
+                description: "controlled late completion".into(),
+            },
+        )
+        .await
+        .unwrap();
         let runtime = Arc::new(runtime);
         let owned_runtime = runtime.clone();
         let owned_stream = stream.clone();
         let worker = tokio::spawn(async move {
-            let argv = Argv { prompt: Some("go".into()), ..Default::default() };
+            let argv = Argv {
+                prompt: Some("go".into()),
+                ..Default::default()
+            };
             if sdk_eof {
                 let plane = StdioControlPlane::new(owned_stream.outbound_tx());
                 let (mut sender, input) = tokio::io::duplex(4096);
-                sender.write_all(b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n").await.unwrap();
+                sender
+                    .write_all(
+                        b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n",
+                    )
+                    .await
+                    .unwrap();
                 sender.shutdown().await.unwrap();
-                let lifecycle = Arc::new(crate::headless::queued_commands::QueueLifecycle::new(owned_stream.outbound_tx(), "fixture".into()));
-                let channels = crate::headless::stream_json_input::spawn_stdin_router_from_reader(input, Output::new(tokio::io::sink()), false, "fixture".into(), owned_stream.outbound_tx(), lifecycle.clone());
-                let prepared = crate::headless::stdio::PreparedStdio::from_channels(channels, lifecycle, plane.clone(), owned_runtime.shutdown.child_token()).await;
-                run_stream_json_input_loop(&Argv::default(), &owned_runtime, owned_stream, permission::PermissionMode::Default, plane, prepared).await
+                let lifecycle = Arc::new(crate::headless::queued_commands::QueueLifecycle::new(
+                    owned_stream.outbound_tx(),
+                    "fixture".into(),
+                ));
+                let channels = crate::headless::stream_json_input::spawn_stdin_router_from_reader(
+                    input,
+                    Output::new(tokio::io::sink()),
+                    false,
+                    "fixture".into(),
+                    owned_stream.outbound_tx(),
+                    lifecycle.clone(),
+                );
+                let prepared = crate::headless::stdio::PreparedStdio::from_channels(
+                    channels,
+                    lifecycle,
+                    plane.clone(),
+                    owned_runtime.shutdown.child_token(),
+                )
+                .await;
+                run_stream_json_input_loop(
+                    &Argv::default(),
+                    &owned_runtime,
+                    owned_stream,
+                    permission::PermissionMode::Default,
+                    plane,
+                    prepared,
+                )
+                .await
             } else {
-                run_stream_json_print(&argv, &owned_runtime, owned_stream, permission::PermissionMode::Default).await
+                run_stream_json_print(
+                    &argv,
+                    &owned_runtime,
+                    owned_stream,
+                    permission::PermissionMode::Default,
+                )
+                .await
             }
         });
         let mut lines = tokio::io::BufReader::new(receive).lines();
@@ -1989,18 +2236,47 @@ mod result_publication_tests {
         let first = next_result(&mut lines, &mut observed).await;
         assert_eq!(first["result"], "parent");
         assert_eq!(first["result_index"], 0);
-        assert!(!worker.is_finished(), "first result precedes delegated completion");
+        assert!(
+            !worker.is_finished(),
+            "first result precedes delegated completion"
+        );
         assert_eq!(api.captured_calls().await.len(), 1);
-        runtime.task_registry.set_status(&task.task_id, tasks::state::TaskStatus::Completed).await.unwrap();
+        runtime
+            .task_registry
+            .set_status(&task.task_id, tasks::state::TaskStatus::Completed)
+            .await
+            .unwrap();
         let second = next_result(&mut lines, &mut observed).await;
         assert_eq!(second["result"], "after child");
         assert_eq!(second["result_index"], 1);
         assert_eq!(second["num_turns"], 1);
-        assert_eq!(observed.iter().filter(|frame| frame["type"] == "system" && frame["subtype"] == "init").count(), 2);
-        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(5), worker).await.unwrap().unwrap(), exit_codes::SUCCESS);
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|frame| frame["type"] == "system" && frame["subtype"] == "init")
+                .count(),
+            2
+        );
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), worker)
+                .await
+                .unwrap()
+                .unwrap(),
+            exit_codes::SUCCESS
+        );
         assert_eq!(api.captured_calls().await.len(), 2);
         let history = runtime.orchestrator.session().lock().await.history.clone();
-        assert_eq!(history.iter().filter(|row| matches!(row, lingxi_core::types::ConversationMessage::User { is_meta: false, .. })).count(), 1, "a notification query does not fabricate another human prompt");
+        assert_eq!(
+            history
+                .iter()
+                .filter(|row| matches!(
+                    row,
+                    lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+                ))
+                .count(),
+            1,
+            "a notification query does not fabricate another human prompt"
+        );
         stream.finish().await.unwrap();
     }
 

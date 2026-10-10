@@ -237,27 +237,6 @@ pub enum TaskSpawnInput {
         creator_team_name: Option<String>,
         /// Persistent identity of the creator agent, when available.
         creator_agent_id: Option<lingxi_core::types::AgentId>,
-        /// Host-minted Local App authority for this run: which app this
-        /// workflow may touch, and why (design §18 Phase -1 step 8 / §8.1).
-        ///
-        /// [`crate::scope::LocalAppWorkflowTaskScope`] has no public
-        /// constructor that takes a name, no `Default` and no `Deserialize`
-        /// (see that module's docs), so the only way a `Some` reaches this
-        /// field is a Host that called a purpose constructor for an app id it
-        /// resolved itself. `state_for_spawn` copies it onto the task row,
-        /// where the workspace-lease gate
-        /// (`crate::handlers::local_workflow::requires_workspace_lease`) and
-        /// the App delete guard
-        /// (`crate::registry::TaskRegistry::find_nonterminal_local_app_workflows`)
-        /// read it.
-        ///
-        /// `None` for every workflow that is not a Local App workflow, and
-        /// for any Local App launch the Host could not fully validate. `None`
-        /// is authority-free by design: neither guard has any fallback to
-        /// `workflow_id` or `args`, because both are caller-supplied and a
-        /// custom workflow reusing a real workflow's name is indistinguishable
-        /// from the real one at this layer.
-        scope: Option<crate::scope::LocalAppWorkflowTaskScope>,
     },
     /// Spawn an MCP monitor.
     MonitorMcp {

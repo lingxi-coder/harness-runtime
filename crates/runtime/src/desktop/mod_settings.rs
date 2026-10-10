@@ -1,6 +1,6 @@
 //! Host settings snapshots for the interceptable Mod `settings.read` call.
 
-use super::{DesktopConfig, managed_model_policy_source, settings_watch};
+use super::{managed_model_policy_source, settings_watch, DesktopConfig};
 use hooks::mods::{ModError, ModSettingsReader};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

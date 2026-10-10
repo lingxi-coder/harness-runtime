@@ -1,9 +1,0 @@
-{
-  "type": "plugin_command",
-  "command": {
-    "type": "set_local_app_mcp_conversation_pinned",
-    "conversation_id": "conv-0001",
-    "app_id": "habits-1a2b",
-    "pinned": true
-  }
-}

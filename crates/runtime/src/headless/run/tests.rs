@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use super::*;
 use super::{fusion::*, lifecycle::*};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 #[test]
 fn stream_compact_recognition_preserves_focus_without_matching_other_commands() {

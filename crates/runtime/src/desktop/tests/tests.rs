@@ -1,18 +1,18 @@
 use super::{
-    CoordinatorWiring, DesktopConfig, DesktopSessionComposition, FusionCatalogClearingAuth,
-    FusionCatalogModelSource, FusionCatalogRefresher, FusionCatalogRefreshingOAuthConnect,
-    QUERY_SOURCE_REPL_MAIN_THREAD, QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE, WorktreeSlashAction,
     build, build_shared_credential_stack_for_config, desktop_fusion_runtime_config,
     desktop_tool_registry, ephemeral_session_home, filter_fusion_catalog, fusion_route_flag,
     model_deprecation_warning, parse_worktree_slash_action,
     refresh_fusion_catalog_after_credential_delete, refresh_fusion_catalog_after_credential_write,
     register_fusion_catalog_refresher, resolve_memory_feature_gates,
     resolve_workflow_session_enabled, resolve_workflow_size_guideline,
-    sandbox_network_ask_callback,
+    sandbox_network_ask_callback, CoordinatorWiring, DesktopConfig, DesktopSessionComposition,
+    FusionCatalogClearingAuth, FusionCatalogModelSource, FusionCatalogRefresher,
+    FusionCatalogRefreshingOAuthConnect, WorktreeSlashAction, QUERY_SOURCE_REPL_MAIN_THREAD,
+    QUERY_SOURCE_SDK, WORKTREE_SLASH_USAGE,
 };
 use serde_json::Value;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[test]
 fn host_workspace_trust_overrides_cli_records_and_preserves_cli_default() {
@@ -3281,7 +3281,7 @@ async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
 
 #[test]
 fn oauth_subscriber_flag_gating() {
-    use llm_runtime::auth::anthropic::resolver::{ResolverContext, resolve};
+    use llm_runtime::auth::anthropic::resolver::{resolve, ResolverContext};
     let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
     let no_inference = vec!["user:profile".to_string()];
     // The context `resolve_llm_stack` builds for a stored-OAuth session,
@@ -3755,15 +3755,22 @@ async fn startup_mcp_warning_uses_only_the_injected_diagnostic_sink() {
     cfg.defer_session_start = true;
     std::fs::write(cfg.cwd.join(".mcp.json"), r#"{"servers":{}}"#).unwrap();
     let expected = mcp::config_diagnostics::collect_all_mcp_config_warnings(&cfg.cwd, None)
-        .into_iter().map(|warning| warning.to_stderr_line()).collect::<Vec<_>>();
-    assert!(!expected.is_empty(), "the fixture must exercise actual startup diagnostics");
+        .into_iter()
+        .map(|warning| warning.to_stderr_line())
+        .collect::<Vec<_>>();
+    assert!(
+        !expected.is_empty(),
+        "the fixture must exercise actual startup diagnostics"
+    );
     let diagnostics = Arc::new(RecordingDesktopDiagnostics::default());
     cfg.diagnostics = Some(diagnostics.clone());
     let runtime = build(
         cfg,
         Arc::new(orchestrator::test_support::MockOutputStream::new()),
         Arc::new(RecordingPermissionSink::default()),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     assert_eq!(*diagnostics.0.lock().unwrap(), expected);
     drop(runtime);
     assert!(DesktopConfig::default().diagnostics.is_none());
@@ -3790,9 +3797,14 @@ async fn apply_worktree_launch_with_tmux_creates_and_records_session_name() {
     ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
     let diagnostics = RecordingDesktopDiagnostics::default();
-    super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx, Some(&diagnostics))
-        .await
-        .expect("worktree + tmux launch must succeed");
+    super::apply_worktree_launch(
+        &Some("feat".to_string()),
+        &Some(String::new()),
+        &ctx,
+        Some(&diagnostics),
+    )
+    .await
+    .expect("worktree + tmux launch must succeed");
 
     assert_eq!(
         runner.probe_calls(),
@@ -3810,7 +3822,12 @@ async fn apply_worktree_launch_with_tmux_creates_and_records_session_name() {
         .clone()
         .expect("worktree_session must be populated");
     assert_eq!(session.tmux_session_name, Some(expected_name.clone()));
-    assert_eq!(*diagnostics.0.lock().unwrap(), vec![format!("Created tmux session: {expected_name}\nTo attach: tmux attach -t {expected_name}")]);
+    assert_eq!(
+        *diagnostics.0.lock().unwrap(),
+        vec![format!(
+            "Created tmux session: {expected_name}\nTo attach: tmux attach -t {expected_name}"
+        )]
+    );
 }
 
 /// A tmux invocation that fails (non-zero exit) must NOT fail boot — the
@@ -3831,9 +3848,14 @@ async fn apply_worktree_launch_tmux_failure_is_non_fatal() {
     ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
     let diagnostics = RecordingDesktopDiagnostics::default();
-    super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx, Some(&diagnostics))
-        .await
-        .expect("a tmux failure must not fail boot");
+    super::apply_worktree_launch(
+        &Some("feat".to_string()),
+        &Some(String::new()),
+        &ctx,
+        Some(&diagnostics),
+    )
+    .await
+    .expect("a tmux failure must not fail boot");
     let notices = diagnostics.0.lock().unwrap().clone();
     assert_eq!(notices.len(), 1);
     assert!(notices[0].starts_with("Warning: Failed to create tmux session: "));
@@ -3937,9 +3959,10 @@ async fn apply_worktree_launch_native_tmux_not_installed_is_hard_error() {
     let runner = Arc::new(RecordingProcessRunner::with_exits(127, 0));
     ctx.process = runner.clone() as Arc<dyn lingxi_core::host::ProcessRunner>;
 
-    let err = super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx, None)
-        .await
-        .expect_err("native --tmux with tmux absent must hard-fail boot");
+    let err =
+        super::apply_worktree_launch(&Some("feat".to_string()), &Some(String::new()), &ctx, None)
+            .await
+            .expect_err("native --tmux with tmux absent must hard-fail boot");
     assert!(
         matches!(err, super::BuildError::TmuxNotInstalled(ref hint)
                 if hint == platform_posix::worktree_tmux::tmux_install_hint()),
@@ -4958,7 +4981,9 @@ async fn build_with_json_schema_surfaces_structured_output_slot() {
     // `--json-schema` ⇒ build() registers the forced `StructuredOutput` tool
     // and surfaces its capture slot for the print path.
     let (_tmp, mut cfg) = test_config(true);
-    cfg.json_schema = Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({ "type": "object" })));
+    cfg.json_schema = Some(lingxi_core::types::utf16_json::Utf16JsonProjection::plain(
+        serde_json::json!({ "type": "object" }),
+    ));
     let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());
     let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
@@ -7943,13 +7968,15 @@ async fn restricted_build_hides_default_restricted_builtins_from_advertising() {
 
 #[tokio::test]
 async fn headless_explicit_empty_tools_applies_without_restricted_mode() {
-    for schema in [None, Some(r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#)] {
+    for schema in [
+        None,
+        Some(r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#),
+    ] {
         let (_tmp, mut cfg) = test_config(true);
         cfg.restricted = false;
         cfg.restricted_tools = Some(vec![String::new()]);
-        cfg.json_schema = schema.map(|raw| {
-            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).unwrap()
-        });
+        cfg.json_schema = schema
+            .map(|raw| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(raw).unwrap());
         let output = Arc::new(orchestrator::test_support::MockOutputStream::new());
         let permissions = Arc::new(RecordingPermissionSink::default());
         let runtime = build(cfg, output, permissions).await.expect("build");
@@ -7976,10 +8003,21 @@ async fn headless_bare_default_catalog_matches_frozen_native() {
         config,
         Arc::new(orchestrator::test_support::MockOutputStream::new()),
         Arc::new(RecordingPermissionSink::default()),
-    ).await.unwrap();
-    assert_eq!(runtime.orchestrator.advertised_tool_names().await, ["Bash", "Edit", "Read"]);
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        runtime.orchestrator.advertised_tool_names().await,
+        ["Bash", "Edit", "Read"]
+    );
     assert!(!runtime.tools.mod_registration_disabled());
-    assert!(runtime.session_lifecycle.shutdown_and_drain().await.complete);
+    assert!(
+        runtime
+            .session_lifecycle
+            .shutdown_and_drain()
+            .await
+            .complete
+    );
 }
 
 #[tokio::test]
@@ -9978,8 +10016,8 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
 #[tokio::test]
 async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner() {
     use std::sync::atomic::Ordering;
-    use tokio::sync::RwLock;
     use tokio::sync::oneshot;
+    use tokio::sync::RwLock;
 
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");

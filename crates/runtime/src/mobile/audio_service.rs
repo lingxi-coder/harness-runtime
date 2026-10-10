@@ -229,13 +229,6 @@ fn owner_to_dto(value: &AudioOwner) -> AudioOwnerDto {
         AudioOwner::Session { session_id } => AudioOwnerDto::Session {
             session_id: session_id.clone(),
         },
-        AudioOwner::LocalApp {
-            app_id,
-            runtime_generation,
-        } => AudioOwnerDto::LocalApp {
-            app_id: app_id.clone(),
-            runtime_generation: *runtime_generation,
-        },
         AudioOwner::Ui { instance_id } => AudioOwnerDto::Ui {
             instance_id: instance_id.clone(),
         },

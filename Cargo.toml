@@ -36,7 +36,6 @@ members = [
     "crates/memory",
     "crates/migrations",
     "crates/jsonrpc",
-    "crates/json-projection",
     "crates/mcp",
     "crates/llm-runtime",
     "crates/http-client",
@@ -56,7 +55,6 @@ members = [
     "crates/msgqueue",
     "crates/session",
     "crates/cron",
-    "crates/local-apps",
     "crates/visualization",
     "crates/sandbox",
     "crates/sandbox-runtime",
@@ -131,7 +129,6 @@ default-members = [
     "crates/msgqueue",
     "crates/session",
     "crates/cron",
-    "crates/local-apps",
     "crates/visualization",
     "crates/sandbox",
     "crates/sandbox-runtime",
@@ -155,18 +152,26 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi-coder/harness-runtime"
 
 [workspace.dependencies]
-lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "e9fd8d809fe8f65870428abad87e5422b2037b69", default-features = false }
+lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "60497015038a656c680587c151be84b3925f5a85", default-features = false }
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
-mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9" }
-mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9" }
-mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9" }
-mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9" }
-platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "5d399c4cd2c74282bc7996edc6b686bb1c0ee0a9" }
+mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b65f8856d773d27ebf73b0cade907884d3080704" }
+mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b65f8856d773d27ebf73b0cade907884d3080704" }
+mobile-linux-android = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b65f8856d773d27ebf73b0cade907884d3080704" }
+mobile-linux-ios = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b65f8856d773d27ebf73b0cade907884d3080704" }
+platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b65f8856d773d27ebf73b0cade907884d3080704" }
 
 # Single source of truth for the product namespace (paths, filenames, env
 # prefix, brand name). Path is workspace-root-relative so every member uses
 # `branding.workspace = true` regardless of its own depth.
 branding = { path = "crates/branding" }
+
+# Shared library crates published from the local-app-builder repository. They are generic libraries (device API,
+# JSON projection, MCP wire types, rooted filesystem); the engine carries no Local App feature code. One revision for
+# every crate of it, here and in the product.
+device-api = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "0b93d07d3194c867b2d9849056bb0bd0c1032c87" }
+json-projection = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "0b93d07d3194c867b2d9849056bb0bd0c1032c87" }
+mcp-wire = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "0b93d07d3194c867b2d9849056bb0bd0c1032c87" }
+rooted-fs = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "0b93d07d3194c867b2d9849056bb0bd0c1032c87" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps `serde_json::Map` keys in insertion order across
 # Value round-trips. Required for claude-code wire-byte fidelity: outbound
@@ -355,10 +360,11 @@ unnecessary_filter_map = "allow"        #  1
 debug = 1
 split-debuginfo = "unpacked"
 
-# Develop the shared SDK in the sibling ../llm-client checkout. Downstream workspaces keep
-# using the immutable Git dependency above because root patches do not propagate.
-[patch."https://github.com/lingxi-coder/llm-client.git"]
-lingxi-llm-client = { path = "../llm-client" }
-
 [profile.release]
 lto = "thin"
+
+# This workspace carries a patched git2 (SSH and TLS through mbedTLS) that `plugin` and `tools/git-mobile` use by path,
+# and it is the one place that decides: a package may link libgit2 once, so any crates.io request for git2 is
+# redirected to it.
+[patch.crates-io]
+git2 = { path = "third_party/git2-rs/git2" }

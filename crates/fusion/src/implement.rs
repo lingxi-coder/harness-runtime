@@ -603,29 +603,15 @@ impl ToolInvoker for WorktreeScopedInvoker {
         self.inner.invoke(name, input, ctx).await
     }
 
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: Value,
-        ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
-    ) -> Result<Value, ToolInvokerError> {
-        let (input, ctx) = self.scope(name, input, ctx)?;
-        self.inner
-            .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
-            .await
-    }
-
     async fn invoke_detailed(
         &self,
         name: &str,
         input: Value,
         ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
     ) -> Result<ToolInvocationResult, ToolInvokerError> {
         let (input, ctx) = self.scope(name, input, ctx)?;
         self.inner
-            .invoke_detailed(name, input, ctx, workspace_lease_token)
+            .invoke_detailed(name, input, ctx)
             .await
     }
 
@@ -634,12 +620,11 @@ impl ToolInvoker for WorktreeScopedInvoker {
         name: &str,
         input: Value,
         ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
         supplied: Arc<dyn Any + Send + Sync>,
     ) -> Result<ToolInvocationResult, ToolInvokerError> {
         let (input, ctx) = self.scope(name, input, ctx)?;
         self.inner
-            .invoke_supplied_detailed(name, input, ctx, workspace_lease_token, supplied)
+            .invoke_supplied_detailed(name, input, ctx, supplied)
             .await
     }
 

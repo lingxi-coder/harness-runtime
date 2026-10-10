@@ -1269,12 +1269,10 @@ mod tests {
             let event_id = DesktopFusionRecorder::event_id(&outcome);
             let uuid = DesktopFusionRecorder::message_uuid(&outcome);
             if publish_first {
-                assert!(
-                    recorder
-                        .record_terminal(outcome.clone(), Some(target))
-                        .await
-                        .is_published()
-                );
+                assert!(recorder
+                    .record_terminal(outcome.clone(), Some(target))
+                    .await
+                    .is_published());
             } else {
                 coordinator
                     .append_fusion_terminal(DurableFusionTerminalRecord {
@@ -1849,8 +1847,8 @@ mod tests {
     #[tokio::test]
     async fn published_projection_waits_for_busy_history_and_remains_uuid_idempotent() {
         use orchestrator::test_support::{
-            MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-            noop_hook_executor,
+            noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+            StaticMemoryProvider,
         };
         use std::path::PathBuf;
         use tool_api::registry::ToolRegistry;

@@ -1,9 +1,0 @@
-{
-  "type": "plugin_command",
-  "command": {
-    "type": "set_local_app_mcp_enabled",
-    "app_id": "habits-1a2b",
-    "enabled": true,
-    "expected_revision": 4
-  }
-}

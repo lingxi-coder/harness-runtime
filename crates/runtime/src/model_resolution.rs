@@ -491,12 +491,25 @@ mod tests {
 
     #[test]
     fn small_fast_override_is_scoped_to_native_provider_facts() {
-        let native = profile(ProviderId::AnthropicFirstParty, "custom-native-name", "fast-id");
+        let native = profile(
+            ProviderId::AnthropicFirstParty,
+            "custom-native-name",
+            "fast-id",
+        );
         let aliases = catalog_aliases_with_small_fast(&native, Some("fast-id".into()));
-        assert_eq!(aliases.get("small-fast"), Some(&vec!["fast-id".to_string()]));
-        assert!(!catalog_aliases_with_small_fast(&native, Some(String::new())).contains_key("small-fast"));
+        assert_eq!(
+            aliases.get("small-fast"),
+            Some(&vec!["fast-id".to_string()])
+        );
+        assert!(
+            !catalog_aliases_with_small_fast(&native, Some(String::new()))
+                .contains_key("small-fast")
+        );
         let foreign = profile(ProviderId::OpenAI, "anthropic", "claude-shaped-id");
-        assert!(!catalog_aliases_with_small_fast(&foreign, Some("fast-id".into())).contains_key("small-fast"));
+        assert!(
+            !catalog_aliases_with_small_fast(&foreign, Some("fast-id".into()))
+                .contains_key("small-fast")
+        );
     }
 
     #[test]

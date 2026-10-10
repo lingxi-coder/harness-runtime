@@ -85,16 +85,8 @@ pub struct MobileConfig {
     /// tests stay deterministic (they never touch the real filesystem). Mirrors
     /// `harness_runtime::desktop::DesktopConfig::memory_provider`.
     pub memory_provider: Option<Arc<dyn orchestrator::prompt::MemoryHierarchyProvider>>,
-    /// Legacy distribution flag retained at the host boundary. Local apps are
-    /// built with Vite and served through the static loopback server in every
-    /// distribution.
-    pub local_apps_full_runtime: bool,
-    /// Host path containing the verified, read-only local-app dependency seed.
-    /// Each build materializes its `node_modules` child into one disposable,
-    /// writable project snapshot; the seed is never exposed as a guest mount.
-    pub local_apps_runtime_root: Option<std::path::PathBuf>,
-    /// Physical memory reported by the native host. Local-app runtime quotas
-    /// are derived from this value; zero is the conservative fallback.
+    /// Physical memory reported by the native host; zero is the conservative
+    /// fallback.
     pub physical_memory_bytes: u64,
     /// Stable native host facts used to render the fixed mobile runtime
     /// reminder. `None` keeps desktop-style prompt assembly semantics for host
@@ -143,8 +135,6 @@ impl std::fmt::Debug for MobileConfig {
                     &"None"
                 },
             )
-            .field("local_apps_full_runtime", &self.local_apps_full_runtime)
-            .field("local_apps_runtime_root", &self.local_apps_runtime_root)
             .field("physical_memory_bytes", &self.physical_memory_bytes)
             .field("host_environment", &self.host_environment)
             .field("vision_delegation_enabled", &self.vision_delegation_enabled)
@@ -174,8 +164,6 @@ impl Default for MobileConfig {
             // P0.2: default to NO memory provider (empty, deterministic). The
             // production FFI entry points inject `Some(real_provider())`.
             memory_provider: None,
-            local_apps_full_runtime: false,
-            local_apps_runtime_root: None,
             physical_memory_bytes: 0,
             host_environment: None,
             vision_delegation_enabled: true,

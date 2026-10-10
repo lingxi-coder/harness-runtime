@@ -487,10 +487,9 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             creator_teammate_name: None,
             creator_team_name: None,
             creator_agent_id: None,
-            // A placeholder carries no Local App authority: `create` only
+            // A placeholder carries no managed-app authority: `create` only
             // allocates a spool file and a state slot, and the Host mints a
             // scope on the real `spawn` path.
-            scope: None,
         },
         TaskType::MonitorMcp => TaskSpawnInput::MonitorMcp {
             server_name: String::new(),
@@ -2120,7 +2119,6 @@ mod tests {
                     transcript_dir: None,
                     current_step: 2,
                     outcome: Default::default(),
-                    scope: None,
                 })
             };
         registry
@@ -2250,7 +2248,6 @@ mod tests {
                 transcript_dir: None,
                 current_step: 0,
                 outcome: Default::default(),
-                scope: None,
             })
         };
         registry

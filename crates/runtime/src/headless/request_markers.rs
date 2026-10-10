@@ -2,7 +2,7 @@
 //! client UUIDs; generated transcript identities are not request markers.
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const LIMIT: usize = 64;
 
@@ -304,22 +304,18 @@ mod tests {
             owner.stamp(&mut frame).unwrap();
             frame.value
         };
-        assert!(
-            stamp(
-                &mut owner,
-                json!({"type":"stream_event","event":{"type":"ping"}})
-            )
-            .get("user_message_uuid")
-            .is_none()
-        );
-        assert!(
-            stamp(
-                &mut owner,
-                json!({"type":"assistant","parent_tool_use_id":"child"})
-            )
-            .get("user_message_uuid")
-            .is_none()
-        );
+        assert!(stamp(
+            &mut owner,
+            json!({"type":"stream_event","event":{"type":"ping"}})
+        )
+        .get("user_message_uuid")
+        .is_none());
+        assert!(stamp(
+            &mut owner,
+            json!({"type":"assistant","parent_tool_use_id":"child"})
+        )
+        .get("user_message_uuid")
+        .is_none());
         assert_eq!(
             stamp(&mut owner, json!({"type":"assistant"}))["user_message_uuid"],
             "typed"
@@ -333,19 +329,15 @@ mod tests {
         );
         owner.note_attachment(&attachment("later", false)).unwrap();
         owner.note_command_started(id("later")).unwrap();
-        assert!(
-            stamp(&mut owner, json!({"type":"assistant"}))
-                .get("user_message_uuid")
-                .is_none()
-        );
-        assert!(
-            stamp(
-                &mut owner,
-                json!({"type":"stream_event","event":{"type":"message_start"}})
-            )
+        assert!(stamp(&mut owner, json!({"type":"assistant"}))
             .get("user_message_uuid")
-            .is_none()
-        );
+            .is_none());
+        assert!(stamp(
+            &mut owner,
+            json!({"type":"stream_event","event":{"type":"message_start"}})
+        )
+        .get("user_message_uuid")
+        .is_none());
         assert_eq!(
             stamp(&mut owner, json!({"type":"result"}))["user_message_uuids"],
             json!(["typed", "later"])

@@ -121,6 +121,8 @@ impl BridgeMock {
         let tools = tool_names
             .iter()
             .map(|t| McpToolDto {
+                input_schema_projection: None,
+                definition_projection: None,
                 // Emit the empty `<server>` token, exactly like the posix
                 // transport's `list_tools` (mcp.rs:397) does.
                 full_name: format!("mcp____{t}"),
@@ -514,7 +516,7 @@ impl DirectInProcessMock {
 impl McpTransport for DirectInProcessMock {
     async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
         assert!(
-            matches!(spec, McpTransportSpec::InProcess { registry_key } if registry_key == "local_apps")
+            matches!(spec, McpTransportSpec::InProcess { registry_key } if registry_key == "in_process_demo")
         );
         Ok(McpRawConnection {
             connection_id: self.connection_id,
@@ -543,7 +545,7 @@ impl McpTransport for DirectInProcessMock {
 
             server_name: String::new(),
             tool_name: "list".into(),
-            description: "list local apps".into(),
+            description: "list demo items".into(),
             input_schema: serde_json::json!({"type":"object"}),
             output_schema: None,
             annotations: None,
@@ -1333,9 +1335,9 @@ async fn inprocess_server_dispatches_directly_without_jsonrpc_client() {
     let registry = McpRegistry::new(transport.clone());
     registry
         .connect(McpServerConfig {
-            name: "local_apps".into(),
+            name: "in_process_demo".into(),
             spec: McpTransportSpec::InProcess {
-                registry_key: "local_apps".into(),
+                registry_key: "in_process_demo".into(),
             },
             scope: ConfigScope::Settings(lingxi_core::types::SettingsScope::Managed),
             disabled: false,
@@ -1350,12 +1352,12 @@ async fn inprocess_server_dispatches_directly_without_jsonrpc_client() {
         .await
         .unwrap();
 
-    assert!(registry.get_client("local_apps").await.is_none());
-    assert!(registry.has_callable_server("local_apps").await);
+    assert!(registry.get_client("in_process_demo").await.is_none());
+    assert!(registry.has_callable_server("in_process_demo").await);
     let result = registry
         .call_tool_with_auth_retry(
-            "local_apps",
-            "mcp__local_apps__list",
+            "in_process_demo",
+            "mcp__in_process_demo__list",
             lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!({"limit": 5})),
             None,
             None,

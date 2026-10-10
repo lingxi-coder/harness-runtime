@@ -902,21 +902,15 @@ mod tests {
         observer.on_event(event).await;
         let new_id = lingxi_core::types::AgentId::new();
         allocate(&observer, new_id, false, 0).await;
-        assert!(
-            observer
-                .snapshot("session-a")
-                .contains_key(&old_id.to_string())
-        );
-        assert!(
-            !observer
-                .snapshot("session-b")
-                .contains_key(&old_id.to_string())
-        );
-        assert!(
-            observer
-                .snapshot("session-b")
-                .contains_key(&new_id.to_string())
-        );
+        assert!(observer
+            .snapshot("session-a")
+            .contains_key(&old_id.to_string()));
+        assert!(!observer
+            .snapshot("session-b")
+            .contains_key(&old_id.to_string()));
+        assert!(observer
+            .snapshot("session-b")
+            .contains_key(&new_id.to_string()));
     }
 
     #[tokio::test]
@@ -1034,7 +1028,8 @@ mod tests {
             observer
                 .on_event(SubagentObservation::Message {
                     agent_id,
-                    message: ConversationMessage::System { api_system: None,
+                    message: ConversationMessage::System {
+                        api_system: None,
                         id: lingxi_core::types::MessageId::new(),
                         content: "idle".into(),
                         subtype: Some("agent_idle".into()),
@@ -1105,25 +1100,22 @@ mod tests {
     #[test]
     fn agent_id_parser_rejects_non_agent_files() {
         assert!(agent_id_from_path(Path::new("agent-nope.jsonl")).is_none());
-        assert!(
-            agent_id_from_path(Path::new(
-                "agent-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
-            ))
-            .is_some()
-        );
-        assert!(
-            agent_id_from_path(Path::new(
-                "agent-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.task.json"
-            ))
-            .is_none()
-        );
+        assert!(agent_id_from_path(Path::new(
+            "agent-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
+        ))
+        .is_some());
+        assert!(agent_id_from_path(Path::new(
+            "agent-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.task.json"
+        ))
+        .is_none());
     }
 
     #[test]
     fn revision_counts_hidden_records_while_lowering_only_visible() {
         let visible =
             ConversationMessage::user(lingxi_core::types::MessageId::new(), "hello".to_string());
-        let hidden = ConversationMessage::User { api_message_override: None,
+        let hidden = ConversationMessage::User {
+            api_message_override: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "summary".into(),
@@ -1217,11 +1209,9 @@ mod tests {
                 })
                 .collect();
             assert_eq!(updates.len(), 2);
-            assert!(
-                updates
-                    .iter()
-                    .all(|(session_id, _)| *session_id == &expected)
-            );
+            assert!(updates
+                .iter()
+                .all(|(session_id, _)| *session_id == &expected));
             assert_eq!(updates[1].1, "completed");
         }
     }
@@ -1275,13 +1265,11 @@ mod tests {
             "running",
             "a resumed persistent agent must re-register",
         );
-        assert!(
-            observer
-                .bound_agents
-                .lock()
-                .await
-                .contains_key(&agent_id.to_string())
-        );
+        assert!(observer
+            .bound_agents
+            .lock()
+            .await
+            .contains_key(&agent_id.to_string()));
     }
 
     /// The other half of the same gate: a one-shot agent that really ended must
@@ -1325,13 +1313,11 @@ mod tests {
                 // GROUP, never the row.
                 if agent.agent_id == agent_id.to_string() && agent.status == "completed"
         )));
-        assert!(
-            observer
-                .bound_agents
-                .lock()
-                .await
-                .contains_key(&agent_id.to_string())
-        );
+        assert!(observer
+            .bound_agents
+            .lock()
+            .await
+            .contains_key(&agent_id.to_string()));
         assert_eq!(
             observer
                 .message_indexes
@@ -1344,7 +1330,8 @@ mod tests {
         observer
             .on_event(SubagentObservation::Message {
                 agent_id,
-                message: ConversationMessage::Assistant { per_turn_effort: None,
+                message: ConversationMessage::Assistant {
+                    per_turn_effort: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![lingxi_core::types::ContentBlock::Text {
                         text: "resumed output".to_string(),

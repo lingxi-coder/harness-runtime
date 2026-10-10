@@ -411,11 +411,10 @@ mod tests {
             a.shares_authority(&b),
             "concurrent A -> B -> A remounts acquire one claim"
         );
-        assert!(
-            !a.durability_gate()
-                .retention_gate()
-                .shares_authority(&old_gate.retention_gate())
-        );
+        assert!(!a
+            .durability_gate()
+            .retention_gate()
+            .shares_authority(&old_gate.retention_gate()));
         assert_eq!(a.projection().unwrap().0.total_nano_usd, 75);
         assert_eq!(
             a.journal().replay().unwrap().entries.len(),
@@ -456,21 +455,19 @@ mod tests {
         f.mount(id).await;
         let core = f.manager.coordinator_core(id).unwrap();
         let permit = core.acquire_permit(id).await.unwrap();
-        assert!(
-            f.tracker
-                .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(f
+            .tracker
+            .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
+            .await
+            .unwrap()
+            .is_none());
         drop(permit);
-        assert!(
-            f.tracker
-                .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(f
+            .tracker
+            .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
+            .await
+            .unwrap()
+            .is_some());
         f.manager.close_and_drain().await.unwrap();
     }
 
@@ -494,22 +491,20 @@ mod tests {
             )
         );
         drop(lease);
-        assert!(
-            f.tracker
-                .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(f
+            .tracker
+            .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
+            .await
+            .unwrap()
+            .is_none());
         drop(recorder);
         assert!(weak_recorder.upgrade().is_none());
-        assert!(
-            f.tracker
-                .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(f
+            .tracker
+            .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
+            .await
+            .unwrap()
+            .is_some());
         f.manager.close_and_drain().await.unwrap();
     }
 
@@ -548,29 +543,27 @@ mod tests {
             .unwrap();
         drop(ack_rx);
         tokio::task::yield_now().await;
-        assert!(
-            f.tracker
-                .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(f
+            .tracker
+            .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
+            .await
+            .unwrap()
+            .is_none());
         release_tx.send(()).unwrap();
         holder.await.unwrap();
         core.flush().await.unwrap();
-        assert!(
-            f.tracker
-                .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
-                .await
-                .unwrap()
-                .is_some()
-        );
+        assert!(f
+            .tracker
+            .prepare_session_retirement(id, &core.durability_gate(), f.budget.clone())
+            .await
+            .unwrap()
+            .is_some());
         f.manager.close_and_drain().await.unwrap();
     }
 
     #[tokio::test]
     async fn queued_maintenance_cannot_retain_writer_claim_after_shutdown_returns() {
-        use std::future::{Future, poll_fn};
+        use std::future::{poll_fn, Future};
         use std::task::Poll;
 
         let f = Fixture::new().await;

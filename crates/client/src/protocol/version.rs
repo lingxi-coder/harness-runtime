@@ -10,9 +10,9 @@
 /// The client::protocol contract version, pinned for the M10 foundation
 /// (decision §0.10). A change here is a deliberate, reviewed bump.
 ///
-/// Bumped to 2.0.0 (local-apps#questionnaire, Task 2 fix-forward): removing
+/// Bumped to 2.0.0 (app questionnaire, Task 2 fix-forward): removing
 /// `AppRecordDto.template` / `AppManifestDto.template` (the core
-/// `local_apps::AppRecord`/`AppManifest` no longer carry a template — apps
+/// `AppRecord`/`AppManifest` no longer carry a template — apps
 /// are now designed from a free-text `brief`) is a BREAKING structural
 /// change per the F1-09 guard.
 ///
@@ -24,7 +24,7 @@
 /// Bumped to 4.0.0 when app records began carrying the persisted
 /// `git_enabled` creation choice.
 ///
-/// Bumped to 5.0.0 when the local-app designer/generation pipeline was
+/// Bumped to 5.0.0 when the app designer/generation pipeline was
 /// removed from the wire contract: the design/questionnaire/plan/generation
 /// command, event, and DTO families are gone and `AppWorkflowStateDto`
 /// collapsed to `draft` / `ready`. Removals are BREAKING structural changes
@@ -35,7 +35,7 @@
 /// the generated page reads from `window.lingxi.v2.deviceContext`, and the
 /// record is now written by the host from its own device facts rather than
 /// declared by the agent. Removals are BREAKING under the F1-09 guard.
-/// Bumped to 7.0.0 for the create-flow reshape: creating a local app no longer
+/// Bumped to 7.0.0 for the create-flow reshape: creating an app no longer
 /// defers to an intake conversation. The library's create sheet resolved the
 /// name and the surface up front and then created the app outright with
 /// `CreateApp.surface`, so the app's very first conversation is already rooted
@@ -75,9 +75,9 @@
 /// native bindings. The wire JSON is additive, but the mobile bindings are
 /// positional and must version-lock with the host.
 ///
-/// Bumped to 10.0.0 for the Phase 9 Local App plugin cutover. This removes the
+/// Bumped to 10.0.0 for the Phase 9 app plugin cutover. This removes the
 /// obsolete runtime-profile selection command/event/capability path: runtime
-/// family confirmation now flows only through the Host-owned Local App create
+/// family confirmation now flows only through the Host-owned app create
 /// confirmation sheet and plugin commands, so keeping the old client command
 /// family would preserve a dead incompatible UniFFI surface.
 ///
@@ -94,10 +94,10 @@
 /// records change shape, so mobile bindings version-lock with the host.
 ///
 /// Bumped to 13.0.0 for the `receipt` removal (r1-backlog-native-confirmation-13).
-/// `LocalAppCreateConfirmationRequestDto::receipt` and
-/// `LocalAppMcpProposalApprovalRequestDto::receipt` had no production emitter --
+/// `AppCreateConfirmationRequestDto::receipt` and
+/// `McpProposalApprovalRequestDto::receipt` had no production emitter --
 /// both sheets are raised BEFORE the user answers, while `McpReceiptBook::issue`
-/// mints only after approval -- and with both gone `LocalAppReceiptStatusDto`
+/// mints only after approval -- and with both gone `ReceiptStatusDto`
 /// had no production producer or reader either, so the record went too. Both
 /// fields were LAST in their records, so nothing that survives moved ordinal;
 /// the bump is required because the structural guard treats any REMOVED indexed
@@ -131,4 +131,10 @@
 /// complete synthetic API-error metadata, and child tombstones delete by UUID.
 /// The snapshot element and native binding layouts change; no old row format
 /// is accepted by this current contract.
-pub const CLIENT_PROTOCOL_VERSION: &str = "19.0.0";
+/// Bumped to 20.0.0 when the app families left the client protocol. Apps are an
+/// externally installed plugin now: the app/bridge/plugin command families
+/// (`ListApps` … `DeleteApp`, `ExecuteAppBridgeRequest`, `ResolveApp*`,
+/// `PluginCommand`), the `App*` events and their DTOs are gone. Removals are
+/// BREAKING structural changes under the F1-09 guard, and the generated mobile
+/// bindings change positionally.
+pub const CLIENT_PROTOCOL_VERSION: &str = "20.0.0";

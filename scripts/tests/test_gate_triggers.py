@@ -4,8 +4,8 @@ a real execution trigger — not a comment mentioning its name, not a
 hardcoded list that agrees with itself.
 
 WHY THIS EXISTS: a five-lens adversarial review of this branch found four
-gate scripts (check-brand-leaks, check-skill-frontmatter, check-i18n-pairing,
-lap-gate) checked in with ZERO automation trigger — nothing but a human (or
+gate scripts (check-brand-leaks, check-skill-frontmatter, check-i18n-pairing)
+checked in with ZERO automation trigger — nothing but a human (or
 an agent) remembering to run them. CI now owns that trigger without making
 every local commit wait for the full repository gate suite.
 A unit test on the gate ENGINES cannot catch this — every one of them
@@ -49,16 +49,10 @@ REPO_ROOT = SCRIPTS_DIR.parents[1]
 GATE_NAME_RE = re.compile(r"^(check-.*\.sh|.*-gate\.sh)$")
 SELF = "check-all.sh"
 
-# The one place a gate needs a non-empty argv to do anything meaningful
-# unattended: lap-gate.sh is a criterion *library* (parse/precheck/planted/
-# green/fmt/owned/identical/tasks/selftest), not a "check this repo" script
-# — see check-all.sh's own comment on it. `selftest` is the closest thing
-# to an unattended smoke check: it exercises all ten planted criteria in
-# both directions. Any OTHER script added later that also needs a forced
-# argv is exactly the kind of drift this table cannot see on its own —
-# reported as a mismatch (see `extra`/`missing` below), never silently
-# swallowed.
-ARGV_OVERRIDES = {"lap-gate.sh": ["selftest"]}
+# A gate that needs a non-empty argv to do anything meaningful unattended goes here.
+# Any such script added later and missing from this table is reported as a
+# mismatch (see `extra`/`missing` below), never silently swallowed.
+ARGV_OVERRIDES: dict = {}
 
 RUNNING_RE = re.compile(r"^=== RUNNING: (\S+) ===$", re.MULTILINE)
 RESULT_RE = re.compile(r"^=== RESULT: (\S+) exit=(-?\d+) ===$", re.MULTILINE)

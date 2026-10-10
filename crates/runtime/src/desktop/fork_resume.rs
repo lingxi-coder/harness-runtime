@@ -137,7 +137,7 @@ impl ForkResumeGate for DesktopForkResumeGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use session::forked_skill::{ForkedSkillScoping, write_fork_records};
+    use session::forked_skill::{write_fork_records, ForkedSkillScoping};
 
     struct Skills(bool);
     #[async_trait]
@@ -184,12 +184,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            gate(dir.path(), true)
-                .check_resume(id, Some("review"))
-                .await
-                .is_ok()
-        );
+        assert!(gate(dir.path(), true)
+            .check_resume(id, Some("review"))
+            .await
+            .is_ok());
     }
 
     /// Deleting the scoping record does NOT downgrade the fork to an unscoped

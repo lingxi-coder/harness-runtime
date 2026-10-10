@@ -1120,20 +1120,15 @@ impl PolicyPermissionGate {
             .unwrap_or(base)
     }
 
-    fn effective_authorize(&self, name: &str, input: &Value) -> (PermissionMode, PermissionResult) {
-        self.effective_authorize_with_lease(name, input, None)
-    }
-
-    fn effective_authorize_with_lease(
+    fn effective_authorize(
         &self,
         name: &str,
         input: &Value,
-        workspace_lease_token: Option<u64>,
     ) -> (PermissionMode, PermissionResult) {
         let mode = self.effective_mode_for_tool(name);
         (
             mode,
-            self.authorize_with_live_state(name, input, mode, workspace_lease_token),
+            self.authorize_with_live_state(name, input, mode),
         )
     }
 
@@ -1175,7 +1170,6 @@ impl PolicyPermissionGate {
         &self,
         name: &str,
         input: &Value,
-        workspace_lease_token: Option<u64>,
         folded: &FoldedPermissionContext,
     ) -> (PermissionMode, Option<PermissionResult>) {
         let mode = self.effective_mode_for_tool(name);
@@ -1187,7 +1181,6 @@ impl PolicyPermissionGate {
             name,
             input,
             PermissionMode::Default,
-            workspace_lease_token,
             folded,
             PermissionCheckPhase::Execution,
         );
@@ -1274,7 +1267,6 @@ impl PolicyPermissionGate {
         name: &str,
         input: &Value,
         mode: PermissionMode,
-        workspace_lease_token: Option<u64>,
     ) -> PermissionResult {
         let folded = FoldedPermissionContext::default();
         // GUEST-COORD (mobile DIVERGENCE). The model names files in guest
@@ -1297,7 +1289,6 @@ impl PolicyPermissionGate {
                 name,
                 input,
                 mode,
-                workspace_lease_token,
                 &folded,
                 PermissionCheckPhase::Execution,
             );
@@ -1325,7 +1316,6 @@ impl PolicyPermissionGate {
             name,
             &rewritten,
             mode,
-            workspace_lease_token,
             &folded,
             PermissionCheckPhase::Execution,
         );
@@ -1349,7 +1339,6 @@ impl PolicyPermissionGate {
             name,
             input,
             mode,
-            workspace_lease_token,
             &folded,
             PermissionCheckPhase::Execution,
         );
@@ -1423,17 +1412,15 @@ impl PolicyPermissionGate {
         name: &str,
         input: &Value,
         mode: PermissionMode,
-        workspace_lease_token: Option<u64>,
         folded: &FoldedPermissionContext,
         phase: PermissionCheckPhase,
     ) -> PermissionResult {
         let policy = self.live_policy_with_layers(folded);
         if folded.bash_command_clamps.is_empty() {
-            return policy.authorize_with_mode_and_workspace_lease(
+            return policy.authorize_with_mode_and_phase(
                 name,
                 input,
                 mode,
-                workspace_lease_token,
                 phase,
             );
         }
@@ -1445,11 +1432,10 @@ impl PolicyPermissionGate {
         // active clamp exactly as upstream is, so an unclamped session keeps
         // today's unwind semantics untouched.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            policy.authorize_with_mode_and_workspace_lease(
+            policy.authorize_with_mode_and_phase(
                 name,
                 input,
                 mode,
-                workspace_lease_token,
                 phase,
             )
         })) {
@@ -1554,17 +1540,15 @@ impl PolicyPermissionGate {
         name: &str,
         input: &Value,
         folded: &FoldedPermissionContext,
-        workspace_lease_token: Option<u64>,
     ) -> bool {
         let policy = self
             .live_policy_with_layers(folded)
             .with_apply_auto_mode_restrictions(true);
         matches!(
-            policy.authorize_with_mode_and_workspace_lease(
+            policy.authorize_with_mode_and_phase(
                 name,
                 input,
                 PermissionMode::AcceptEdits,
-                workspace_lease_token,
                 PermissionCheckPhase::Execution,
             ),
             PermissionResult::Allow { .. }
@@ -1699,7 +1683,6 @@ impl PolicyPermissionGate {
                             name,
                             input,
                             &FoldedPermissionContext::default(),
-                            None,
                         )
                     })
                     .await
@@ -2571,17 +2554,16 @@ fn read_only_default_auto_allows(
         return false;
     }
     // LINGXI DIVERGENCE, narrowly scoped to the rows that have no oracle
-    // counterpart (`defaults_per_tool::is_divergence_tool`: the `LocalApp*`
-    // family plus `Workflow`).
+    // counterpart (`defaults_per_tool::is_divergence_tool`: `Workflow` plus
+    // whatever rows a product installed).
     //
     // `AllowByDefault` short-circuits the Plan-mode backstop, so a mutating
     // tool that is auto-allowed for convenience would RUN while the user
-    // believes they are only planning — `LocalAppBuild` starts a 30-minute
-    // build, `LocalAppRuntime {action:"open"}` puts an app on screen, and
-    // `Workflow` fans out a whole crew of side-effecting agents
-    // (`WorkflowTool::is_read_only` answers `false`). `PLAN_SAFE_TOOLS` is the
-    // existing statement of what may run in Plan mode, and none of these are
-    // in it.
+    // believes they are only planning — a product's long build, an app put on
+    // screen, and `Workflow` fans out a whole crew of side-effecting agents
+    // (`WorkflowTool::is_read_only` answers `false`). `PLAN_SAFE_TOOLS` (plus
+    // the product's own plan-safe list) is the existing statement of what may
+    // run in Plan mode, and none of these are in it.
     //
     // Deliberately NOT applied to the oracle tools: several of them are
     // `AllowByDefault` without being plan-safe, and changing that would be a
@@ -2653,11 +2635,10 @@ impl PermissionGate for PolicyPermissionGate {
                 )
             });
         }
-        match policy.authorize_with_mode_and_workspace_lease(
+        match policy.authorize_with_mode_and_phase(
             name,
             input,
             PermissionMode::Default,
-            ctx.workspace_lease_token,
             PermissionCheckPhase::Execution,
         ) {
             result @ PermissionResult::Deny { .. } => {
@@ -2864,7 +2845,6 @@ impl PermissionGate for PolicyPermissionGate {
             name,
             input,
             mode,
-            ctx.workspace_lease_token,
             &folded,
             PermissionCheckPhase::ToolCheck,
         );
@@ -2900,7 +2880,6 @@ impl PermissionGate for PolicyPermissionGate {
                             name,
                             input,
                             &folded,
-                            ctx.workspace_lease_token,
                         ) || crate::mode_policy::is_auto_mode_safe_tool(name)));
                 if allowed_without_classifier {
                     ModToolCheckVerdict {
@@ -2972,7 +2951,7 @@ impl PermissionGate for PolicyPermissionGate {
             name,
             input,
             ctx.is_non_interactive_session || folded.should_avoid_permission_prompts,
-            &|| self.accept_edits_fast_path(name, input, &folded, ctx.workspace_lease_token),
+            &|| self.accept_edits_fast_path(name, input, &folded),
         )
         .await
     }
@@ -3232,7 +3211,7 @@ impl PermissionGate for PolicyPermissionGate {
     ) -> Result<PermissionOutcome, PermissionAbort> {
         // PER-CALL PERMISSION LAYERS — `gn(toolUseContext)` (binary @287028951).
         // This is the fold's PRIMARY call site: every subagent / teammate /
-        // local-app tool dispatch reaches the gate here, so a spawn's
+        // host-owned tool dispatch reaches the gate here, so a spawn's
         // `permission_mode` (its clamped spawn mode), `avoid_prompts`,
         // `allowed_tools` / `disallowed_tools`, `working_directory` and
         // `bash_command_clamp` layers all take effect on THIS call without
@@ -3247,12 +3226,11 @@ impl PermissionGate for PolicyPermissionGate {
             name,
             input,
             mode,
-            ctx.workspace_lease_token,
             &folded,
             PermissionCheckPhase::Execution,
         );
         self.decide_outcome_with_context(mode, result, name, input, ctx, &|| {
-            self.accept_edits_fast_path(name, input, &folded, ctx.workspace_lease_token)
+            self.accept_edits_fast_path(name, input, &folded)
         })
         .await
     }
@@ -3304,7 +3282,7 @@ impl PermissionGate for PolicyPermissionGate {
     ) -> Result<core_permission::HookAllowModCoreEvaluation, PermissionAbort> {
         let folded = self.fold_call_context(ctx);
         let (mode, verdict) =
-            self.rule_or_safety_verdict(name, input, ctx.workspace_lease_token, &folded);
+            self.rule_or_safety_verdict(name, input, &folded);
         match verdict {
             Some(result) => {
                 let evaluation =
@@ -3343,7 +3321,7 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
     ) -> PermissionDecision {
         let (mode, verdict) =
-            self.rule_or_safety_verdict(name, input, None, &FoldedPermissionContext::default());
+            self.rule_or_safety_verdict(name, input, &FoldedPermissionContext::default());
         match verdict {
             Some(PermissionResult::Deny {
                 reason,
@@ -3419,7 +3397,7 @@ impl PermissionGate for PolicyPermissionGate {
         }
         self.decide(
             PermissionMode::Plan,
-            self.authorize_with_live_state(name, input, PermissionMode::Plan, None),
+            self.authorize_with_live_state(name, input, PermissionMode::Plan),
             name,
             input,
         )
@@ -3437,7 +3415,6 @@ impl PermissionGate for PolicyPermissionGate {
             name,
             input,
             PermissionMode::Plan,
-            ctx.workspace_lease_token,
             &folded,
             PermissionCheckPhase::Execution,
         );
@@ -3461,7 +3438,7 @@ impl PermissionGate for PolicyPermissionGate {
         let (mode, result) = self.effective_authorize(name, input);
         match self
             .resolve_with_mode(mode, result, name, input, false, &|| {
-                self.accept_edits_fast_path(name, input, &FoldedPermissionContext::default(), None)
+                self.accept_edits_fast_path(name, input, &FoldedPermissionContext::default())
             })
             .await
         {
@@ -3495,7 +3472,6 @@ impl PermissionGate for PolicyPermissionGate {
             name,
             input,
             mode,
-            ctx.workspace_lease_token,
             &folded,
             PermissionCheckPhase::Execution,
         );
@@ -3507,7 +3483,7 @@ impl PermissionGate for PolicyPermissionGate {
             name,
             input,
             ctx.is_non_interactive_session || folded.should_avoid_permission_prompts,
-            &|| self.accept_edits_fast_path(name, input, &folded, ctx.workspace_lease_token),
+            &|| self.accept_edits_fast_path(name, input, &folded),
         )
         .await
     }

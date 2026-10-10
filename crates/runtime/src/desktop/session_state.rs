@@ -20,17 +20,17 @@ use lingxi_core::host::{FusionPublicationReceipt, FusionPublicationStatus, Fusio
 use lingxi_core::types::SessionId;
 use session::jsonl::{DurableJournal, JournalError};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 #[cfg(test)]
 use std::sync::Condvar;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 
 const COST_QUEUE_CAPACITY: usize = 64;
 
 mod attempts;
-mod retention;
 mod resume;
+mod retention;
 pub(crate) use resume::capture_resume_cost;
 mod tool_execution;
 use attempts::AttemptProjection;
@@ -3836,13 +3836,11 @@ mod tests {
             .expect("retirement should unblock a fresh B mount")
             .unwrap()
             .unwrap();
-        assert!(
-            coordinator_b.shares_authority(
-                &manager
-                    .coordinator(session_b)
-                    .expect("only retry publishes B")
-            )
-        );
+        assert!(coordinator_b.shares_authority(
+            &manager
+                .coordinator(session_b)
+                .expect("only retry publishes B")
+        ));
         assert!(
             coordinator_a.shares_authority(&manager.ensure_coordinator(session_a).await.unwrap())
         );
@@ -3958,12 +3956,10 @@ mod tests {
             .import_legacy_opening_balance(None)
             .await
             .unwrap();
-        assert!(
-            coordinator
-                .import_legacy_opening_balance(Some(99))
-                .await
-                .is_ok()
-        );
+        assert!(coordinator
+            .import_legacy_opening_balance(Some(99))
+            .await
+            .is_ok());
         let hydration = coordinator.hydrate(session_id).await.unwrap();
         assert_eq!(hydration.state.total_nano_usd, 0);
         assert_eq!(hydration.state.legacy_opening_balance_nano_usd, 0);

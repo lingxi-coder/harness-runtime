@@ -1,8 +1,8 @@
 //! Explicit inputs for a headless session. Hosts resolve argv and environment.
 pub use super::session::SessionStart;
 use crate::desktop::DesktopConfig;
-pub use lingxi_core::types::ImageSource;
 pub use lingxi_core::types::utf16_json::Utf16JsonProjection;
+pub use lingxi_core::types::ImageSource;
 pub use permission::PermissionMode;
 
 pub struct HeadlessConfig {

@@ -6,7 +6,11 @@ use futures_core::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use thiserror::Error;
+
+// The error, guard and append vocabulary the rooted primitives share with this
+// trait lives in `rooted-fs`, so an out-of-tree service can use those primitives
+// without depending on this crate; re-exported so every existing path resolves.
+pub use rooted_fs::{FileAppendError, FileAppendStage, FlockGuard, FsError};
 
 /// Stable namespace for caches whose entries also include per-file OS
 /// metadata. `generation` must change whenever a backend can change read
@@ -30,25 +34,6 @@ impl FileSystemCacheIdentity {
             generation,
         }
     }
-}
-
-/// Which phase of an append failed. An open failure retains queued output;
-/// a write failure may have consumed bytes and cannot safely replay the batch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileAppendStage {
-    /// No payload write was attempted.
-    Open,
-    /// Payload write was attempted and may have partially succeeded.
-    Write,
-}
-
-/// Append failure with its observable consumption phase.
-#[derive(Debug)]
-pub struct FileAppendError {
-    /// Failed phase.
-    pub stage: FileAppendStage,
-    /// Underlying filesystem failure.
-    pub error: FsError,
 }
 
 /// Sandboxed read/write access to the workspace.
@@ -474,13 +459,6 @@ pub trait FileSystem: Send + Sync {
     }
 }
 
-/// Guard for an OS advisory file lock acquired via
-/// [`FileSystem::flock_exclusive`]. Releasing the lock happens in `Drop`.
-pub trait FlockGuard: Send + Sync {
-    /// The path the guard locks. Implementations may use this for diagnostics.
-    fn path(&self) -> &str;
-}
-
 /// Apply the line-indexed `offset`/`limit` window used by [`FileSystem::read_file`].
 ///
 /// Unwindowed reads return `content` as-is (no line-split / join). Windowed
@@ -558,40 +536,6 @@ pub struct FileContent {
     pub total_lines: u64,
     /// True when `content` is a prefix of the full file.
     pub truncated: bool,
-}
-
-/// Failure modes for [`FileSystem`] calls.
-#[derive(Debug, Clone, Error)]
-pub enum FsError {
-    /// Requested path does not exist.
-    #[error("file not found: {0}")]
-    NotFound(String),
-    /// Caller lacks permission on the underlying OS or sandbox.
-    #[error("permission denied: {0}")]
-    PermissionDenied(String),
-    /// Path resolves outside the workspace root.
-    #[error("path outside workspace: {0}")]
-    OutsideWorkspace(String),
-    /// A file (or symlink) already exists where an exclusive create was
-    /// requested. Surfaced by [`FileSystem::create_new_file`] when the path is
-    /// occupied — the `O_EXCL` collision that guards the spool double-allocate
-    /// race.
-    #[error("file already exists: {0}")]
-    AlreadyExists(String),
-    /// File contents are not valid UTF-8 / look like binary data.
-    #[error("file is binary: {0}")]
-    BinaryFile(String),
-    /// File or read window exceeds the configured size limit.
-    #[error("size exceeds limit: {actual} > {limit}")]
-    TooLarge {
-        /// Actual size encountered, in bytes.
-        actual: u64,
-        /// Configured maximum, in bytes.
-        limit: u64,
-    },
-    /// Catch-all for underlying I/O failures.
-    #[error("io error: {0}")]
-    Io(String),
 }
 
 /// One file-system change event emitted by [`FileSystem::watch`].

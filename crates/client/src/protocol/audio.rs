@@ -45,19 +45,12 @@ pub enum AudioOwnerDto {
         /// Stable session identifier.
         session_id: String,
     },
-    /// Local App runtime instance.
-    LocalApp {
-        /// Validated app identifier.
-        app_id: String,
-        /// Runtime generation that prevents stale requests stopping a new run.
-        runtime_generation: u64,
-    },
     /// UI app instance.
     Ui {
         /// Stable UI instance identifier.
         instance_id: String,
     },
-    /// Host-owned operation not tied to a chat or app runtime.
+    /// Host-owned operation not tied to a chat.
     System {
         /// Stable host instance identifier.
         instance_id: String,
@@ -74,7 +67,7 @@ pub struct AudioInitiatorDto {
     /// Tool-use identifier, when invoked by a model tool call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
-    /// Host request identifier, when invoked by a Local App or UI request.
+    /// Host request identifier, when invoked by an app or UI request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
 }

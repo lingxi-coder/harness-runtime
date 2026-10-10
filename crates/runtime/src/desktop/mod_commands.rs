@@ -3,11 +3,11 @@
 use command_api::{
     ModCommandExecutor, ModCommandRunContext, ModCommandRunInterceptor, RegistrySlashDispatcher,
 };
-use hooks::HookRegistry;
 use hooks::mods::ModSessionContext;
+use hooks::HookRegistry;
 use lingxi_core::host::SlashDispatchResult;
 use orchestrator::ConversationOrchestrator;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use tokio::sync::RwLock;
 

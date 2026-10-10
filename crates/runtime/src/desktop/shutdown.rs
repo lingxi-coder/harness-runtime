@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use command_api::CommandRegistry;
 use orchestrator::ConversationOrchestrator;
 #[cfg(windows)]
-use platform_windows::WindowsMcpTransport;
-#[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
+#[cfg(windows)]
+use platform_windows::WindowsMcpTransport;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

@@ -1,4 +1,4 @@
-use crate::mobile::local_apps_host::canonical_cwd_string;
+use super::restoration::canonical_cwd_string;
 use async_trait::async_trait;
 use client::adapter::{ClientEventListener, PermissionRequestSink};
 use client::protocol::events::ClientEvent;
@@ -46,21 +46,6 @@ pub struct FiredCronJobDto {
     /// Whether the failure is safe to retry automatically (HTTP 429/5xx and
     /// transport failures, or a durable `busy:` queued occurrence). Successful
     /// runs always report `false`.
-    pub retryable: bool,
-}
-
-/// One durable local-app background task outcome returned to Android/iOS
-/// scheduler adapters. The scheduler never receives raw host paths or
-/// capability handles; it only receives an app/task identity and a bounded
-/// terminal/retry classification.
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct LocalAppBackgroundRunDto {
-    pub app_id: String,
-    pub task_id: String,
-    pub status: String,
-    pub result_json: Option<String>,
-    pub error: Option<String>,
     pub retryable: bool,
 }
 

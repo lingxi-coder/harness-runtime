@@ -106,12 +106,11 @@ mobile = [
     "dep:tool-workflow",
     "workflow",
     "dep:provider-config",
-    "dep:local-apps",
+    "dep:mcp-wire",
+    "dep:rooted-fs",
     "dep:jsonrpc",
     "dep:tool-mcp",
     "dep:futures-util",
-    "dep:reqwest",
-    "reqwest/rustls-tls",
     "dep:sha2",
     "dep:uuid",
     "dep:plugin",
@@ -202,10 +201,10 @@ futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
-local-apps = { path = "../local-apps", optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }
 mcp = { path = "../mcp", optional = true }
+mcp-wire = { workspace = true, optional = true }
 memory = { path = "../memory", optional = true }
 migrations = { path = "../migrations", optional = true }
 llm-runtime = { path = "../llm-runtime" }
@@ -219,7 +218,7 @@ platform-posix = { path = "../platforms/posix", optional = true }
 platform-posix-minimal = { path = "../platforms/posix-minimal", optional = true }
 plugin = { path = "../plugin", optional = true }
 provider-config = { path = "../provider-config", optional = true }
-reqwest = { version = "=0.12.28", default-features = false, optional = true }
+rooted-fs = { workspace = true, optional = true }
 sandbox = { path = "../sandbox", optional = true }
 sandbox-runtime = { path = "../sandbox-runtime", optional = true }
 secret = { path = "../secret", optional = true }
@@ -262,10 +261,6 @@ url = { version = "2", optional = true }
 uuid = { version = "1.10", optional = true }
 workflow = { path = "../workflow", optional = true }
 
-[build-dependencies]
-local-apps = { path = "../local-apps", optional = true }
-serde_json = { workspace = true }
-
 [target."cfg(unix)".dependencies]
 nix = { version = "0.27", default-features = false, features = ["user"], optional = true }
 
@@ -280,6 +275,9 @@ platform-android = { path = "../platforms/android", optional = true }
 
 [dev-dependencies]
 bytes.workspace = true
+permission = { path = "../permission", features = ["test-support"] }
+# the role-schema tests compile the plugin's JSON schemas the way the agent runner does
+boon = "0.6"
 llm-runtime = { path = "../llm-runtime", features = ["test-support"] }
 toml = "0.8"
 async-trait = { workspace = true }
@@ -345,16 +343,6 @@ required-features = ["desktop"]
 name = "settings_watch_spawn"
 path = "tests/desktop/settings_watch_spawn.rs"
 required-features = ["desktop"]
-
-[[test]]
-name = "component_literal_scan"
-path = "tests/mobile/component_literal_scan.rs"
-required-features = ["mobile"]
-
-[[test]]
-name = "local_app_image_read"
-path = "tests/mobile/local_app_image_read.rs"
-required-features = ["mobile"]
 
 [[test]]
 name = "mobile_git_gating"

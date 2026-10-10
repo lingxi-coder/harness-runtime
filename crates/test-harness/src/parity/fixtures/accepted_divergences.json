@@ -1,6 +1,6 @@
 {
   "_doc": [
-    "REGISTER OF ACCEPTED DIVERGENCES from Claude Code — the things this port",
+    "REGISTER OF ACCEPTED DIVERGENCES from Claude Code \u2014 the things this port",
     "deliberately does differently, and the guards that only LOOK like removable",
     "redundancy. A parity audit must triage anything listed here as settled, not",
     "re-find it as a gap.",
@@ -21,10 +21,10 @@
     "",
     "Each active entry carries at least one anchor, checked by",
     "`tests/parity_accepted_divergences.rs`:",
-    "  * `present` — the text must still appear at `path`. This is the anchor for",
+    "  * `present` \u2014 the text must still appear at `path`. This is the anchor for",
     "    'we do it our own way': it fails when the thing we point at is renamed or",
     "    deleted, i.e. when the entry stops describing the code.",
-    "  * `absent`  — the text must have zero hits under `path`. This is the anchor",
+    "  * `absent`  \u2014 the text must have zero hits under `path`. This is the anchor",
     "    for 'we deliberately do not have this', and it is the half that would have",
     "    caught the function-hook entry the day it went stale.",
     "",
@@ -37,12 +37,16 @@
       "id": "multi-llm-providers",
       "kind": "divergence",
       "finding": "Claude Code speaks only to Anthropic's API.",
-      "reason": "LingXi is a multi-provider product by design (OpenAI, GLM, Bedrock, Vertex, OpenAI Responses/WebSocket, plus provider catalog and routing). Any code path that branches on model identity must therefore have defined behaviour for an id it does not recognise — that is the normal case here, not an edge.",
+      "reason": "LingXi is a multi-provider product by design (OpenAI, GLM, Bedrock, Vertex, OpenAI Responses/WebSocket, plus provider catalog and routing). Any code path that branches on model identity must therefore have defined behaviour for an id it does not recognise \u2014 that is the normal case here, not an edge.",
       "decided_on": "2026-07-02",
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/llm-runtime/src/types.rs", "text": "pub enum ProviderId" }
+        {
+          "kind": "present",
+          "path": "crates/llm-runtime/src/types.rs",
+          "text": "pub enum ProviderId"
+        }
       ]
     },
     {
@@ -54,20 +58,16 @@
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/core/src/host/fusion.rs", "text": "pub struct FusionRequest" },
-        { "kind": "present", "path": "crates/tasks/src/handlers/local_fusion.rs", "text": "pub struct LocalFusionHandler" }
-      ]
-    },
-    {
-      "id": "local-app-runtime",
-      "kind": "divergence",
-      "finding": "LingXi creates and runs Local Apps with their own runtime profiles and grants.",
-      "reason": "The 2026-09-30 latest-Claude parity goal explicitly preserves create Local App. This includes the runtime and app permission boundary, in addition to the Workflow description exception below.",
-      "decided_on": "2026-09-30",
-      "decided_by": "user",
-      "status": "active",
-      "anchors": [
-        { "kind": "present", "path": "crates/local-apps/src/types.rs", "text": "pub struct AppRecord" }
+        {
+          "kind": "present",
+          "path": "crates/core/src/host/fusion.rs",
+          "text": "pub struct FusionRequest"
+        },
+        {
+          "kind": "present",
+          "path": "crates/tasks/src/handlers/local_fusion.rs",
+          "text": "pub struct LocalFusionHandler"
+        }
       ]
     },
     {
@@ -79,7 +79,11 @@
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/runtime/src/lib.rs", "text": "pub mod mobile;" }
+        {
+          "kind": "present",
+          "path": "crates/runtime/src/lib.rs",
+          "text": "pub mod mobile;"
+        }
       ]
     },
     {
@@ -91,19 +95,11 @@
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/branding/src/lib.rs", "text": "pub const ENV_PREFIX" }
-      ]
-    },
-    {
-      "id": "workflow-description-sixth-clause",
-      "kind": "divergence",
-      "finding": "The Workflow tool description enumerates five EXHAUSTIVE opt-in clauses and closes with 'For any other task ... do NOT call this tool.'",
-      "reason": "None of the five covers the local-app create flow, where the MODEL self-invokes the create skill and that skill specifies the Workflow call. Without a sixth clause every create is a call the model has been told not to make. The edit itself is registered byte-for-byte next door.",
-      "decided_on": "2026-09-05",
-      "decided_by": "user",
-      "status": "active",
-      "anchors": [
-        { "kind": "present", "path": "crates/workflow/src/workflow_description_divergences.json", "text": "local-app-create-handoff" }
+        {
+          "kind": "present",
+          "path": "crates/branding/src/lib.rs",
+          "text": "pub const ENV_PREFIX"
+        }
       ]
     },
     {
@@ -115,21 +111,37 @@
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/cron/src/lib.rs", "text": "default_recurring_max_age" },
-        { "kind": "absent", "path": "crates/cron", "text": "Auto-expires after 7 days" }
+        {
+          "kind": "present",
+          "path": "crates/cron/src/lib.rs",
+          "text": "default_recurring_max_age"
+        },
+        {
+          "kind": "absent",
+          "path": "crates/cron",
+          "text": "Auto-expires after 7 days"
+        }
       ]
     },
     {
       "id": "propose-goal-and-ultraplan",
       "kind": "divergence",
       "finding": "2.1.266 has a `ProposeGoal` tool and a cloud 'ultraplan' remote plan mode.",
-      "reason": "ProposeGoal is dormant twice over upstream: its flag defaults false and its isEnabled also bails on non-interactive or remote, which is this engine's shape. It also needs an interactive dialog and a message-queue enqueue there is no seat for. Ultraplan is plan mode running in Claude Code on the web, with cloud session URLs and PR delivery — no substrate here. The name still appears in the ported upstream tool-name tables; what is absent is any implementation.",
+      "reason": "ProposeGoal is dormant twice over upstream: its flag defaults false and its isEnabled also bails on non-interactive or remote, which is this engine's shape. It also needs an interactive dialog and a message-queue enqueue there is no seat for. Ultraplan is plan mode running in Claude Code on the web, with cloud session URLs and PR delivery \u2014 no substrate here. The name still appears in the ported upstream tool-name tables; what is absent is any implementation.",
       "decided_on": "2026-09-08",
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "absent", "path": "crates/tools", "text": "ProposeGoal" },
-        { "kind": "absent", "path": "crates/command-api", "text": "ProposeGoal" }
+        {
+          "kind": "absent",
+          "path": "crates/tools",
+          "text": "ProposeGoal"
+        },
+        {
+          "kind": "absent",
+          "path": "crates/command-api",
+          "text": "ProposeGoal"
+        }
       ]
     },
     {
@@ -148,39 +160,63 @@
       "id": "turn-interrupt-markers",
       "kind": "divergence",
       "finding": "Upstream carries two turn-interrupt strings alongside `[Request interrupted by user]`: one for a tool call that had started when the turn was ended to deliver a message, one for a call that had not run.",
-      "reason": "They describe a mechanism this port deliberately does not have — ending a turn MID-TOOL-CALL to deliver an inbound message. Here a message queues, the agent parks, and the queue drains as a digest at rest. Porting the strings would produce markers nothing can emit. Reopen only alongside an interrupting-delivery path; both are needed then, and the distinction between them matters.",
+      "reason": "They describe a mechanism this port deliberately does not have \u2014 ending a turn MID-TOOL-CALL to deliver an inbound message. Here a message queues, the agent parks, and the queue drains as a digest at rest. Porting the strings would produce markers nothing can emit. Reopen only alongside an interrupting-delivery path; both are needed then, and the distinction between them matters.",
       "decided_on": "2026-09-10",
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/tasks/src/observer.rs", "text": "non-interrupting" },
-        { "kind": "absent", "path": "crates", "text": "Tool call skipped:" }
+        {
+          "kind": "present",
+          "path": "crates/tasks/src/observer.rs",
+          "text": "non-interrupting"
+        },
+        {
+          "kind": "absent",
+          "path": "crates",
+          "text": "Tool call skipped:"
+        }
       ]
     },
     {
       "id": "ghost-bundled-skills",
       "kind": "divergence",
       "finding": "`claude-code/src/skills/bundled/index.ts` lists `skillify` and `lorem-ipsum`.",
-      "reason": "That mirror is stale: both are zero hits in the 2.1.267 and 2.1.263 binaries, and skill names survive minification as string literals, so a zero there is decisive. `stuck` is not one either — it has many hits as the English word and no registration. The bundled set must be read off registrations, never off a substring count.",
+      "reason": "That mirror is stale: both are zero hits in the 2.1.267 and 2.1.263 binaries, and skill names survive minification as string literals, so a zero there is decisive. `stuck` is not one either \u2014 it has many hits as the English word and no registration. The bundled set must be read off registrations, never off a substring count.",
       "decided_on": "2026-09-10",
       "decided_by": "oracle",
       "status": "active",
       "anchors": [
-        { "kind": "absent", "path": "crates/command-api/src/builtins/bundled", "text": "lorem-ipsum" },
-        { "kind": "present", "path": "crates/test-harness/tests/parity_claude_2_1_267.rs", "text": "lorem-ipsum" }
+        {
+          "kind": "absent",
+          "path": "crates/command-api/src/builtins/bundled",
+          "text": "lorem-ipsum"
+        },
+        {
+          "kind": "present",
+          "path": "crates/test-harness/tests/parity_claude_2_1_267.rs",
+          "text": "lorem-ipsum"
+        }
       ]
     },
     {
       "id": "plugin-surface-modules",
       "kind": "divergence",
       "finding": "2.1.267 introduces plugin surface modules and a JSX render runtime (`$.ui.resolve`, `ClientElements`, `exportTree`, the Box/Text/Button/Client/Svg element set).",
-      "reason": "New in 267 and unbuilt here. It shares the JS-worker seam with the rest of the plugin runtime — scope it as its own project or not at all, never as an audit finding.",
+      "reason": "New in 267 and unbuilt here. It shares the JS-worker seam with the rest of the plugin runtime \u2014 scope it as its own project or not at all, never as an audit finding.",
       "decided_on": "2026-09-10",
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "absent", "path": "crates/plugin", "text": "exportTree" },
-        { "kind": "present", "path": "crates/plugin/src/lib.rs", "text": "pub mod manifest;" }
+        {
+          "kind": "absent",
+          "path": "crates/plugin",
+          "text": "exportTree"
+        },
+        {
+          "kind": "present",
+          "path": "crates/plugin/src/lib.rs",
+          "text": "pub mod manifest;"
+        }
       ]
     },
     {
@@ -192,7 +228,11 @@
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "absent", "path": "crates/agent/src/builtins.rs", "text": "name: \"claude-code-guide\"" }
+        {
+          "kind": "absent",
+          "path": "crates/agent/src/builtins.rs",
+          "text": "name: \"claude-code-guide\""
+        }
       ]
     },
     {
@@ -204,31 +244,39 @@
       "decided_by": "user",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/mcp/src/json_config.rs", "text": "claudeai-proxy" }
+        {
+          "kind": "present",
+          "path": "crates/mcp/src/json_config.rs",
+          "text": "claudeai-proxy"
+        }
       ]
     },
     {
       "id": "cost-and-stats-aliases",
       "kind": "guard",
-      "finding": "`/cost` and `/stats` have no independent content — they are aliases of `/usage`.",
+      "finding": "`/cost` and `/stats` have no independent content \u2014 they are aliases of `/usage`.",
       "reason": "This LOOKS like removable redundancy and is not: Claude Code itself defines the usage command with those two aliases, so deleting them would be the divergence. The real recorded gap is `/usage` CONTENT missing upstream rows, which is data-plumbing-gated. Fix direction is to fill `/usage`, never to remove `/cost`.",
       "decided_on": "2026-07-12",
       "decided_by": "oracle",
       "status": "active",
       "anchors": [
-        { "kind": "present", "path": "crates/command-api/src/builtins/register.rs", "text": "register_alias(\"cost\".to_string(), \"usage\".to_string())" }
+        {
+          "kind": "present",
+          "path": "crates/command-api/src/builtins/register.rs",
+          "text": "register_alias(\"cost\".to_string(), \"usage\".to_string())"
+        }
       ]
     },
     {
       "id": "plugin-function-hook-runtime",
       "kind": "divergence",
-      "finding": "`functionHooks` / `hooks-worker` — the JS-worker hook runtime, present in 2.1.245 through 2.1.267 alike.",
+      "finding": "`functionHooks` / `hooks-worker` \u2014 the JS-worker hook runtime, present in 2.1.245 through 2.1.267 alike.",
       "reason": "Recorded as a long-standing absence rather than a 2.1.267 delta, on the grounds that the whole JS-worker hook runtime was zero hits here and `HookEvent` carried only the command hooks.",
       "decided_on": "2026-09-10",
       "decided_by": "user",
       "status": "retired",
       "retired_on": "2026-09-10",
-      "retired_because": "Overtaken the same day: the AG-15 series built it. `hooks/src/function_hook.rs` exists, `HookEvent` carries the function-hook path, and a plugin can declare one. The entry is kept rather than deleted because it is the case that proves why this register has `absent` anchors — it was true when written and false a few commits later, and nothing outside a person's memory would have noticed.",
+      "retired_because": "Overtaken the same day: the AG-15 series built it. `hooks/src/function_hook.rs` exists, `HookEvent` carries the function-hook path, and a plugin can declare one. The entry is kept rather than deleted because it is the case that proves why this register has `absent` anchors \u2014 it was true when written and false a few commits later, and nothing outside a person's memory would have noticed.",
       "anchors": []
     },
     {

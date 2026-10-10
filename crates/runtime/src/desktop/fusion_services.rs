@@ -1,15 +1,15 @@
 use lingxi_core::host::AuthHandle;
 #[cfg(windows)]
-use platform_windows::WindowsMcpTransport;
-#[cfg(windows)]
 use platform_windows::process::supervisor as shell_supervisor;
+#[cfg(windows)]
+use platform_windows::WindowsMcpTransport;
 use secret::CredentialManager;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use super::{
-    DesktopConfig, fusion_attempts, load_effective_settings_for_config,
-    managed_model_policy_source, managed_settings_raw_tiers_sync,
+    fusion_attempts, load_effective_settings_for_config, managed_model_policy_source,
+    managed_settings_raw_tiers_sync, DesktopConfig,
 };
 
 /// `billing_mode` is the OWNING profile's source-resolved
@@ -203,8 +203,8 @@ impl fusion::ModelSource for FusionCatalogModelSource {
     }
 }
 
-pub(super) fn live_managed_model_restriction_sync()
--> Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)> {
+pub(super) fn live_managed_model_restriction_sync(
+) -> Option<(llm_runtime::model::allowlist::ModelEnforcement, Vec<String>)> {
     use llm_runtime::model::allowlist::{self, ModelEnforcement};
 
     let source = managed_model_policy_source(&managed_settings_raw_tiers_sync());

@@ -762,7 +762,6 @@ async fn handback_supplied_dispatch_native_model_result_bytes_match_pinned_fixtu
                     HANDBACK_TOOL_NAME,
                     serde_json::json!({"message":"prior report"}),
                     invocation.clone(),
-                    None,
                     Arc::new(tool_api::tool_invoker_impl::SuppliedTool(tool.clone())),
                 )
                 .await
@@ -774,7 +773,6 @@ async fn handback_supplied_dispatch_native_model_result_bytes_match_pinned_fixtu
                 HANDBACK_TOOL_NAME,
                 serde_json::json!({"message":"report"}),
                 invocation,
-                None,
                 Arc::new(tool_api::tool_invoker_impl::SuppliedTool(tool)),
             )
             .await

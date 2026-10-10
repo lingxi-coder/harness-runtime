@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+// One of the engine's ids, defined in `mcp-wire` so a transport can name it without the
+// engine; the old path stays.
+pub use mcp_wire::McpConnectionId;
+
 macro_rules! id_newtype {
     ($name:ident, $prefix:literal) => {
         #[doc = concat!("Identifier for a ", stringify!($name), ". UUID v4 internally; ")]
@@ -76,7 +80,6 @@ id_newtype!(MessageId, "msg");
 id_newtype!(RequestId, "req");
 id_newtype!(HookId, "hook");
 id_newtype!(PluginId, "plg");
-id_newtype!(McpConnectionId, "mcp");
 id_newtype!(SnapshotId, "snap");
 id_newtype!(PrefetchId, "pf");
 

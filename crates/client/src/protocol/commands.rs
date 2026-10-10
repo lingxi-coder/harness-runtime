@@ -37,41 +37,9 @@ use crate::protocol::audio::{
 use crate::protocol::computer_access::ComputerAccessResponseDto;
 use crate::protocol::controls::ReasoningSelectionDto;
 use crate::protocol::listings::TaskStatusDto;
-use crate::protocol::local_apps::{
-    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppRuntimeProfileDto,
-    AppSurfaceDto, PluginCommandDto,
-};
 use crate::protocol::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-fn default_git_version_control() -> bool {
-    true
-}
-
-fn is_default_git_version_control(value: &bool) -> bool {
-    *value
-}
-
-/// How a [`CreateApp`](ClientCommand::CreateApp) creates the app. Protocol v9
-/// accepts `Shell`; the retained `Scaffolded` wire value is rejected by the
-/// host so runtime identity can only come from native confirmation plus a
-/// one-shot scaffold receipt.
-///
-/// A bare wire STRING (`"shell"` / `"scaffolded"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(rename_all = "snake_case")]
-pub enum AppCreateModeDto {
-    /// Create the empty shell only: the record is written with
-    /// `scaffolded: false` and no scaffold is laid down. In this mode
-    /// `surface` MUST be `None` — the shape is decided when the scaffold
-    /// lands, not before.
-    Shell,
-    /// Retained for an explicit error response; direct create-and-scaffold is
-    /// not allowed in protocol v9.
-    Scaffolded,
-}
 
 /// A provider credential carried over the authenticated local bridge.
 ///
@@ -528,198 +496,6 @@ pub enum ClientCommand {
         task_id: String,
     },
 
-    // ── Local apps ────────────────────────────────────────────────────────
-    // List the local apps. Replied with an
-    // [`AppsChanged`](crate::protocol::events::ClientEvent::AppsChanged) event carrying
-    // the full record set.
-    ListApps,
-
-    // Request the complete detail snapshot for one app.
-    GetAppDetails {
-        // App whose detail snapshot is requested.
-        app_id: String,
-    },
-
-    // Create a new local-app record and its workspace. Confirmed by an
-    // [`AppsChanged`](crate::protocol::events::ClientEvent::AppsChanged) event.
-    CreateApp {
-        // User-facing display name.
-        name: String,
-        // Where the creation originated (`chat` / `library`).
-        origin: AppCreateOriginDto,
-        // One-line description of what the app should do — the seed the
-        // LLM authors the questionnaire from. Distinct from `name`: a
-        // display label is not a spec, and conflating the two used to leave
-        // the questionnaire authored from a bare app name.
-        brief: String,
-        // Whether to keep Git-backed source versions. Defaults to enabled
-        // when omitted by an older client.
-        #[serde(
-            default = "default_git_version_control",
-            skip_serializing_if = "is_default_git_version_control"
-        )]
-        git_enabled: bool,
-        // Provider-qualified model reference for the app creation workflow.
-        // Skipped when the app follows the current session model -- which is
-        // what every shipping client sends today: `LocalAppsStore.swift` and
-        // `LocalAppsViewModel.kt` both hard-code the null, there is no picker.
-        //
-        // ⚠ INERT END TO END as of this comment. The engine accepts the
-        // value, trims/byte-caps it (`local_apps::service`) and persists it as
-        // `AppRecord::workflow_model`, and `commit_scaffold` preserves it
-        // across scaffold -- but NOTHING in production reads the stored value
-        // back. Every `.workflow_model` READ site in the workspace is a
-        // `#[cfg(test)]` assertion, and the reader the design named for it,
-        // `apply_local_app_build_default_model`, exists only under
-        // `docs/local-apps/` and in no source tree at all. Setting it has no
-        // side effect either: the scaffold contract
-        // (`local_apps_host::formal_workspace_contract`) renders `name`,
-        // `brief` and `mcp_intent`, never this.
-        //
-        // It is kept rather than dropped because a struct variant's fields are
-        // encoded POSITIONALLY by the generated mobile bindings (see `surface`
-        // below): removing it would silently shift `conversation_id` /
-        // `surface` / `mode` / `request_id` on a client built against an older
-        // binding. Close the gap by restoring a reader, not by deleting a
-        // field mid-struct. `tasks/src/scope.rs`'s module docs hold the
-        // long-form account and the greps behind it; do not upgrade this note
-        // to "the build workflow defaults to it" until a reader actually
-        // exists.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        workflow_model: Option<String>,
-        // Conversation the app was created from (`origin: chat`). Skipped
-        // from the wire when `None`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        conversation_id: Option<String>,
-        // Retained only for protocol-v9 error compatibility. New clients send
-        // `None` with `Shell`; the later native runtime-profile selection owns
-        // the immutable surface. Appended LAST: generated mobile bindings
-        // encode struct variants positionally, so inserting a field above
-        // `conversation_id` would silently reinterpret it on an older client.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        surface: Option<AppSurfaceDto>,
-        // `Shell` creates the empty shell. `Scaffolded` is retained only so
-        // the host can return a clear protocol-v9 error directing the caller
-        // through native profile confirmation and receipt-bound scaffold.
-        mode: AppCreateModeDto,
-        // Client-generated correlation key, echoed verbatim on both the
-        // success event (`AppEventDto::AppCreated`) and the failure event
-        // (`ClientEvent::AppOperationFailed`) so the caller that started this
-        // creation can recognise its own outcome.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
-    },
-
-    // Start the app's dev-server runtime. Phase 1 validates the app exists,
-    // then fails typed with
-    // [`AppOperationFailed`](crate::protocol::events::ClientEvent::AppOperationFailed)
-    // `{ code: not_yet_available }` (runtime is phase 4).
-    StartApp {
-        // App to start.
-        app_id: String,
-    },
-
-    // Stop the app's dev-server runtime (`not_yet_available` until phase 4,
-    // like [`Self::StartApp`]).
-    StopApp {
-        // App to stop.
-        app_id: String,
-    },
-
-    // Restart the app's dev-server runtime (`not_yet_available` until phase
-    // 4, like [`Self::StartApp`]).
-    RestartApp {
-        // App to restart.
-        app_id: String,
-    },
-
-    // Execute one data-only request from the versioned local-app bridge.
-    ExecuteAppBridgeRequest {
-        // Data-only request to execute.
-        request: AppBridgeRequestDto,
-    },
-
-    // Resolve a permission-gated structured `WebView` action.
-    ResolveAppUiRequest {
-        // Pending UI request correlator.
-        request_id: String,
-        // User's scoped authorization decision.
-        decision: AppAuthorizationDecisionDto,
-        // Structured `WebView` inspection/action result as JSON data.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        result_json: Option<String>,
-        // Host-side action failure, if the authorized action failed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-
-    // Resolve a native app capability request.
-    ResolveAppCapabilityRequest {
-        // Pending capability request correlator.
-        request_id: String,
-        // User's scoped authorization decision.
-        decision: AppAuthorizationDecisionDto,
-    },
-
-    // Approve or reject a host-issued App Agent Profile proposal. The token
-    // is minted by the engine and is never accepted from the local-app page.
-    ResolveAppProfileProposal {
-        // App whose profile is being changed.
-        app_id: String,
-        // One-time token from [`AppProfileProposal`](crate::protocol::local_apps::AppEventDto).
-        approval_token: String,
-        // `true` applies the exact proposal shown by the trusted client UI.
-        approved: bool,
-    },
-
-    // Revoke every session and durable capability grant for one app. Future
-    // gated operations prompt again; the design manifest is not changed.
-    ResetAppPermissions {
-        // App whose saved grants should be cleared.
-        app_id: String,
-    },
-
-    // Page through one app's workspace-scoped session catalog. Replied with
-    // an [`AppSessionsChanged`](crate::protocol::events::ClientEvent::AppSessionsChanged)
-    // event. `offset`/`limit` page the modified-descending catalog
-    // (default limit 50, max 100); the reply's `next_offset` is `None` on
-    // the last page.
-    ListAppSessions {
-        // App whose sessions to list.
-        app_id: String,
-        // Zero-based row offset into the modified-descending catalog.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        offset: Option<u64>,
-        // Page size (default 50, max 100).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        limit: Option<u32>,
-    },
-
-    // List an app's restorable checkpoints. Phase 1 replies with an empty
-    // list (git wiring is phase 5).
-    ListAppCheckpoints {
-        // App whose checkpoints to list.
-        app_id: String,
-    },
-
-    // Restore an app workspace to a checkpoint. Phase 1 validates the app
-    // exists, then fails typed with
-    // [`AppOperationFailed`](crate::protocol::events::ClientEvent::AppOperationFailed)
-    // `{ code: not_yet_available }` (git wiring is phase 5).
-    RestoreAppCheckpoint {
-        // App to restore.
-        app_id: String,
-        // Checkpoint to restore to.
-        checkpoint_id: String,
-    },
-
-    // Delete an app record and its workspace. Confirmed by an
-    // [`AppsChanged`](crate::protocol::events::ClientEvent::AppsChanged) event.
-    DeleteApp {
-        // App to delete.
-        app_id: String,
-    },
-
     // ── Lifecycle ─────────────────────────────────────────────────────────
     // Request a clean engine/connection shutdown.
     RequestExit,
@@ -738,24 +514,6 @@ pub enum ClientCommand {
     SetFastMode {
         // Whether the user wants the fast tier enabled.
         enabled: bool,
-    },
-
-    // Resolve a native dependency-change confirmation request.  `approved`
-    // is a one-shot decision; the host issues a dependency receipt only for
-    // `true` and performs no registry access before that decision.
-    ResolveAppDependencyChangeConfirmation {
-        // Pending dependency-review request correlator.
-        request_id: String,
-        // Whether the user approved the exact package diff shown by native UI.
-        approved: bool,
-    },
-
-    // ── Plugins (§17.1, §19.2) ────────────────────────────────────────────
-    // Enable/disable/status for one builtin plugin. Nested in
-    // [`PluginCommandDto`] so plugin operations do not consume a separate
-    // top-level protocol variant for every operation.
-    PluginCommand {
-        command: PluginCommandDto,
     },
 
     // ── Desktop settings managers ────────────────────────────────────────
@@ -937,15 +695,6 @@ pub enum ClientCommand {
     // fixed by the engine; clients may choose only `auto`, `off`, or `on`.
     SetTypescriptLspMode {
         mode: String,
-    },
-
-    // Confirm the runtime profile family selected by native UI for one app.
-    // Appended to preserve every previously frozen UniFFI variant ordinal.
-    ResolveAppRuntimeProfileSelection {
-        // Pending runtime selector correlator.
-        request_id: String,
-        // The runtime profile family the user selected.
-        selected_family: AppRuntimeProfileDto,
     },
 
     // Fork the named session into a fresh session under `target_mode` while

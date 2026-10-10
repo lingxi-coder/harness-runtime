@@ -24,14 +24,14 @@ use lingxi_core::host::subagent_spawn::{
 };
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use lingxi_core::host::{
-    DEFAULT_IMPLEMENT_FUSION_DIMENSIONS, FusionExecutor, FusionImplementHost, FusionInheritance,
-    FusionModelHints, FusionModelRef, FusionOrigin, FusionPanelMode, FusionPreset, FusionRequest,
-    FusionStatus, PanelClaim, PanelEvidence, PanelReport, PanelVerification, VerificationOutcome,
-    VerificationRun, WorktreeManager,
+    FusionExecutor, FusionImplementHost, FusionInheritance, FusionModelHints, FusionModelRef,
+    FusionOrigin, FusionPanelMode, FusionPreset, FusionRequest, FusionStatus, PanelClaim,
+    PanelEvidence, PanelReport, PanelVerification, VerificationOutcome, VerificationRun,
+    WorktreeManager, DEFAULT_IMPLEMENT_FUSION_DIMENSIONS,
 };
 use lingxi_core::types::AgentId;
 use platform_posix::worktree::PosixWorktreeManager;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
     StrictStructuredQueryRequest, StrictStructuredQueryResponse,
@@ -515,10 +515,9 @@ async fn implement_run_against_a_real_repo_snapshots_the_users_work_and_leaves_i
     dirs.sort();
     dirs.dedup();
     assert_eq!(dirs.len(), 3);
-    assert!(
-        dirs.iter()
-            .all(|cwd| *cwd != &repo && cwd.starts_with(&repo))
-    );
+    assert!(dirs
+        .iter()
+        .all(|cwd| *cwd != &repo && cwd.starts_with(&repo)));
 
     // ── What each panel's patch says ──────────────────────────────────────
     // Panel ids are anonymous; tell the panels apart by what they changed.
@@ -698,11 +697,9 @@ async fn implement_run_against_a_real_repo_snapshots_the_users_work_and_leaves_i
         .map(str::trim)
         .collect();
     assert_eq!(new_branches.len(), 2, "kept branches: {new_branches:?}");
-    assert!(
-        new_branches
-            .iter()
-            .all(|b| b.starts_with("worktree-fusion-"))
-    );
+    assert!(new_branches
+        .iter()
+        .all(|b| b.starts_with("worktree-fusion-")));
 
     // ── Kept worktrees are exactly the ones with changes ──────────────────
     let kept = worktree_dirs(&repo);

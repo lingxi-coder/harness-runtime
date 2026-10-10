@@ -175,26 +175,14 @@ impl ToolInvoker for PlanAwareInvoker {
     ) -> Result<Value, ToolInvokerError> {
         self.inner.invoke(name, input, self.context(context)).await
     }
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: Value,
-        context: SubagentInvocationContext,
-        lease: Option<u64>,
-    ) -> Result<Value, ToolInvokerError> {
-        self.inner
-            .invoke_with_workspace_lease(name, input, self.context(context), lease)
-            .await
-    }
     async fn invoke_detailed(
         &self,
         name: &str,
         input: Value,
         context: SubagentInvocationContext,
-        lease: Option<u64>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         self.inner
-            .invoke_detailed(name, input, self.context(context), lease)
+            .invoke_detailed(name, input, self.context(context))
             .await
     }
     async fn invoke_supplied_detailed(
@@ -202,11 +190,10 @@ impl ToolInvoker for PlanAwareInvoker {
         name: &str,
         input: Value,
         context: SubagentInvocationContext,
-        lease: Option<u64>,
         supplied: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         self.inner
-            .invoke_supplied_detailed(name, input, self.context(context), lease, supplied)
+            .invoke_supplied_detailed(name, input, self.context(context), supplied)
             .await
     }
     fn as_any(&self) -> &dyn std::any::Any {

@@ -823,7 +823,7 @@ mod tests {
     #[test]
     fn disk_reload_cannot_replace_or_resurrect_a_reserved_plugin_command() {
         let plugin_id = PluginId::new();
-        let mut plugin = markdown_cmd("lingxi-local-app:frontend-design", vec![]);
+        let mut plugin = markdown_cmd("acme-plugin:frontend-design", vec![]);
         plugin.source = CommandSource::Plugin;
         plugin.kind = SlashCommandKind::Plugin {
             plugin_id,
@@ -834,19 +834,19 @@ mod tests {
         let mut reg = CommandRegistry::new();
         reg.register_plugin_commands(plugin_id, vec![plugin]);
 
-        let mut decoy = markdown_cmd("lingxi-local-app:frontend-design", vec![]);
+        let mut decoy = markdown_cmd("acme-plugin:frontend-design", vec![]);
         decoy.loaded_from = Some("skills".into());
         reg.register_command(decoy.clone());
         assert_eq!(
-            reg.resolve("lingxi-local-app:frontend-design")
+            reg.resolve("acme-plugin:frontend-design")
                 .map(|command| command.source),
             Some(CommandSource::Plugin)
         );
 
         reg.unregister_plugin(&plugin_id);
         reg.register_command(decoy);
-        assert_eq!(reg.unregister_non_plugin_prefix("lingxi-local-app:"), 1);
-        assert!(reg.resolve("lingxi-local-app:frontend-design").is_none());
+        assert_eq!(reg.unregister_non_plugin_prefix("acme-plugin:"), 1);
+        assert!(reg.resolve("acme-plugin:frontend-design").is_none());
     }
 
     /// `get_handler` canonicalizes through the aliases map (mirroring `resolve`),

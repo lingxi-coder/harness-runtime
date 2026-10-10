@@ -16,7 +16,13 @@ async fn end_session_returns_while_its_input_pipe_remains_open() {
     peer.write_all(b"{\"type\":\"control_request\",\"request_id\":\"end\",\"request\":{\"subtype\":\"end_session\"}}\n").await.unwrap();
     let lifecycle = Arc::new(crate::headless::queued_commands::QueueLifecycle::new(
         stream.outbound_tx(),
-        runtime.orchestrator.session().lock().await.session_id.to_string(),
+        runtime
+            .orchestrator
+            .session()
+            .lock()
+            .await
+            .session_id
+            .to_string(),
     ));
     let channels = spawn_stdin_router_from_reader(
         input,
@@ -90,7 +96,13 @@ async fn fatal_input_is_distinct_from_eof_and_returns_nonzero_before_any_turn() 
         let plane = StdioControlPlane::new(stream.outbound_tx());
         let lifecycle = Arc::new(crate::headless::queued_commands::QueueLifecycle::new(
             stream.outbound_tx(),
-            runtime.orchestrator.session().lock().await.session_id.to_string(),
+            runtime
+                .orchestrator
+                .session()
+                .lock()
+                .await
+                .session_id
+                .to_string(),
         ));
         let channels = spawn_stdin_router_from_reader(
             std::io::Cursor::new(format!("{input}\n").into_bytes()),

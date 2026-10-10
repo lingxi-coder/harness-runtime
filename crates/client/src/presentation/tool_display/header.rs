@@ -252,21 +252,6 @@ pub fn tool_icon(tool: &str, input: &Value) -> ToolIcon {
             | "Output" => ToolIcon::Output,
             "TaskStop" | "KillShell" | "KillBash" | "Stop" => ToolIcon::Stop,
             "Plug" => ToolIcon::Plug,
-            // First-party local-app host operations. They used to be spelled
-            // `mcp__local_apps__*` and therefore took the `Plug` branch above;
-            // as builtins they would otherwise all fall to `Wrench`. Map the
-            // families whose verb is unambiguous.
-            "LocalAppList" | "LocalAppCheckpointList" | "LocalAppBackgroundList" => ToolIcon::List,
-            "LocalAppGet"
-            | "LocalAppLogs"
-            | "LocalAppQueryData"
-            | "LocalAppEvents"
-            | "LocalAppBackgroundStatus" => ToolIcon::Read,
-            "LocalAppCreate"
-            | "LocalAppManifest"
-            | "LocalAppMutateData"
-            | "LocalAppCheckpointCreate" => ToolIcon::Edit,
-            "LocalAppRuntime" | "LocalAppBackgroundSchedule" => ToolIcon::Workflow,
             _ => ToolIcon::Wrench,
         }
     }
@@ -767,27 +752,6 @@ mod tests {
         );
         assert_eq!(
             tool_icon("MCP", &json!({"full_name": "mcp__fs__read_file"})),
-            ToolIcon::Plug
-        );
-    }
-
-    /// The local-app host operations moved from `mcp__local_apps__*` to
-    /// builtin `LocalApp*` names. That silently changed their icon: the
-    /// `mcp__` prefix took the `Plug` branch, while an unmapped builtin falls
-    /// to the generic `Wrench`.
-    #[test]
-    fn local_app_tools_keep_a_meaningful_icon_after_the_rename() {
-        use serde_json::json;
-        assert_eq!(tool_icon("LocalAppList", &json!({})), ToolIcon::List);
-        assert_eq!(tool_icon("LocalAppLogs", &json!({})), ToolIcon::Read);
-        assert_eq!(tool_icon("LocalAppQueryData", &json!({})), ToolIcon::Read);
-        assert_eq!(tool_icon("LocalAppMutateData", &json!({})), ToolIcon::Edit);
-        assert_eq!(tool_icon("LocalAppRuntime", &json!({})), ToolIcon::Workflow);
-        // Deliberately generic: a build is a tool action with no better icon.
-        assert_eq!(tool_icon("LocalAppBuild", &json!({})), ToolIcon::Wrench);
-        // A real MCP server still plugs.
-        assert_eq!(
-            tool_icon("mcp__github__search_code", &json!({})),
             ToolIcon::Plug
         );
     }

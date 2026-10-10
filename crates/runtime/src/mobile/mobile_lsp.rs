@@ -32,7 +32,7 @@ pub(crate) fn global_typescript_lsp_plugin_id() -> lingxi_core::types::PluginId 
 }
 
 /// Host-owned, immutable TypeScript 7 descriptor. Keeping this out of the
-/// Local App manifest makes the global setting independent of that plugin's
+/// plugin manifests makes the global setting independent of any plugin's
 /// enable/disable lifecycle while still using the registry's plugin-only
 /// registration boundary.
 pub(crate) fn global_typescript_lsp_config() -> LspServerConfig {
@@ -53,34 +53,6 @@ pub(crate) fn global_typescript_lsp_config() -> LspServerConfig {
         diagnostics: Some(true),
         ..LspServerConfig::default()
     }
-}
-
-/// `Auto` mode trust classifier. Only the engine-owned
-/// `<data>/apps/<validated-id>/workspace[/…]` shape is accepted; project files
-/// cannot opt themselves in by containing a matching substring.
-pub(crate) fn is_managed_local_app_workspace(app_data_root: &Path, workspace: &Path) -> bool {
-    let root = fs::canonicalize(app_data_root).unwrap_or_else(|_| app_data_root.to_path_buf());
-    let workspace = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    let Ok(relative) = workspace.strip_prefix(&root) else {
-        return false;
-    };
-    let mut components = relative.components();
-    let Some(std::path::Component::Normal(apps)) = components.next() else {
-        return false;
-    };
-    let Some(std::path::Component::Normal(app_id)) = components.next() else {
-        return false;
-    };
-    let Some(std::path::Component::Normal(workspace_dir)) = components.next() else {
-        return false;
-    };
-    if apps != "apps"
-        || workspace_dir != "workspace"
-        || !local_apps::ids::is_valid_app_id(&app_id.to_string_lossy())
-    {
-        return false;
-    }
-    components.all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 struct ConnectionEntry {
@@ -782,31 +754,6 @@ mod tests {
     use super::*;
     use lsp::DiagnosticEntry;
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
-
-    #[test]
-    fn auto_mode_accepts_only_managed_local_app_workspace_shape() {
-        let root = Path::new("/data/profile");
-        assert!(is_managed_local_app_workspace(
-            root,
-            Path::new("/data/profile/apps/habits-1a2b/workspace")
-        ));
-        assert!(is_managed_local_app_workspace(
-            root,
-            Path::new("/data/profile/apps/habits-1a2b/workspace/src")
-        ));
-        assert!(!is_managed_local_app_workspace(
-            root,
-            Path::new("/repo/apps/habits-1a2b/workspace")
-        ));
-        assert!(!is_managed_local_app_workspace(
-            root,
-            Path::new("/data/profile/apps/INVALID/workspace")
-        ));
-        assert!(!is_managed_local_app_workspace(
-            root,
-            Path::new("/data/profile/apps/habits-1a2b/not-workspace")
-        ));
-    }
 
     #[test]
     fn global_typescript_descriptor_is_fixed_and_native() {

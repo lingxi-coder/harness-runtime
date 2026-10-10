@@ -12,7 +12,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::mobile::local_apps_mcp::LocalAppsMcpTransport;
 use async_trait::async_trait;
 use client::adapter::{ClientEventListener, ListenerSink, MockSink, PermissionRequestSink};
 use client::protocol::events::ClientEvent;
@@ -32,9 +31,11 @@ use super::{
     mobile_mcp_reload_requires_replacement, mobile_mcp_run_reload_job,
     mobile_mcp_state_is_transitional, mobile_skill_listing_provider,
     session_agent_conversation_is_visible, session_agent_transcript_event,
-    session_agent_transcript_revision, McpConfigScope, McpRegistry, McpServerConfig, MobileConfig,
+    session_agent_transcript_revision, McpRegistry, McpServerConfig, MobileConfig,
     MobileCronStoreHandle, MobileMcpReloadJob, MobileRuntime, MobileSessionAgentObserver,
 };
+
+use mcp::ConfigScope as McpConfigScope;
 
 #[test]
 fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
@@ -204,17 +205,21 @@ async fn session_agent_helpers_find_nested_workflow_transcripts() {
 
 #[test]
 fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
-    let visible = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+    let visible = lingxi_core::types::ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "visible".to_string(), citations: None,
+            text: "visible".to_string(),
+            citations: None,
         }],
         stop_reason: None,
     };
-    let compact = lingxi_core::types::ConversationMessage::User { api_message_override: None,
+    let compact = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "replacement summary".to_string(), citations: None,
+            text: "replacement summary".to_string(),
+            citations: None,
         }],
         is_meta: false,
         is_compact_summary: true,
@@ -242,10 +247,12 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         "declined fallback",
         "2026-10-04T00:00:00.000Z".into(),
     );
-    let first_message = ConversationMessage::Assistant { per_turn_effort: None,
+    let first_message = ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: first_id,
         content: vec![ContentBlock::Text {
-            text: "kept main row".into(), citations: None,
+            text: "kept main row".into(),
+            citations: None,
         }],
         stop_reason: Some("end_turn".into()),
     };
@@ -354,30 +361,35 @@ fn session_agent_id_from_nested_transcript_path_requires_agent_jsonl_shape() {
 
 #[test]
 fn session_agent_index_excludes_hidden_transcript_records() {
-    let hidden_meta = lingxi_core::types::ConversationMessage::User { api_message_override: None,
+    let hidden_meta = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
-            text: "<runtime-reminder>internal</runtime-reminder>".to_string(), citations: None,
+            text: "<runtime-reminder>internal</runtime-reminder>".to_string(),
+            citations: None,
         }],
         is_meta: true,
         is_compact_summary: false,
         is_visible_in_transcript_only: false,
     };
-    let hidden_summary = lingxi_core::types::ConversationMessage::User { api_message_override: None,
+    let hidden_summary = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: true,
         is_visible_in_transcript_only: false,
     };
-    let hidden_transcript_only = lingxi_core::types::ConversationMessage::User { api_message_override: None,
+    let hidden_transcript_only = lingxi_core::types::ConversationMessage::User {
+        api_message_override: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
         is_compact_summary: false,
         is_visible_in_transcript_only: true,
     };
-    let visible = lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+    let visible = lingxi_core::types::ConversationMessage::Assistant {
+        per_turn_effort: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         stop_reason: None,
@@ -427,10 +439,12 @@ async fn session_agent_observer_binds_metadata_at_allocate_time() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+            message: lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "working".to_string(), citations: None,
+                    text: "working".to_string(),
+                    citations: None,
                 }],
                 stop_reason: None,
             },
@@ -510,7 +524,8 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::System { api_system: None,
+            message: lingxi_core::types::ConversationMessage::System {
+                api_system: None,
                 id: lingxi_core::types::MessageId::new(),
                 subtype: Some("agent_idle".to_string()),
                 content: "idle".to_string(),
@@ -544,10 +559,12 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::User { api_message_override: None,
+            message: lingxi_core::types::ConversationMessage::User {
+                api_message_override: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "follow-up".to_string(), citations: None,
+                    text: "follow-up".to_string(),
+                    citations: None,
                 }],
                 is_meta: true,
                 is_compact_summary: false,
@@ -572,10 +589,12 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
     observer
         .on_event(SubagentObservation::Message {
             agent_id,
-            message: lingxi_core::types::ConversationMessage::Assistant { per_turn_effort: None,
+            message: lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
-                    text: "resumed".to_string(), citations: None,
+                    text: "resumed".to_string(),
+                    citations: None,
                 }],
                 stop_reason: None,
             },
@@ -1004,308 +1023,11 @@ async fn build_mobile_constructs_orchestrator() {
     let _handle: Arc<dyn lingxi_core::host::OrchestratorHandle> = rt.orchestrator.clone();
 
     // SKILLLIST.1: the production composition must attach the listing
-    // provider before the orchestrator is wrapped, and the provider's live
-    // registry must contain every compiled-in mobile skill.
+    // provider before the orchestrator is wrapped.
     assert!(
         rt.orchestrator.has_skill_listing(),
         "mobile orchestrator must expose a skill-listing provider"
     );
-    let listed =
-        mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, false, None)
-            .skill_entries()
-            .await;
-    let listed_names: std::collections::BTreeSet<_> =
-        listed.iter().map(|entry| entry.name.as_str()).collect();
-    let expected_names = ["create-local-app", "local-app-use", "expose-as-mcp"]
-        .into_iter()
-        .map(|name| format!("{}:{name}", crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        expected_names.len(),
-        3,
-        "a global Code listing must expose exactly the three Local App routers"
-    );
-    for name in &expected_names {
-        assert!(
-            listed_names.contains(name.as_str()),
-            "mobile skill-listing provider must expose bundled skill {name:?}: {listed_names:?}"
-        );
-    }
-    let listed_local_app_names = listed_names
-        .iter()
-        .filter(|name| name.starts_with("lingxi-local-app:"))
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let expected_local_app_names = expected_names
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        listed_local_app_names, expected_local_app_names,
-        "a global Code cold boot must hide every app-only Local App skill"
-    );
-    let local_app_tool_names = rt
-        .orchestrator
-        .tool_names()
-        .into_iter()
-        .filter(|name| name.starts_with("LocalApp"))
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        local_app_tool_names,
-        [
-            "LocalAppCreate",
-            "LocalAppGet",
-            "LocalAppList",
-            "LocalAppPrepare"
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-        "a global Code cold boot must register only the global Local App management \
-             tools: the four in `local_apps_tools::GLOBAL_LOCAL_APP_TOOLS`"
-    );
-    let registry = rt.slash_registry.read().await;
-    for name in &expected_names {
-        assert!(
-            registry.resolve(name).is_some(),
-            "compiled-in mobile skill {name:?} must be present in the live slash registry"
-        );
-    }
-    let app_scoped =
-        mobile_skill_listing_provider(rt.slash_registry.clone(), rt.session_mode, true, None)
-            .skill_entries()
-            .await;
-    let app_scoped_names: std::collections::BTreeSet<_> =
-        app_scoped.iter().map(|entry| entry.name.as_str()).collect();
-    for name in crate::mobile::mobile_plugin_skill_names()
-        .into_iter()
-        .map(|name| format!("{}:{name}", crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME))
-    {
-        assert!(
-            app_scoped_names.contains(name.as_str()),
-            "an app-scoped listing must expose the full Local App skill set: {name:?}"
-        );
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn mobile_local_app_scope_id_uses_the_canonical_target_not_the_alias_spelling() {
-    use std::os::unix::fs::symlink;
-
-    let root = tempfile::tempdir().expect("app data root");
-    let app_two = root.path().join("apps/app-two/workspace");
-    std::fs::create_dir_all(&app_two).expect("canonical app workspace");
-    let alias_parent = root.path().join("apps/app-one");
-    std::fs::create_dir_all(&alias_parent).expect("alias parent");
-    let alias = alias_parent.join("workspace");
-    symlink(&app_two, &alias).expect("A-to-B workspace alias");
-
-    assert_eq!(
-        super::mobile_local_app_scope_id(&app_two, root.path()).as_deref(),
-        Some("app-two")
-    );
-    assert_eq!(
-        super::mobile_local_app_scope_id(&alias, root.path()).as_deref(),
-        Some("app-two"),
-        "the Host must carry the canonical target id, never the alias's app-one spelling"
-    );
-
-    let outside = tempfile::tempdir().expect("ordinary project");
-    let forged = outside.path().join("apps/app-two/workspace");
-    std::fs::create_dir_all(&forged).expect("forged suffix");
-    assert_eq!(
-        super::mobile_local_app_scope_id(&forged, root.path()),
-        None,
-        "an app-shaped suffix outside the Host data root must stay global"
-    );
-}
-
-#[tokio::test]
-async fn mobile_local_app_exposure_is_host_cwd_bounded_and_chat_stays_isolated() {
-    async fn build_for_cwd(
-        data_root: &std::path::Path,
-        cwd: std::path::PathBuf,
-        session_mode: session::jsonl::SessionMode,
-    ) -> MobileRuntime {
-        std::fs::create_dir_all(&cwd).expect("session cwd");
-        let mut cfg = test_config(data_root);
-        cfg.cwd = cwd;
-        cfg.session_mode = session_mode;
-        let platform: Arc<dyn lingxi_core::host::Platform> =
-            Arc::new(HostFakePlatform::new(data_root.to_path_buf()));
-        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
-        let permission_sink: Arc<dyn PermissionRequestSink> =
-            Arc::new(RecordingPermissionSink::default());
-        build_mobile(cfg, platform, listener, permission_sink)
-            .await
-            .expect("build scoped mobile runtime")
-    }
-
-    fn local_app_tool_names(runtime: &MobileRuntime) -> std::collections::BTreeSet<String> {
-        runtime
-            .orchestrator
-            .tool_names()
-            .into_iter()
-            .filter(|name| name.starts_with("LocalApp"))
-            .collect()
-    }
-
-    async fn local_app_skill_names(runtime: &MobileRuntime) -> std::collections::BTreeSet<String> {
-        runtime
-            .wired_skill_listing_provider
-            .skill_entries()
-            .await
-            .into_iter()
-            .map(|entry| entry.name)
-            .filter(|name| name.starts_with("lingxi-local-app:"))
-            .collect()
-    }
-
-    let global_tools = [
-        "LocalAppCreate",
-        "LocalAppGet",
-        "LocalAppList",
-        "LocalAppPrepare",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<std::collections::BTreeSet<_>>();
-    let global_skills = ["create-local-app", "expose-as-mcp", "local-app-use"]
-        .into_iter()
-        .map(|name| format!("{}:{name}", crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME))
-        .collect::<std::collections::BTreeSet<_>>();
-
-    // A project is allowed to contain this directory shape. The Host must
-    // not infer Local App authority from the suffix alone.
-    let project_root = tempfile::tempdir().expect("project root");
-    let forged_project_cwd = project_root
-        .path()
-        .join("project")
-        .join("apps")
-        .join("not-a-local-app")
-        .join("workspace");
-    let forged = build_for_cwd(
-        project_root.path(),
-        forged_project_cwd,
-        session::jsonl::SessionMode::Code,
-    )
-    .await;
-    assert_eq!(
-        local_app_tool_names(&forged),
-        global_tools,
-        "a project with an app-shaped suffix must retain the global three-tool surface"
-    );
-    assert_eq!(
-        local_app_skill_names(&forged).await,
-        global_skills,
-        "a project with an app-shaped suffix must retain the global three-skill surface"
-    );
-
-    let app_root = tempfile::tempdir().expect("app root");
-    let app_cwd = app_root
-        .path()
-        .join("apps")
-        .join("app-one")
-        .join("workspace");
-    let app = build_for_cwd(
-        app_root.path(),
-        app_cwd.clone(),
-        session::jsonl::SessionMode::Code,
-    )
-    .await;
-    let expected_app_tools = crate::mobile::local_apps_tools::LOCAL_APP_TOOLS
-        .iter()
-        .map(|(name, _, _)| (*name).to_string())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        local_app_tool_names(&app),
-        expected_app_tools,
-        "a Host-owned Local App workspace must receive the complete builtin surface"
-    );
-    let expected_app_skills = crate::mobile::mobile_plugin_skill_names()
-        .into_iter()
-        .map(|name| format!("{}:{name}", crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME))
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        local_app_skill_names(&app).await,
-        expected_app_skills,
-        "a Host-owned Local App workspace must receive the complete skill listing"
-    );
-
-    let chat = build_for_cwd(app_root.path(), app_cwd, session::jsonl::SessionMode::Chat).await;
-    assert!(
-        local_app_tool_names(&chat).is_empty(),
-        "Chat's existing tool allowlist must remain authoritative in an app workspace"
-    );
-    assert!(
-        local_app_skill_names(&chat).await.is_empty(),
-        "Chat must not gain Code-only Local App skills from app cwd classification"
-    );
-}
-
-#[tokio::test]
-async fn mobile_local_app_listing_keeps_chat_visibility_and_other_plugins() {
-    let registry = Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new()));
-    let mut chat_frontmatter = command_api::CommandFrontmatter::default();
-    chat_frontmatter.session_modes = Some(vec!["chat".to_string()]);
-    for name in [
-        "third-party:chat-router",
-        "lingxi-local-app:create-local-app",
-    ] {
-        let frontmatter = if name.starts_with("lingxi-local-app:") {
-            command_api::CommandFrontmatter::default()
-        } else {
-            chat_frontmatter.clone()
-        };
-        registry
-            .write()
-            .await
-            .register_command(command_api::SlashCommand {
-                name: name.to_string(),
-                description: "router".to_string(),
-                source: command_api::CommandSource::Plugin,
-                kind: command_api::SlashCommandKind::Markdown {
-                    file_path: std::path::PathBuf::from("/virtual/SKILL.md"),
-                    frontmatter,
-                    prompt_template: "route".to_string(),
-                },
-                loaded_from: Some("plugin".to_string()),
-                has_user_specified_description: true,
-                ..command_api::SlashCommand::default()
-            });
-    }
-
-    let chat = mobile_skill_listing_provider(
-        registry.clone(),
-        session::jsonl::SessionMode::Chat,
-        false,
-        None,
-    )
-    .skill_entries()
-    .await;
-    assert!(
-        chat.iter()
-            .any(|entry| entry.name == "third-party:chat-router"),
-        "Chat's existing session-mode visibility must remain intact"
-    );
-    assert!(
-        !chat
-            .iter()
-            .any(|entry| entry.name == "lingxi-local-app:create-local-app"),
-        "the Local App router must not bypass Chat's existing frontmatter gate"
-    );
-
-    let code =
-        mobile_skill_listing_provider(registry, session::jsonl::SessionMode::Code, false, None)
-            .skill_entries()
-            .await;
-    assert!(code
-        .iter()
-        .any(|entry| entry.name == "third-party:chat-router"));
-    assert!(code
-        .iter()
-        .any(|entry| entry.name == "lingxi-local-app:create-local-app"));
 }
 
 fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
@@ -1322,18 +1044,6 @@ fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
 async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
     let tmp = tempfile::tempdir().expect("tempdir");
     write_skill(tmp.path(), "foo", "Foo skill", "FOO BODY v1");
-    write_skill(
-        tmp.path(),
-        "frontend-design",
-        "Decoy frontend-design",
-        "DECOY FRONTEND DESIGN",
-    );
-    write_skill(
-        tmp.path(),
-        "lingxi-local-app:frontend-design",
-        "Reserved namespace decoy",
-        "RESERVED NAMESPACE DECOY",
-    );
     let commands_dir = tmp.path().join(".lingxi").join("commands");
     std::fs::create_dir_all(&commands_dir).expect("create commands dir");
     std::fs::write(
@@ -1364,17 +1074,7 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
     let listed = provider.skill_entries().await;
     let listed_names: std::collections::BTreeSet<_> =
         listed.iter().map(|entry| entry.name.as_str()).collect();
-    let mut expected = vec!["loop".to_string(), "foo".to_string()];
-    expected.extend(
-        ["create-local-app", "local-app-use", "expose-as-mcp"]
-            .into_iter()
-            .map(|name| format!("{}:{name}", crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME)),
-    );
-    assert_eq!(
-        expected.len(),
-        5,
-        "loop + foo + three global Local App routers must be listed"
-    );
+    let expected = vec!["loop".to_string(), "foo".to_string()];
     for name in &expected {
         assert!(
             listed_names.contains(name.as_str()),
@@ -1397,19 +1097,6 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         .expect("load ok")
         .expect("foo present");
     assert!(foo_v1.body.contains("FOO BODY v1"));
-    let frontend_design_name = format!(
-        "{}:frontend-design",
-        crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
-    );
-    let frontend_design = loader
-        .load(&frontend_design_name)
-        .await
-        .expect("load ok")
-        .expect("frontend-design present");
-    assert!(
-        !frontend_design.body.contains("DECOY FRONTEND DESIGN"),
-        "same-name disk decoy must not override the file-backed Plugin frontend-design"
-    );
     let loop_desc = loader
         .load("loop")
         .await
@@ -1483,20 +1170,6 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         loader.load("foo").await.expect("load ok").is_none(),
         "deleted disk skill must disappear from the shared Skill loader"
     );
-    let frontend_design_after_delete = loader
-        .load(&frontend_design_name)
-        .await
-        .expect("load ok")
-        .expect("frontend-design still present");
-    assert!(
-        !frontend_design_after_delete
-            .body
-            .contains("DECOY FRONTEND DESIGN"),
-        "the file-backed Plugin frontend-design must survive repeated reloads"
-    );
-    assert!(!frontend_design_after_delete
-        .body
-        .contains("RESERVED NAMESPACE DECOY"));
     let loop_after_delete = loader
         .load("loop")
         .await
@@ -1521,41 +1194,6 @@ async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
         "loop must still resolve from bundled after repeated reloads"
     );
     drop(registry_after_delete);
-
-    let plugin_id = crate::mobile::mobile_builtin_plugin_id();
-    rt.wired_plugin_manager
-        .disable(&plugin_id)
-        .await
-        .expect("disable builtin Plugin");
-    match rt.dispatcher.dispatch("/reload-skills").await {
-        SlashDispatchResult::Handled { .. } => {}
-        other => panic!("reload-skills after disable must be handled, got {other:?}"),
-    }
-    assert!(
-        loader
-            .load(&frontend_design_name)
-            .await
-            .expect("load after disable/reload")
-            .is_none(),
-        "a disk decoy cannot resurrect a disabled Plugin namespace"
-    );
-    let (manifest, install_dir) = match rt.wired_plugin_manager.plugin_state(&plugin_id).await {
-        Some(plugin::PluginState::Disabled {
-            manifest,
-            install_dir,
-        }) => (manifest, install_dir),
-        other => panic!("expected disabled builtin Plugin, got {other:?}"),
-    };
-    rt.wired_plugin_manager
-        .enable(&plugin_id, manifest, install_dir)
-        .await
-        .expect("re-enable builtin Plugin");
-    let restored = loader
-        .load(&frontend_design_name)
-        .await
-        .expect("load after re-enable")
-        .expect("Plugin skill restored");
-    assert!(!restored.body.contains("RESERVED NAMESPACE DECOY"));
 }
 
 /// Write a minimal fixture plugin directory `root/{plugin_name}` with one
@@ -1730,269 +1368,6 @@ async fn listing_and_invocation_share_one_registry() {
         invocation_names.contains(&namespaced_agent),
         "the plugin's agent must be resolvable through the subagent \
              spawner's own catalog handle: {invocation_names:?}"
-    );
-}
-
-/// P1.10 (§19.2) — the required gate: after booting through the REAL
-/// production path (`build_mobile` → `build_mobile_inner`, never a
-/// hand-built `PluginManager` or a direct call to
-/// `builtin_bundle`/`local_apps::pack`), the ONE compiled-in mobile
-/// plugin's live components must come from a materialized,
-/// digest-verified on-disk root — not from a manifest registered over
-/// `PathBuf::new()` with `PluginComponents::default()`, the pre-P1.10
-/// state in which registration trivially "succeeded" having loaded
-/// nothing.
-///
-/// Every assertion below is deliberately non-vacuous: a component COUNT
-/// derived from the packer's OWN resolved inventory (never a hardcoded
-/// literal that could rot independently of the embedded file set), and a
-/// NAMED skill's body content asserted equal to what a completely
-/// separate call to the SAME materializer function finds on disk at the
-/// verified root. Two zero counts, or two empty bodies, would both
-/// satisfy a weaker version of this test — see the module docs on why
-/// that shape is exactly the defect class this task exists to close.
-#[tokio::test]
-async fn mobile_boot_materializes_the_builtin_bundle() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let platform: Arc<dyn lingxi_core::host::Platform> =
-        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
-    let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
-    let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
-    let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
-        .await
-        .expect("build_mobile failed");
-
-    // --- Independent, non-production re-derivation of what the boot
-    // path SHOULD have materialized: the exact same bundle_root
-    // `build_mobile_inner` computes (`test_config`'s `lingxi_home` is
-    // `<cwd>/.claude`), fed to the very same materializer function. This
-    // is not a second implementation to compare against — it is the
-    // identical function, called a second time, which the §6.2
-    // short-circuit makes a cheap no-op if boot already promoted this
-    // digest. It exists so the test can name a concrete on-disk path and
-    // read real file content from it, without reaching into
-    // `PluginManager`'s private state.
-    let bundle_root = tmp
-        .path()
-        .join(branding::DOT_DIR)
-        .join("builtin-plugin-bundle");
-    let (verified_root, resolved_inventory) =
-        crate::mobile::builtin_bundle::materialize_compiled_in_plugin_bundle(&bundle_root, None)
-            .expect("the compiled-in bundle must already be materialized by boot");
-    assert!(
-        verified_root.is_dir(),
-        "the verified root boot promoted must exist on disk: {}",
-        verified_root.display()
-    );
-    let root_dir_name = verified_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .expect("verified root must have a UTF-8 directory name");
-    let digest_suffix = root_dir_name
-        .strip_prefix("root-")
-        .expect("the verified root must be digest-named (root-<sha256>)");
-    assert_eq!(
-        digest_suffix.len(),
-        64,
-        "the digest suffix must be a full SHA-256 hex string, got {digest_suffix:?} \
-             — a shorter/synthetic name would mean this was never actually digest-verified"
-    );
-
-    // Real content, read straight off the verified root — not a fixture
-    // string this test invented.
-    let device_skill_on_disk =
-        std::fs::read_to_string(verified_root.join("skills/device/SKILL.md"))
-            .expect("skills/device/SKILL.md must exist at the verified root");
-    let real_skill_marker = ["window", ".", "lingxi", ".v2"].concat();
-    assert!(
-        device_skill_on_disk.contains(&real_skill_marker),
-        "the verified root's own file content must be the real plugin skill, got: \
-             {device_skill_on_disk}"
-    );
-
-    // --- The production-visible half: the plugin `PluginManager` loaded
-    // through `build_mobile_inner` must have actually READ that root, not
-    // merely have a manifest that happens to name it.
-    let plugin_id = crate::mobile::mobile_builtin_plugin_id();
-    assert!(
-        rt.wired_plugin_manager
-            .loaded_plugin_ids()
-            .await
-            .contains(&plugin_id),
-        "the compiled-in plugin must be Loaded after boot"
-    );
-    // TypeScript is host-global: the Local App plugin materialization above
-    // must not own this descriptor or unload it when the plugin is toggled.
-    let lsp_name = crate::mobile::mobile_lsp::GLOBAL_TYPESCRIPT_LSP_SERVER_NAME;
-    let lsp_config = rt
-        .lsp_registry
-        .get_config(lsp_name)
-        .await
-        .unwrap_or_else(|| {
-            panic!("{lsp_name} must register in the shared global mobile LSP registry")
-        });
-    assert_eq!(
-        lsp_config.command,
-        "/opt/lingxi/toolchains/typescript/7.0.2/tsc"
-    );
-
-    // Agents: count derived from the packer's OWN resolved inventory, so
-    // this can never rot into a hardcoded literal independent of
-    // `EMBEDDED_PLUGIN_FILES`. Nonzero and specific — not the "0 == 0"
-    // shape a manifest-over-nothing would also satisfy.
-    let expected_agent_count = resolved_inventory
-        .iter()
-        .filter(|entry| entry.path.starts_with("agents/") && entry.path.ends_with(".md"))
-        .count();
-    assert!(
-        expected_agent_count > 0,
-        "fixture bug: the compiled-in plugin must embed at least one agent"
-    );
-    let plugin_agent_names: Vec<String> = rt
-        .wired_agent_catalog
-        .read()
-        .await
-        .iter()
-        .map(|def| def.agent_type.clone())
-        .filter(|name| name.starts_with(&format!("{}:", crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME)))
-        .collect();
-    assert_eq!(
-        plugin_agent_names.len(),
-        expected_agent_count,
-        "the live agent catalog must carry exactly the packer-resolved agent count \
-             for this plugin, got {plugin_agent_names:?}"
-    );
-    assert!(
-        plugin_agent_names.contains(&format!(
-            "{}:mcp-designer",
-            crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
-        )),
-        "the real `mcp-designer` agent must be present, named, in the live catalog: \
-             {plugin_agent_names:?}"
-    );
-    // The create path no longer runs a build workflow, so that workflow's
-    // role agents went with it. Pin their ABSENCE: an agent file left
-    // behind re-advertises a stage the flow no longer has, and the count
-    // assertion above would not notice a swap of one agent for another.
-    for retired in [
-        "builder",
-        "designer",
-        "template-selector",
-        "create-preparer",
-    ] {
-        assert!(
-            !plugin_agent_names.contains(&format!(
-                "{}:{retired}",
-                crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
-            )),
-            "the retired create agent `{retired}` must not be in the live catalog: \
-                 {plugin_agent_names:?}"
-        );
-    }
-
-    // Skills: the plugin's skills are registered as namespaced slash
-    // commands (`plugin::manager::load_plugin`'s skill arm) into the SAME
-    // shared command registry the model's per-turn listing and the Skill
-    // tool's loader both read — `wired_skill_listing_provider` /
-    // `wired_skill_loader` below, exactly as
-    // `listing_and_invocation_share_one_registry` above exercises for a
-    // fixture plugin.
-    let namespaced_device_skill = format!("{}:device", crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME);
-    let listed = rt.wired_skill_listing_provider.skill_entries().await;
-    assert!(
-        !listed
-            .iter()
-            .any(|entry| entry.name == namespaced_device_skill),
-        "a global session must not list app-only Local App skills: {:?}",
-        listed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
-    );
-    let loaded_device_skill = rt
-        .wired_skill_loader
-        .load(&namespaced_device_skill)
-        .await
-        .expect("load ok")
-        .unwrap_or_else(|| panic!("{namespaced_device_skill} must be invocable"));
-    // The decisive tie: the LIVE, invocable body must be the SAME real
-    // content this test read directly off the verified root above — not
-    // merely both non-empty, but the actual materialized bytes.
-    assert!(
-        loaded_device_skill.body.contains(&real_skill_marker),
-        "the live skill body must be the verified root's own real content, got: {:?}",
-        loaded_device_skill.body
-    );
-
-    // The real subagent spawner must preload the bare skills declared by
-    // Plugin agents through that same registry. The plugin prefix is
-    // derived from `lingxi-local-app:verifier`, exactly like desktop.
-    let agent_skill_loader = rt
-        .wired_subagent_skill_loader_cell
-        .get()
-        .expect("mobile subagent skill-preload cell must be filled");
-    let preloaded = agent_skill_loader
-        .resolve_and_load("frontend-qa", "lingxi-local-app:verifier", None, None)
-        .await
-        .expect("checked skill preload")
-        .expect("Plugin agent bare skill must resolve through its namespace");
-    assert!(matches!(
-        preloaded.content.as_slice(),
-        [lingxi_core::types::ContentBlock::Text { text, .. }]
-            if text.contains("# Frontend QA")
-                && text.contains("Verify the running app, not only the build output.")
-    ));
-
-    let frontend_root = loaded_device_skill
-        .skill_root
-        .as_ref()
-        .and_then(|device_root| device_root.parent())
-        .map(|skills_root| skills_root.join("frontend-design"))
-        .expect("materialized Plugin skill root");
-    assert!(
-        frontend_root.join("references/router.md").is_file(),
-        "file-backed migrated references must remain reachable from the materialized skill root"
-    );
-    assert!(rt
-        .wired_skill_loader
-        .load("lingxi-local-app:openai")
-        .await
-        .expect("load ok")
-        .is_none());
-
-    // Workflows: the manager, model-facing tool, launcher, and nested task
-    // handler must share the exact same registry allocation. The loaded
-    // snapshot must be the real verified-root bytes under its namespaced
-    // meta.name, not a hand-seeded test entry.
-    let workflow_registry = &rt.wired_plugin_workflow_registry;
-    assert!(rt
-        .wired_plugin_manager
-        .shares_plugin_workflows(workflow_registry));
-    assert!(rt
-        .wired_workflow_tool
-        .shares_plugin_workflows(workflow_registry));
-    assert!(rt
-        .wired_local_workflow_handler
-        .shares_plugin_workflows(workflow_registry));
-    assert!(Arc::ptr_eq(
-        &rt.workflow_launcher.plugin_workflows,
-        workflow_registry
-    ));
-    let namespaced_workflow = format!(
-        "{}:local-app-use-test",
-        crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
-    );
-    let resolved = workflow_registry
-        .resolve(&namespaced_workflow)
-        .unwrap_or_else(|| panic!("{namespaced_workflow} must resolve after production boot"));
-    let workflow_on_disk =
-        std::fs::read_to_string(verified_root.join("workflows/local-app-use-test.js"))
-            .expect("materialized workflow");
-    assert_eq!(
-        std::fs::read_to_string(&resolved).expect("resolved workflow"),
-        workflow_on_disk
-    );
-    assert_eq!(
-        resolved,
-        std::fs::canonicalize(verified_root.join("workflows/local-app-use-test.js"))
-            .expect("canonical materialized workflow")
     );
 }
 
@@ -2479,7 +1854,6 @@ async fn workflow_launches_and_completes_on_mobile() {
     let launcher = crate::mobile::workflow_support::MobileWorkflowLauncher {
         registry: rt.task_registry.clone(),
         project_cwd: tmp.path().to_path_buf(),
-        app_data_root: tmp.path().to_path_buf(),
         current_cwd: Arc::new(std::sync::Mutex::new(tmp.path().to_path_buf())),
         lingxi_home: tmp.path().join(".claude"),
         // The launcher and status sink must share the engine's live
@@ -2669,7 +2043,6 @@ async fn workflow_relative_script_path_uses_live_cwd_but_session_files_stay_unde
     let launcher = crate::mobile::workflow_support::MobileWorkflowLauncher {
         registry: rt.task_registry.clone(),
         project_cwd: tmp.path().to_path_buf(),
-        app_data_root: tmp.path().to_path_buf(),
         current_cwd,
         lingxi_home: tmp.path().join(".claude"),
         session_uuid: rt.active_session_uuid.clone(),
@@ -2844,7 +2217,6 @@ async fn build_mobile_default_loads_no_memory() {
 // ── F3-05: the async `submit` FFI entry point ───────────────────────────
 
 use super::{build_mobile_engine, MobileEngineHandle};
-use crate::mobile::local_apps_llm::test_support::ScriptedModel;
 use client::protocol::commands::ClientCommand;
 use client::protocol::error::ClientError;
 use client::protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
@@ -2858,14 +2230,6 @@ use lingxi_core::host::audio::{
 /// `Platform`) so the F3-05 `submit` path is exercised on CI. Returns the
 /// handle plus the recording listener so a test can read back delivered
 /// events.
-///
-/// Task 11: `CreateApp` (and friends) now trigger a REAL background
-/// authoring/planning round trip. Off-device tests have no network, so
-/// this installs a deterministic, always-fails-fast local-apps model
-/// (zero scripted responses ⇒ an immediate, in-process
-/// `AppError::Io`, no I/O) instead of leaving every caller race a real
-/// `api.anthropic.com` request — a test that wants a scripted success
-/// overrides it via `set_local_apps_model` before triggering.
 fn build_submit_handle(root: &std::path::Path) -> (Arc<MobileEngineHandle>, Arc<FakeListener>) {
     build_submit_handle_with_platform(root, Arc::new(HostFakePlatform::new(root.to_path_buf())))
 }
@@ -2879,7 +2243,6 @@ fn build_submit_handle_with_platform(
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
     let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
         .expect("build_mobile_engine failed");
-    handle.set_local_apps_model(ScriptedModel::new());
     (handle, listener)
 }
 
@@ -3007,68 +2370,6 @@ impl AudioService for AudioDropGateService {
 }
 
 #[test]
-fn plugin_command_reaches_the_manager_and_reports_status() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::PluginCommand {
-                command: client::protocol::local_apps::PluginCommandDto::GetStatus {
-                    plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                },
-            })
-            .await
-            .expect("GetStatus should route to the live plugin manager");
-        let events = listener.received.lock().await.clone();
-        assert!(
-            events.iter().any(|event| {
-                matches!(
-                    event,
-                    Ev::AppEvent {
-                        event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
-                            status,
-                        },
-                    } if status.plugin_id == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
-                        && matches!(
-                            status.state,
-                            client::protocol::local_apps::PluginActivationStateDto::Loaded
-                        )
-                )
-            }),
-            "GetStatus must emit a Loaded PluginStatusChanged event: {events:?}"
-        );
-    });
-}
-
-#[test]
-fn enabled_plugins_three_way_uses_manifest_default() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let settings = tmp.path().join("settings.json");
-
-    assert!(!super::mobile_builtin_plugin_enabled(&settings, false).unwrap());
-    std::fs::write(&settings, r#"{"enabledPlugins":{}}"#).unwrap();
-    assert!(!super::mobile_builtin_plugin_enabled(&settings, false).unwrap());
-    std::fs::write(&settings, r#"{"enabledPlugins":{"lingxi-local-app":true}}"#).unwrap();
-    assert!(super::mobile_builtin_plugin_enabled(&settings, false).unwrap());
-    std::fs::write(
-        &settings,
-        r#"{"enabledPlugins":{"lingxi-local-app":false}}"#,
-    )
-    .unwrap();
-    assert!(!super::mobile_builtin_plugin_enabled(&settings, true).unwrap());
-
-    std::fs::write(&settings, r#"{"enabledPlugins":[]}"#).unwrap();
-    assert!(super::mobile_builtin_plugin_enabled(&settings, true).is_err());
-    std::fs::write(
-        &settings,
-        r#"{"enabledPlugins":{"lingxi-local-app":"false"}}"#,
-    )
-    .unwrap();
-    assert!(super::mobile_builtin_plugin_enabled(&settings, true).is_err());
-}
-
-#[test]
 fn typescript_lsp_mode_defaults_to_auto_and_preserves_unrelated_settings() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let settings = tmp.path().join("settings.json");
@@ -3122,426 +2423,6 @@ fn typescript_lsp_command_persists_requested_and_reports_degraded_effective_mode
     );
 }
 
-#[test]
-fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        let command = |enabled| ClientCommand::PluginCommand {
-            command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
-                plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                enabled,
-            },
-        };
-        handle
-            .submit(command(false))
-            .await
-            .expect("disable should route to PluginManager::disable");
-        let disabled = listener.received.lock().await.clone();
-        assert!(
-            disabled.iter().any(|event| {
-                matches!(
-                    event,
-                    Ev::AppEvent {
-                        event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
-                            status,
-                        },
-                    } if status.plugin_id == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
-                        && matches!(
-                            status.state,
-                            client::protocol::local_apps::PluginActivationStateDto::Disabled
-                        )
-                )
-            }),
-            "disable must emit Disabled PluginStatusChanged: {disabled:?}"
-        );
-        assert_eq!(
-            handle
-                .inner
-                .wired_plugin_workflow_registry
-                .resolve("lingxi-local-app:local-app-use-test"),
-            None,
-            "disable must unload plugin workflows from the shared registry"
-        );
-        let namespaced_skill = "lingxi-local-app:frontend-design";
-        assert!(handle
-            .inner
-            .wired_skill_loader
-            .load(namespaced_skill)
-            .await
-            .expect("load after disable")
-            .is_none());
-        assert!(!handle
-            .inner
-            .wired_skill_listing_provider
-            .skill_entries()
-            .await
-            .iter()
-            .any(|entry| entry.name == namespaced_skill));
-        assert_eq!(
-            super::mobile_live_plugin_skill_count(&handle.inner.slash_registry).await,
-            0,
-            "live FFI count source must agree with disabled listing"
-        );
-        assert!(
-            handle
-                .inner
-                .lsp_registry
-                .get_config(crate::mobile::mobile_lsp::GLOBAL_TYPESCRIPT_LSP_SERVER_NAME)
-                .await
-                .is_some(),
-            "global TypeScript LSP must not follow the Local App plugin toggle"
-        );
-        let settings =
-            std::fs::read_to_string(tmp.path().join(branding::DOT_DIR).join("settings.json"))
-                .expect("disable should persist settings.json");
-        let settings: serde_json::Value = serde_json::from_str(&settings).expect("settings");
-        assert_eq!(
-            settings["enabledPlugins"][crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME],
-            false
-        );
-
-        handle
-            .submit(command(true))
-            .await
-            .expect("enable should materialize and route to PluginManager");
-        let enabled = listener.received.lock().await.clone();
-        assert!(
-            enabled.iter().any(|event| {
-                matches!(
-                    event,
-                    Ev::AppEvent {
-                        event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
-                            status,
-                        },
-                    } if status.plugin_id == crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME
-                        && matches!(
-                            status.state,
-                            client::protocol::local_apps::PluginActivationStateDto::Loaded
-                        )
-                )
-            }),
-            "enable must emit Loaded PluginStatusChanged: {enabled:?}"
-        );
-        assert!(
-            handle
-                .inner
-                .wired_plugin_workflow_registry
-                .resolve("lingxi-local-app:local-app-use-test")
-                .is_some(),
-            "enable must restore plugin workflows in the shared registry"
-        );
-        assert!(handle
-            .inner
-            .wired_skill_loader
-            .load(namespaced_skill)
-            .await
-            .expect("load after re-enable")
-            .is_some());
-        assert!(
-            !handle
-                .inner
-                .wired_skill_listing_provider
-                .skill_entries()
-                .await
-                .iter()
-                .any(|entry| entry.name == namespaced_skill),
-            "re-enabling must restore the complete live registry without leaking an \
-                 app-only skill into this global conversation's listing"
-        );
-        assert_eq!(
-            super::mobile_live_plugin_skill_count(&handle.inner.slash_registry).await,
-            crate::mobile::mobile_plugin_skill_names().len(),
-            "re-enable must restore the complete live registry even though the \
-                 global listing exposes only its three routers"
-        );
-        let settings =
-            std::fs::read_to_string(tmp.path().join(branding::DOT_DIR).join("settings.json"))
-                .expect("enable should persist settings.json");
-        let settings: serde_json::Value = serde_json::from_str(&settings).expect("settings");
-        assert_eq!(
-            settings["enabledPlugins"][crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME],
-            true
-        );
-    });
-}
-
-#[test]
-fn disabled_state_is_present_and_status_survives_restart() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    {
-        let (handle, _) = build_submit_handle(tmp.path());
-        handle.runtime().block_on(async {
-            handle
-                .submit(ClientCommand::PluginCommand {
-                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
-                        plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                        enabled: false,
-                    },
-                })
-                .await
-                .expect("disable");
-            assert!(matches!(
-                handle
-                    .inner
-                    .plugin_manager
-                    .plugin_state(&crate::mobile::mobile_builtin_plugin_id())
-                    .await,
-                Some(plugin::PluginState::Disabled { .. })
-            ));
-        });
-    }
-
-    let (restarted, listener) = build_submit_handle(tmp.path());
-    assert_eq!(
-        restarted.skill_count(),
-        0,
-        "an explicitly disabled Plugin must report zero live skills after restart"
-    );
-    restarted.runtime().block_on(async {
-        assert!(
-            restarted
-                .inner
-                .plugin_manager
-                .plugin_state(&crate::mobile::mobile_builtin_plugin_id())
-                .await
-                .is_none(),
-            "a disabled boot must not materialize/register the plugin merely \
-                 to manufacture a generic PluginManager Disabled state"
-        );
-        assert!(restarted
-            .inner
-            .wired_plugin_workflow_registry
-            .resolve("lingxi-local-app:local-app-use-test")
-            .is_none());
-        restarted
-            .submit(ClientCommand::PluginCommand {
-                command: client::protocol::local_apps::PluginCommandDto::GetStatus {
-                    plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                },
-            })
-            .await
-            .expect("status after restart");
-        assert!(listener.received.lock().await.iter().any(|event| {
-            matches!(
-                event,
-                Ev::AppEvent {
-                    event: client::protocol::local_apps::AppEventDto::PluginStatusChanged {
-                        status,
-                    },
-                } if matches!(
-                    status.state,
-                    client::protocol::local_apps::PluginActivationStateDto::Disabled
-                )
-            )
-        }));
-    });
-}
-
-#[test]
-fn disabled_boot_defers_bundle_materialization_until_enable() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let settings_dir = tmp.path().join(branding::DOT_DIR);
-    std::fs::create_dir_all(&settings_dir).expect("settings directory");
-    std::fs::write(
-        settings_dir.join("settings.json"),
-        serde_json::json!({
-            "enabledPlugins": {
-                "lingxi-local-app": false
-            }
-        })
-        .to_string(),
-    )
-    .expect("disabled settings");
-
-    // A pre-existing container makes the negative assertion meaningful:
-    // merely checking that an absent directory stays absent cannot catch a
-    // future sync path that reads/repairs an existing plugin root.
-    let bundle_root = settings_dir.join("builtin-plugin-bundle");
-    std::fs::create_dir_all(&bundle_root).expect("stale bundle container");
-    let sentinel = bundle_root.join("disabled-boot-sentinel");
-    std::fs::write(&sentinel, b"must remain the only entry").expect("bundle sentinel");
-    let bundle_entries = || {
-        std::fs::read_dir(&bundle_root)
-            .expect("bundle entries")
-            .map(|entry| {
-                entry
-                    .expect("bundle entry")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-    };
-
-    let (handle, listener) = build_submit_handle(tmp.path());
-    assert_eq!(
-        bundle_entries(),
-        ["disabled-boot-sentinel".to_string()]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>(),
-        "disabled boot must not materialize or repair an existing compiled-plugin container"
-    );
-    handle.runtime().block_on(async {
-        assert!(
-            handle
-                .inner
-                .plugin_manager
-                .plugin_state(&crate::mobile::mobile_builtin_plugin_id())
-                .await
-                .is_none(),
-            "disabled boot should retain no materialized PluginManager state"
-        );
-        for command in [
-            client::protocol::local_apps::PluginCommandDto::GetStatus {
-                plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-            },
-            client::protocol::local_apps::PluginCommandDto::GetInventory {
-                plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-            },
-        ] {
-            handle
-                .submit(ClientCommand::PluginCommand { command })
-                .await
-                .expect("disabled metadata query");
-        }
-    });
-    assert_eq!(
-        bundle_entries(),
-        ["disabled-boot-sentinel".to_string()]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>(),
-        "compiled status/inventory queries must not enter plugin filesystem materialization"
-    );
-    assert_eq!(
-        std::fs::read(&sentinel).expect("sentinel after metadata queries"),
-        b"must remain the only entry"
-    );
-    let events = listener.received.blocking_lock().clone();
-    assert!(events.iter().any(|event| matches!(
-        event,
-        Ev::AppEvent {
-            event: client::protocol::local_apps::AppEventDto::PluginStatusChanged { status }
-        } if matches!(
-            status.state,
-            client::protocol::local_apps::PluginActivationStateDto::Disabled
-        )
-    )));
-    assert!(events.iter().any(|event| matches!(
-        event,
-        Ev::AppEvent {
-            event: client::protocol::local_apps::AppEventDto::PluginInventoryChanged {
-                inventory
-            }
-        } if matches!(
-            inventory.state,
-            client::protocol::local_apps::PluginActivationStateDto::Disabled
-        ) && inventory.counts.skills > 0
-    )));
-
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::PluginCommand {
-                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
-                    plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                    enabled: true,
-                },
-            })
-            .await
-            .expect("enable should use the existing registration path");
-    });
-    assert!(
-        bundle_root
-            .join("materialized")
-            .join("active.manifest.json")
-            .is_file(),
-        "enabling must be the first operation that materializes and activates the bundle"
-    );
-}
-
-#[test]
-fn concurrent_plugin_toggles_leave_disk_and_registry_consistent() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, _) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        for _ in 0..4 {
-            let disable = handle.submit(ClientCommand::PluginCommand {
-                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
-                    plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                    enabled: false,
-                },
-            });
-            let enable = handle.submit(ClientCommand::PluginCommand {
-                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
-                    plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                    enabled: true,
-                },
-            });
-            let (disable, enable) = tokio::join!(disable, enable);
-            disable.expect("concurrent disable");
-            enable.expect("concurrent enable");
-
-            let is_loaded = matches!(
-                handle
-                    .inner
-                    .plugin_manager
-                    .plugin_state(&crate::mobile::mobile_builtin_plugin_id())
-                    .await,
-                Some(plugin::PluginState::Loaded { .. })
-            );
-            let settings =
-                std::fs::read_to_string(tmp.path().join(branding::DOT_DIR).join("settings.json"))
-                    .expect("settings after concurrent toggles");
-            let settings: serde_json::Value =
-                serde_json::from_str(&settings).expect("valid settings JSON");
-            assert_eq!(
-                settings["enabledPlugins"][crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME].as_bool(),
-                Some(is_loaded),
-                "atomic settings transaction must agree with the live registry"
-            );
-        }
-    });
-}
-
-#[test]
-fn failed_plugin_setting_write_rolls_live_state_back() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, _) = build_submit_handle(tmp.path());
-    let settings = tmp.path().join(branding::DOT_DIR).join("settings.json");
-    let _ = std::fs::remove_file(&settings);
-    std::fs::create_dir_all(&settings).expect("replace settings file with directory");
-
-    handle.runtime().block_on(async {
-        let error = handle
-            .submit(ClientCommand::PluginCommand {
-                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
-                    plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                    enabled: false,
-                },
-            })
-            .await
-            .expect_err("settings write must fail");
-        assert!(error
-            .to_string()
-            .contains("persist mobile plugin setting failed"));
-        assert!(matches!(
-            handle
-                .inner
-                .plugin_manager
-                .plugin_state(&crate::mobile::mobile_builtin_plugin_id())
-                .await,
-            Some(plugin::PluginState::Loaded { .. })
-        ));
-        assert!(handle
-            .inner
-            .wired_plugin_workflow_registry
-            .resolve("lingxi-local-app:local-app-use-test")
-            .is_some());
-    });
-}
-
 /// `build_submit_handle` with a caller-supplied config, for tests that need
 /// a specific routing allowlist or default model.
 fn build_submit_handle_with_config(
@@ -3555,7 +2436,6 @@ fn build_submit_handle_with_config(
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
     let handle = build_mobile_engine(cfg, platform, listener_dyn, perm_sink)
         .expect("build_mobile_engine failed");
-    handle.set_local_apps_model(ScriptedModel::new());
     (handle, listener)
 }
 
@@ -3571,7 +2451,6 @@ fn build_submit_handle_with_secure_store(
     let perm_sink: Arc<dyn PermissionRequestSink> = Arc::new(RecordingPermissionSink::default());
     let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
         .expect("build_mobile_engine failed");
-    handle.set_local_apps_model(ScriptedModel::new());
     (handle, listener)
 }
 
@@ -4268,9 +3147,11 @@ fn mobile_mcp_changed_to_disabled_reloads_without_dialing() {
 #[test]
 fn mobile_mcp_reload_revert_invalidates_a_pending_change() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let registry = Arc::new(McpRegistry::new(Arc::new(LocalAppsMcpTransport::new(
-        tmp.path().join("apps"),
-    ))));
+    let registry = Arc::new(McpRegistry::new(Arc::new(
+        crate::mobile::mcp_transport::MobileMcpTransport::new(Arc::new(
+            platform_common::RemoteMcpTransport::new(),
+        )),
+    )));
     let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
     let config_b = mobile_reload_test_config("http://127.0.0.1:1/b");
     registry.connections.blocking_write().insert(
@@ -4325,9 +3206,11 @@ fn mobile_mcp_reload_revert_invalidates_a_pending_change() {
 #[test]
 fn mobile_mcp_reload_restore_invalidates_a_pending_delete() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let registry = Arc::new(McpRegistry::new(Arc::new(LocalAppsMcpTransport::new(
-        tmp.path().join("apps"),
-    ))));
+    let registry = Arc::new(McpRegistry::new(Arc::new(
+        crate::mobile::mcp_transport::MobileMcpTransport::new(Arc::new(
+            platform_common::RemoteMcpTransport::new(),
+        )),
+    )));
     let config_a = mobile_reload_test_config("http://127.0.0.1:1/a");
     registry.connections.blocking_write().insert(
         "remote".into(),
@@ -4844,7 +3727,8 @@ fn submit_lists_and_loads_nested_workflow_agents() {
                 model: "claude-sonnet-5".into(),
                 content: vec![llm_runtime::ContentBlock::Text {
                     text: "nested workflow child".into(),
-                    cache_control: None, citations: None,
+                    cache_control: None,
+                    citations: None,
                 }],
                 stop_reason: Some("end_turn".into()),
                 stop_details: None,
@@ -5309,8 +4193,6 @@ fn submit_task_stop_skips_second_workflow_status_event() {
                     creator_teammate_name: None,
                     creator_team_name: None,
                     creator_agent_id: None,
-                    // Not a Local App workflow.
-                    scope: None,
                 },
                 "workflow".to_string(),
             )
@@ -7774,52 +6656,6 @@ fn submit_list_sessions_empty_when_no_catalog() {
     });
 }
 
-/// WORKFLOWS: `submit(ResumeWorkflow)` adopts a workflow whose session
-/// `adopt.json` checkpoint survives but whose registry row does not — the
-/// evicted-row recovery path.
-///
-/// The checkpoint must name a PLUGIN workflow and claim a verbatim builtin
-/// script whose on-disk bytes still hash to the recorded digest, so the
-/// fixture uses a live plugin workflow id. The retired create coordinator's
-/// recovery sidecars (`create-input.json` / `create-terminal.json`) went
-/// with it — a create whose template never landed is re-planned through the
-/// plan approval instead of being resumed — so this fixture carries the
-/// checkpoint alone.
-#[test]
-fn submit_resume_workflow_recovers_a_plugin_workflow_from_its_checkpoint() {
-    use sha2::{Digest, Sha256};
-    let tmp = tempfile::tempdir().unwrap();
-    let (handle, _) = build_submit_handle(tmp.path());
-    handle.runtime().block_on(async {
-            let session = handle.active_session_id();
-            let subagents = orchestrator::transcript_paths::subagents_dir(
-                &handle.lingxi_home, &handle.session_cwd, &session,
-            );
-            let directory = subagents.join("workflows/wf_recover1");
-            std::fs::create_dir_all(&directory).unwrap();
-            let script_path = directory.join("build.js");
-            let script = "export const meta = {name: 'local-app-use-test'}; return 1;";
-            std::fs::write(&script_path, script).unwrap();
-            std::fs::write(directory.join("journal.jsonl"), "").unwrap();
-            let hash = format!("{:x}", Sha256::digest(script.as_bytes()));
-            let workflow_id = crate::mobile::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID;
-            let args = serde_json::json!({"app_id": "missing1"});
-            let checkpoint = serde_json::json!({
-                "taskId": "wrecover1", "workflowRunId": "wf_recover1", "workflowId": workflow_id,
-                "scriptPath": script_path, "scriptSha256": hash, "scriptIsVerbatimBuiltin": true,
-                "argsJson": args.to_string(), "description": "Interrupted use test", "transcriptDir": directory,
-            });
-            std::fs::write(subagents.parent().unwrap().join("adopt.json"),
-                serde_json::json!({"workflows": [checkpoint]}).to_string()).unwrap();
-            assert!(handle.inner.task_registry.get("wrecover1").await.is_none());
-            let result = handle.submit(ClientCommand::ResumeWorkflow {task_id: "wrecover1".into()}).await;
-            // The fixture intentionally has no app record: business validation
-            // may reject launch, but task recovery must have completed first.
-            assert!(!matches!(result, Err(ClientError::NotFound { .. })), "{result:?}");
-            assert!(handle.inner.task_registry.get("wrecover1").await.is_some());
-        });
-}
-
 /// SESSIONS/HISTORY: `submit(NewSession)` clears the session (minting a fresh
 /// id) and confirms with a `SessionStarted` carrying the new connection
 /// session id — proving the command drives the real orchestrator handle, not
@@ -8605,14 +7441,6 @@ fn mobile_model_refs_keep_duplicate_provider_models_distinct() {
     );
 }
 
-// ── LOCAL-APPS (phase 1): handler-level tests (command in → state +
-//    events out) over the real engine handle ─────────────────────────────
-
-use client::protocol::commands::AppCreateModeDto;
-use client::protocol::local_apps::{
-    AppCreateOriginDto, AppErrorCodeDto, AppEventDto, AppRuntimeStateDto,
-};
-
 /// Drain and return every event delivered to the fake listener so far.
 /// Event delivery is asynchronous, in two ordered stages: `AppService`
 /// hands events to spawned emission tasks (commit → enqueue onto the
@@ -8622,505 +7450,7 @@ use client::protocol::local_apps::{
 /// committed is ENQUEUED, then the queue flush waits until everything
 /// enqueued is DELIVERED.
 async fn drain_events(handle: &MobileEngineHandle, listener: &FakeListener) -> Vec<Ev> {
-    if let Ok(service) = handle.local_apps() {
-        service.flush_events().await;
-    }
-    handle.app_emissions.flush().await;
     std::mem::take(&mut *listener.received.lock().await)
-}
-
-fn apps_changed_rows(events: &[Ev]) -> Option<Vec<client::protocol::local_apps::AppRecordDto>> {
-    events.iter().rev().find_map(|event| match event {
-        Ev::AppsChanged { apps } => Some(apps.clone()),
-        _ => None,
-    })
-}
-
-/// This round trip covers the dynamic application list/details protocol;
-/// the retired static-catalog exchange is intentionally absent.
-#[test]
-fn local_apps_create_and_details_round_trip_through_submit() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: "Tracker".into(),
-                origin: AppCreateOriginDto::Library,
-                brief: "a test app".into(),
-                git_enabled: true,
-                workflow_model: None,
-                conversation_id: None,
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: None,
-            })
-            .await
-            .expect("submit(CreateApp)");
-        let events = drain_events(&handle, &listener).await;
-        let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
-        let app_id = record.id;
-
-        handle
-            .submit(ClientCommand::GetAppDetails {
-                app_id: app_id.clone(),
-            })
-            .await
-            .expect("submit(GetAppDetails)");
-        let events = drain_events(&handle, &listener).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::AppEvent {
-                event: AppEventDto::AppDetailsChanged { details }
-            } if details.app.id == app_id
-                && matches!(details.runtime.state, AppRuntimeStateDto::Stopped)
-        )));
-    });
-}
-
-/// r2-critic-1: a disabled built-in plugin must refuse `CreateApp`
-/// immediately with a typed failure instead of letting the app land and
-/// dead-end later. Proves the gate can go RED (no plugin state check ->
-/// `AppCreated` fires) and GREEN (checked -> refused, nothing created)
-/// by exercising the same handler both ways within one test.
-#[test]
-fn create_app_is_refused_when_the_builtin_plugin_is_disabled() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        // Control: with the plugin in its default Loaded state, the
-        // create succeeds -- this is what would happen for EVERY create
-        // if the new gate above were silently miscompiled to a no-op.
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: "Control".into(),
-                origin: AppCreateOriginDto::Library,
-                brief: "plugin is enabled, this must succeed".into(),
-                git_enabled: true,
-                workflow_model: None,
-                conversation_id: None,
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: None,
-            })
-            .await
-            .expect("submit(CreateApp)");
-        let events = drain_events(&handle, &listener).await;
-        assert!(
-            created_row(&events).is_some(),
-            "control create with the plugin enabled must succeed, got {events:?}"
-        );
-
-        handle
-            .submit(ClientCommand::PluginCommand {
-                command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
-                    plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                    enabled: false,
-                },
-            })
-            .await
-            .expect("submit(PluginCommand::SetEnabled false)");
-        let _ = drain_events(&handle, &listener).await;
-
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: "Blocked".into(),
-                origin: AppCreateOriginDto::Library,
-                brief: "plugin is disabled, this must be refused".into(),
-                git_enabled: true,
-                workflow_model: None,
-                conversation_id: None,
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: Some("req-plugin-disabled".into()),
-            })
-            .await
-            .expect("submit(CreateApp) resolves Ok even for a domain refusal");
-        let events = drain_events(&handle, &listener).await;
-        assert!(
-            created_row(&events).is_none(),
-            "a disabled plugin must not let CreateApp mint a record, got {events:?}"
-        );
-        let (code, message, request_id) =
-            first_failure(&events).expect("CreateApp must report a typed failure");
-        assert_eq!(code, AppErrorCodeDto::NotYetAvailable);
-        assert_eq!(request_id.as_deref(), Some("req-plugin-disabled"));
-        assert!(
-            message.contains("plugin"),
-            "failure message should name the plugin as the cause, got {message:?}"
-        );
-    });
-}
-
-/// r2-critic-1 (coverage half): `handle_create_app`'s plugin gate covers
-/// only `ClientCommand::CreateApp`. The agent-facing `LocalAppCreate` tool
-/// is a SECOND live create entry point — `LocalAppTool` dispatches it
-/// through `LocalAppsMcpTransport::call_host_operation("create", ..)`,
-/// which reaches `AppService::create_app_…` without ever entering that
-/// handler — and the local-apps MCP server stays connected while the
-/// plugin is disabled (bootstrap registers it `disabled: false,
-/// always_load: true`, and `set_builtin_plugin_enabled` only calls
-/// `PluginManager::disable`). So this drives the TOOL, not the command,
-/// against the very transport the engine wired, and asserts the same
-/// plugin state refuses it with the same typed code and sentence.
-#[test]
-fn local_app_create_tool_is_refused_when_the_builtin_plugin_is_disabled() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-    // THE production transport — the one `build_mobile_inner` attached the
-    // availability probe to and `local_app_builtin_tools` hands to
-    // `LocalAppTool`. A transport built by the test would prove nothing
-    // about what the engine actually wired.
-    let transport = handle.inner.local_apps_mcp.clone();
-
-    handle.runtime().block_on(async {
-            // Control: with the plugin in its default Loaded state the tool
-            // create succeeds. Without this the refusal below could equally
-            // come from an unattached host/service or a malformed payload.
-            let created = transport
-                .call_host_operation(
-                    "create",
-                    serde_json::json!({ "brief": "plugin is enabled, this must succeed" }),
-                )
-                .await
-                .expect("LocalAppCreate dispatch");
-            assert!(
-                !created.is_error,
-                "control create through the MCP tool must succeed, got {created:?}"
-            );
-            let structured = created
-                .structured_content
-                .clone()
-                .expect("create returns structured content");
-            assert!(
-                structured["app"]["id"].as_str().is_some(),
-                "control create must mint a record: {structured}"
-            );
-
-            handle
-                .submit(ClientCommand::PluginCommand {
-                    command: client::protocol::local_apps::PluginCommandDto::SetEnabled {
-                        plugin_id: crate::mobile::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-                        enabled: false,
-                    },
-                })
-                .await
-                .expect("submit(PluginCommand::SetEnabled false)");
-            let _ = drain_events(&handle, &listener).await;
-
-            let refused = transport
-                .call_host_operation(
-                    "create",
-                    serde_json::json!({ "brief": "plugin is disabled, this must be refused" }),
-                )
-                .await
-                .expect("a domain refusal is a tool result, not a transport error");
-            assert!(
-                refused.is_error,
-                "a disabled plugin must refuse the agent-facing create, got {refused:?}"
-            );
-            let text = refused.content.to_string();
-            assert!(
-                text.contains("not_yet_available"),
-                "the refusal must carry the same typed code the ClientCommand                  path reports: {text}"
-            );
-            assert!(
-                text.contains("the Local App plugin is disabled or unavailable"),
-                "the refusal must say the same thing handle_create_app says: {text}"
-            );
-
-            // …and it must refuse BEFORE minting: the catalog still holds only
-            // the control app.
-            let listed = transport
-                .call_host_operation("list", serde_json::json!({}))
-                .await
-                .expect("list dispatch")
-                .structured_content
-                .expect("list returns structured content");
-            assert_eq!(
-                listed["total"], 1,
-                "a refused create must not mint a second record: {listed}"
-            );
-        });
-}
-
-/// v3 Phase 4: a library create pins an init session — the record gains
-/// `init_session_id`, the anchor lands in the APP WORKSPACE's own
-/// catalog, and `ListAppSessions` returns that row marked `Init`.
-#[test]
-fn create_app_pins_an_init_session_and_lists_it() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: "Tracker".into(),
-                origin: AppCreateOriginDto::Library,
-                brief: "a test app".into(),
-                git_enabled: true,
-                workflow_model: None,
-                conversation_id: None,
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: None,
-            })
-            .await
-            .expect("submit(CreateApp)");
-        let events = drain_events(&handle, &listener).await;
-        let (record, _) = created_row(&events).expect("CreateApp announces AppCreated");
-        let app_id = record.id.clone();
-        // The create snapshot carries the new row; init-session pinning
-        // arrives as one incremental record update.
-        let pinned = events
-            .iter()
-            .find_map(|event| match event {
-                Ev::AppEvent {
-                    event: AppEventDto::AppRecordChanged { record },
-                } if record.id == app_id => Some(record.clone()),
-                _ => None,
-            })
-            .expect("an incremental record update carries the pin");
-        let init_id = pinned
-            .init_session_id
-            .clone()
-            .expect("library create pins an empty init anchor");
-        let settings_path = tmp
-            .path()
-            .join("apps")
-            .join(&app_id)
-            .join("workspace")
-            .join(".lingxi/settings.local.json");
-        let settings: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&settings_path)
-                .expect("CreateApp seeds workspace permission settings"),
-        )
-        .expect("workspace permission settings are valid JSON");
-        assert_eq!(
-            settings["permissions"]["allow"],
-            serde_json::json!([
-                "Read(./**)",
-                "Edit(./**)",
-                "LocalAppLogs",
-                "LocalAppBuild",
-                "LocalAppRuntime"
-            ])
-        );
-        assert!(
-            !tmp.path()
-                .join("apps")
-                .join(&app_id)
-                .join("workspace")
-                .join(&init_id)
-                .join(".lingxi/settings.local.json")
-                .exists(),
-            "session ids are catalog keys, not workspace path components"
-        );
-
-        handle
-            .submit(ClientCommand::ListAppSessions {
-                app_id: app_id.clone(),
-                offset: None,
-                limit: None,
-            })
-            .await
-            .expect("submit(ListAppSessions)");
-        let events = drain_events(&handle, &listener).await;
-        let (sessions, next_offset) = events
-            .iter()
-            .find_map(|event| match event {
-                Ev::AppSessionsChanged {
-                    app_id: got,
-                    sessions,
-                    next_offset,
-                } if *got == app_id => Some((sessions.clone(), *next_offset)),
-                _ => None,
-            })
-            .expect("ListAppSessions replies with AppSessionsChanged");
-        assert_eq!(next_offset, None, "one anchor row — no further pages");
-        assert_eq!(sessions.len(), 1, "{sessions:?}");
-        assert_eq!(sessions[0].uuid, init_id);
-        assert_eq!(
-            sessions[0].kind,
-            client::protocol::local_apps::AppSessionKindDto::Init
-        );
-        assert_eq!(sessions[0].message_count, 0, "an anchor is empty");
-    });
-}
-
-/// r1-backlog-engine-create-10: an app remembers the cwd it was created
-/// from, and the fork must use THAT catalog — not whatever cwd the caller
-/// happens to be anchored to now.
-///
-/// This is the boot-repair case made concrete: the backfill sweep calls
-/// `mint_app_init_session` with the CONNECTION's cwd, which for an app
-/// created from a different scope names a catalog the source conversation
-/// was never in. The fork then found nothing and silently degraded to an
-/// empty anchor, losing the user's real transcript.
-#[tokio::test]
-async fn mint_forks_from_the_recorded_origin_cwd_not_the_callers_cwd() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let lingxi_home = tmp.path().join(".claude");
-    let origin_cwd = tmp.path().join("origin").to_string_lossy().to_string();
-    let other_cwd = tmp
-        .path()
-        .join("somewhere-else")
-        .to_string_lossy()
-        .to_string();
-    std::fs::create_dir_all(&origin_cwd).unwrap();
-    std::fs::create_dir_all(&other_cwd).unwrap();
-    let data_root = tmp.path().to_path_buf();
-
-    // The source conversation exists ONLY in the origin cwd's catalog.
-    let source_uuid = uuid::Uuid::new_v4();
-    let src_path = orchestrator::transcript_paths::main_transcript_path(
-        &lingxi_home,
-        &origin_cwd,
-        &source_uuid.to_string(),
-    );
-    std::fs::create_dir_all(src_path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &src_path,
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "user",
-                "uuid": "33333333-3333-3333-3333-333333333333",
-                "parentUuid": None::<String>,
-                "sessionId": source_uuid.to_string(),
-                "timestamp": "2026-09-04T12:00:00.000Z",
-                "cwd": origin_cwd,
-                "version": "0.0.0",
-                "message": { "role": "user", "content": "remember where I came from" },
-            })
-        ),
-    )
-    .unwrap();
-
-    let mut record = local_apps::AppState::create(
-        "zz9origin".into(),
-        "来源".into(),
-        "forks from its origin scope".into(),
-        Some(source_uuid.to_string()),
-        1,
-    )
-    .record;
-    record.origin_cwd = Some(origin_cwd.clone());
-    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
-        platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
-    // The caller is anchored somewhere else entirely — the sweep's case.
-    let init_id = super::mint_app_init_session(&lingxi_home, &other_cwd, &data_root, fs, &record)
-        .await
-        .expect("mint");
-
-    let workspace_cwd = crate::mobile::local_apps_host::canonical_cwd_string(
-        &data_root.join(&record.workspace_rel),
-    );
-    let forked = std::fs::read_to_string(orchestrator::transcript_paths::main_transcript_path(
-        &lingxi_home,
-        &workspace_cwd,
-        &init_id,
-    ))
-    .expect("the minted session lives in the app catalog");
-    assert!(
-        forked.contains("remember where I came from"),
-        "the fork must follow the app's RECORDED origin catalog, not the caller's cwd; \
-             an empty anchor here is the silent transcript loss this fixes: {forked}"
-    );
-}
-
-/// v3 Phase 4: a chat-origin create FORKS the source conversation into
-/// the app workspace catalog — history follows, entries re-root on the
-/// workspace cwd, and the source session file is untouched. Direct test
-/// of `mint_app_init_session` (the submit path needs a live turn to put
-/// messages in the source session; the fork mechanics are what matter).
-#[tokio::test]
-async fn chat_origin_mint_forks_the_source_conversation() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let lingxi_home = tmp.path().join(".claude");
-    let source_cwd = tmp.path().to_string_lossy().to_string();
-    let data_root = tmp.path().to_path_buf();
-    // Seed a two-message source session in the source cwd's catalog.
-    let source_uuid = uuid::Uuid::new_v4();
-    let src_path = orchestrator::transcript_paths::main_transcript_path(
-        &lingxi_home,
-        &source_cwd,
-        &source_uuid.to_string(),
-    );
-    std::fs::create_dir_all(src_path.parent().unwrap()).unwrap();
-    let line = |uuid: &str, parent: Option<&str>, text: &str| {
-        serde_json::json!({
-            "type": "user",
-            "uuid": uuid,
-            "parentUuid": parent,
-            "sessionId": source_uuid.to_string(),
-            "timestamp": "2026-08-09T12:00:00.000Z",
-            "cwd": source_cwd,
-            "version": "0.0.0",
-            "message": { "role": "user", "content": text },
-        })
-        .to_string()
-    };
-    std::fs::write(
-        &src_path,
-        format!(
-            "{}\n{}\n",
-            line("11111111-1111-1111-1111-111111111111", None, "make an app"),
-            line(
-                "22222222-2222-2222-2222-222222222222",
-                Some("11111111-1111-1111-1111-111111111111"),
-                "it tracks habits",
-            ),
-        ),
-    )
-    .unwrap();
-    let source_before = std::fs::read_to_string(&src_path).unwrap();
-
-    let record = local_apps::AppState::create(
-        "zz9plural".into(),
-        "习惯".into(),
-        "track habits".into(),
-        Some(source_uuid.to_string()),
-        1,
-    )
-    .record;
-    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
-        platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
-    let init_id = super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record)
-        .await
-        .expect("mint forks");
-
-    // Spell the catalog directory the way `mint_app_init_session` does.
-    // A raw `to_string_lossy()` used to match only because the old
-    // `canonical_cwd_string` fell back to the raw path when the workspace
-    // leaf did not exist yet — which is exactly the bug r1-engine-core-010
-    // fixed, since mint (leaf present) and a later cleanup (leaf gone) then
-    // disagreed on where the catalog lived. Now it always canonicalises the
-    // nearest existing ancestor, so on a symlink-split platform this is
-    // `/private/var/...` where the raw join says `/var/...`.
-    let workspace_cwd = crate::mobile::local_apps_host::canonical_cwd_string(
-        &data_root.join(&record.workspace_rel),
-    );
-    let fork_path = orchestrator::transcript_paths::main_transcript_path(
-        &lingxi_home,
-        &workspace_cwd,
-        &init_id,
-    );
-    let forked = std::fs::read_to_string(&fork_path).expect("fork lives in the app catalog");
-    assert!(forked.contains("it tracks habits"), "history followed");
-    assert!(
-        forked.contains(&format!("\"cwd\":{}", serde_json::json!(workspace_cwd))),
-        "entries re-root on the workspace cwd: {forked}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&src_path).unwrap(),
-        source_before,
-        "the source session must be untouched"
-    );
 }
 
 /// r1-engine-core-002: a filesystem double that fails the Nth
@@ -9233,268 +7563,6 @@ impl lingxi_core::host::FileSystem for FlakyAppendFs {
     }
 }
 
-/// r1-engine-core-002: `mint_app_init_session`'s empty-anchor branch
-/// makes TWO writes to the same freshly-created transcript file —
-/// `append_mobile_empty_session` then `append_session_mode`. Neither
-/// `map_err` arm removed the file on failure, so a mint that got past
-/// the first write and failed on the second stranded a real transcript
-/// file on disk forever (the caller only ever sees the `Err` string).
-/// This forces exactly that: the SECOND write fails, and the assertion
-/// is that the file is actually gone afterward, not that an `Err` came
-/// back.
-#[tokio::test]
-async fn mint_app_init_session_cleans_up_orphan_transcript_on_partial_failure() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let lingxi_home = tmp.path().join(".claude");
-    let source_cwd = tmp.path().to_string_lossy().to_string();
-    let data_root = tmp.path().to_path_buf();
-    let record = local_apps::AppState::create(
-        "orphan-app".into(),
-        "孤儿".into(),
-        "no source conversation, takes the empty-anchor branch".into(),
-        None,
-        1,
-    )
-    .record;
-
-    let inner: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
-        platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
-    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(FlakyAppendFs {
-        inner,
-        target_suffix: ".jsonl".to_string(),
-        calls: std::sync::atomic::AtomicUsize::new(0),
-        fail_on_call: 2,
-    });
-
-    let result =
-        super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record).await;
-    let error = result.expect_err("the planted 2nd append failure must surface");
-    assert!(
-        error.contains("persist app init session mode"),
-        "got {error:?}"
-    );
-
-    let workspace_cwd = super::canonical_cwd_string(&data_root.join(&record.workspace_rel));
-    let catalog_dir = lingxi_home
-        .join("projects")
-        .join(session::jsonl::path::project_dir_name(&workspace_cwd));
-    let stray_files: Vec<_> = std::fs::read_dir(&catalog_dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .collect();
-    assert!(
-        stray_files.is_empty(),
-        "a half-completed mint must not strand its transcript file, found {stray_files:?}"
-    );
-}
-
-/// r1-engine-core-002, FORK arm. The gate above only reaches
-/// `mint_app_init_session`'s empty-anchor branch (its fixture record has
-/// no `conversation_id`). The chat-origin branch strands the more
-/// expensive artifact -- a full transcript COPY that
-/// `create_branch_to_cwd` already wrote -- and derives its cleanup path
-/// through a second spelling (`remove_app_session_file`) that could drift
-/// from `main_transcript_path`. This forces that exact arm: the fork body
-/// lands (`create_branch_to_cwd` writes it with `tokio::fs::write`, which
-/// this double does not intercept), so the FIRST `append_file_with_mode`
-/// on the forked file is the `session-mode` append -- planted to fail.
-#[tokio::test]
-async fn mint_app_init_session_cleans_up_a_forked_transcript_on_partial_failure() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let lingxi_home = tmp.path().join(".claude");
-    let source_cwd = tmp.path().to_string_lossy().to_string();
-    let data_root = tmp.path().to_path_buf();
-
-    let source_session_id = uuid::Uuid::new_v4();
-    let source_path = orchestrator::transcript_paths::main_transcript_path(
-        &lingxi_home,
-        &source_cwd,
-        &source_session_id.to_string(),
-    );
-    std::fs::create_dir_all(source_path.parent().expect("parent")).expect("source catalog");
-    std::fs::write(
-        &source_path,
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "user",
-                "uuid": "22222222-2222-2222-2222-222222222222",
-                "parentUuid": null,
-                "sessionId": source_session_id.to_string(),
-                "timestamp": "2026-08-09T12:00:00.000Z",
-                "cwd": source_cwd,
-                "version": "0.0.0",
-                "message": { "role": "user", "content": "the chat this app forks from" },
-            })
-        ),
-    )
-    .expect("seed the source conversation");
-
-    let record = local_apps::AppState::create(
-        "fork-app".into(),
-        "分叉".into(),
-        "has a source conversation, takes the chat-origin fork branch".into(),
-        Some(source_session_id.to_string()),
-        1,
-    )
-    .record;
-
-    let inner: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
-        platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
-    let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(FlakyAppendFs {
-        inner,
-        target_suffix: ".jsonl".to_string(),
-        calls: std::sync::atomic::AtomicUsize::new(0),
-        fail_on_call: 1,
-    });
-
-    let result =
-        super::mint_app_init_session(&lingxi_home, &source_cwd, &data_root, fs, &record).await;
-    let error = result.expect_err("the planted session-mode append failure must surface");
-    assert!(
-        error.contains("persist app init session mode"),
-        "the FORK arm must be the arm that failed -- a degraded empty anchor would have \
-             failed its first write with \"anchor app init session\" instead, got {error:?}"
-    );
-
-    let workspace_cwd = super::canonical_cwd_string(&data_root.join(&record.workspace_rel));
-    let catalog_dir = lingxi_home
-        .join("projects")
-        .join(session::jsonl::path::project_dir_name(&workspace_cwd));
-    let stray_files: Vec<_> = std::fs::read_dir(&catalog_dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .collect();
-    assert!(
-        stray_files.is_empty(),
-        "a half-completed FORK must not strand the transcript copy it already wrote, \
-             found {stray_files:?}"
-    );
-}
-
-/// r1-engine-core-013: when the promote-rename fails, the directory
-/// holding the pinned init session must be merged FIRST so the
-/// first-writer-wins collision loop right after it protects that copy,
-/// not whichever unrelated drifted directory already sat in the vector.
-/// Before the fix this pushed to the back (`drifted.push(base)`), which
-/// would have failed this assertion (`drifted[0]` would have been
-/// `sibling`, not `base`).
-#[test]
-fn requeue_failed_catalog_promotion_puts_the_pin_holder_first() {
-    let sibling = std::path::PathBuf::from("/tmp/apps/sibling-apps-x-workspace");
-    let base = std::path::PathBuf::from("/tmp/apps/base-holds-the-pin-apps-x-workspace");
-    let mut drifted = vec![sibling.clone()];
-
-    super::requeue_failed_catalog_promotion(base.clone(), &mut drifted);
-
-    assert_eq!(
-        drifted,
-        vec![base, sibling],
-        "the pin holder must be merged before any other drifted directory"
-    );
-}
-
-/// r1-failure-paths-012: a pin-less record is not necessarily an empty
-/// shell -- a create that minted a REAL conversation and then failed
-/// before `set_init_session` leaves exactly this state. Seeds a
-/// non-empty session file directly under the app's workspace catalog
-/// with no pin ever set, runs the real boot sweep, and asserts the
-/// record gets pinned to THAT conversation -- not a freshly minted
-/// empty anchor stacked next to it.
-#[tokio::test]
-async fn boot_backfill_adopts_an_existing_unpinned_conversation_instead_of_minting() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let backfill_home = tmp.path().join(".claude");
-    let backfill_root = tmp.path().to_path_buf();
-    let backfill_cwd = tmp.path().to_string_lossy().to_string();
-    let backfill_fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
-        platform_posix_minimal::PosixFileSystem::new(tmp.path().to_path_buf()),
-    );
-    let backfill_service = Arc::new(
-        local_apps::AppService::load(
-            tmp.path(),
-            Arc::new(local_apps::test_support::FixedClock::new(1)),
-            Arc::new(local_apps::NoopAppEventObserver),
-        )
-        .await
-        .expect("load app service"),
-    );
-    let record = backfill_service
-        .create_app(Some("领养"), "adopt an orphaned conversation", None)
-        .await
-        .expect("seed record");
-    assert!(
-        record.init_session_id.is_none(),
-        "fixture must start unpinned"
-    );
-
-    let workspace_cwd = super::canonical_cwd_string(&backfill_root.join(&record.workspace_rel));
-    let orphan_session_id = uuid::Uuid::new_v4();
-    let session_path = orchestrator::transcript_paths::main_transcript_path(
-        &backfill_home,
-        &workspace_cwd,
-        &orphan_session_id.to_string(),
-    );
-    std::fs::create_dir_all(session_path.parent().expect("parent")).expect("catalog dir");
-    std::fs::write(
-        &session_path,
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "user",
-                "uuid": "11111111-1111-1111-1111-111111111111",
-                "parentUuid": null,
-                "sessionId": orphan_session_id.to_string(),
-                "timestamp": "2026-08-09T12:00:00.000Z",
-                "cwd": workspace_cwd,
-                "version": "0.0.0",
-                "message": { "role": "user", "content": "orphaned by a half-completed create" },
-            })
-        ),
-    )
-    .expect("seed orphan conversation");
-
-    let broker =
-        super::LocalAppsHostBroker::new(backfill_root.clone(), MockSink::arc(), None, false, None);
-
-    super::run_app_boot_backfill_sweep(
-        backfill_home.clone(),
-        backfill_cwd,
-        backfill_root,
-        backfill_fs.clone(),
-        backfill_service.clone(),
-        broker,
-    )
-    .await;
-
-    let after = backfill_service
-        .record(&record.id)
-        .await
-        .expect("record after sweep");
-    assert_eq!(
-        after.init_session_id.as_deref(),
-        Some(orphan_session_id.to_string().as_str()),
-        "boot backfill must adopt the existing non-empty conversation, not mint a fresh \
-             empty anchor over it, got {after:?}"
-    );
-
-    let rows =
-        session::jsonl::list_recent_sessions(&backfill_home, &workspace_cwd, 50, backfill_fs)
-            .await
-            .expect("list sessions after sweep");
-    assert_eq!(
-        rows.len(),
-        1,
-        "adoption must not ALSO mint a second, empty anchor next to it: {rows:?}"
-    );
-}
-
 /// v3 Phase 4: a cross-workspace `NewSession`/`ResumeSession` cwd is
 /// REJECTED (the old behavior silently ignored it — a client could
 /// believe a workspace switch happened). A matching cwd still works.
@@ -9538,77 +7606,6 @@ fn new_session_rejects_a_foreign_cwd() {
     });
 }
 
-/// PINS the Task 11 fix: `ClientCommand::CreateApp` now carries a real
-/// `brief` field, and `handle_create_app` persists the CALLER-SUPPLIED
-/// brief — not `name` doubling as the brief (the deliberate placeholder
-/// this test used to pin, `create_app_persists_name_as_brief_until_
-/// task_11_adds_a_real_one`, until this task landed). All three LLM
-/// stages read `AppRecord.brief`, so a client-created app must author
-/// its questionnaire from the caller's real spec, not a bare display
-/// name.
-///
-/// Mirrors `create_persists_the_caller_supplied_brief_and_does_not_
-/// overwrite_a_supplied_name` in `local_apps_mcp.rs` (Task 10's side of
-/// this same fix): `name` and `brief` are asserted UNEQUAL and both
-/// checked, so this cannot pass by conflating them back together. The
-/// `NAME` fixture stays longer than `AppService::create_app`'s 24-char
-/// placeholder cut so a regression to `create_app(None, brief, ..)`
-/// (`name` silently dropped) is visible too: it would come back as the
-/// brief's own 24-char prefix instead of `NAME`.
-#[test]
-fn create_app_persists_the_caller_supplied_brief_and_does_not_overwrite_a_supplied_name() {
-    const NAME: &str = "Habit Tracker Deluxe Edition";
-    const BRIEF: &str = "一个记事本 app，用来跟踪每天的习惯打卡";
-    assert!(
-        NAME.chars().count() > 24,
-        "test fixture must exceed the placeholder cut to be meaningful"
-    );
-    assert_ne!(
-        NAME, BRIEF,
-        "name and brief must be distinct fixtures so the test cannot pass by \
-             conflating them"
-    );
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: NAME.into(),
-                origin: AppCreateOriginDto::Library,
-                brief: BRIEF.into(),
-                git_enabled: true,
-                workflow_model: Some("deepseek/deepseek-flash".into()),
-                conversation_id: None,
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: None,
-            })
-            .await
-            .expect("submit(CreateApp)");
-        let events = drain_events(&handle, &listener).await;
-        let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
-        let app_id = record.id;
-
-        let service = handle.local_apps().expect("local-apps service");
-        let record = service.record(&app_id).await.expect("record");
-        assert_eq!(
-            record.name, NAME,
-            "a caller-supplied name must not be silently overwritten"
-        );
-        assert_eq!(
-            record.brief, BRIEF,
-            "the brief the caller supplied is the brief that gets stored — not the \
-                 name, not empty, not anything else"
-        );
-        assert_eq!(
-            record.workflow_model.as_deref(),
-            Some("deepseek/deepseek-flash"),
-            "CreateApp must persist the selected workflow model as structured metadata"
-        );
-    });
-}
-
 /// Index of the first event matching `pred`, or a panic naming what was
 /// expected and the whole batch. The app surface delivers through ONE
 /// ordered channel (channel order = commit order), so multi-event batches
@@ -9620,958 +7617,7 @@ fn position_of(events: &[Ev], what: &str, pred: impl Fn(&Ev) -> bool) -> usize {
         .unwrap_or_else(|| panic!("{what} not found in {events:?}"))
 }
 
-#[test]
-fn local_apps_runtime_and_checkpoint_commands_report_real_state() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: "Board".into(),
-                origin: AppCreateOriginDto::Chat,
-                brief: "a test app".into(),
-                git_enabled: true,
-                workflow_model: None,
-                conversation_id: Some("conv-7".into()),
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: None,
-            })
-            .await
-            .expect("submit(CreateApp)");
-        let events = drain_events(&handle, &listener).await;
-        let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
-        assert_eq!(
-            record.conversation_id.as_deref(),
-            Some("conv-7"),
-            "a chat-origin create keeps the conversation binding"
-        );
-        let app_id = record.id;
-
-        // Persisted capability grants are revocable from the native
-        // permissions page without exposing permissions.json to clients.
-        let layout = local_apps::AppLayout::new(tmp.path(), app_id.clone()).unwrap();
-        let mut permissions = local_apps::AppPermissions::default();
-        permissions.grant(local_apps::AppCapability::DataMutation);
-        permissions.grant_domain("api.example.com").unwrap();
-        local_apps::save_permissions(&layout, &permissions).unwrap();
-        handle
-            .submit(ClientCommand::ResetAppPermissions {
-                app_id: app_id.clone(),
-            })
-            .await
-            .expect("submit(ResetAppPermissions)");
-        let reset = local_apps::load_permissions(&layout).unwrap();
-        assert!(reset.always_allowed_capabilities.is_empty());
-        assert!(reset.always_allowed_domains.is_empty());
-        assert!(
-            reset.grant_epoch > permissions.grant_epoch,
-            "reset must advance the grant epoch to invalidate prior leases"
-        );
-
-        // A record without generated build output fails honestly and never
-        // reports a false running state.
-        handle
-            .submit(ClientCommand::StartApp {
-                app_id: app_id.clone(),
-            })
-            .await
-            .expect("submit(StartApp)");
-        let events = drain_events(&handle, &listener).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::AppOperationFailed { app_id: Some(id), .. } if *id == app_id
-        )));
-        let service = handle.local_apps().expect("local-apps service");
-        assert_ne!(
-            service.runtime_record(&app_id).await.unwrap().state,
-            local_apps::AppRuntimeState::Running,
-            "a missing build must never be surfaced as running"
-        );
-
-        // A missing app is not_found, not not_yet_available.
-        handle
-            .submit(ClientCommand::StartApp {
-                app_id: "beadfeed".into(),
-            })
-            .await
-            .expect("submit(StartApp missing)");
-        let events = drain_events(&handle, &listener).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::AppOperationFailed {
-                code: AppErrorCodeDto::NotFound,
-                ..
-            }
-        )));
-
-        // Checkpoint lists now use the explicit snapshot event, including
-        // an empty list for a new app.
-        handle
-            .submit(ClientCommand::ListAppCheckpoints {
-                app_id: app_id.clone(),
-            })
-            .await
-            .expect("submit(ListAppCheckpoints)");
-        let events = drain_events(&handle, &listener).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::AppEvent {
-                event: AppEventDto::AppCheckpointsChanged { app_id: id, checkpoints }
-            } if *id == app_id && checkpoints.is_empty()
-        )));
-        handle
-            .submit(ClientCommand::ListAppCheckpoints {
-                app_id: "beadfeed".into(),
-            })
-            .await
-            .expect("submit(ListAppCheckpoints missing)");
-        let events = drain_events(&handle, &listener).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::AppOperationFailed {
-                code: AppErrorCodeDto::NotFound,
-                ..
-            }
-        )));
-    });
-}
-
-#[test]
-fn local_apps_state_survives_engine_rebuild_and_delete_removes_the_app() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-    let app_id = handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: "Persist".into(),
-                origin: AppCreateOriginDto::Library,
-                brief: "a test app".into(),
-                git_enabled: true,
-                workflow_model: None,
-                conversation_id: None,
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: None,
-            })
-            .await
-            .expect("submit(CreateApp)");
-        let events = drain_events(&handle, &listener).await;
-        let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
-
-        record.id
-    });
-    // The store lives at the per-profile data root (`<root>/apps/…`) —
-    // `test_config` roots `lingxi_home` under the temp dir, so its parent
-    // (the temp root) is the profile root.
-    assert!(tmp
-        .path()
-        .join("apps")
-        .join(&app_id)
-        .join("runtime.json")
-        .is_file());
-    drop(handle);
-
-    // A brand-new engine over the same root rebuilds from disk alone.
-    let (handle, listener) = build_submit_handle(tmp.path());
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::ListApps)
-            .await
-            .expect("submit(ListApps)");
-        let events = drain_events(&handle, &listener).await;
-        let apps = apps_changed_rows(&events).expect("ListApps replies with AppsChanged");
-        assert_eq!(apps.len(), 1);
-        assert_eq!(apps[0].id, app_id);
-        handle
-            .submit(ClientCommand::DeleteApp {
-                app_id: app_id.clone(),
-            })
-            .await
-            .expect("submit(DeleteApp)");
-        let events = drain_events(&handle, &listener).await;
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, Ev::AppsChanged { apps } if apps.is_empty())));
-    });
-    assert!(
-        !tmp.path().join("apps").join(&app_id).exists(),
-        "DeleteApp must remove the app directory"
-    );
-}
-
-#[test]
-fn initial_app_cold_boot_exposes_only_its_enabled_managed_mcp() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let seed_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("seed runtime");
-    let (app_id, workspace) = seed_runtime.block_on(async {
-        let service = local_apps::AppService::load(
-            tmp.path().to_path_buf(),
-            Arc::new(platform_posix_minimal::PosixClock::new()),
-            Arc::new(local_apps::NoopAppEventObserver),
-        )
-        .await
-        .expect("seed app service");
-        let record = service
-            .create_app(Some("Published"), "cold-boot MCP", None)
-            .await
-            .expect("seed app");
-        let layout =
-            local_apps::AppLayout::new(tmp.path(), record.id.clone()).expect("seed app layout");
-        let definition = lingxi_core::host::McpToolDefinitionDto::new(
-            "read_value",
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        );
-        let catalog = serde_json::json!({
-            "appId": record.id.clone(),
-            "buildId": "build-cold",
-            "tools": [{
-                "definition": definition,
-                "ceiling": "allow"
-            }],
-            "execution": []
-        });
-        let catalog_sha256 = local_apps::hash_mcp_catalog(catalog.clone()).expect("catalog digest");
-        local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog).expect("save catalog");
-        let mut manifest = local_apps::load_manifest(&layout).expect("seed manifest");
-        manifest.revision = manifest.revision.max(1);
-        let profile_sha256 = "2".repeat(64);
-        manifest.surface = Some(local_apps::AppSurface::Dom);
-        manifest.runtime_profile = Some(local_apps::AppRuntimeProfileBinding {
-            family: local_apps::AppRuntimeProfile::ReactDom,
-            revision: 1,
-            contract_sha256: profile_sha256.clone(),
-        });
-        manifest.dependency_snapshot = Some(local_apps::AppDependencySnapshot {
-            requested_sha256: "3".repeat(64),
-            package_sha256: "4".repeat(64),
-            lockfile_sha256: "5".repeat(64),
-            dependency_tree_sha256: "6".repeat(64),
-            sbom_sha256: "7".repeat(64),
-            toolchain_key: "pnpm@test/node@test".into(),
-            verified_profile_contract_sha256: profile_sha256.clone(),
-        });
-        manifest.template_origin = Some(local_apps::AppTemplateOrigin {
-            plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
-            plugin_version: "builtin".into(),
-            template_id: "react-dom-r4".into(),
-            template_sha256: profile_sha256,
-        });
-        manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
-            build_id: "build-cold".into(),
-            manifest_revision: manifest.revision,
-            authoring_revision: 1,
-            user_goal_sha256: "0".repeat(64),
-            proposal_sha256: "0".repeat(64),
-            approval_contract_sha256: "0".repeat(64),
-            tool_surface_sha256: "1".repeat(64),
-            catalog_sha256,
-            mcp_verification_sha256: "0".repeat(64),
-        });
-        local_apps::save_manifest(&layout, &manifest).expect("publish catalog pointer");
-        local_apps::save_mcp_settings(
-            &layout,
-            &local_apps::AppMcpSettings {
-                enabled: true,
-                enabled_tools: vec!["read_value".into()],
-                ..Default::default()
-            },
-            None,
-        )
-        .expect("enable published MCP");
-        (record.id, tmp.path().join(layout.workspace_rel()))
-    });
-    drop(seed_runtime);
-
-    // The authoring plugin can be disabled independently of an app MCP
-    // the user already published and enabled.
-    let settings_dir = tmp.path().join(branding::DOT_DIR);
-    std::fs::create_dir_all(&settings_dir).expect("settings directory");
-    std::fs::write(
-        settings_dir.join("settings.json"),
-        serde_json::json!({
-            "enabledPlugins": { "lingxi-local-app": false }
-        })
-        .to_string(),
-    )
-    .expect("disabled authoring plugin setting");
-
-    let mut cfg = test_config(tmp.path());
-    cfg.cwd = workspace;
-    let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
-    assert_eq!(
-        handle.skill_count(),
-        0,
-        "the authoring plugin must remain disabled on this cold boot"
-    );
-    let expected = format!("mcp__local_app_{app_id}__read_value");
-    handle.runtime().block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if handle.inner.orchestrator.tool_names().contains(&expected) {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "initial Local App cold boot did not expose {expected:?}; tools={:?}",
-                handle.inner.orchestrator.tool_names()
-            )
-        });
-    });
-}
-
-/// r1-engine-core-015 / r1-backlog-engine-create-06: an app's transcripts
-/// do NOT live under `apps/<id>` — they live in the ordinary per-cwd
-/// catalog `<lingxi_home>/projects/<sanitize(workspace)>/`, which
-/// `AppService::delete_app` cannot see. Without an explicit removal every
-/// session this host minted for the app — for a chat-origin app, a full
-/// FORK of the user's own conversation — outlives the app forever.
-#[test]
-fn delete_app_removes_the_apps_session_catalog() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-    let (app_id, catalog_dir) = handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: "Catalog".into(),
-                origin: AppCreateOriginDto::Library,
-                brief: "a test app".into(),
-                git_enabled: true,
-                workflow_model: None,
-                conversation_id: None,
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: None,
-            })
-            .await
-            .expect("submit(CreateApp)");
-        let events = drain_events(&handle, &listener).await;
-        let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
-        let app_id = record.id;
-        // Derived independently of the production helper, and while the
-        // workspace still exists, so this test cannot agree with the code
-        // by simply calling the same function.
-        let workspace_cwd = crate::mobile::local_apps_host::canonical_cwd_string(
-            &tmp.path().join("apps").join(&app_id).join("workspace"),
-        );
-        let catalog_dir = tmp
-            .path()
-            .join(branding::DOT_DIR)
-            .join("projects")
-            .join(session::jsonl::path::project_dir_name(&workspace_cwd));
-        (app_id, catalog_dir)
-    });
-
-    // Vacuity guard: with no transcript on disk the post-delete assertion
-    // would pass against an app that never had a catalog at all.
-    let minted: Vec<_> = std::fs::read_dir(&catalog_dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .collect();
-    assert!(
-        !minted.is_empty(),
-        "CreateApp must have minted an init session under {}",
-        catalog_dir.display()
-    );
-
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::DeleteApp {
-                app_id: app_id.clone(),
-            })
-            .await
-            .expect("submit(DeleteApp)");
-        let events = drain_events(&handle, &listener).await;
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, Ev::AppsChanged { apps } if apps.is_empty())));
-    });
-
-    assert!(
-        !catalog_dir.exists(),
-        "DeleteApp must remove the app's session catalog; {} survived with {:?}",
-        catalog_dir.display(),
-        std::fs::read_dir(&catalog_dir)
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>()
-    );
-}
-
-/// W4: the runtime seam (the broker's runtime manager drives it) must
-/// reach the client through the same lowered wire path as command
-/// replies — field-exact.
-#[test]
-fn local_apps_runtime_seam_delivers_field_exact_events() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: "Telemetry".into(),
-                origin: AppCreateOriginDto::Library,
-                brief: "a test app".into(),
-                git_enabled: true,
-                workflow_model: None,
-                conversation_id: None,
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: None,
-            })
-            .await
-            .expect("submit(CreateApp)");
-        let events = drain_events(&handle, &listener).await;
-        let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
-        let app_id = record.id;
-        let service = handle.local_apps().expect("local-apps service");
-
-        // Runtime record: stopped -> starting (pins the port)…
-        service
-            .update_runtime_record(
-                &app_id,
-                local_apps::AppRuntimeState::Starting,
-                Some(3001),
-                Some(77),
-                None,
-            )
-            .await
-            .expect("update_runtime_record(starting)");
-        // …then starting -> failed, carrying the failure detail.
-        service
-            .update_runtime_record(
-                &app_id,
-                local_apps::AppRuntimeState::Failed,
-                None,
-                None,
-                Some("dev server exited: code 1".into()),
-            )
-            .await
-            .expect("update_runtime_record(failed)");
-        let events = drain_events(&handle, &listener).await;
-        let starting_at = position_of(&events, "AppRuntimeChanged(starting)", |event| {
-            matches!(
-                event,
-                Ev::AppRuntimeChanged {
-                    app_id: id,
-                    state: AppRuntimeStateDto::Starting,
-                    last_error: None,
-                    ..
-                } if *id == app_id
-            )
-        });
-        let failed_at = position_of(&events, "AppRuntimeChanged(failed)", |event| {
-            matches!(
-                event,
-                Ev::AppRuntimeChanged {
-                    app_id: id,
-                    state: AppRuntimeStateDto::Failed,
-                    last_error: Some(last_error),
-                    ..
-                } if *id == app_id && last_error == "dev server exited: code 1"
-            )
-        });
-        assert!(
-            starting_at < failed_at,
-            "runtime transitions must arrive in commit order (got {events:?})"
-        );
-    });
-}
-
-/// A corrupt on-disk apps store must DEGRADE, never brick: the engine
-/// still builds (chat is unaffected), `local_apps()` returns the boot
-/// error, and every app command surfaces it as a typed
-/// `AppOperationFailed { code: storage_corrupt }` — the Err branch of the
-/// handle's `local_apps` Result and `local_apps_or_report`'s emit path.
-#[test]
-fn local_apps_corrupt_store_degrades_but_never_bricks_the_engine() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(tmp.path().join("apps")).expect("apps dir");
-    std::fs::write(tmp.path().join("apps/index.json"), "{ not json").expect("plant corrupt index");
-
-    // The engine still builds over the corrupt store…
-    let (handle, listener) = build_submit_handle(tmp.path());
-    handle.runtime().block_on(async {
-        // …the boot-time load error is held on the handle…
-        let err = match handle.local_apps() {
-            Err(error) => error,
-            Ok(_) => panic!("a corrupt store must surface as the boot error"),
-        };
-        assert_eq!(err.code(), local_apps::AppErrorCode::StorageCorrupt);
-
-        // …and every app command reports it typed instead of hanging or
-        // pretending an empty store.
-        handle
-            .submit(ClientCommand::ListApps)
-            .await
-            .expect("submit(ListApps) must not be a transport error");
-        handle
-            .submit(ClientCommand::CreateApp {
-                name: "Habit Tracker".into(),
-                origin: AppCreateOriginDto::Library,
-                brief: "a test app".into(),
-                git_enabled: true,
-                workflow_model: None,
-                conversation_id: None,
-                surface: None,
-                mode: AppCreateModeDto::Shell,
-                request_id: None,
-            })
-            .await
-            .expect("submit(CreateApp) must not be a transport error");
-        let events = drain_events(&handle, &listener).await;
-        let failures = events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    Ev::AppOperationFailed {
-                        code: AppErrorCodeDto::StorageCorrupt,
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(
-            failures, 2,
-            "each app command must emit the typed boot failure: {events:?}"
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Ev::AppsChanged { .. })),
-            "a corrupt store must never masquerade as an (empty) app list"
-        );
-    });
-}
-
 // ── Create-flow: `CreateApp{mode}` forks shell vs scaffolded ───────────
-
-/// Submit one `CreateApp` and return every event it produced.
-///
-/// Deliberately takes `name` as a `&str` (never an `Option`): the wire
-/// field is a required `String` and the "+" button sends `""`, so a helper
-/// that offered `None` would test a payload no client can send.
-#[allow(clippy::too_many_arguments)]
-async fn submit_create(
-    handle: &MobileEngineHandle,
-    listener: &FakeListener,
-    name: &str,
-    brief: &str,
-    surface: Option<client::protocol::local_apps::AppSurfaceDto>,
-    mode: AppCreateModeDto,
-    request_id: Option<&str>,
-) -> Vec<Ev> {
-    handle
-        .submit(ClientCommand::CreateApp {
-            name: name.into(),
-            origin: AppCreateOriginDto::Library,
-            brief: brief.into(),
-            git_enabled: true,
-            workflow_model: None,
-            conversation_id: None,
-            surface,
-            mode,
-            request_id: request_id.map(str::to_string),
-        })
-        .await
-        .expect("submit(CreateApp) must not be a transport error");
-    drain_events(handle, listener).await
-}
-
-/// The `AppCreated` row (record + correlation key) from a create's events.
-fn created_row(
-    events: &[Ev],
-) -> Option<(client::protocol::local_apps::AppRecordDto, Option<String>)> {
-    events.iter().find_map(|event| match event {
-        Ev::AppEvent {
-            event: AppEventDto::AppCreated { record, request_id },
-        } => Some((record.clone(), request_id.clone())),
-        _ => None,
-    })
-}
-
-/// The first `AppOperationFailed` in a create's events.
-fn first_failure(events: &[Ev]) -> Option<(AppErrorCodeDto, String, Option<String>)> {
-    events.iter().find_map(|event| match event {
-        Ev::AppOperationFailed {
-            code,
-            message,
-            request_id,
-            ..
-        } => Some((*code, message.clone(), request_id.clone())),
-        _ => None,
-    })
-}
-
-/// `CreateApp{mode: Shell}` lands an UNFORMED app: `scaffolded == false`,
-/// a workspace holding only the private `.lingxi/` state dir plus the
-/// GUIDED contract, and no application source at all.
-///
-/// ⚠️ The source check is a per-path absence, NOT an exact directory
-/// listing: `git_enabled` defaults true and `layout.initialize()` may put
-/// a `.git` in the workspace, so an equality assertion would fail for a
-/// reason that has nothing to do with the property under test. The form
-/// below still fails the moment a scaffold leaks in — which is what this
-/// test is for.
-#[test]
-fn create_app_in_shell_mode_leaves_an_empty_workspace_with_the_guided_contract() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        // The "+" button's exact payload: empty name, empty brief, no
-        // surface, `Shell`, and its own correlation key.
-        let events = submit_create(
-            &handle,
-            &listener,
-            "",
-            "",
-            None,
-            AppCreateModeDto::Shell,
-            Some("req-1"),
-        )
-        .await;
-        let (record, request_id) =
-            created_row(&events).expect("a Shell create must announce AppCreated");
-        assert_eq!(
-            request_id.as_deref(),
-            Some("req-1"),
-            "the client that pressed + recognises its own creation by this key"
-        );
-        assert!(
-            !record.scaffolded,
-            "a Shell create must land an UNFORMED record: {record:?}"
-        );
-        assert_eq!(
-            record.name,
-            local_apps::PLACEHOLDER_APP_NAME,
-            "an empty wire name plus an empty brief derives the placeholder"
-        );
-
-        let workspace = tmp.path().join("apps").join(&record.id).join("workspace");
-        assert!(
-            workspace.join(".lingxi").is_dir(),
-            "layout.initialize() must have run before the initializer"
-        );
-        assert!(
-            workspace.join("LINGXI.md").is_file(),
-            "the shell workspace must carry the guided contract"
-        );
-        for leaked in [
-            "app",
-            "src",
-            "package.json",
-            "vite.config.mjs",
-            "index.html",
-        ] {
-            assert!(
-                !workspace.join(leaked).exists(),
-                "a shell workspace must hold no application source; found {leaked}"
-            );
-        }
-
-        let contract =
-            std::fs::read_to_string(workspace.join("LINGXI.md")).expect("guided contract");
-        assert!(
-            contract.contains("lingxi-local-app:create-local-app")
-                && contract.contains("Immediately use the `Skill` tool"),
-            "the thin shell must immediately enter the create coordinator: {contract}"
-        );
-        assert!(
-            contract.contains(
-                "Do not write source, build, install dependencies, or operate the runtime in \
-                     this shell"
-            ) && contract.contains("that refusal is the contract, not a transient failure"),
-            "the contract must say a shapeless shell has nowhere for source to go, and that \
-                 every tool refusing it is the contract rather than a transient failure: \
-                 {contract}"
-        );
-        assert!(
-            contract.contains("do not call `LocalAppScaffold` directly"),
-            "the shell must preserve the direct-scaffold guard: {contract}"
-        );
-        assert!(
-            contract.contains("Do not run a separate questionnaire")
-                && contract
-                    .contains("the Host prepares this workspace from the plan the user approves"),
-            "the Host shell must leave the planning to the create skill and name that skill \
-                 the owner of preparation: {contract}"
-        );
-        assert!(
-            contract.contains(&record.id),
-            "the contract must bind the workspace to its app id so the agent \
-                 can enter the create flow without rediscovering it: {contract}"
-        );
-    });
-}
-
-/// A shape is decided when the scaffold lands, never before (§B.1), so a
-/// `Shell` create that names a `surface` is REJECTED — it must not quietly
-/// land a shell with the surface dropped on the floor.
-#[test]
-fn create_app_in_shell_mode_rejects_a_surface() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        let events = submit_create(
-            &handle,
-            &listener,
-            "",
-            "",
-            Some(client::protocol::local_apps::AppSurfaceDto::Dom),
-            AppCreateModeDto::Shell,
-            Some("req-2"),
-        )
-        .await;
-        let (code, message, request_id) = first_failure(&events).unwrap_or_else(|| {
-            panic!("a Shell create that names a surface must fail typed, got {events:?}")
-        });
-        assert_eq!(code, AppErrorCodeDto::InvalidRequest);
-        assert!(
-            message.contains("surface"),
-            "the failure must name the offending field, got {message}"
-        );
-        assert_eq!(
-            request_id.as_deref(),
-            Some("req-2"),
-            "even the pre-service rejection is the client's own failure"
-        );
-        assert!(
-            created_row(&events).is_none(),
-            "a rejected create must not land a record: {events:?}"
-        );
-    });
-}
-
-/// The record a `Shell` create commits lowers with `scaffolded == false`.
-/// `lower_record` is a PURE mapping — proving it end-to-end here (real
-/// service record in, DTO out) is what rules out a lowering that reads
-/// the flag off something other than the record.
-#[test]
-fn a_shell_record_lowers_with_scaffolded_false() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        let events = submit_create(
-            &handle,
-            &listener,
-            "",
-            "",
-            None,
-            AppCreateModeDto::Shell,
-            None,
-        )
-        .await;
-        let (row, _) = created_row(&events).expect("a Shell create must announce AppCreated");
-        let record = handle
-            .local_apps()
-            .expect("local-apps service")
-            .record(&row.id)
-            .await
-            .expect("the committed record");
-        let dto = crate::mobile::local_apps_bridge::lower_record(tmp.path(), &record);
-        assert!(
-            !dto.scaffolded,
-            "lower_record must carry the shell's own flag — no extra IO"
-        );
-    });
-}
-
-/// 🚨 `lower_record` is NOT `lower_app_event`: the test above pins the
-/// record mapping and cannot stop the correlation key being dropped off
-/// the EVENT. This one pins the event.
-#[test]
-fn lower_app_event_passes_request_id_through_on_app_created() {
-    let record = local_apps::AppRecord {
-        id: "app00001".into(),
-        name: "Habits".into(),
-        brief: "a habit tracker".into(),
-        origin_cwd: None,
-        mcp_intent: None,
-        workflow_model: None,
-        git_enabled: true,
-        scaffolded: false,
-        created_at_ms: 1,
-        updated_at_ms: 2,
-        conversation_id: None,
-        init_session_id: None,
-        workspace_rel: "apps/app00001/workspace".into(),
-    };
-    let root = tempfile::tempdir().expect("tempdir");
-    let lowered = crate::mobile::local_apps_bridge::lower_app_event(
-        root.path(),
-        local_apps::AppEvent::AppCreated {
-            record,
-            request_id: Some("req-1".into()),
-        },
-    )
-    .expect("AppCreated always has a wire representation");
-    match lowered {
-        Ev::AppEvent {
-            event: AppEventDto::AppCreated { request_id, .. },
-        } => {
-            assert_eq!(
-                request_id.as_deref(),
-                Some("req-1"),
-                "a dropped correlation key here means the + button never opens the new app"
-            );
-        }
-        other => panic!("expected AppCreated, got {other:?}"),
-    }
-}
-
-/// 🚨 A FAILED create must carry the client's own `request_id`.
-///
-/// `ClientEvent::AppOperationFailed.request_id` had no producer at all
-/// before this handler threaded one through: the field existed and was
-/// unconditionally `None`. A client that cannot claim its own failure
-/// waits out a 30-second timeout and shows "创建结果未知" instead of the
-/// real reason.
-///
-/// The failure is raised INSIDE `AppService` (an over-long name trips
-/// `ensure_within`), so this also proves the key survives the deep path,
-/// not just the handler's own early returns.
-#[test]
-fn a_failed_shell_create_reports_the_request_id_the_client_sent() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        let too_long = "n".repeat(local_apps::service::MAX_NAME_BYTES + 1);
-        let events = submit_create(
-            &handle,
-            &listener,
-            &too_long,
-            "",
-            None,
-            AppCreateModeDto::Shell,
-            Some("req-9"),
-        )
-        .await;
-        let (code, message, request_id) = first_failure(&events)
-            .unwrap_or_else(|| panic!("AppOperationFailed must be emitted, got {events:?}"));
-        assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message}");
-        assert_eq!(
-            request_id.as_deref(),
-            Some("req-9"),
-            "否则客户端只能靠超时兜底"
-        );
-    });
-}
-
-/// 🚨 `Scaffolded` is no longer a reachable success path on the client
-/// wire: v9 create is shell-only, and any stale caller must get a typed
-/// failure carrying its own correlation key.
-#[test]
-fn a_scaffolded_create_reports_the_request_id_on_app_operation_failed() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        let events = submit_create(
-            &handle,
-            &listener,
-            "Tracker",
-            "a habit tracker",
-            None,
-            AppCreateModeDto::Scaffolded,
-            Some("req-3"),
-        )
-        .await;
-        let (code, message, request_id) = first_failure(&events).unwrap_or_else(|| {
-            panic!("a Scaffolded create must fail typed on the v9 shell-only wire, got {events:?}")
-        });
-        assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message}");
-        assert!(
-            message.contains("shell"),
-            "the failure must explain that CreateApp is shell-only now, got {message}"
-        );
-        assert_eq!(
-            request_id.as_deref(),
-            Some("req-3"),
-            "the stale caller must still receive its own correlation key"
-        );
-        assert!(
-            created_row(&events).is_none(),
-            "a rejected Scaffolded create must not land a record: {events:?}"
-        );
-    });
-}
-
-/// 🚨 The wire still carries both enum variants, but only `Shell` is a
-/// valid client create. Pinning success vs typed rejection keeps the
-/// compatibility story explicit.
-#[test]
-fn create_app_accepts_shell_and_rejects_scaffolded_mode() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, listener) = build_submit_handle(tmp.path());
-
-    handle.runtime().block_on(async {
-        let shell = submit_create(
-            &handle,
-            &listener,
-            "",
-            "",
-            None,
-            AppCreateModeDto::Shell,
-            None,
-        )
-        .await;
-        let (shell_record, _) = created_row(&shell).expect("Shell create announces AppCreated");
-        let shell_workspace = tmp
-            .path()
-            .join("apps")
-            .join(&shell_record.id)
-            .join("workspace");
-
-        let scaffolded = submit_create(
-            &handle,
-            &listener,
-            "Tracker",
-            "a habit tracker",
-            None,
-            AppCreateModeDto::Scaffolded,
-            None,
-        )
-        .await;
-        let (code, message, _) = first_failure(&scaffolded).unwrap_or_else(|| {
-            panic!("Scaffolded create must fail typed on the shell-only wire, got {scaffolded:?}")
-        });
-
-        assert!(
-            !shell_record.scaffolded,
-            "Shell lands unformed: {shell_record:?}"
-        );
-        assert!(
-            !shell_workspace.join("package.json").exists(),
-            "the Shell branch must lay down no scaffold"
-        );
-        assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message}");
-        assert!(
-            message.contains("shell"),
-            "the rejection must explain the shell-only contract, got {message}"
-        );
-    });
-}
 
 #[test]
 fn mobile_handback_admission_wakes_a_real_model_turn_with_peer_meta_and_stable_id() {

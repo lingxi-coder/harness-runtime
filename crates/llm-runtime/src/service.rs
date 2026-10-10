@@ -465,6 +465,9 @@ struct StreamState {
     /// disables it (`LINGXI_ENABLE_STREAM_WATCHDOG=0`). The deadline resets on
     /// every received event because a fresh timeout wraps each frame fetch.
     idle_timeout: Option<Duration>,
+    /// Pooled WebSocket session of a side stream. Last, so it returns to the
+    /// pool only after `frames` has released its socket.
+    side_ws_lease: Option<SideWsLease>,
 }
 
 fn frozen_stream_quote(
@@ -1019,6 +1022,54 @@ pub struct ApiService {
     /// `previous_response_id` when the new request is a strict compatible
     /// extension of the previous completed request.
     responses_ws_session: tokio::sync::Mutex<ResponsesSession>,
+    /// Idle Responses WebSocket sessions for streams outside the main
+    /// conversation (auto-mode classifier, subagents, scheduled tasks). As
+    /// with Codex's Guardian pool, they never share the conversation's
+    /// socket, which stays busy while its own response streams.
+    side_ws_sessions: Arc<Mutex<Vec<ResponsesSession>>>,
+}
+
+/// A pooled session held for one stream. Dropping it, when the stream ends
+/// or is abandoned, returns the session for the next side stream.
+struct SideWsLease {
+    session: Option<ResponsesSession>,
+    pool: Arc<Mutex<Vec<ResponsesSession>>>,
+}
+
+impl SideWsLease {
+    /// Codex opens at most four Guardian sockets at once.
+    const MAX_IDLE: usize = 4;
+
+    fn checkout(pool: &Arc<Mutex<Vec<ResponsesSession>>>) -> Self {
+        let session = pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+            .unwrap_or_default();
+        Self {
+            session: Some(session),
+            pool: Arc::clone(pool),
+        }
+    }
+
+    fn session(&mut self) -> &mut ResponsesSession {
+        self.session.as_mut().expect("leased session")
+    }
+}
+
+impl Drop for SideWsLease {
+    fn drop(&mut self) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pool.len() < Self::MAX_IDLE {
+            pool.push(session);
+        }
+    }
 }
 
 impl DispatchHeaderState {
@@ -1650,6 +1701,7 @@ impl ApiService {
             stream_idle_timeout_override: None,
             stream_first_byte_timeout_override: None,
             responses_ws_session: tokio::sync::Mutex::new(ResponsesSession::new()),
+            side_ws_sessions: Arc::default(),
         }
     }
 
@@ -5988,6 +6040,12 @@ impl ApiService {
         let mut dispatch =
             DispatchHeaderState::for_query_source(req.execution.query_source.as_deref());
         dispatch.context_hint_beta = req.execution.context_hint_beta;
+        // The conversation's WebSocket belongs to its main turn; every other
+        // stream may run while that turn is still streaming.
+        let main_conversation = matches!(
+            query_source_category(req.execution.query_source.as_deref()),
+            None | Some(QuerySourceCategory::Main)
+        );
 
         loop {
             // Prepare so we can inject headers, then call execute_stream via
@@ -6028,22 +6086,31 @@ impl ApiService {
             // attempt takes the same path: the opener marks dispatch
             // immediately before whichever transport call carries it, so a
             // WebSocket send is metered exactly like an HTTP one.
+            let websocket = matches!(
+                prepared.provider_request.stream_transport,
+                crate::ProviderStreamTransport::ResponsesWebSocket
+            );
+            let mut side_ws_lease = (websocket && !main_conversation)
+                .then(|| SideWsLease::checkout(&self.side_ws_sessions));
             let opened = async {
                 // HTTP attempts have no shared connection state. Never hold
                 // the WebSocket mutex while an HTTP admission waits for a
                 // durable intent: a concurrent revoked call must reject without
                 // waiting for the first intent's acknowledgement.
                 let mut http_session = ResponsesSession::new();
-                let mut shared_session = if matches!(
-                    prepared.provider_request.stream_transport,
-                    crate::ProviderStreamTransport::ResponsesWebSocket
-                ) {
+                let mut shared_session = if websocket && side_ws_lease.is_none() {
                     Some(self.responses_ws_session.lock().await)
                 } else {
                     None
                 };
-                let responses_ws_session =
-                    shared_session.as_deref_mut().unwrap_or(&mut http_session);
+                let responses_ws_session = match (
+                    shared_session.as_deref_mut(),
+                    side_ws_lease.as_mut(),
+                ) {
+                    (Some(session), _) => session,
+                    (None, Some(lease)) => lease.session(),
+                    (None, None) => &mut http_session,
+                };
                 let preparing = tokio::time::Instant::now();
                 let prepared = crate::execution::first_byte_bound(
                     first_byte_timeout,
@@ -6637,6 +6704,7 @@ impl ApiService {
                         request_id: stream_request_id,
                         started: stream_started,
                         idle_timeout: stream_idle_timeout,
+                        side_ws_lease: side_ws_lease.take(),
                     };
 
                     let boxed: BoxStream<'static, Result<HistoryEvent, LlmError>> = Box::pin(

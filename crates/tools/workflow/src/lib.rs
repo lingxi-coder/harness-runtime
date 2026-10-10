@@ -2461,37 +2461,6 @@ mod tests {
         );
     }
 
-    /// The divergence this register was built for: without it the tool
-    /// description forbids the local-app create flow's only hand-off.
-    #[test]
-    fn the_shipped_description_permits_the_local_app_create_handoff() {
-        assert!(
-            !ORACLE_DESCRIPTION.contains("lingxi-local-app:create-local-app"),
-            "the oracle must stay free of product-specific carve-outs; that is what the \
-             register is for"
-        );
-        assert!(
-            DESCRIPTION.contains("lingxi-local-app:create-local-app"),
-            "the create flow has the MODEL self-invoke the skill, which none of the oracle's \
-             five opt-in clauses covers, so the shipped description must add the sixth"
-        );
-        // It must land inside the opt-in list, not after the closing "do NOT
-        // call this tool" sentence, or the model reads it as unrelated prose.
-        let opt_in = DESCRIPTION
-            .find("Explicit opt-in means one of:")
-            .expect("the opt-in list must exist");
-        let closing = DESCRIPTION
-            .find("For any other task")
-            .expect("the closing prohibition must exist");
-        let clause = DESCRIPTION
-            .find("lingxi-local-app:create-local-app")
-            .expect("checked above");
-        assert!(
-            opt_in < clause && clause < closing,
-            "the added clause must sit inside the opt-in list ({opt_in}..{closing}), got {clause}"
-        );
-    }
-
     /// Managed `disableWorkflows: true` must disable the tool. Before this was
     /// wired there was no seam for the setting at all, so an organization that
     /// set it still had Workflow advertised AND executable — the policy was

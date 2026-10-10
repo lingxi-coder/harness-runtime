@@ -42,16 +42,3 @@ fn sdk_types_preserve_wire_names() {
     let _: fn(Arc<dyn ProcessStreamSink>) -> Arc<dyn mobile_linux_api::ProcessStreamSink> =
         sdk_stream;
 }
-
-#[test]
-fn harness_product_paths_remain_outside_the_sdk_defaults() {
-    use mobile_linux_api::guest_paths;
-    assert_eq!(
-        lingxi_core::host::local_app_paths::local_app_build_project("app", "dev"),
-        "/var/lingxi/local-app-build/app/dev/project"
-    );
-    assert_eq!(
-        guest_paths::workspace("id"),
-        mobile_linux_api::guest_paths::workspace("id")
-    );
-}

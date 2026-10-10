@@ -2,7 +2,7 @@
 //! `register_mobile` entry points the composition roots
 //! (`apps/engine-{desktop,mobile}`) call to assemble their skill set.
 //!
-//! Mobile Local App skills are file-backed Plugin components. The mobile
+//! Mobile product skills are file-backed Plugin components. The mobile
 //! entry point remains as an empty compatibility seam so hosts can assemble
 //! the shared registry without a second bundled source of truth.
 
@@ -17,7 +17,7 @@ pub fn register_desktop(reg: &mut SkillRegistry) {
     register_slice(reg, BUILTIN_DESKTOP);
 }
 
-/// Register mobile bundled skills. Local App skills are intentionally not
+/// Register mobile bundled skills. Product skills are intentionally not
 /// bundled; the mobile composition root loads them from the verified Plugin
 /// package through `PluginManager`.
 pub fn register_mobile(reg: &mut SkillRegistry) {
@@ -76,12 +76,12 @@ mod tests {
     }
 
     #[test]
-    fn mobile_registry_contains_no_bundled_local_app_skills() {
+    fn mobile_registry_contains_no_bundled_plugin_skills() {
         let mut r = SkillRegistry::new();
         register_mobile(&mut r);
         assert!(
             r.is_empty(),
-            "Local App skills must come from the Plugin registry"
+            "product skills must come from the Plugin registry"
         );
         assert!(BUILTIN_MOBILE.is_empty());
     }

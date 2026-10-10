@@ -149,11 +149,6 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
         // constructing replacements here would miss broken production wiring.
         for reloaded in [false, true] {
             if reloaded {
-                runtime
-                    .wired_plugin_manager
-                    .disable(&crate::mobile::mobile_builtin_plugin_id())
-                    .await
-                    .expect("disable unrelated Local App plugin");
                 assert!(matches!(
                     runtime.dispatcher.dispatch("/reload-skills").await,
                     SlashDispatchResult::Handled { .. }

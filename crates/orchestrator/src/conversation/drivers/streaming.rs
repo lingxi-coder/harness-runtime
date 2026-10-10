@@ -174,6 +174,8 @@ enum PumpStreamingOutcome<'a> {
     Pumped(PumpedStreamingIteration<'a>),
     Complete(MessageId),
     ModelFallback,
+    /// A user interrupt aborted the response before it produced output.
+    Interrupted,
 }
 
 enum StreamErrorFallback<'a> {
@@ -2025,6 +2027,15 @@ impl StreamingTurnDriver<'_> {
                     }
                 };
                 match pump_outcome {
+                    // Nothing completed before the interrupt, so there is no
+                    // assistant message to keep (Claude Code drops a
+                    // thinking-only partial the same way).
+                    Ok((p, _))
+                        if token_aborted(user_cancel)
+                            && !crate::streaming_loop::partial_has_output(&p) =>
+                    {
+                        return Ok(PumpStreamingOutcome::Interrupted);
+                    }
                     Ok((p, tail)) => (p, Some(tail)),
                     Err(mut failure)
                         if failure.disposition
@@ -3111,6 +3122,12 @@ impl StreamingTurnDriver<'_> {
                 Ok(PumpStreamingOutcome::ModelFallback) => {
                     orch.set_tool_frame_buffering(false).await;
                     return Ok(None);
+                }
+                Ok(PumpStreamingOutcome::Interrupted) => {
+                    orch.set_tool_frame_buffering(false).await;
+                    // Rejoin the top-of-loop cancellation checkpoint, which
+                    // ends the turn as `aborted_streaming`.
+                    return Ok(Some(StepExit::Continue));
                 }
             };
 

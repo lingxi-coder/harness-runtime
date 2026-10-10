@@ -229,14 +229,33 @@ fn restore_message_with_utf16(
         ConversationMessage::System { .. } => return Some(message),
     };
     for (index, block) in content.iter_mut().enumerate() {
-        if let ContentBlock::ToolUse { input, input_projection, .. } = block {
-            let projection = row.subprojection(&format!("/message/content/{index}/input")).ok()?;
+        if let ContentBlock::ToolUse {
+            input,
+            input_projection,
+            ..
+        } = block
+        {
+            let projection = row
+                .subprojection(&format!("/message/content/{index}/input"))
+                .ok()?;
             *input = projection.value.clone();
             *input_projection = Some(projection);
         }
-        if let ContentBlock::ToolResult { content_projection, content_blocks, .. } = block {
-            let field = if content_blocks.is_some() { "content_blocks" } else { "content" };
-            *content_projection = Some(row.subprojection(&format!("/message/content/{index}/{field}")).ok()?);
+        if let ContentBlock::ToolResult {
+            content_projection,
+            content_blocks,
+            ..
+        } = block
+        {
+            let field = if content_blocks.is_some() {
+                "content_blocks"
+            } else {
+                "content"
+            };
+            *content_projection = Some(
+                row.subprojection(&format!("/message/content/{index}/{field}"))
+                    .ok()?,
+            );
         }
         let pointer = format!("/message/content/{index}/text");
         let Some(code_units) = row.string_units(&pointer) else {
@@ -338,18 +357,27 @@ async fn read_restored_transcript(
             format!("agent transcript exact UTF-16 fields are invalid: {error}")
         })?;
         for pointer in exact_strings.keys() {
-            let is_tool_input = pointer.strip_prefix("/message/content/")
+            let is_tool_input = pointer
+                .strip_prefix("/message/content/")
                 .and_then(|rest| rest.split_once("/input"))
-                .is_some_and(|(index, rest)| index.parse::<usize>().is_ok_and(|index| {
-                    value["message"]["content"][index]["type"] == "tool_use" && (rest.is_empty() || rest.starts_with('/'))
-                }));
-            let is_tool_result = pointer.strip_prefix("/message/content/")
+                .is_some_and(|(index, rest)| {
+                    index.parse::<usize>().is_ok_and(|index| {
+                        value["message"]["content"][index]["type"] == "tool_use"
+                            && (rest.is_empty() || rest.starts_with('/'))
+                    })
+                });
+            let is_tool_result = pointer
+                .strip_prefix("/message/content/")
                 .and_then(|rest| rest.split_once('/'))
-                .is_some_and(|(index, field)| index.parse::<usize>().is_ok_and(|index| {
-                    value["message"]["content"][index]["type"] == "tool_result"
-                        && (field == "content" || field.starts_with("content/")
-                            || field == "content_blocks" || field.starts_with("content_blocks/"))
-                }));
+                .is_some_and(|(index, field)| {
+                    index.parse::<usize>().is_ok_and(|index| {
+                        value["message"]["content"][index]["type"] == "tool_result"
+                            && (field == "content"
+                                || field.starts_with("content/")
+                                || field == "content_blocks"
+                                || field.starts_with("content_blocks/"))
+                    })
+                });
             let is_message_text = pointer
                 .strip_prefix("/message/content/")
                 .and_then(|rest| rest.strip_suffix("/text"))
@@ -379,8 +407,8 @@ async fn read_restored_transcript(
                 announcement_history.push(attachment.clone());
             }
         }
-        let is_model_selection = value.get("type").and_then(serde_json::Value::as_str)
-            == Some("model-selection");
+        let is_model_selection =
+            value.get("type").and_then(serde_json::Value::as_str) == Some("model-selection");
         if let Some(model) = value
             .get("model")
             .and_then(serde_json::Value::as_str)
@@ -415,7 +443,8 @@ async fn read_restored_transcript(
             // before any provider request is assembled.
             if let Ok(attachment) = row_projection.subprojection("/source_attachment") {
                 let content = exact_source_attachment_marker(message.id(), &attachment)?;
-                history.push(lingxi_core::types::ConversationMessage::System { api_system: None,
+                history.push(lingxi_core::types::ConversationMessage::System {
+                    api_system: None,
                     id: lingxi_core::types::MessageId::new(),
                     content,
                     subtype: Some("mod_attachment_source".into()),
@@ -625,7 +654,7 @@ mod tests {
     use lingxi_core::host::subagent_spawn::{
         AsyncLaunch, SelectedAgentMeta, SubagentListingEntry, SubagentResult, SubagentSpawnError,
     };
-    use session::agent_rows::{ParkedAgentRow, write_row};
+    use session::agent_rows::{write_row, ParkedAgentRow};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
@@ -1161,7 +1190,8 @@ mod tests {
         }
         tokio::fs::write(path, rows).await.unwrap();
         let spawner = RecordingSpawner::default();
-        let outcomes = restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit(), None).await;
+        let outcomes =
+            restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit(), None).await;
         assert_eq!(outcomes[0].1, RestoreOutcome::Restored(id));
         let seen = spawner.seen.lock().unwrap();
         assert_eq!(seen[0].model.as_deref(), Some("shared-model"));
@@ -1257,18 +1287,14 @@ mod tests {
         store
             .park("a00000001", id, "research", &request(), None, &[])
             .await;
-        assert!(
-            session::agent_rows::read_row(dir.path(), &id.to_string())
-                .await
-                .is_some()
-        );
+        assert!(session::agent_rows::read_row(dir.path(), &id.to_string())
+            .await
+            .is_some());
 
         store.unpark(id).await;
-        assert!(
-            session::agent_rows::read_row(dir.path(), &id.to_string())
-                .await
-                .is_none()
-        );
+        assert!(session::agent_rows::read_row(dir.path(), &id.to_string())
+            .await
+            .is_none());
 
         let spawner = RecordingSpawner::default();
         assert!(
@@ -1395,18 +1421,14 @@ mod tests {
         store
             .park("original-task", id, "research", &launch, None, &[])
             .await;
-        assert!(
-            session::agent_rows::read_row(&original, &id.to_string())
-                .await
-                .is_some()
-        );
+        assert!(session::agent_rows::read_row(&original, &id.to_string())
+            .await
+            .is_some());
         assert!(!fallback.exists());
         store.unpark(id).await;
-        assert!(
-            session::agent_rows::read_row(&original, &id.to_string())
-                .await
-                .is_none()
-        );
+        assert!(session::agent_rows::read_row(&original, &id.to_string())
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -1458,16 +1480,12 @@ mod tests {
             )
             .await;
             store.unpark(id).await;
-            assert!(
-                session::agent_rows::read_row(&original, &id.to_string())
-                    .await
-                    .is_none()
-            );
-            assert!(
-                session::agent_rows::read_row(&next, &id.to_string())
-                    .await
-                    .is_some()
-            );
+            assert!(session::agent_rows::read_row(&original, &id.to_string())
+                .await
+                .is_none());
+            assert!(session::agent_rows::read_row(&next, &id.to_string())
+                .await
+                .is_some());
             store.unpark(id).await;
             assert!(
                 session::agent_rows::read_row(&next, &id.to_string())
@@ -1576,8 +1594,8 @@ mod tests {
                     let other = serde_json::to_value(lingxi_core::types::SessionId::new()).unwrap();
                     value["attachment"]["envelope"]["receipt"]["run"]["scope"]["session_id"] =
                         other.clone();
-                    value["attachment"]["envelope"]["receipt"]["recipient"]["scope"]["session_id"] =
-                        other.clone();
+                    value["attachment"]["envelope"]["receipt"]["recipient"]["scope"]
+                        ["session_id"] = other.clone();
                     value["attachment"]["envelope"]["origin"]["scope"]["session_id"] = other;
                 }
                 "wrong-id" => {
@@ -1605,15 +1623,13 @@ mod tests {
                     requests[0].resumed_history.as_ref().unwrap().last(),
                     Some(&message)
                 );
-                assert!(
-                    requests[0]
-                        .instruction_context
-                        .as_ref()
-                        .unwrap()
-                        .announcement_history
-                        .iter()
-                        .any(|attachment| attachment["type"] == "subagent_handback")
-                );
+                assert!(requests[0]
+                    .instruction_context
+                    .as_ref()
+                    .unwrap()
+                    .announcement_history
+                    .iter()
+                    .any(|attachment| attachment["type"] == "subagent_handback"));
             } else {
                 assert!(
                     matches!(outcomes[0].1, RestoreOutcome::Failed(_)),
