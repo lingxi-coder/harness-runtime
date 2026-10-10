@@ -736,6 +736,7 @@ mod tests {
             _: &str,
             _: &Utf16JsonProjection,
             _: &Utf16JsonProjection,
+            _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         ) {
         }
 

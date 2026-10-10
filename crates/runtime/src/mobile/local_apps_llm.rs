@@ -935,12 +935,17 @@ fn lower_messages(messages: Vec<ChatMessage>) -> Vec<ConversationMessage> {
                     is_meta: false,
                     is_compact_summary: false,
                     is_visible_in_transcript_only: false,
+                    turn_companion: None,
+                    usage_limit_note: None,
+                    origin: None,
+                    turn_origin: None,
                 },
                 ChatRole::Assistant => ConversationMessage::Assistant {
                     per_turn_effort: None,
                     id: MessageId::new(),
                     content,
                     stop_reason: None,
+                    resumable: None,
                 },
             }
         })

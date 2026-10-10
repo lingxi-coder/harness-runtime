@@ -55,6 +55,44 @@ mod tool_frame_ordering_tests {
             .collect()
     }
 
+    #[tokio::test]
+    async fn accepted_mcp_metadata_survives_buffering_and_drops_with_substitution() {
+        for (buffered, substituted) in [(false, false), (true, false), (true, true)] {
+            let output = Arc::new(MockOutputStream::new());
+            let orch = orch_for_frames(output.clone());
+            let id = lingxi_core::types::ToolUseId::new();
+            let meta = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"opaque":"\ud800","count":1e400}"#,
+            )
+            .unwrap();
+            orch.record_tool_use_mcp_meta(&id, meta.clone()).await;
+            orch.set_tool_frame_buffering(buffered).await;
+            orch.emit_tool_result_frame(
+                &id,
+                "McpTool",
+                &"real".into(),
+                &projection_from_value(&serde_json::json!({})),
+                None,
+            )
+            .await;
+            if buffered {
+                orch.release_tool_frame(
+                    &id,
+                    "McpTool",
+                    &if substituted {
+                        "cancelled".into()
+                    } else {
+                        "real".into()
+                    },
+                    substituted,
+                )
+                .await;
+            }
+            let received = output.tool_result_mcp_meta_snapshot().await;
+            assert_eq!(received, vec![(!substituted).then_some(meta)]);
+        }
+    }
+
     /// With buffering OFF the frame goes straight out — the batched driver,
     /// which dispatches in received order anyway, is unchanged.
     #[tokio::test]

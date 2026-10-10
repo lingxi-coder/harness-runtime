@@ -135,7 +135,8 @@ async fn cwd_during_replay(
     dispatch_control_request(
         "set_cwd",
         "cwd",
-        &lingxi_core::types::utf16_json::Utf16JsonProjection::plain(frame),
+        &lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&frame)
+            .expect("valid orphan control frame"),
         &writer,
         &cancel,
         &lifecycle,

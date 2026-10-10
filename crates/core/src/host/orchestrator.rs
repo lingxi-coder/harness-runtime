@@ -3533,7 +3533,7 @@ pub enum OutputEvent {
         /// Full model-generated compact summary displayed when the transcript
         /// is expanded (Ctrl-O). This is the same continuation summary stored
         /// in the post-compact history.
-        summary: String,
+        summary: crate::types::utf16_json::Utf16JsonProjection,
     },
     /// A streaming reasoning ("thinking") delta as it arrives. (§0.7
     /// "light up thinking/usage"). Recorded by `MockOutputStream` so the
@@ -3943,13 +3943,15 @@ pub trait OutputStream: Send + Sync {
     ///
     /// `model_text` is the exact string the model saw for this tool result
     /// (the SDK frame's `tool_result.content`); `result` is the pure-metadata
-    /// `data` payload (carried in `toolUseResult`).
+    /// `data` payload (carried in `toolUseResult`). `mcp_meta` is the exact
+    /// optional MCP metadata attached to the accepted native user frame.
     async fn emit_tool_result(
         &self,
         id: &crate::types::ToolUseId,
         tool: &str,
         model_text: &Utf16JsonProjection,
         result: &Utf16JsonProjection,
+        mcp_meta: Option<&Utf16JsonProjection>,
     );
 
     /// [`Self::emit_tool_result`] for a tool that was DENIED rather than run.
@@ -4006,7 +4008,8 @@ pub trait OutputStream: Send + Sync {
         _denial_kind: &str,
         _projection: Option<&ToolResultProjection>,
     ) {
-        self.emit_tool_result(id, tool, model_text, result).await;
+        self.emit_tool_result(id, tool, model_text, result, None)
+            .await;
     }
 
     /// Emit a heartbeat for a tool call that is still running.
@@ -4074,7 +4077,7 @@ pub trait OutputStream: Send + Sync {
         _messages_before: u32,
         _messages_after: u32,
         _bytes_saved: u64,
-        _summary: &str,
+        _summary: &crate::types::utf16_json::Utf16JsonProjection,
     ) {
     }
 

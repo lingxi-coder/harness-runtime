@@ -374,8 +374,7 @@ impl OutputStream for AgentOutputStream {
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        _input: &Value,
-        _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        _input: &Utf16JsonProjection,
     ) {
     }
 
@@ -383,9 +382,9 @@ impl OutputStream for AgentOutputStream {
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        _model_text: &str,
-        _result: &Value,
-        _projection: Option<&lingxi_core::host::ToolResultProjection>,
+        _model_text: &Utf16JsonProjection,
+        _result: &Utf16JsonProjection,
+        _mcp_meta: Option<&Utf16JsonProjection>,
     ) {
     }
 
@@ -431,7 +430,7 @@ impl OutputStream for AgentOutputRouter {
 
     async fn emit_text(&self, text: &Utf16JsonProjection) {
         if let Some(target) = self.target().await {
-            target.emit_text(text, _utf16_code_units).await;
+            target.emit_text(text).await;
         }
     }
 
@@ -439,13 +438,10 @@ impl OutputStream for AgentOutputRouter {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        input: &Value,
-        _input_projection: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        input: &Utf16JsonProjection,
     ) {
         if let Some(target) = self.target().await {
-            target
-                .emit_tool_call(id, tool, input, _input_projection)
-                .await;
+            target.emit_tool_call(id, tool, input).await;
         }
     }
 
@@ -453,13 +449,13 @@ impl OutputStream for AgentOutputRouter {
         &self,
         id: &lingxi_core::types::ToolUseId,
         tool: &str,
-        model_text: &str,
-        result: &Value,
-        _projection: Option<&lingxi_core::host::ToolResultProjection>,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
+        mcp_meta: Option<&Utf16JsonProjection>,
     ) {
         if let Some(target) = self.target().await {
             target
-                .emit_tool_result(id, tool, model_text, result, None)
+                .emit_tool_result(id, tool, model_text, result, mcp_meta)
                 .await;
         }
     }

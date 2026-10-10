@@ -1775,6 +1775,7 @@ impl lingxi_core::host::OutputStream for BlockingAssistantAppendLog {
         _tool: &str,
         _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
     }
 

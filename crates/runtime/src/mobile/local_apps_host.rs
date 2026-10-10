@@ -18,6 +18,7 @@ use client::protocol::local_apps::{
     LocalAppVerificationSummaryDto,
 };
 use futures_util::StreamExt;
+use lingxi_core::types::utf16_json::{Utf16JsonConsumer, Utf16JsonProjection};
 use local_apps::{
     load_manifest, load_mcp_settings, load_permissions, mcp_catalog_tool_names, save_mcp_settings,
     AppCapability, AppDependencyState, AppLayout, AppMcpSettings, AppRuntimeProfile,
@@ -334,6 +335,15 @@ fn minimal_schema_witness(schema: &Value) -> Result<Value, String> {
         Some(other) => Err(format!("schema witness does not support type {other}")),
         None => Ok(Value::Null),
     }
+}
+
+/// The Local Apps schema engine consumes serde values. Keep the Source-owned
+/// schema as a projection until that explicit consumer boundary, where the
+/// reversible consumer preserves any unpaired UTF-16 units.
+fn local_apps_schema_value(schema: &Utf16JsonProjection) -> Result<Value, String> {
+    let consumer = Utf16JsonConsumer::new(&[schema])
+        .map_err(|error| format!("cannot inspect source schema: {error}"))?;
+    Ok(consumer.values()[0].clone())
 }
 
 fn active_mcp_flow_contexts_bytes(
@@ -2391,7 +2401,7 @@ impl LocalAppsHostBroker {
             .emit(ClientEvent::AppOperationFailed {
                 app_id: None,
                 code: crate::mobile::local_apps_bridge::lower_error_code(error.code()),
-                message: error.to_string(),
+                message: error.to_string().into(),
                 // Correctly `None`, not a stub: `request_id` is the
                 // correlation key a client puts on its own `CreateApp`, and
                 // this failure belongs to an AGENT-driven create that no
@@ -3415,17 +3425,28 @@ impl LocalAppsHostBroker {
         if input_bytes > local_apps::mcp_authoring::MAX_MCP_CALL_BYTES {
             return Err("call_payload_limit: MCP call payload exceeds 256 KiB".into());
         }
-        if !local_apps::value_matches_schema(&tool_input, &definition.input_schema) {
+        let input_schema = local_apps_schema_value(&definition.input_schema)?;
+        if !local_apps::value_matches_schema(&tool_input, &input_schema) {
             return Err("invalid_argument: tool input does not satisfy its schema".into());
         }
         if context.app_id != app_id || context.source != local_apps::FlowSource::Active {
             return Err("cross_app_flow: active typed Flow is not owned by this App".into());
         }
-        if context.input_schema != definition.input_schema
-            || definition
-                .output_schema
-                .as_ref()
-                .is_some_and(|schema| *schema != context.output_schema)
+        let context_input_schema = Utf16JsonProjection::from_serde_value(&context.input_schema)
+            .map_err(|error| format!("binding_invalid: Flow input schema is invalid: {error}"))?;
+        let output_schema_mismatch = definition
+            .output_schema
+            .as_ref()
+            .map(|schema| {
+                Utf16JsonProjection::from_serde_value(&context.output_schema)
+                    .map(|context_schema| !context_schema.semantically_eq(schema))
+                    .map_err(|error| {
+                        format!("binding_invalid: Flow output schema is invalid: {error}")
+                    })
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if !context_input_schema.semantically_eq(&definition.input_schema) || output_schema_mismatch
         {
             return Err("binding_invalid: Flow schemas do not match the active tool".into());
         }
@@ -4804,7 +4825,9 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         let mut context_sha256 = BTreeMap::new();
         let mut first_isolation_probe = None;
         for tool in &candidate.validated.tools {
-            let witness = minimal_schema_witness(&tool.definition.input_schema)
+            let input_schema = local_apps_schema_value(&tool.definition.input_schema)
+                .map_err(|error| format!("mcp_qa_failed: {}: {error}", tool.definition.name))?;
+            let witness = minimal_schema_witness(&input_schema)
                 .map_err(|error| format!("mcp_qa_failed: {}: {error}", tool.definition.name))?;
             let context = contexts.get(&tool.flow.flow_id).ok_or_else(|| {
                 format!(

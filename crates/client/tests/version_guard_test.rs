@@ -400,7 +400,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::CompactionCompleted.messages_before", "u32");
     put("ClientEvent::CompactionCompleted.messages_after", "u32");
     put("ClientEvent::CompactionCompleted.bytes_saved", "u64");
-    put("ClientEvent::CompactionCompleted.summary", "String");
+    put("ClientEvent::CompactionCompleted.summary", "ClientTextDto");
 
     put("ClientEvent::SessionStarted", "session_started");
     put("ClientEvent::SessionStarted.session_id", "String");
@@ -1868,21 +1868,24 @@ fn current_contract_index() -> ContractIndex {
     put("AgentDto.tools_allowed", "Vec<String>");
 
     put("SessionAgentSummaryDto.agent_id", "String");
-    put("SessionAgentSummaryDto.name", "String");
+    put("SessionAgentSummaryDto.name", "ClientTextDto");
     put("SessionAgentSummaryDto.agent_type", "String");
     put("SessionAgentSummaryDto.status", "String");
-    put("SessionAgentSummaryDto.latest_activity", "Option<String>");
+    put(
+        "SessionAgentSummaryDto.latest_activity",
+        "Option<ClientTextDto>",
+    );
     put("SessionAgentSummaryDto.updated_at_ms", "Option<u64>");
     put("SessionAgentMessageRowDto.message_index", "u64");
     put("SessionAgentMessageRowDto.message_uuid", "String");
     put("SessionAgentMessageRowDto.message", "MessageDto");
     put("SessionAgentMessageRowDto.api_error_json", "Option<String>");
 
-    put("SlashCommandDto.name", "String");
-    put("SlashCommandDto.description", "String");
+    put("SlashCommandDto.name", "ClientTextDto");
+    put("SlashCommandDto.description", "ClientTextDto");
     put("SlashCommandDto.source", "String");
-    put("SlashCommandDto.aliases", "Vec<String>");
-    put("SlashCommandDto.argument_hint", "Option<String>");
+    put("SlashCommandDto.aliases", "Vec<ClientTextDto>");
+    put("SlashCommandDto.argument_hint", "Option<ClientTextDto>");
     put("SlashCommandDto.menu_description", "Option<String>");
     put("SlashCommandDto.hidden", "bool");
 
@@ -3829,7 +3832,7 @@ fn contract_index_covers_every_dto() {
         },
         SessionAgentSummaryDto {
             agent_id: String::new(),
-            name: String::new(),
+            name: String::new().into(),
             agent_type: String::new(),
             model: None,
             model_profile: None,
@@ -3850,8 +3853,8 @@ fn contract_index_covers_every_dto() {
             api_error_json: None,
         },
         SlashCommandDto {
-            name: String::new(),
-            description: String::new(),
+            name: String::new().into(),
+            description: String::new().into(),
             source: String::new(),
             aliases: vec![],
             argument_hint: None,

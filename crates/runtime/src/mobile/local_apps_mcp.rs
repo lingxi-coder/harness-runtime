@@ -11,6 +11,7 @@ use lingxi_core::host::{
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
     McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use local_apps::{AppError, AppService};
 use serde_json::{json, Value};
@@ -27,6 +28,35 @@ const LOCAL_APP_CALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const LOCAL_APP_WIDGET_MIME: &str = "text/html;profile=mcp-app";
 const LOCAL_APP_WIDGET_FILE: &str = "mcp-app.html";
 pub(crate) const LOCAL_APP_WIDGET_DIR: &str = "resources";
+
+fn source_json(value: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value)
+        .expect("serde_json values are valid source JSON projections")
+}
+
+fn source_json_string(value: &Utf16JsonProjection) -> Result<String, McpError> {
+    value
+        .to_json_string()
+        .map_err(|error| McpError::Internal(error.to_string().into()))
+}
+
+fn source_json_value(value: &Utf16JsonProjection) -> Result<Value, McpError> {
+    let json = source_json_string(value)?;
+    serde_json::from_str(&json)
+        .map_err(|error| internal_error(format!("invalid JSON value: {error}")))
+}
+
+fn source_root_string(value: &Utf16JsonProjection) -> Result<String, McpError> {
+    let units = value
+        .string_units("")
+        .ok_or_else(|| McpError::Internal("expected a source-preserved JSON string".into()))?;
+    String::from_utf16(&units)
+        .map_err(|_| McpError::Internal("string contains an unpaired UTF-16 surrogate".into()))
+}
+
+fn internal_error(message: impl Into<String>) -> McpError {
+    McpError::Internal(message.into().into())
+}
 
 /// Host operations that are deliberately outside the catalog state machine.
 ///
@@ -502,10 +532,10 @@ impl Drop for LocalAppCallGuard {
 fn rate_limited(retry_after_ms: u64) -> McpToolResultDto {
     let mut result =
         LocalAppsMcpTransport::tool_error("rate_limited: retry after the indicated delay");
-    result.structured_content = Some(json!({
+    result.structured_content = Some(source_json(&json!({
         "code": "rate_limited",
         "retry_after_ms": retry_after_ms,
-    }));
+    })));
     result
 }
 
@@ -1009,15 +1039,19 @@ impl LocalAppsMcpTransport {
         definition: &lingxi_core::host::McpToolDefinitionDto,
     ) -> Option<String> {
         let meta = definition.meta.as_ref()?;
-        meta.get("ui")
-            .and_then(Value::as_object)
-            .and_then(|ui| ui.get("resourceUri"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
+        let ui_resource = meta
+            .get_property("ui")
+            .and_then(|ui| ui.get_property("resourceUri"));
+        ui_resource
+            .and_then(|uri| {
+                uri.code_units()
+                    .and_then(|units| String::from_utf16(units).ok())
+            })
             .or_else(|| {
-                meta.get("openai/outputTemplate")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
+                meta.get_property("openai/outputTemplate").and_then(|uri| {
+                    uri.code_units()
+                        .and_then(|units| String::from_utf16(units).ok())
+                })
             })
     }
 
@@ -1066,7 +1100,7 @@ impl LocalAppsMcpTransport {
             let definition_value = entry.get("definition").unwrap_or(entry);
             let definition: lingxi_core::host::McpToolDefinitionDto =
                 serde_json::from_value(definition_value.clone()).map_err(|error| {
-                    McpError::Internal(format!(
+                    internal_error(format!(
                         "active Local App tool definition is invalid: {error}"
                     ))
                 })?;
@@ -1078,13 +1112,28 @@ impl LocalAppsMcpTransport {
             };
             let name = definition
                 .title
-                .clone()
-                .or_else(|| definition.description.clone())
+                .as_ref()
+                .and_then(|title| {
+                    title
+                        .string_units("")
+                        .and_then(|units| String::from_utf16(&units).ok())
+                })
+                .or_else(|| {
+                    definition.description.as_ref().and_then(|description| {
+                        description
+                            .string_units("")
+                            .and_then(|units| String::from_utf16(&units).ok())
+                    })
+                })
                 .unwrap_or_else(|| format!("{app_name} widget"));
             return Ok(Some(LocalAppResourceHandle {
                 uri,
                 name,
-                description: definition.description.clone(),
+                description: definition.description.as_ref().and_then(|description| {
+                    description
+                        .string_units("")
+                        .and_then(|units| String::from_utf16(&units).ok())
+                }),
                 mime_type: LOCAL_APP_WIDGET_MIME.to_string(),
                 meta: None,
                 resource_sha256,
@@ -1140,7 +1189,7 @@ impl LocalAppsMcpTransport {
         let mut enabled_tools: Vec<String> = enabled_tools.iter().cloned().collect();
         enabled_tools.sort();
         local_apps::effective_tool_surface_sha256(&active.tool_surface_sha256, &enabled_tools)
-            .map_err(|error| McpError::Internal(error.to_string()))
+            .map_err(|error| McpError::Internal(error.to_string().into()))
     }
 
     async fn wait_cancelled(cancelled: Arc<AtomicBool>) {
@@ -1151,10 +1200,10 @@ impl LocalAppsMcpTransport {
 
     fn validate_input(input: &Value) -> Result<(), McpError> {
         let size = serde_json::to_vec(input)
-            .map_err(|error| McpError::Internal(format!("invalid tool input: {error}")))?
+            .map_err(|error| internal_error(format!("invalid tool input: {error}")))?
             .len();
         if size > MAX_INPUT_BYTES {
-            return Err(McpError::Internal(format!(
+            return Err(internal_error(format!(
                 "tool input is {size} bytes; limit is {MAX_INPUT_BYTES}"
             )));
         }
@@ -1171,7 +1220,7 @@ impl LocalAppsMcpTransport {
             .get(field)
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| McpError::Internal(format!("missing non-empty {field:?}")))
+            .ok_or_else(|| internal_error(format!("missing non-empty {field:?}")))
     }
 
     fn validate_query_data_input(input: &Value) -> Result<(), String> {
@@ -1262,11 +1311,9 @@ impl LocalAppsMcpTransport {
     fn result(value: Value) -> McpToolResultDto {
         let text = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
         McpToolResultDto {
-            result_projection: None,
-
-            content: json!([{ "type": "text", "text": text }]),
+            content: source_json(&json!([{ "type": "text", "text": text }])),
             is_error: false,
-            structured_content: Some(value),
+            structured_content: Some(source_json(&value)),
             ..Default::default()
         }
     }
@@ -1287,11 +1334,11 @@ impl LocalAppsMcpTransport {
     /// and an iPhone in portrait, and the frame alone does not say which.
     fn image_result(data: &str, mime_type: &str, metadata: Value) -> McpToolResultDto {
         McpToolResultDto {
-            result_projection: None,
-
-            content: json!([{ "type": "image", "data": data, "mimeType": mime_type }]),
+            content: source_json(
+                &json!([{ "type": "image", "data": data, "mimeType": mime_type }]),
+            ),
             is_error: false,
-            structured_content: Some(metadata),
+            structured_content: Some(source_json(&metadata)),
             ..Default::default()
         }
     }
@@ -1376,15 +1423,13 @@ impl LocalAppsMcpTransport {
             }
         }
         McpToolResultDto {
-            result_projection: None,
-
-            content,
+            content: source_json(&content),
             is_error: false,
             // Image/text payload bytes ride only in the real MCP content
             // blocks above. Keeping them in structured_content as well would
             // duplicate screenshots into the model transcript and turn the
             // metadata side channel into a second base64 transport.
-            structured_content: Some(value),
+            structured_content: Some(source_json(&value)),
             ..Default::default()
         }
     }
@@ -1400,9 +1445,7 @@ impl LocalAppsMcpTransport {
 
     fn tool_error(message: impl Into<String>) -> McpToolResultDto {
         McpToolResultDto {
-            result_projection: None,
-
-            content: json!([{ "type": "text", "text": message.into() }]),
+            content: source_json(&json!([{ "type": "text", "text": message.into() }])),
             is_error: true,
             ..Default::default()
         }
@@ -1422,13 +1465,10 @@ impl LocalAppsMcpTransport {
 
     fn tool(name: &str, description: &str, input_schema: Value) -> McpToolDto {
         McpToolDto {
-            input_schema_projection: None,
-            definition_projection: None,
-
             server_name: String::new(),
             tool_name: name.to_string(),
-            description: description.to_string(),
-            input_schema,
+            description: description.into(),
+            input_schema: source_json(&input_schema),
             output_schema: None,
             annotations: None,
             icons: Vec::new(),
@@ -1981,7 +2021,7 @@ impl LocalAppsMcpTransport {
             let definition_value = entry.get("definition").unwrap_or(entry);
             let definition: lingxi_core::host::McpToolDefinitionDto =
                 serde_json::from_value(definition_value.clone()).map_err(|error| {
-                    McpError::Internal(format!(
+                    internal_error(format!(
                         "active Local App tool definition is invalid: {error}"
                     ))
                 })?;
@@ -1999,24 +2039,25 @@ impl LocalAppsMcpTransport {
                 .and_then(Value::as_str)
                 .and_then(lingxi_core::host::McpPermissionCeiling::from_policy_str)
             else {
-                return Err(McpError::Internal(format!(
+                return Err(internal_error(format!(
                     "active Local App tool {} has no valid permission ceiling",
                     definition.name
                 )));
             };
             if ceiling == lingxi_core::host::McpPermissionCeiling::Deny {
-                return Err(McpError::Internal(format!(
+                return Err(internal_error(format!(
                     "active Local App tool {} has a denied permission ceiling",
                     definition.name
                 )));
             }
             let tool = McpToolDto {
-                input_schema_projection: None,
-                definition_projection: None,
-
                 server_name: scope.server_name(),
                 tool_name: definition.name.clone(),
-                description: definition.description.clone().unwrap_or_default(),
+                description: definition
+                    .description
+                    .clone()
+                    .filter(|description| description.string_units("").is_some())
+                    .unwrap_or_else(|| "".into()),
                 input_schema: definition.input_schema.clone(),
                 output_schema: definition.output_schema.clone(),
                 annotations: definition.annotations.clone(),
@@ -2030,7 +2071,7 @@ impl LocalAppsMcpTransport {
             tools.push(tool);
         }
         local_apps::validate_generated_mcp_catalog(&definitions).map_err(|issues| {
-            McpError::Internal(format!(
+            internal_error(format!(
                 "active Local App catalog failed validation: {issues:?}"
             ))
         })?;
@@ -2063,7 +2104,7 @@ impl LocalAppsMcpTransport {
             let definition_value = entry.get("definition").unwrap_or(entry);
             let definition: lingxi_core::host::McpToolDefinitionDto =
                 serde_json::from_value(definition_value.clone()).map_err(|error| {
-                    McpError::Internal(format!(
+                    internal_error(format!(
                         "active Local App tool definition is invalid: {error}"
                     ))
                 })?;
@@ -2181,8 +2222,9 @@ impl LocalAppsMcpTransport {
         let object = input
             .as_object()
             .ok_or_else(|| Self::tool_error("invalid_argument: tool input must be an object"))?;
-        let schema = definition
-            .input_schema
+        let schema_value = source_json_value(&definition.input_schema)
+            .map_err(|_| Self::tool_error("invalid_argument: input schema is invalid"))?;
+        let schema = schema_value
             .as_object()
             .ok_or_else(|| Self::tool_error("invalid_argument: input schema is invalid"))?;
         if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
@@ -2209,7 +2251,7 @@ impl LocalAppsMcpTransport {
                 "invalid_argument: required tool input is missing",
             ));
         }
-        if !local_apps::value_matches_schema(input, &definition.input_schema) {
+        if !local_apps::value_matches_schema(input, &schema_value) {
             return Err(Self::tool_error(
                 "invalid_argument: tool input does not satisfy its schema",
             ));
@@ -2238,15 +2280,15 @@ impl LocalAppsMcpTransport {
         service
             .record(&scope.app_id)
             .await
-            .map_err(|error| McpError::Internal(error.to_string()))?;
+            .map_err(|error| internal_error(error.to_string()))?;
         let managed = self.export_managed_state(&scope.app_id).await?;
         if managed.registry_attached && !managed.visible {
             return Err(McpError::ToolNotFound(tool.into()));
         }
         let layout = local_apps::AppLayout::new(self.root.clone(), scope.app_id.clone())
-            .map_err(|error| McpError::Internal(error.to_string()))?;
+            .map_err(|error| internal_error(error.to_string()))?;
         let manifest = local_apps::load_manifest(&layout)
-            .map_err(|error| McpError::Internal(error.to_string()))?;
+            .map_err(|error| internal_error(error.to_string()))?;
         let Some(active) = manifest.active_mcp_catalog.as_ref() else {
             return Err(McpError::ToolNotFound(tool.into()));
         };
@@ -2269,7 +2311,7 @@ impl LocalAppsMcpTransport {
         let definition_value = entry.get("definition").unwrap_or(&entry);
         let definition: lingxi_core::host::McpToolDefinitionDto =
             serde_json::from_value(definition_value.clone()).map_err(|error| {
-                McpError::Internal(format!(
+                internal_error(format!(
                     "active Local App tool definition is invalid: {error}"
                 ))
             })?;
@@ -2301,9 +2343,7 @@ impl LocalAppsMcpTransport {
             registry
                 .begin_local_app_call(&conversation_id, &scope.app_id)
                 .await
-                .map_err(|error| {
-                    McpError::Internal(format!("local app exposure invalid: {error}"))
-                })?;
+                .map_err(|error| internal_error(format!("local app exposure invalid: {error}")))?;
         }
         let started = Instant::now();
         let request = json!({
@@ -2330,7 +2370,11 @@ impl LocalAppsMcpTransport {
                                 if definition
                                     .output_schema
                                     .as_ref()
-                                    .is_none_or(|schema| local_apps::value_matches_schema(&value, schema)) =>
+                                    .is_none_or(|schema| {
+                                        source_json_value(schema).is_ok_and(|schema| {
+                                            local_apps::value_matches_schema(&value, &schema)
+                                        })
+                                    }) =>
                             {
                                 Self::result(value)
                             }
@@ -2593,7 +2637,7 @@ impl LocalAppsMcpTransport {
         request.insert(
             "spec".into(),
             serde_json::to_value(&approval.spec)
-                .map_err(|error| McpError::Internal(format!("encode authoring spec: {error}")))?,
+                .map_err(|error| internal_error(format!("encode authoring spec: {error}")))?,
         );
         Ok(match self.host()?.prepare(Value::Object(request)).await {
             Ok(value) => Self::result(value),
@@ -2694,11 +2738,11 @@ impl LocalAppsMcpTransport {
             service
                 .record(app_id)
                 .await
-                .map_err(|error| McpError::Internal(error.to_string()))?;
+                .map_err(|error| internal_error(error.to_string()))?;
             let layout = local_apps::AppLayout::new(self.root.clone(), app_id)
-                .map_err(|error| McpError::Internal(error.to_string()))?;
+                .map_err(|error| internal_error(error.to_string()))?;
             let manifest = local_apps::load_manifest(&layout)
-                .map_err(|error| McpError::Internal(error.to_string()))?;
+                .map_err(|error| internal_error(error.to_string()))?;
             if !manifest.runtime_api_compatible() {
                 return Ok(Self::tool_error(
                     "runtime_api_incompatible: this app must be regenerated for Local Apps Runtime OS v2",
@@ -2820,14 +2864,15 @@ impl LocalAppsMcpTransport {
                     Ok(value) => value,
                     Err(error) => return Ok(Self::app_error(error)),
                 };
-                let runtime = service.runtime_record(app_id).await.map_err(|error| {
-                    McpError::Internal(format!("failed to read runtime: {error}"))
-                })?;
+                let runtime = service
+                    .runtime_record(app_id)
+                    .await
+                    .map_err(|error| internal_error(format!("failed to read runtime: {error}")))?;
                 let dependencies = service.dependency_record(app_id).await.map_err(|error| {
-                    McpError::Internal(format!("failed to read dependencies: {error}"))
+                    internal_error(format!("failed to read dependencies: {error}"))
                 })?;
                 let checkpoints = service.list_checkpoints(app_id).await.map_err(|error| {
-                    McpError::Internal(format!("failed to list checkpoints: {error}"))
+                    internal_error(format!("failed to list checkpoints: {error}"))
                 })?;
                 let runtime_profile_status =
                     crate::mobile::local_apps_build::derive_runtime_profile_status(
@@ -2835,13 +2880,13 @@ impl LocalAppsMcpTransport {
                     )
                     .map(|status| status.as_str());
                 let layout = local_apps::AppLayout::new(&self.root, app_id)
-                    .map_err(|error| McpError::Internal(error.to_string()))?;
+                    .map_err(|error| internal_error(error.to_string()))?;
                 let authoring =
                     match crate::mobile::local_apps_build::active_authoring_contract(&layout) {
                         Ok(Some(contract)) => {
                             let contract_sha256 = contract
                                 .sha256()
-                                .map_err(|error| McpError::Internal(error.to_string()))?;
+                                .map_err(|error| internal_error(error.to_string()))?;
                             let acceptance_checks = contract.spec.acceptance_checks.clone();
                             json!({
                                 "contract_sha256": contract_sha256,
@@ -3258,11 +3303,11 @@ impl LocalAppsMcpTransport {
             "read_logs" => {
                 let app_id = Self::required_string(&input, "app_id")?;
                 local_apps::ids::validate_app_id(app_id)
-                    .map_err(|error| McpError::Internal(error.to_string()))?;
+                    .map_err(|error| internal_error(error.to_string()))?;
                 service
                     .record(app_id)
                     .await
-                    .map_err(|error| McpError::Internal(error.to_string()))?;
+                    .map_err(|error| internal_error(error.to_string()))?;
                 let log = input
                     .get("log")
                     .and_then(Value::as_str)
@@ -3288,7 +3333,7 @@ impl LocalAppsMcpTransport {
                     )
                 })
                 .await
-                .map_err(|error| McpError::Internal(format!("log reader failed: {error}")))?
+                .map_err(|error| internal_error(format!("log reader failed: {error}")))?
                 {
                     Ok(body) => body,
                     Err(lingxi_core::host::FsError::NotFound(_)) => String::new(),
@@ -3385,6 +3430,11 @@ impl McpTransport for LocalAppsMcpTransport {
     async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError> {
         self.ensure_connection(conn)?;
         let export_scope = self.export_scope_for_connection(conn.connection_id)?;
+        let mut experimental = serde_json::Map::new();
+        experimental.insert("tools.listChanged".into(), Value::Bool(true));
+        if export_scope.is_some() {
+            experimental.insert("resources.listChanged".into(), Value::Bool(true));
+        }
         Ok(ServerCapabilitiesDto {
             tools: true,
             resources: export_scope.is_some(),
@@ -3395,15 +3445,8 @@ impl McpTransport for LocalAppsMcpTransport {
             // does not yet expose a nested tools capability. Preserve the
             // standard listChanged bit in the experimental map until the
             // protocol DTO can grow that field without a major bump.
-            experimental: [("tools.listChanged".into(), Value::Bool(true))]
-                .into_iter()
-                .chain(
-                    export_scope
-                        .is_some()
-                        .then_some(("resources.listChanged".into(), Value::Bool(true))),
-                )
-                .collect::<std::collections::HashMap<_, _>>(),
-            extensions: std::collections::HashMap::new(),
+            experimental: source_json(&Value::Object(experimental)),
+            extensions: source_json(&json!({})),
         })
     }
 
@@ -3414,7 +3457,7 @@ impl McpTransport for LocalAppsMcpTransport {
             service
                 .record(&export_scope.scope.app_id)
                 .await
-                .map_err(|error| McpError::Internal(error.to_string()))?;
+                .map_err(|error| internal_error(error.to_string()))?;
             let managed = self
                 .export_managed_state(&export_scope.scope.app_id)
                 .await?;
@@ -3423,9 +3466,9 @@ impl McpTransport for LocalAppsMcpTransport {
             }
             let layout =
                 local_apps::AppLayout::new(self.root.clone(), export_scope.scope.app_id.clone())
-                    .map_err(|error| McpError::Internal(error.to_string()))?;
+                    .map_err(|error| internal_error(error.to_string()))?;
             let manifest = local_apps::load_manifest(&layout)
-                .map_err(|error| McpError::Internal(error.to_string()))?;
+                .map_err(|error| internal_error(error.to_string()))?;
             if let Some(active) = manifest.active_mcp_catalog.as_ref() {
                 let effective_tool_surface_sha256 =
                     Self::effective_listed_tool_surface_sha256(&managed, active)?;
@@ -3490,21 +3533,21 @@ impl McpTransport for LocalAppsMcpTransport {
         service
             .record(&export_scope.scope.app_id)
             .await
-            .map_err(|error| McpError::Internal(error.to_string()))?;
+            .map_err(|error| internal_error(error.to_string()))?;
         let layout =
             local_apps::AppLayout::new(self.root.clone(), export_scope.scope.app_id.clone())
-                .map_err(|error| McpError::Internal(error.to_string()))?;
+                .map_err(|error| internal_error(error.to_string()))?;
         let manifest = local_apps::load_manifest(&layout)
-            .map_err(|error| McpError::Internal(error.to_string()))?;
+            .map_err(|error| internal_error(error.to_string()))?;
         let Some(resource) = self.active_catalog_resource(&managed, &manifest, &layout)? else {
             return Ok(Vec::new());
         };
         Ok(vec![McpResourceDto {
-            uri: resource.uri,
-            name: resource.name,
-            description: resource.description,
+            uri: resource.uri.into(),
+            name: resource.name.into(),
+            description: resource.description.map(Into::into),
             mime_type: Some(resource.mime_type),
-            meta: resource.meta,
+            meta: resource.meta.as_ref().map(source_json),
         }])
     }
 
@@ -3517,9 +3560,18 @@ impl McpTransport for LocalAppsMcpTransport {
         &self,
         conn: &McpRawConnection,
         tool: &str,
-        input: Value,
+        input: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         self.ensure_connection(conn)?;
+        let input_json = source_json_string(&input)?;
+        if input_json.len() > MAX_INPUT_BYTES {
+            return Err(internal_error(format!(
+                "tool input is {} bytes; limit is {MAX_INPUT_BYTES}",
+                input_json.len()
+            )));
+        }
+        let input: Value = serde_json::from_str(&input_json)
+            .map_err(|error| internal_error(format!("invalid tool input: {error}")))?;
         if self
             .export_scope_for_connection(conn.connection_id)?
             .is_some()
@@ -3539,9 +3591,10 @@ impl McpTransport for LocalAppsMcpTransport {
     async fn read_resource(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         self.ensure_connection(conn)?;
+        let uri = source_root_string(uri)?;
         let Some(export_scope) = self.export_scope_for_connection(conn.connection_id)? else {
             return Err(McpError::Internal(
                 "local apps exposes widget resources only on conversation exports".into(),
@@ -3559,12 +3612,12 @@ impl McpTransport for LocalAppsMcpTransport {
         service
             .record(&export_scope.scope.app_id)
             .await
-            .map_err(|error| McpError::Internal(error.to_string()))?;
+            .map_err(|error| internal_error(error.to_string()))?;
         let layout =
             local_apps::AppLayout::new(self.root.clone(), export_scope.scope.app_id.clone())
-                .map_err(|error| McpError::Internal(error.to_string()))?;
+                .map_err(|error| internal_error(error.to_string()))?;
         let manifest = local_apps::load_manifest(&layout)
-            .map_err(|error| McpError::Internal(error.to_string()))?;
+            .map_err(|error| internal_error(error.to_string()))?;
         let Some(resource) = self.active_catalog_resource(&managed, &manifest, &layout)? else {
             return Err(McpError::Internal(
                 "Local App widget resource is unavailable".into(),
@@ -3585,7 +3638,7 @@ impl McpTransport for LocalAppsMcpTransport {
             &relative,
             4 * 1024 * 1024,
         )
-        .map_err(|error| McpError::Internal(format!("failed to read Local App widget: {error}")))?;
+        .map_err(|error| internal_error(format!("failed to read Local App widget: {error}")))?;
         let actual_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
         if actual_sha256 != resource.resource_sha256 {
             return Err(McpError::Internal(
@@ -3593,10 +3646,10 @@ impl McpTransport for LocalAppsMcpTransport {
             ));
         }
         Ok(McpResourceContentDto {
-            uri: resource.uri,
-            content,
+            uri: resource.uri.into(),
+            content: content.into(),
             mime_type: Some(resource.mime_type),
-            meta: resource.meta,
+            meta: resource.meta.as_ref().map(source_json),
         })
     }
 

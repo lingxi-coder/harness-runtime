@@ -3696,6 +3696,7 @@ mod async_path_tests {
             _tool: &str,
             _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         ) {
         }
 
@@ -4059,6 +4060,7 @@ mod once_and_status_message_tests {
             _tool: &str,
             _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
             _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+            _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         ) {
         }
 

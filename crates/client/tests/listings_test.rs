@@ -420,17 +420,17 @@ fn slash_command_catalog_round_trips() {
     let ev = ClientEvent::SlashCommandCatalog {
         commands: vec![
             SlashCommandDto {
-                name: "model".to_string(),
-                description: "Switch the active model".to_string(),
+                name: "model".into(),
+                description: "Switch the active model".into(),
                 source: "builtin".to_string(),
-                aliases: vec!["m".to_string()],
-                argument_hint: Some("[model]".to_string()),
+                aliases: vec!["m".into()],
+                argument_hint: Some("[model]".into()),
                 menu_description: Some("Switch model".to_string()),
                 hidden: false,
             },
             SlashCommandDto {
-                name: "review".to_string(),
-                description: "Review a PR".to_string(),
+                name: "review".into(),
+                description: "Review a PR".into(),
                 source: "markdown".to_string(),
                 aliases: vec![],
                 argument_hint: None,

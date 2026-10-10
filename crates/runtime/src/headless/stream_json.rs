@@ -56,13 +56,97 @@ fn escape_line_terminators(s: &str) -> String {
         .replace('\u{2029}', "\\u2029")
 }
 
+fn project_json_value(value: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("serde JSON value projects to flat JSON")
+}
+
+fn json_value_from_projection(value: &Utf16JsonProjection) -> Option<Value> {
+    let json = value.to_json_string().ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+#[cfg(test)]
+fn projected_value(value: &Utf16JsonProjection) -> Value {
+    json_value_from_projection(value).expect("test projection contains ordinary JSON strings")
+}
+
+fn escape_pointer_token(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
+fn projections_equal(left: &Utf16JsonProjection, right: &Utf16JsonProjection) -> bool {
+    if left.validate().is_err() || right.validate().is_err() {
+        return false;
+    }
+    let (Some(left), Some(right)) = (left.at_pointer(""), right.at_pointer("")) else {
+        return false;
+    };
+    let mut pending = vec![(left, right)];
+    while let Some((left, right)) = pending.pop() {
+        if left.is_null() || right.is_null() {
+            if left.is_null() && right.is_null() {
+                continue;
+            }
+            return false;
+        }
+        if let (Some(left), Some(right)) = (left.code_units(), right.code_units()) {
+            if left != right {
+                return false;
+            }
+            continue;
+        }
+        if let (Some(left), Some(right)) = (left.as_bool(), right.as_bool()) {
+            if left != right {
+                return false;
+            }
+            continue;
+        }
+        if let (Some(left), Some(right)) = (left.as_number(), right.as_number()) {
+            if left.to_bits() != right.to_bits() {
+                return false;
+            }
+            continue;
+        }
+        if let (Some(left_len), Some(right_len)) = (left.array_len(), right.array_len()) {
+            if left_len != right_len {
+                return false;
+            }
+            for index in 0..left_len {
+                let (Some(left), Some(right)) = (left.get_index(index), right.get_index(index))
+                else {
+                    return false;
+                };
+                pending.push((left, right));
+            }
+            continue;
+        }
+        if let (Some(left_entries), Some(right_entries)) =
+            (left.object_entries(), right.object_entries())
+        {
+            if left_entries.len() != right_entries.len() {
+                return false;
+            }
+            for entry in left_entries {
+                let Some(right_value) = right.get_property_units(entry.code_units) else {
+                    return false;
+                };
+                pending.push((entry.value, right_value));
+            }
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
 /// Serialize a JSON value to an escaped NDJSON line (compact + LF).
 /// This is the canonical wire-format serialiser for both the drain task
 /// and any caller that needs to bypass the channel (e.g. `emit_replay_ack`).
 pub fn serialize_ndjson_line(v: &Value) -> String {
-    let s = Utf16JsonProjection::plain(v.clone())
+    let s = Utf16JsonProjection::from_serde_value(v)
+        .expect("serde JSON value projects to flat JSON")
         .to_json_string()
-        .expect("plain JSON projection is valid");
+        .expect("projected JSON is valid");
     let mut line = escape_line_terminators(&s);
     line.push('\n');
     line
@@ -169,20 +253,22 @@ struct PrintTextLimits {
     max_budget_usd: Option<f64>,
 }
 
+fn finite_u64(value: f64) -> Option<u64> {
+    (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value < u64::MAX as f64)
+        .then_some(value as u64)
+}
+
+fn projected_u64(value: &Utf16JsonProjection, pointer: &str) -> Option<u64> {
+    finite_u64(value.number_at(pointer)?)
+}
+
 fn render_text_result(frame: &Utf16JsonProjection, limits: PrintTextLimits) -> String {
     let string = |path: &str| {
         frame
             .string_units(path)
             .map(|units| String::from_utf16_lossy(&units))
-            .or_else(|| {
-                frame
-                    .value
-                    .pointer(path)
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
     };
-    match frame.value["subtype"].as_str() {
+    match frame.string_at("/subtype") {
         Some("success") => {
             let mut text = string("/result").unwrap_or_default();
             if !text.ends_with('\n') {
@@ -253,7 +339,11 @@ fn print_text_result_renderer_preserves_native_diagnostic_bytes() {
         ),
     ] {
         assert_eq!(
-            render_text_result(&Utf16JsonProjection::plain(frame), limits).as_bytes(),
+            render_text_result(
+                &Utf16JsonProjection::from_serde_value(&frame).unwrap(),
+                limits,
+            )
+            .as_bytes(),
             expected.as_bytes()
         );
     }
@@ -263,12 +353,12 @@ fn verbose_json_keeps_frame(line: &str) -> bool {
     let Ok(frame) = Utf16JsonProjection::parse(line.trim_end_matches('\n')) else {
         return false;
     };
-    let frame_type = frame.value.get("type").and_then(Value::as_str);
+    let frame_type = frame.string_at("/type");
     match frame_type {
         Some("ui_invalidate" | "stream_event") => false,
         Some("system")
             if matches!(
-                frame.value.get("subtype").and_then(Value::as_str),
+                frame.string_at("/subtype"),
                 Some(
                     "status"
                         | "hook_started"
@@ -316,7 +406,7 @@ impl PrintFrameBuffer {
             return;
         };
         let line = line.strip_suffix('\n').unwrap_or(&line).to_owned();
-        if frame.value["type"] == "result" {
+        if frame.string_at("/type") == Some("result") {
             if mode != StreamJsonOutputMode::VerboseJson {
                 self.results.clear();
             }
@@ -332,7 +422,7 @@ impl PrintFrameBuffer {
         };
         let mut frame = Utf16JsonProjection::parse(raw).map_err(std::io::Error::other)?;
         let monotonic_cost = totals["total_cost_usd"].as_f64().unwrap_or_default()
-            >= frame.value["total_cost_usd"].as_f64().unwrap_or_default();
+            >= frame.number_at("/total_cost_usd").unwrap_or_default();
         for key in [
             "total_cost_usd",
             "duration_api_ms",
@@ -340,24 +430,31 @@ impl PrintFrameBuffer {
             "subagent_stats",
             "safety_stops",
         ] {
-            let Some(mut value) = totals.get(key).cloned() else {
+            let Some(value) = totals.get(key) else {
                 continue;
             };
             if !matches!(key, "subagent_stats" | "safety_stops") && !monotonic_cost {
                 continue;
             }
-            if key == "duration_api_ms" && frame.value[key] == 0 {
+            if key == "duration_api_ms" && frame.number_at("/duration_api_ms") == Some(0.0) {
                 continue;
             }
+            let mut value =
+                Utf16JsonProjection::from_serde_value(value).map_err(std::io::Error::other)?;
             if key == "safety_stops" {
-                let Some(previous) = frame.value.get(key).and_then(Value::as_u64) else {
+                let Some(previous) = projected_u64(&frame, "/safety_stops") else {
                     continue;
                 };
-                value = json!(previous.max(value.as_u64().unwrap_or_default()));
+                let Some(current) = value.number_at("") else {
+                    continue;
+                };
+                let Some(current) = finite_u64(current) else {
+                    continue;
+                };
+                value = Utf16JsonProjection::from_serde_value(&json!(previous.max(current)))
+                    .map_err(std::io::Error::other)?;
             }
-            frame
-                .set_pointer(&format!("/{key}"), Utf16JsonProjection::plain(value))
-                .map_err(std::io::Error::other)?;
+            frame.set_field(key, value).map_err(std::io::Error::other)?;
         }
         frame.to_json_string().map_err(std::io::Error::other)
     }
@@ -467,8 +564,7 @@ enum AccBlock {
     ToolUse {
         id: String,
         name: String,
-        input: Value,
-        input_projection: Option<Utf16JsonProjection>,
+        input: Utf16JsonProjection,
     },
 }
 
@@ -490,10 +586,8 @@ impl AccBlock {
                 }
                 Value::Object(m)
             }
-            AccBlock::ToolUse {
-                id, name, input, ..
-            } => {
-                json!({"type": "tool_use", "id": id, "name": name, "input": input})
+            AccBlock::ToolUse { id, name, .. } => {
+                json!({"type": "tool_use", "id": id, "name": name, "input": null})
             }
         }
     }
@@ -902,7 +996,7 @@ impl StreamJsonStream {
             init_params: Mutex::new(init_params),
             accum: Arc::new(Mutex::new(MessageAccum::default())),
             suppress_frames,
-            last_result_text: Mutex::new(Utf16JsonProjection::plain(json!(""))),
+            last_result_text: Mutex::new(Utf16JsonProjection::from("")),
             structured_output: Mutex::new(None),
             result_metadata: Mutex::new(StreamJsonResultMetadata::default()),
             text_limits: PrintTextLimits::default(),
@@ -1138,6 +1232,29 @@ impl StreamJsonStream {
         let line = serialize_ndjson_line(v);
         let is_stream_event = v.get("type").and_then(Value::as_str) == Some("stream_event");
         self.enqueue_line(line, is_stream_event);
+    }
+
+    fn enqueue_projected(&self, frame: &Utf16JsonProjection) {
+        let is_stream_event = frame.string_at("/type") == Some("stream_event");
+        match serialize_projected_ndjson_line(frame) {
+            Ok(line) => self.enqueue_line(line, is_stream_event),
+            Err(error) => self.abort_delivery(format!("invalid projected frame: {error}")),
+        }
+    }
+
+    fn enqueue_with_projection(
+        &self,
+        frame: &Value,
+        pointer: &str,
+        value: &Utf16JsonProjection,
+        context: &str,
+    ) {
+        let mut projection = project_json_value(frame);
+        if let Err(error) = projection.replace_pointer_projection(pointer, value.clone()) {
+            self.abort_delivery(format!("invalid {context} projection: {error}"));
+            return;
+        }
+        self.enqueue_projected(&projection);
     }
 
     /// Build the client-protocol heartbeat frame used by stream-json. Keeping
@@ -1458,56 +1575,63 @@ impl StreamJsonStream {
 
     fn enqueue_tool_result_frame(
         &self,
-        frame: Value,
-        model_text: &str,
-        result: &Value,
+        mut frame: Utf16JsonProjection,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
         exact: Option<&lingxi_core::host::ToolResultProjection>,
+        mcp_meta: Option<&Utf16JsonProjection>,
     ) {
-        let Some(exact) = exact else {
-            self.enqueue(&frame);
-            return;
-        };
-        if exact.data.value != *result
-            || exact.data.validate().is_err()
-            || exact.content.validate().is_err()
-            || exact.model_text.as_ref().is_some_and(|text| {
-                text.value.as_str() != Some(model_text) || text.validate().is_err()
-            })
-            || !(exact.content.value.as_str() == Some(model_text)
-                || (exact.content.value.is_array() && exact.content.value == *result))
-        {
-            self.abort_delivery("tool result projection association changed");
-            return;
+        if let Some(exact) = exact {
+            let content_matches = projections_equal(&exact.content, model_text)
+                || (exact.content.array_len("").is_some()
+                    && projections_equal(&exact.content, result));
+            if !projections_equal(&exact.data, result)
+                || exact.data.validate().is_err()
+                || exact.content.validate().is_err()
+                || exact.model_text.as_ref().is_some_and(|text| {
+                    !projections_equal(text, model_text) || text.validate().is_err()
+                })
+                || !content_matches
+            {
+                self.abort_delivery("tool result projection association changed");
+                return;
+            }
+            if let Some(meta) = &exact.mcp_meta {
+                if let Err(error) = meta.validate() {
+                    self.abort_delivery(format!("invalid MCP metadata: {error}"));
+                    return;
+                }
+            }
+            if let Err(error) = frame
+                .replace_pointer_projection("/toolUseResult", exact.data.clone())
+                .and_then(|()| {
+                    frame.replace_pointer_projection(
+                        "/message/content/0/content",
+                        exact.content.clone(),
+                    )
+                })
+            {
+                self.abort_delivery(format!("invalid tool result projection: {error}"));
+                return;
+            }
+            if let Some(meta) = &exact.mcp_meta {
+                if let Err(error) = frame.set_field("mcpMeta", meta.clone()) {
+                    self.abort_delivery(format!("invalid MCP metadata frame: {error}"));
+                    return;
+                }
+            }
         }
-        let mut frame = frame;
-        if let Some(meta) = &exact.mcp_meta {
+        if let Some(meta) = mcp_meta {
             if let Err(error) = meta.validate() {
                 self.abort_delivery(format!("invalid MCP metadata: {error}"));
                 return;
             }
-            frame
-                .as_object_mut()
-                .expect("native user frame")
-                .insert("mcpMeta".into(), meta.value.clone());
-        }
-        let mut frame = Utf16JsonProjection::plain(frame);
-        if let Err(error) = frame
-            .set_pointer("/toolUseResult", exact.data.clone())
-            .and_then(|()| frame.set_pointer("/message/content/0/content", exact.content.clone()))
-        {
-            self.abort_delivery(format!("invalid tool result projection: {error}"));
-            return;
-        }
-        if let Some(meta) = &exact.mcp_meta {
-            if let Err(error) = frame.set_pointer("/mcpMeta", meta.clone()) {
+            if let Err(error) = frame.set_field("mcpMeta", meta.clone()) {
                 self.abort_delivery(format!("invalid MCP metadata frame: {error}"));
                 return;
             }
         }
-        match serialize_projected_ndjson_line(&frame) {
-            Ok(line) => self.enqueue_line(line, false),
-            Err(error) => self.abort_delivery(format!("invalid tool result frame: {error}")),
-        }
+        self.enqueue_projected(&frame);
     }
 
     fn build_compact_error_frame(
@@ -1670,9 +1794,9 @@ impl StreamJsonStream {
     async fn build_tool_result_frame(
         &self,
         tool_use_id: &str,
-        model_text: &str,
-        result: &Value,
-    ) -> Value {
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
+    ) -> Utf16JsonProjection {
         self.build_tool_result_frame_with_denial(tool_use_id, model_text, result, None, None)
             .await
     }
@@ -1693,16 +1817,18 @@ impl StreamJsonStream {
     async fn build_tool_result_frame_with_denial(
         &self,
         tool_use_id: &str,
-        model_text: &str,
-        result: &Value,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
         denial_kind: Option<&str>,
         user_feedback: Option<&str>,
-    ) -> Value {
-        let is_error = result.get("error").is_some();
+    ) -> Utf16JsonProjection {
+        let is_error = result.get_property("error").is_some();
         let uuid = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let session_id = self.session_id.lock().await.clone();
-        let content_value = json!(model_text);
+        let content_value = model_text
+            .string_at("")
+            .expect("tool-result model text is a root string");
         let content_block = json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
@@ -1717,7 +1843,7 @@ impl StreamJsonStream {
             },
             "session_id": session_id,
             "parent_tool_use_id": null,
-            "toolUseResult": result,
+            "toolUseResult": null,
             "uuid": uuid,
             "timestamp": timestamp
         });
@@ -1728,7 +1854,15 @@ impl StreamJsonStream {
                 .expect("frame is a JSON object")
                 .insert("tool_result_meta".to_string(), Value::Array(meta));
         }
-        frame
+        let mut projection = project_json_value(&frame);
+        projection
+            .replace_pointer_projection("/toolUseResult", result.clone())
+            .and_then(|()| {
+                projection
+                    .replace_pointer_projection("/message/content/0/content", model_text.clone())
+            })
+            .expect("tool-result projections match the frame slots");
+        projection
     }
 
     /// Build the 2.1.293 success result envelope in native insertion order.
@@ -1776,7 +1910,11 @@ impl StreamJsonStream {
                     json!({
                         "tool_name": d.tool_name,
                         "tool_use_id": d.tool_use_id,
-                        "tool_input": d.tool_input,
+                        // The result builder retains a JSON placeholder here;
+                        // enqueue_result_frame replaces it with the exact flat
+                        // source projection before serialization.
+                        "tool_input": json_value_from_projection(&d.tool_input)
+                            .unwrap_or(Value::Null),
                     })
                 })
                 .collect(),
@@ -1784,34 +1922,26 @@ impl StreamJsonStream {
     }
 
     async fn enqueue_result_frame(&self, frame: &Value, result_text: Option<&Utf16JsonProjection>) {
-        let mut projection = Utf16JsonProjection::plain(frame.clone());
+        let mut projection = project_json_value(frame);
         if let Some(cell) = self.permission_denials.get() {
             let denials = cell.lock().await;
             for (index, denial) in denials.iter().enumerate() {
-                if let Some(input) = &denial.tool_input_projection {
-                    let path = format!("/permission_denials/{index}/tool_input");
-                    if input.value != denial.tool_input
-                        || frame.pointer(&path) != Some(&input.value)
-                    {
-                        self.abort_delivery("permission denial projection association changed");
-                        return;
-                    }
-                    if let Err(error) = projection.set_pointer(&path, input.clone()) {
-                        self.abort_delivery(format!(
-                            "invalid permission denial projection: {error}"
-                        ));
-                        return;
-                    }
+                let path = format!("/permission_denials/{index}/tool_input");
+                if let Err(error) =
+                    projection.replace_pointer_projection(&path, denial.tool_input.clone())
+                {
+                    self.abort_delivery(format!("invalid permission denial projection: {error}"));
+                    return;
                 }
             }
         }
         if frame.get("structured_output").is_none() {
             if let Some(text) = result_text {
-                if frame.get("result") != Some(&text.value) {
+                if frame.get("result").and_then(Value::as_str) != text.string_at("") {
                     self.abort_delivery("result text projection association changed");
                     return;
                 }
-                if let Err(error) = projection.set_pointer("/result", text.clone()) {
+                if let Err(error) = projection.replace_pointer_projection("/result", text.clone()) {
                     self.abort_delivery(format!("invalid result text projection: {error}"));
                     return;
                 }
@@ -1819,20 +1949,35 @@ impl StreamJsonStream {
         }
         if frame.get("structured_output").is_some() {
             if let Some(output) = self.structured_output.lock().await.clone() {
-                if frame.get("structured_output") != Some(&output.value) {
-                    self.abort_delivery("structured output projection association changed");
-                    return;
-                }
-                if let Err(error) = projection.set_pointer("/structured_output", output) {
+                if let Err(error) =
+                    projection.replace_pointer_projection("/structured_output", output)
+                {
                     self.abort_delivery(format!("invalid structured output projection: {error}"));
                     return;
                 }
             }
         }
-        match serialize_projected_ndjson_line(&projection) {
-            Ok(line) => self.enqueue_line(line, false),
-            Err(error) => self.abort_delivery(format!("invalid result projection: {error}")),
+        let markers = self
+            .request_markers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Ok(Some(fields)) = markers.fields() {
+            for key in ["user_message_uuid", "user_message_uuids"] {
+                if !projection.contains_property(key) {
+                    continue;
+                }
+                let Ok(value) = fields.subprojection(&format!("/{key}")) else {
+                    continue;
+                };
+                if let Err(error) = projection.replace_pointer_projection(key, value) {
+                    drop(markers);
+                    self.abort_delivery(format!("invalid request marker projection: {error}"));
+                    return;
+                }
+            }
         }
+        drop(markers);
+        self.enqueue_projected(&projection);
     }
 
     pub async fn set_result_metadata(&self, metadata: StreamJsonResultMetadata) {
@@ -1858,11 +2003,11 @@ impl StreamJsonStream {
     /// Stage all actually rendered queued humans before any started lifecycle.
     /// Native's pending attachment set has its own independent 64-entry cap.
     pub fn stage_queued_request_marker(&self, uuid: Utf16JsonProjection) -> Result<(), String> {
-        let mut attachment = Utf16JsonProjection::plain(json!({
-            "type":"queued_command", "commandMode":"prompt", "source_uuid":uuid.value
+        let mut attachment = project_json_value(&json!({
+            "type":"queued_command", "commandMode":"prompt", "source_uuid":null
         }));
         attachment
-            .set_pointer("/source_uuid", uuid.clone())
+            .replace_pointer_projection("/source_uuid", uuid.clone())
             .map_err(|error| error.to_string())?;
         let mut owner = self
             .request_markers
@@ -1893,8 +2038,11 @@ impl StreamJsonStream {
         {
             Ok(Some(markers)) => {
                 for key in fields {
-                    if let Some(value) = markers.value.get(*key) {
-                        obj.insert((*key).into(), value.clone());
+                    if let Ok(value) = markers.subprojection(&format!("/{key}")) {
+                        obj.insert(
+                            (*key).into(),
+                            json_value_from_projection(&value).unwrap_or(Value::Null),
+                        );
                     }
                 }
             }
@@ -2045,7 +2193,10 @@ impl StreamJsonStream {
                     .to_json_string()
                     .expect("validated structured output projection")),
             );
-            obj.insert("structured_output".into(), value.value);
+            obj.insert(
+                "structured_output".into(),
+                json_value_from_projection(&value).unwrap_or(Value::Null),
+            );
         }
         if let Some(value) = metadata.ttft_ms {
             obj.insert("ttft_ms".into(), json!(value));
@@ -2084,8 +2235,7 @@ impl StreamJsonStream {
         betas: &[String],
     ) -> Value {
         let Some(text) = result_text
-            .value
-            .as_str()
+            .string_at("")
             .filter(|_| result_text.validate().is_ok())
         else {
             self.abort_delivery("result text must be a validated string projection");
@@ -2499,52 +2649,68 @@ impl StreamJsonStream {
     ///   - the message has no `content` array.
     fn build_forwarded_subagent_frame(
         &self,
-        message: &Value,
+        message: &Utf16JsonProjection,
         parent_tool_use_id: &str,
         session_id: &str,
         uuid: &str,
-    ) -> Option<Value> {
+    ) -> Option<Utf16JsonProjection> {
         if !self.forward_subagent_text() || self.suppress_frames {
             return None;
         }
         // Only assistant turns are forwarded here.
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        if message.string_at("/role") != Some("assistant") {
             return None;
         }
         // Mirror the binary's `{...o.message, content: Xzt(content)}`. `Xzt`
         // keeps tool_use (and every non-text/thinking) block UNCHANGED and only
         // rewrites text/thinking; with no `i0`/`<cc-memory>` stripping in LingXi
         // that rewrite is the identity, so the whole `content` array is kept.
-        let content = message.get("content").and_then(Value::as_array)?;
-        let rewritten: Vec<Value> = content
-            .iter()
-            .map(|block| match block.get("type").and_then(Value::as_str) {
-                // Seam for a future `i0`/`<cc-memory>` strip on text/thinking.
-                // No-op today (pass through unchanged).
-                Some("text") | Some("thinking") => block.clone(),
-                Some("text_js_utf16") => {
-                    let mut block = block.clone();
-                    if let Some(object) = block.as_object_mut() {
-                        object.insert("type".into(), json!("text"));
-                        object.remove("utf16_code_units");
-                    }
-                    block
-                }
-                // Every other block (incl. tool_use) is returned unchanged.
-                _ => block.clone(),
-            })
-            .collect();
-        let mut fwd_message = message.clone();
-        if let Some(obj) = fwd_message.as_object_mut() {
-            obj.insert("content".to_string(), Value::Array(rewritten));
+        let content_len = message.array_len("/content")?;
+        let mut forwarded_message = message.clone();
+        for index in 0..content_len {
+            let block_path = format!("/content/{index}");
+            if message.string_at(&format!("{block_path}/type")) != Some("text_js_utf16") {
+                continue;
+            }
+            let block = message.subprojection(&block_path).ok()?;
+            let display = block.string_at("/text")?.to_owned();
+            let unit_count = block.array_len("/utf16_code_units")?;
+            let mut units = Vec::with_capacity(unit_count);
+            for unit_index in 0..unit_count {
+                let value = block.number_at(&format!("/utf16_code_units/{unit_index}"))?;
+                let value = finite_u64(value)?;
+                units.push(u16::try_from(value).ok()?);
+            }
+            let text = Utf16JsonProjection::root_string(display, units).ok()?;
+            let mut fields = Vec::new();
+            for entry in block.object_entries()? {
+                let value = match entry.display_key {
+                    "utf16_code_units" => continue,
+                    "type" => Utf16JsonProjection::from("text"),
+                    "text" => text.clone(),
+                    key => block
+                        .subprojection(&format!("/{}", escape_pointer_token(key)))
+                        .ok()?,
+                };
+                fields.push((entry.code_units.to_vec(), value));
+            }
+            let rewritten_block = Utf16JsonProjection::object_units(fields).ok()?;
+            forwarded_message
+                .replace_pointer_projection(&block_path, rewritten_block)
+                .ok()?;
         }
-        Some(json!({
+
+        let mut frame = project_json_value(&json!({
             "type": "assistant",
-            "message": fwd_message,
+            "message": null,
             "parent_tool_use_id": parent_tool_use_id,
             "session_id": session_id,
             "uuid": uuid,
-        }))
+        }));
+        frame
+            .replace_pointer_projection("/message", forwarded_message)
+            .ok()?;
+        Some(frame)
     }
 }
 
@@ -2572,20 +2738,21 @@ impl OutputStream for StreamJsonStream {
             clock.first_request_input_tokens.get_or_insert(input_tokens);
         }
     }
-    async fn emit_task_lifecycle(&self, event: &Value) {
+    async fn emit_task_lifecycle(&self, event: &Utf16JsonProjection) {
         if self.suppress_frames {
             return;
         }
         let mut frame = event.clone();
-        let Some(frame_object) = frame.as_object_mut() else {
+        let session_id = Utf16JsonProjection::from(self.session_id.lock().await.clone());
+        let uuid = Utf16JsonProjection::from(uuid::Uuid::new_v4().to_string());
+        if let Err(error) = frame
+            .set_field("session_id", session_id)
+            .and_then(|()| frame.set_field("uuid", uuid))
+        {
+            self.abort_delivery(format!("invalid task lifecycle projection: {error}"));
             return;
-        };
-        frame_object.insert(
-            "session_id".into(),
-            json!(self.session_id.lock().await.clone()),
-        );
-        frame_object.insert("uuid".into(), json!(uuid::Uuid::new_v4().to_string()));
-        self.enqueue(&frame);
+        }
+        self.enqueue_projected(&frame);
     }
 
     async fn emit_compaction_started(&self) {
@@ -2653,7 +2820,11 @@ impl OutputStream for StreamJsonStream {
     /// `Task`/`Agent` tool_use_id that spawned the child. Gated + shaped by
     /// [`Self::build_forwarded_subagent_frame`]; a no-op when the flag is off or
     /// the message has no forwardable text/thinking blocks.
-    async fn emit_forwarded_subagent_message(&self, message: &Value, parent_tool_use_id: &str) {
+    async fn emit_forwarded_subagent_message(
+        &self,
+        message: &Utf16JsonProjection,
+        parent_tool_use_id: &str,
+    ) {
         // Cheap gate before locking / minting a uuid.
         if !self.forward_subagent_text() || self.suppress_frames {
             return;
@@ -2664,48 +2835,24 @@ impl OutputStream for StreamJsonStream {
         // (transparent-UUID) `id` field; reuse it so a forwarded child frame
         // correlates to the subagent message. Fall back to a fresh v4 only if
         // the message is malformed and carries no `id`.
-        let uuid = message
-            .get("id")
-            .and_then(Value::as_str)
-            .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
-        if let Some(frame) =
+        let uuid_projection = message
+            .subprojection("/id")
+            .ok()
+            .filter(|id| id.string_at("").is_some());
+        let uuid = uuid_projection
+            .as_ref()
+            .and_then(|id| id.string_at("").map(str::to_owned))
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if let Some(mut frame) =
             self.build_forwarded_subagent_frame(message, parent_tool_use_id, &session_id, &uuid)
         {
-            let mut projection = Utf16JsonProjection::plain(frame);
-            if let Some(content) = message.get("content").and_then(Value::as_array) {
-                for (index, block) in content.iter().enumerate() {
-                    if block.get("type").and_then(Value::as_str) != Some("text_js_utf16") {
-                        continue;
-                    }
-                    let exact =
-                        serde_json::from_value::<lingxi_core::types::ContentBlock>(block.clone())
-                            .map_err(|error| error.to_string())
-                            .and_then(|block| match block {
-                                lingxi_core::types::ContentBlock::TextJsUtf16 {
-                                    text,
-                                    utf16_code_units,
-                                    ..
-                                } => Utf16JsonProjection::root_string(text, utf16_code_units)
-                                    .map_err(|error| error.to_string()),
-                                _ => unreachable!("checked rich text discriminator"),
-                            });
-                    let result = exact.and_then(|text| {
-                        projection
-                            .set_pointer(&format!("/message/content/{index}/text"), text)
-                            .map_err(|error| error.to_string())
-                    });
-                    if let Err(error) = result {
-                        self.abort_delivery(format!("invalid forwarded assistant text: {error}"));
-                        return;
-                    }
+            if let Some(uuid_projection) = uuid_projection {
+                if let Err(error) = frame.replace_pointer_projection("/uuid", uuid_projection) {
+                    self.abort_delivery(format!("invalid forwarded assistant identity: {error}"));
+                    return;
                 }
             }
-            match serialize_projected_ndjson_line(&projection) {
-                Ok(line) => self.enqueue_line(line, false),
-                Err(error) => {
-                    self.abort_delivery(format!("invalid forwarded assistant frame: {error}"))
-                }
-            }
+            self.enqueue_projected(&frame);
         }
     }
 
@@ -2713,12 +2860,11 @@ impl OutputStream for StreamJsonStream {
         self.accum.lock().await.new_text_block = true;
     }
 
-    async fn emit_text(&self, text: &str, utf16_code_units: Option<&[u16]>) {
-        if utf16_code_units.is_some_and(|units| String::from_utf16_lossy(units) != text) {
-            self.abort_delivery("assistant text units do not match display text");
+    async fn emit_text(&self, text: &Utf16JsonProjection) {
+        let Some(units) = text.string_units("") else {
+            self.abort_delivery("assistant text projection must be a root string");
             return;
-        }
-        let units = utf16_code_units.map_or_else(|| text.encode_utf16().collect(), <[u16]>::to_vec);
+        };
         let mut acc = self.accum.lock().await;
         if !acc.new_text_block {
             if let Some(AccBlock::Text(last)) = acc.blocks.last_mut() {
@@ -2730,89 +2876,93 @@ impl OutputStream for StreamJsonStream {
         acc.new_text_block = false;
     }
 
-    async fn emit_system_notice(&self, body: &str, is_error: bool) {
+    async fn emit_system_notice(&self, body: &Utf16JsonProjection, is_error: bool) {
         if self.suppress_frames {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
-        self.enqueue(&json!({
+        let frame = json!({
             "type": "system",
             "subtype": "notice",
-            "message": body,
+            "message": null,
             "is_error": is_error,
             "uuid": uuid::Uuid::new_v4().to_string(),
             "session_id": session_id,
-        }));
+        });
+        self.enqueue_with_projection(&frame, "/message", body, "system notice");
     }
 
-    async fn emit_mod_log(&self, plugin: &str, text: &str) {
+    async fn emit_mod_log(&self, plugin: &str, text: &Utf16JsonProjection) {
         if self.suppress_frames {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
-        self.enqueue(&json!({
+        let frame = json!({
             "type": "system",
             "subtype": "ui_log",
             "plugin": plugin,
-            "text": text,
+            "text": null,
             "uuid": uuid::Uuid::new_v4().to_string(),
             "session_id": session_id,
-        }));
+        });
+        self.enqueue_with_projection(&frame, "/text", text, "Mod log");
     }
 
-    async fn emit_mod_toast(&self, plugin: &str, text: &str, timeout_ms: u64) {
+    async fn emit_mod_toast(&self, plugin: &str, text: &Utf16JsonProjection, timeout_ms: u64) {
         if self.suppress_frames {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
-        self.enqueue(&json!({
+        let frame = json!({
             "type": "system",
             "subtype": "ui_toast",
             "plugin": plugin,
-            "text": text,
+            "text": null,
             "timeout_ms": timeout_ms,
             "uuid": uuid::Uuid::new_v4().to_string(),
             "session_id": session_id,
-        }));
+        });
+        self.enqueue_with_projection(&frame, "/text", text, "Mod toast");
     }
 
-    async fn emit_mod_status(&self, plugin: &str, text: Option<&str>) {
+    async fn emit_mod_status(&self, plugin: &str, text: Option<&Utf16JsonProjection>) {
         if self.suppress_frames {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
-        self.enqueue(&json!({
+        let frame = json!({
             "type": "system",
             "subtype": "ui_status",
             "plugin": plugin,
-            "text": text,
+            "text": null,
             "uuid": uuid::Uuid::new_v4().to_string(),
             "session_id": session_id,
-        }));
+        });
+        if let Some(text) = text {
+            self.enqueue_with_projection(&frame, "/text", text, "Mod status");
+        } else {
+            self.enqueue(&frame);
+        }
     }
 
     async fn emit_tool_call(
         &self,
         id: &lingxi_core::types::ToolUseId,
         name: &str,
-        input: &serde_json::Value,
-        input_projection: Option<&Utf16JsonProjection>,
+        input: &Utf16JsonProjection,
     ) {
         if self.suppress_frames {
             return;
         }
-        if let Some(projection) = input_projection {
-            if projection.value != *input || projection.validate().is_err() {
-                self.abort_delivery("tool input projection does not match emitted input");
-                return;
-            }
+        if let Err(error) = input.validate() {
+            self.abort_delivery(format!("invalid tool input projection: {error}"));
+            return;
         }
         let mut acc = self.accum.lock().await;
         acc.blocks.push(AccBlock::ToolUse {
             id: id.as_str().to_string(),
             name: name.to_string(),
             input: input.clone(),
-            input_projection: input_projection.cloned(),
         });
     }
 
@@ -2820,9 +2970,9 @@ impl OutputStream for StreamJsonStream {
         &self,
         _id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        model_text: &str,
-        result: &serde_json::Value,
-        _projection: Option<&lingxi_core::host::ToolResultProjection>,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
+        mcp_meta: Option<&Utf16JsonProjection>,
     ) {
         if self.suppress_frames {
             return;
@@ -2830,15 +2980,15 @@ impl OutputStream for StreamJsonStream {
         let frame = self
             .build_tool_result_frame(_id.as_str(), model_text, result)
             .await;
-        self.enqueue_tool_result_frame(frame, model_text, result, _projection);
+        self.enqueue_tool_result_frame(frame, model_text, result, None, mcp_meta);
     }
 
     async fn emit_tool_result_denied(
         &self,
         id: &lingxi_core::types::ToolUseId,
         _tool: &str,
-        model_text: &str,
-        result: &serde_json::Value,
+        model_text: &Utf16JsonProjection,
+        result: &Utf16JsonProjection,
         denial_kind: &str,
         _projection: Option<&lingxi_core::host::ToolResultProjection>,
     ) {
@@ -2854,7 +3004,7 @@ impl OutputStream for StreamJsonStream {
                 None,
             )
             .await;
-        self.enqueue_tool_result_frame(frame, model_text, result, _projection);
+        self.enqueue_tool_result_frame(frame, model_text, result, _projection, None);
     }
 
     async fn emit_tool_heartbeat(
@@ -3017,7 +3167,7 @@ impl OutputStream for StreamJsonStream {
             "uuid": uuid,
             "request_id": request_id
         });
-        let mut projection = Utf16JsonProjection::plain(frame);
+        let mut projection = project_json_value(&frame);
         for (index, block) in acc.blocks.iter().enumerate() {
             if let AccBlock::Text(units) = block {
                 let text = Utf16JsonProjection::root_string(
@@ -3025,21 +3175,18 @@ impl OutputStream for StreamJsonStream {
                     units.clone(),
                 )
                 .expect("accumulated text owns its units");
-                if let Err(error) =
-                    projection.set_pointer(&format!("/message/content/{index}/text"), text)
+                if let Err(error) = projection
+                    .replace_pointer_projection(&format!("/message/content/{index}/text"), text)
                 {
                     self.abort_delivery(format!("invalid assistant text projection: {error}"));
                     return;
                 }
             }
-            if let AccBlock::ToolUse {
-                input_projection: Some(input),
-                ..
-            } = block
-            {
-                if let Err(error) = projection
-                    .set_pointer(&format!("/message/content/{index}/input"), input.clone())
-                {
+            if let AccBlock::ToolUse { input, .. } = block {
+                if let Err(error) = projection.replace_pointer_projection(
+                    &format!("/message/content/{index}/input"),
+                    input.clone(),
+                ) {
                     self.abort_delivery(format!(
                         "invalid assistant tool input projection: {error}"
                     ));
@@ -3859,7 +4006,7 @@ mod tests {
                 serialize_ndjson_line(&result),
                 format!("{}\n", native["rawLine"].as_str().unwrap())
             );
-            assert_eq!(result["user_message_uuid"], client_uuid.value);
+            assert_eq!(result["user_message_uuid"], client_uuid.string_at(""));
             stream.finish().await.unwrap();
         }
     }
@@ -3867,7 +4014,7 @@ mod tests {
     #[tokio::test]
     async fn request_marker_dispatch_facts_latch_first_real_observations_and_omit_unavailable() {
         let stream = StreamJsonStream::new_placeholder(Output::new(tokio::io::sink()));
-        let client = Utf16JsonProjection::plain(json!("client"));
+        let client = Utf16JsonProjection::from("client");
         stream
             .begin_request_markers(Some(client.clone()), vec![client], false)
             .unwrap();
@@ -4379,9 +4526,9 @@ mod tests {
         stream
             .emit_message_start("msg_test", "claude-opus-4-8")
             .await;
-        stream.emit_text("he", None).await;
-        stream.emit_text("llo", None).await;
-        stream.emit_text(" world", None).await;
+        stream.emit_text(&Utf16JsonProjection::from("he")).await;
+        stream.emit_text(&Utf16JsonProjection::from("llo")).await;
+        stream.emit_text(&Utf16JsonProjection::from(" world")).await;
         let acc = stream.accum.lock().await;
         assert_eq!(acc.blocks.len(), 1);
         if let AccBlock::Text(t) = &acc.blocks[0] {
@@ -4402,7 +4549,7 @@ mod tests {
         stream
             .emit_message_start("msg_001", "claude-opus-4-8")
             .await;
-        stream.emit_text("pong", None).await;
+        stream.emit_text(&Utf16JsonProjection::from("pong")).await;
         // Boundary flush (output goes to real stdout in tests — that's OK).
         stream
             .emit_message_boundary(Some("end_turn"), Some("req_test"))
@@ -4431,9 +4578,15 @@ mod tests {
             "bytes": 5, "code": 200, "codeText": "OK",
             "result": "# Page\n\nbody", "durationMs": 3, "url": "https://e/"
         });
-        let frame = stream
-            .build_tool_result_frame(tuid, "# Page\n\nbody", &data)
-            .await;
+        let frame = projected_value(
+            &stream
+                .build_tool_result_frame(
+                    tuid,
+                    &Utf16JsonProjection::from("# Page\n\nbody"),
+                    &project_json_value(&data),
+                )
+                .await,
+        );
         let tr = &frame["message"]["content"][0];
         assert_eq!(tr["type"], "tool_result");
         assert_eq!(tr["tool_use_id"], tuid);
@@ -4450,16 +4603,30 @@ mod tests {
         // Bash-shaped: the model text is whatever the dispatch computed; `data`
         // stays pure metadata on `toolUseResult`.
         let bash = json!({ "model_content": "out\n", "stdout": "out\n", "exit_code": 0 });
-        let f2 = stream.build_tool_result_frame(tuid, "out\n", &bash).await;
+        let f2 = projected_value(
+            &stream
+                .build_tool_result_frame(
+                    tuid,
+                    &Utf16JsonProjection::from("out\n"),
+                    &project_json_value(&bash),
+                )
+                .await,
+        );
         assert_eq!(f2["message"]["content"][0]["content"], "out\n");
         assert_eq!(f2["toolUseResult"], bash);
 
         // Error wrapper `{error}`: content is the model text + is_error derives
         // from the `error` key on `data`.
         let err = json!({ "error": "Permission to use Bash has been denied." });
-        let f3 = stream
-            .build_tool_result_frame(tuid, "Permission to use Bash has been denied.", &err)
-            .await;
+        let f3 = projected_value(
+            &stream
+                .build_tool_result_frame(
+                    tuid,
+                    &Utf16JsonProjection::from("Permission to use Bash has been denied."),
+                    &project_json_value(&err),
+                )
+                .await,
+        );
         assert_eq!(
             f3["message"]["content"][0]["content"],
             "Permission to use Bash has been denied."
@@ -4479,23 +4646,31 @@ mod tests {
         let tuid = "toolu_deny_1";
         let err = json!({ "error": "Permission to use Bash has been denied." });
 
-        let denied = stream
-            .build_tool_result_frame_with_denial(
-                tuid,
-                "Permission to use Bash has been denied.",
-                &err,
-                Some("permission-rule"),
-                None,
-            )
-            .await;
+        let denied = projected_value(
+            &stream
+                .build_tool_result_frame_with_denial(
+                    tuid,
+                    &Utf16JsonProjection::from("Permission to use Bash has been denied."),
+                    &project_json_value(&err),
+                    Some("permission-rule"),
+                    None,
+                )
+                .await,
+        );
         assert_eq!(
             serde_json::to_string(&denied["tool_result_meta"]).unwrap(),
             r#"[{"id":"toolu_deny_1","non_execution_kind":"permission-rule"}]"#
         );
 
-        let allowed = stream
-            .build_tool_result_frame(tuid, "ok\n", &json!({"stdout": "ok\n"}))
-            .await;
+        let allowed = projected_value(
+            &stream
+                .build_tool_result_frame(
+                    tuid,
+                    &Utf16JsonProjection::from("ok\n"),
+                    &project_json_value(&json!({"stdout": "ok\n"})),
+                )
+                .await,
+        );
         assert!(
             allowed.get("tool_result_meta").is_none(),
             "a non-denied result must omit the key, not emit []"
@@ -4565,7 +4740,12 @@ mod tests {
         let stream =
             StreamJsonStream::new(make_params("sess-task"), Output::new(tokio::io::sink()));
         let mut rx = stream.drain_rx.lock().await.take().unwrap();
-        stream.emit_task_lifecycle(&json!({"type":"system", "subtype":"task_started", "task_id":"b12345678", "description":"build", "task_type":"local_bash"})).await;
+        stream
+            .emit_task_lifecycle(&project_json_value(&json!({
+                "type":"system", "subtype":"task_started", "task_id":"b12345678",
+                "description":"build", "task_type":"local_bash"
+            })))
+            .await;
         let OutboundMsg::Line(line) = rx.try_recv().unwrap() else {
             panic!("expected SDK frame");
         };
@@ -4588,7 +4768,10 @@ mod tests {
             .expect("drain receiver available");
 
         stream
-            .emit_system_notice("transcript persistence failed", true)
+            .emit_system_notice(
+                &Utf16JsonProjection::from("transcript persistence failed"),
+                true,
+            )
             .await;
 
         let OutboundMsg::Line(line) = rx.try_recv().expect("notice frame") else {
@@ -4606,7 +4789,9 @@ mod tests {
     async fn mod_log_matches_claude_stream_json_system_frame() {
         let stream = StreamJsonStream::new(make_params("sess-mod"), Output::new(tokio::io::sink()));
         let mut rx = stream.drain_rx.lock().await.take().unwrap();
-        stream.emit_mod_log("review", "Found a mismatch").await;
+        stream
+            .emit_mod_log("review", &Utf16JsonProjection::from("Found a mismatch"))
+            .await;
 
         let OutboundMsg::Line(line) = rx.try_recv().expect("ui_log frame") else {
             panic!("expected a Line frame");
@@ -4632,7 +4817,9 @@ mod tests {
     async fn mod_toast_matches_claude_stream_json_system_frame() {
         let stream = StreamJsonStream::new(make_params("sess-mod"), Output::new(tokio::io::sink()));
         let mut rx = stream.drain_rx.lock().await.take().unwrap();
-        stream.emit_mod_toast("review", "Done", 4000).await;
+        stream
+            .emit_mod_toast("review", &Utf16JsonProjection::from("Done"), 4000)
+            .await;
 
         let OutboundMsg::Line(line) = rx.try_recv().expect("ui_toast frame") else {
             panic!("expected a Line frame");
@@ -4725,14 +4912,14 @@ mod tests {
         stream
             .emit_message_start("msg_001", "claude-opus-4-8")
             .await;
-        stream.emit_text("pong", None).await;
+        stream.emit_text(&Utf16JsonProjection::from("pong")).await;
         stream
             .emit_message_boundary(Some("end_turn"), Some("req_test"))
             .await;
         let text = stream.get_last_result_text().await;
         assert_eq!(
-            text.value,
-            json!("pong"),
+            text.string_at(""),
+            Some("pong"),
             "last_result_text should be 'pong'"
         );
     }
@@ -4794,7 +4981,7 @@ mod tests {
         stream
             .emit_message_start("msg_otd", "claude-opus-4-8")
             .await;
-        stream.emit_text("hi", None).await;
+        stream.emit_text(&Utf16JsonProjection::from("hi")).await;
         let acc = stream.accum.lock().await;
         let message = acc.to_message_json(Some("end_turn"));
         drop(acc);
@@ -4822,8 +5009,7 @@ mod tests {
         cell.lock().await.push(lingxi_core::host::PermissionDenial {
             tool_name: "Read".into(),
             tool_use_id: "toolu_denied_1".into(),
-            tool_input: json!({"file_path": "/repo/secret/.env"}),
-            tool_input_projection: None,
+            tool_input: project_json_value(&json!({"file_path": "/repo/secret/.env"})),
         });
 
         let cost = CostSnapshot::default();
@@ -5086,11 +5272,13 @@ mod tests {
         let stream = StreamJsonStream::new_json_mode(params, Output::new(tokio::io::sink()));
         // These should be no-ops (no panic, no output that we can detect in tests)
         stream.emit_message_start("msg_001", "model").await;
-        stream.emit_text("hello from json mode", None).await;
+        stream
+            .emit_text(&Utf16JsonProjection::from("hello from json mode"))
+            .await;
         // emit_message_boundary in suppressed mode should still store last_result_text
         stream.emit_message_boundary(Some("end_turn"), None).await;
         let text = stream.get_last_result_text().await;
-        assert_eq!(text.value, json!("hello from json mode"));
+        assert_eq!(text.string_at(""), Some("hello from json mode"));
         // Accumulator reset
         let acc = stream.accum.lock().await;
         assert!(acc.blocks.is_empty());
@@ -5171,9 +5359,16 @@ mod tests {
             ],
             "stop_reason": "end_turn",
         });
-        let frame = stream
-            .build_forwarded_subagent_frame(&msg, "toolu_parent_task", "sess-fwd", "uuid-1")
-            .expect("frame forwarded when flag is on");
+        let frame = projected_value(
+            &stream
+                .build_forwarded_subagent_frame(
+                    &project_json_value(&msg),
+                    "toolu_parent_task",
+                    "sess-fwd",
+                    "uuid-1",
+                )
+                .expect("frame forwarded when flag is on"),
+        );
         assert_eq!(frame["type"], "assistant");
         // The distinguishing feature: NON-NULL parent_tool_use_id = spawner.
         assert_eq!(frame["parent_tool_use_id"], "toolu_parent_task");
@@ -5208,7 +5403,12 @@ mod tests {
         });
         assert!(
             stream
-                .build_forwarded_subagent_frame(&msg, "toolu_parent", "sess-fwd", "uuid-1")
+                .build_forwarded_subagent_frame(
+                    &project_json_value(&msg),
+                    "toolu_parent",
+                    "sess-fwd",
+                    "uuid-1",
+                )
                 .is_none(),
             "flag OFF forwards nothing"
         );
@@ -5228,9 +5428,16 @@ mod tests {
             "content": [{"type": "tool_use", "id": "toolu_x", "name": "Read", "input": {}}],
             "stop_reason": "tool_use",
         });
-        let frame = stream
-            .build_forwarded_subagent_frame(&msg, "toolu_parent", "sess-fwd", "uuid-1")
-            .expect("tool_use-only message is forwarded, not dropped");
+        let frame = projected_value(
+            &stream
+                .build_forwarded_subagent_frame(
+                    &project_json_value(&msg),
+                    "toolu_parent",
+                    "sess-fwd",
+                    "uuid-1",
+                )
+                .expect("tool_use-only message is forwarded, not dropped"),
+        );
         let content = frame["message"]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1, "the tool_use block is kept");
         assert_eq!(content[0]["type"], "tool_use");
@@ -5263,7 +5470,7 @@ mod tests {
             "stop_reason": "tool_use",
         });
         stream
-            .emit_forwarded_subagent_message(&msg, "toolu_parent_task")
+            .emit_forwarded_subagent_message(&project_json_value(&msg), "toolu_parent_task")
             .await;
         let line = match rx.try_recv().expect("a frame was enqueued") {
             OutboundMsg::Line(l) => l,
@@ -6019,14 +6226,14 @@ mod tests {
         stream
             .emit_message_start("msg_golden", "claude-opus-4-8")
             .await;
-        stream.emit_text("pong", None).await;
+        stream.emit_text(&Utf16JsonProjection::from("pong")).await;
         stream
             .emit_message_boundary(Some("end_turn"), Some("req_golden"))
             .await;
         let last_text = stream.get_last_result_text().await;
         assert_eq!(
-            last_text.value,
-            json!("pong"),
+            last_text.string_at(""),
+            Some("pong"),
             "last_result_text propagates from boundary"
         );
 
@@ -6250,7 +6457,7 @@ mod tests {
                     expected
                         .get("structured_output")
                         .cloned()
-                        .map(Utf16JsonProjection::plain),
+                        .map(|value| project_json_value(&value)),
                 )
                 .await;
             let cost = CostSnapshot {
@@ -6459,8 +6666,7 @@ mod verbose_json_tests {
             .emit_tool_call(
                 &lingxi_core::types::ToolUseId::from("toolu_exact"),
                 "StructuredOutput",
-                &input.value,
-                Some(&input),
+                &input,
             )
             .await;
         stream.emit_message_boundary(Some("tool_use"), None).await;
@@ -6469,13 +6675,12 @@ mod verbose_json_tests {
             lingxi_core::host::PermissionDenial {
                 tool_name: "Read".into(),
                 tool_use_id: "toolu_denied".into(),
-                tool_input: input.value.clone(),
-                tool_input_projection: Some(input.clone()),
+                tool_input: input.clone(),
             },
         ])));
         stream
             .emit_result_success(
-                &Utf16JsonProjection::plain(json!("ignored")),
+                &Utf16JsonProjection::from("ignored"),
                 "tool_use",
                 &CostSnapshot::default(),
                 "model",
@@ -6512,11 +6717,12 @@ mod verbose_json_tests {
                 "{path}"
             );
         }
-        assert_eq!(wire.value[1]["result"], input.to_json_string().unwrap());
+        let result_text = input.to_json_string().unwrap();
+        assert_eq!(wire.string_at("/1/result"), Some(result_text.as_str()));
     }
 
     #[tokio::test]
-    async fn accepted_mcp_result_preserves_array_keys_and_string_units_in_both_fields() {
+    async fn accepted_mcp_result_preserves_meta_and_exact_result_projection() {
         let bytes = Arc::new(StdMutex::new(Vec::new()));
         let stream = StreamJsonStream::new_verbose_json_mode_placeholder(Output::new(
             CapturedWriter(bytes.clone()),
@@ -6527,19 +6733,14 @@ mod verbose_json_tests {
         let meta =
             Utf16JsonProjection::parse(r#"{"_meta":{"\udc00":"\udfff"},"structuredContent":null}"#)
                 .unwrap();
-        let exact = lingxi_core::host::ToolResultProjection {
-            model_text: None,
-            mcp_meta: Some(meta.clone()),
-            data: data.clone(),
-            content: data.clone(),
-        };
+        let model_text = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
         stream
             .emit_tool_result(
                 &lingxi_core::types::ToolUseId::from("toolu_mcp"),
                 "mcp__test__exact",
-                "\u{fffd}",
-                &data.value,
-                Some(&exact),
+                &model_text,
+                &data,
+                Some(&meta),
             )
             .await;
         stream.finish().await.unwrap();
@@ -6554,17 +6755,23 @@ mod verbose_json_tests {
                 .unwrap(),
             meta.to_json_string().unwrap()
         );
-        assert!(wire.value[0]["mcpMeta"]
-            .get("structuredContent")
-            .unwrap()
-            .is_null());
-        for path in ["/0/toolUseResult", "/0/message/content/0/content"] {
-            assert_eq!(
-                wire.subprojection(path).unwrap().to_json_string().unwrap(),
-                data.to_json_string().unwrap(),
-                "{path}"
-            );
-        }
+        assert!(wire
+            .at_pointer("/0/mcpMeta/structuredContent")
+            .is_some_and(|value| value.is_null()));
+        assert_eq!(
+            wire.subprojection("/0/toolUseResult")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            data.to_json_string().unwrap()
+        );
+        assert_eq!(
+            wire.subprojection("/0/message/content/0/content")
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            model_text.to_json_string().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -6621,10 +6828,12 @@ mod verbose_json_tests {
         let stream =
             StreamJsonStream::new_json_mode_placeholder(Output::new(CapturedWriter(bytes.clone())));
         stream.emit_status().await;
-        stream.emit_text("collected text", None).await;
+        stream
+            .emit_text(&Utf16JsonProjection::from("collected text"))
+            .await;
         let result = stream
             .emit_result_success(
-                &Utf16JsonProjection::plain(json!("done")),
+                &Utf16JsonProjection::from("done"),
                 "end_turn",
                 &CostSnapshot::default(),
                 "model",
@@ -6667,7 +6876,7 @@ mod verbose_json_tests {
                     .await;
                 stream
                     .emit_result_success(
-                        &Utf16JsonProjection::plain(json!(text)),
+                        &Utf16JsonProjection::from(text),
                         "end_turn",
                         &CostSnapshot::default(),
                         "model",
@@ -6813,10 +7022,20 @@ mod verbose_json_tests {
         );
         stream.emit_message_start("msg_unicode", "model").await;
         stream.emit_assistant_block_start(1).await;
-        stream.emit_text("�", Some(&[0xd83d])).await;
-        stream.emit_text("�", Some(&[0xde00])).await;
         stream
-            .emit_text("\u{2028}\u{2029}�", Some(&[0x2028, 0x2029, 0xd800]))
+            .emit_text(&Utf16JsonProjection::root_string("�".into(), vec![0xd83d]).unwrap())
+            .await;
+        stream
+            .emit_text(&Utf16JsonProjection::root_string("�".into(), vec![0xde00]).unwrap())
+            .await;
+        stream
+            .emit_text(
+                &Utf16JsonProjection::root_string(
+                    "\u{2028}\u{2029}�".into(),
+                    vec![0x2028, 0x2029, 0xd800],
+                )
+                .unwrap(),
+            )
             .await;
         let pending = stream.get_last_result_text().await;
         assert_eq!(
@@ -6854,9 +7073,13 @@ mod verbose_json_tests {
         );
         stream.emit_message_start("msg_unicode", "model").await;
         stream.emit_assistant_block_start(1).await;
-        stream.emit_text("�", Some(&[0xd83d])).await;
+        stream
+            .emit_text(&Utf16JsonProjection::root_string("�".into(), vec![0xd83d]).unwrap())
+            .await;
         stream.emit_assistant_block_start(2).await;
-        stream.emit_text("�", Some(&[0xde00])).await;
+        stream
+            .emit_text(&Utf16JsonProjection::root_string("�".into(), vec![0xde00]).unwrap())
+            .await;
         assert_eq!(
             stream
                 .get_last_result_text()
@@ -6881,9 +7104,9 @@ mod verbose_json_tests {
             Output::new(CapturedWriter(bytes.clone())),
         );
         stream.set_forward_subagent_text(true);
-        stream.emit_forwarded_subagent_message(&json!({
+        stream.emit_forwarded_subagent_message(&project_json_value(&json!({
             "role":"assistant", "content":[{"type":"text_js_utf16","text":"A�","utf16_code_units":[65,55296]}]
-        }), "toolu_parent").await;
+        })), "toolu_parent").await;
         stream.finish().await.unwrap();
         let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
         assert!(
@@ -6895,12 +7118,14 @@ mod verbose_json_tests {
     }
 
     #[tokio::test]
-    async fn mismatched_assistant_text_units_fail_delivery_without_admitting_text() {
+    async fn non_string_assistant_text_projection_fails_delivery_without_admitting_text() {
         let stream = StreamJsonStream::new(
             super::tests::make_params("unicode"),
             Output::new(tokio::io::sink()),
         );
-        stream.emit_text("different", Some(&[0xd800])).await;
+        stream
+            .emit_text(&project_json_value(&json!({"text":"different"})))
+            .await;
         assert!(stream.accum.lock().await.blocks.is_empty());
         assert!(stream.finish().await.is_err());
     }

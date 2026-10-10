@@ -413,12 +413,14 @@ impl QueueLifecycle {
         let Some(delivery) = &turn.queue_delivery else {
             return;
         };
-        let mut record = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({
-            "type":"queue-operation","operation":"enqueue","timestamp":delivery.timestamp,
-            "sessionId":self.session_id,"content":turn.content_projection.value
-        }));
+        let mut record =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({
+                "type":"queue-operation","operation":"enqueue","timestamp":delivery.timestamp,
+                "sessionId":self.session_id,"content":null
+            }))
+            .expect("queue operation frame is valid JSON");
         record
-            .set_pointer("/content", turn.content_projection.clone())
+            .replace_pointer_projection("/content", turn.content_projection.clone())
             .expect("validated queued content");
         self.journal
             .lock()
@@ -433,10 +435,10 @@ impl QueueLifecycle {
         {
             return;
         }
-        let record = lingxi_core::types::utf16_json::Utf16JsonProjection::plain(json!({
+        let record = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&json!({
             "type":"queue-operation","operation":"dequeue",
             "timestamp":chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),"sessionId":self.session_id
-        }));
+        })).expect("queue operation frame is valid JSON");
         self.journal
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

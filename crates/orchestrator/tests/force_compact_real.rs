@@ -599,6 +599,7 @@ impl lingxi_core::host::OutputStream for CompactLifecycleOutput {
         _tool: &str,
         _model_text: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _result: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
     }
     async fn emit_end_turn(&self, _reason: &str, _cost: &lingxi_core::host::CostSnapshot) {}

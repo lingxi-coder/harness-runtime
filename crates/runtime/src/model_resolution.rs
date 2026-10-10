@@ -17,6 +17,8 @@ struct ProfileFacts {
     protocol: String,
     family_defaults: FamilyModelDefaults,
     model_keys: Vec<String>,
+    registered_model_ids: std::collections::BTreeSet<String>,
+    catalog_aliases: BTreeMap<String, Vec<String>>,
 }
 
 /// Uses the configured `ModelRuntime` route resolver and a per-profile copy of
@@ -40,6 +42,28 @@ impl RuntimeModelResolutionProvider {
                         endpoint: profile.base_url.clone(),
                         protocol: format!("{:?}", profile.protocol),
                         family_defaults: family_defaults(profile),
+                        registered_model_ids: profile
+                            .models
+                            .iter()
+                            .map(|model| model.request_model.clone())
+                            .collect(),
+                        catalog_aliases: {
+                            let mut aliases: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                            for model in &profile.models {
+                                for alias in std::iter::once(&model.display_model)
+                                    .chain(model.aliases.iter())
+                                {
+                                    if alias != &model.request_model {
+                                        let candidates =
+                                            aliases.entry(alias.to_lowercase()).or_default();
+                                        if !candidates.contains(&model.request_model) {
+                                            candidates.push(model.request_model.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            aliases
+                        },
                         model_keys: profile
                             .models
                             .iter()
@@ -171,6 +195,8 @@ impl ModelResolutionContextProvider for RuntimeModelResolutionProvider {
                 protocol: Some(facts.protocol.clone()),
             },
             family_defaults: facts.family_defaults.clone(),
+            registered_model_ids: facts.registered_model_ids.clone(),
+            catalog_aliases: facts.catalog_aliases.clone(),
             // Native's live best/catalog, Fable entitlement, 1M capability,
             // and broader entitlement resolver have no trusted host ingress.
             best_model: None,

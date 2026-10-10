@@ -38,12 +38,12 @@
 #![forbid(unsafe_code)]
 
 use crate::headless::io::{Input, Output};
-use crate::headless::stream_json::{serialize_ndjson_line, OutboundMsg, OutboundTx};
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use crate::headless::stream_json::{OutboundMsg, OutboundTx, serialize_ndjson_line};
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::{
     CompactBoundaryMetadata, ContentBlock, ConversationMessage, MessageId, ToolUseId,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
@@ -92,54 +92,103 @@ impl std::fmt::Display for InputError {
 /// does: renames the top-level `requestId` key to `request_id`, and the nested
 /// `response.requestId` to `response.request_id`. (iOS clients emit camelCase;
 /// the canonical wire format is snake_case.)
-fn normalize_control_message_keys(v: &mut Value) {
-    if let Some(obj) = v.as_object_mut() {
-        // Top-level `requestId` → `request_id`
-        if let Some(val) = obj.remove("requestId") {
-            obj.entry("request_id").or_insert(val);
-        }
-        // Nested `response.requestId` → `response.request_id`
-        if let Some(resp) = obj.get_mut("response") {
-            if let Some(resp_obj) = resp.as_object_mut() {
-                if let Some(val) = resp_obj.remove("requestId") {
-                    resp_obj.entry("request_id").or_insert(val);
-                }
-            }
-        }
+fn rename_projection_field(
+    projection: &mut Utf16JsonProjection,
+    old: &str,
+    new: &str,
+) -> Result<(), lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    let Ok(value) = projection.subprojection(&format!("/{old}")) else {
+        return Ok(());
+    };
+    let target_exists = projection.contains_property(new);
+    projection.remove_field(old)?;
+    if !target_exists {
+        projection.set_field(new, value)?;
     }
+    Ok(())
 }
 
-fn normalize_projected_control_message_keys(projection: &mut Utf16JsonProjection) {
-    let mut moves = Vec::new();
-    for (old, new) in [
-        ("/requestId", "/request_id"),
-        ("/response/requestId", "/response/request_id"),
-    ] {
-        if projection.value.pointer(old).is_some() {
-            moves.push((old, new, projection.value.pointer(new).is_some()));
+fn normalize_projected_control_message_keys(
+    projection: &mut Utf16JsonProjection,
+) -> Result<(), lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    rename_projection_field(projection, "requestId", "request_id")?;
+    if let Ok(mut response) = projection.subprojection("/response") {
+        if response.contains_property("requestId") {
+            rename_projection_field(&mut response, "requestId", "request_id")?;
+            projection.set_field("response", response)?;
         }
     }
-    normalize_control_message_keys(&mut projection.value);
-    for (old, new, target_exists) in moves {
-        projection.strings.retain_mut(|entry| {
-            if entry.pointer == old || entry.pointer.starts_with(&format!("{old}/")) {
-                if target_exists {
-                    return false;
-                }
-                entry.pointer = format!("{new}{}", &entry.pointer[old.len()..]);
-            }
-            true
-        });
-        projection.keys.retain_mut(|entry| {
-            if entry.pointer == old || entry.pointer.starts_with(&format!("{old}/")) {
-                if target_exists {
-                    return false;
-                }
-                entry.pointer = format!("{new}{}", &entry.pointer[old.len()..]);
-            }
-            true
-        });
+    Ok(())
+}
+
+fn projection_from_value(value: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("generated JSON value is valid")
+}
+
+fn display_value(projection: &Utf16JsonProjection) -> Value {
+    enum Task<'a> {
+        Visit(JsonValueView<'a>),
+        Array(usize),
+        Object(Vec<String>),
     }
+
+    let root = projection
+        .at_pointer("")
+        .expect("a validated projection always has a root");
+    let mut tasks = vec![Task::Visit(root)];
+    let mut values = Vec::new();
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Visit(value) if value.is_null() => values.push(Value::Null),
+            Task::Visit(value) if value.as_bool().is_some() => {
+                values.push(Value::Bool(value.as_bool().unwrap()));
+            }
+            Task::Visit(value) if value.as_number().is_some() => {
+                let number = serde_json::Number::from_f64(value.as_number().unwrap());
+                values.push(number.map_or(Value::Null, Value::Number));
+            }
+            Task::Visit(value) if value.as_str().is_some() => {
+                values.push(Value::String(value.as_str().unwrap().to_owned()));
+            }
+            Task::Visit(value) if value.array_len().is_some() => {
+                let len = value.array_len().unwrap();
+                tasks.push(Task::Array(len));
+                for index in (0..len).rev() {
+                    tasks.push(Task::Visit(
+                        value
+                            .get_index(index)
+                            .expect("array length identifies every index"),
+                    ));
+                }
+            }
+            Task::Visit(value) if value.object_entries().is_some() => {
+                let entries = value.object_entries().unwrap();
+                let keys = entries
+                    .iter()
+                    .map(|entry| entry.display_key.to_owned())
+                    .collect();
+                tasks.push(Task::Object(keys));
+                tasks.extend(
+                    entries
+                        .into_iter()
+                        .rev()
+                        .map(|entry| Task::Visit(entry.value)),
+                );
+            }
+            Task::Visit(_) => values.push(Value::Null),
+            Task::Array(len) => {
+                let first = values.len().saturating_sub(len);
+                let children = values.drain(first..).collect();
+                values.push(Value::Array(children));
+            }
+            Task::Object(keys) => {
+                let first = values.len().saturating_sub(keys.len());
+                let children = values.drain(first..).collect::<Vec<_>>();
+                values.push(Value::Object(keys.into_iter().zip(children).collect()));
+            }
+        }
+    }
+    values.pop().expect("the root task produces one value")
 }
 
 // ── Parsed turn ───────────────────────────────────────────────────────────────
@@ -252,14 +301,10 @@ pub fn process_line(
         ));
         InputError::MalformedJson
     })?;
-    normalize_projected_control_message_keys(&mut projection);
-    let frame = &projection.value;
+    normalize_projected_control_message_keys(&mut projection)
+        .map_err(|_| InputError::MalformedJson)?;
 
-    let frame_type = frame
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let frame_type = projection.string_at("/type").unwrap_or("").to_owned();
 
     match frame_type.as_str() {
         "keep_alive" => Ok(FrameAction::Consumed),
@@ -280,7 +325,10 @@ pub fn process_line(
                 "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
                 "CLAUDE_CODE_OAUTH_TOKEN",
             ];
-            let Some(env_vars) = frame.get("variables").and_then(Value::as_object) else {
+            let Some(env_vars) = projection
+                .at_pointer("/variables")
+                .and_then(|variables| variables.object_entries())
+            else {
                 diagnostics(&format!(
                     "[structuredIO] dropped update_environment_variables: variables must be an object of string values"
                 ));
@@ -292,20 +340,25 @@ pub fn process_line(
             // carries a `request_id`; this parse fn only routes frames, so the
             // drop is surfaced via the same stderr log the port uses for other
             // structuredIO validation failures.)
-            if env_vars.values().any(|v| !v.is_string()) {
+            if env_vars.iter().any(|entry| entry.value.as_str().is_none()) {
                 diagnostics(&format!(
                     "[structuredIO] dropped update_environment_variables: variables must be an object of string values"
                 ));
                 return Ok(FrameAction::Consumed);
             }
-            let mut refused: Vec<&str> = Vec::new();
+            let mut refused: Vec<String> = Vec::new();
             let mut updates = HashMap::new();
-            for (k, v) in env_vars {
-                let Some(val) = v.as_str() else { continue };
-                if ALLOWLIST.contains(&k.as_str()) {
-                    updates.insert(k.clone(), val.to_owned());
+            for entry in env_vars {
+                let Some(value) = entry.value.as_str() else {
+                    continue;
+                };
+                let allowed = ALLOWLIST.iter().any(|key| {
+                    entry.code_units == key.encode_utf16().collect::<Vec<_>>().as_slice()
+                });
+                if allowed {
+                    updates.insert(entry.display_key.to_owned(), value.to_owned());
                 } else {
-                    refused.push(k.as_str());
+                    refused.push(entry.display_key.to_owned());
                 }
             }
             if !refused.is_empty() {
@@ -319,7 +372,7 @@ pub fn process_line(
 
         "control_request" => {
             // require `request` field (byte-exact error matches binary).
-            if frame.get("request").is_none() {
+            if !projection.contains_property("request") {
                 diagnostics(&format!("Error: Missing request on control_request"));
                 return Err(InputError::MissingRequest);
             }
@@ -335,17 +388,13 @@ pub fn process_line(
         "control_cancel_request" => {
             let request_id = projection
                 .subprojection("/request_id")
-                .unwrap_or_else(|_| Utf16JsonProjection::plain(json!("")));
+                .unwrap_or_else(|_| Utf16JsonProjection::from(""));
             Ok(FrameAction::ControlCancel(request_id))
         }
 
         "user" => {
             // Role check.
-            let role = frame
-                .get("message")
-                .and_then(|m| m.get("role"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let role = projection.string_at("/message/role").unwrap_or("");
             if role != "user" {
                 let got = role.to_string();
                 diagnostics(&format!("Error: Expected message role 'user'"));
@@ -353,20 +402,16 @@ pub fn process_line(
             }
 
             // Extract content.
-            let content = frame
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .cloned()
-                .unwrap_or(Value::String(String::new()));
+            let content_projection = projection
+                .subprojection("/message/content")
+                .unwrap_or_else(|_| Utf16JsonProjection::from(""));
+            let content = display_value(&content_projection);
 
             // Original timestamp (echoed verbatim on a replay-ack when present).
-            let timestamp = frame
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .map(String::from);
+            let timestamp = projection.string_at("/timestamp").map(String::from);
 
             // UUID dedup.
-            let uuid = frame.get("uuid").and_then(Value::as_str).map(String::from);
+            let uuid = projection.string_at("/uuid").map(String::from);
             if let Some(ref u) = uuid {
                 let identity = projection
                     .subprojection("/uuid")
@@ -386,9 +431,7 @@ pub fn process_line(
 
             Ok(FrameAction::UserTurn(UserTurn {
                 queue_delivery: None,
-                content_projection: projection
-                    .subprojection("/message/content")
-                    .unwrap_or_else(|_| Utf16JsonProjection::plain(content.clone())),
+                content_projection,
                 content,
                 uuid,
                 frame_projection: projection,
@@ -400,11 +443,10 @@ pub fn process_line(
             .unwrap_or(FrameAction::Consumed)),
 
         "bash_command" => {
-            let command = frame
-                .get("command")
-                .and_then(Value::as_str)
+            let command = projection
+                .string_at("/command")
                 .unwrap_or_default()
-                .to_string();
+                .to_owned();
             Ok(FrameAction::BashCommand(BashCommand { command }))
         }
 
@@ -416,33 +458,29 @@ pub fn process_line(
 }
 
 fn parse_history_frame(projection: &Utf16JsonProjection) -> Option<HistoryInput> {
-    let frame = &projection.value;
-    let frame_type = frame.get("type")?.as_str()?;
-    let message_id = frame
-        .get("uuid")
-        .and_then(Value::as_str)
+    let frame_type = projection.string_at("/type")?;
+    let message_id = projection
+        .string_at("/uuid")
         .and_then(MessageId::parse_prefixed)
         .unwrap_or_default();
 
     match frame_type {
         "assistant" => {
-            let message = frame.get("message")?;
-            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            let message = projection.subprojection("/message").ok()?;
+            if message.string_at("/role") != Some("assistant") {
                 return None;
             }
-            let content_projection = projection.subprojection("/message/content").ok();
+            let content_projection = message.subprojection("/content").ok();
             let content = parse_assistant_content(content_projection.as_ref());
             Some(HistoryInput {
                 message: ConversationMessage::Assistant {
                     per_turn_effort: None,
                     id: message_id,
                     content,
-                    stop_reason: message
-                        .get("stop_reason")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                    stop_reason: message.string_at("/stop_reason").map(str::to_owned),
+                    resumable: message.subprojection("/resumable").ok(),
                 },
-                replay_frame: Some(frame.clone()),
+                replay_frame: Some(display_value(projection)),
                 frame_projection: projection.clone(),
             })
         }
@@ -450,17 +488,17 @@ fn parse_history_frame(projection: &Utf16JsonProjection) -> Option<HistoryInput>
             // `toInternalMessages` accepts only the SDK compact boundary;
             // informational/status system frames are presentation events and
             // must not become model conversation history.
-            if frame.get("subtype").and_then(Value::as_str) != Some("compact_boundary") {
+            if projection.string_at("/subtype") != Some("compact_boundary") {
                 return None;
             }
-            let mut compact_metadata: CompactBoundaryMetadata = serde_json::from_value(
-                normalize_compact_metadata_keys(frame.get("compact_metadata")?.clone()),
-            )
-            .ok()?;
-            compact_metadata.logical_parent_uuid = frame
-                .get("logical_parent_uuid")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let metadata = projection.subprojection("/compact_metadata").ok()?;
+            let normalized = normalize_compact_metadata_projection(&metadata).ok()?;
+            let normalized_json = normalized.to_json_string().ok()?;
+            let mut compact_metadata: CompactBoundaryMetadata =
+                serde_json::from_str(&normalized_json).ok()?;
+            compact_metadata.logical_parent_uuid = projection
+                .string_at("/logical_parent_uuid")
+                .map(str::to_owned);
             Some(HistoryInput {
                 message: ConversationMessage::compact_boundary(
                     message_id,
@@ -475,57 +513,79 @@ fn parse_history_frame(projection: &Utf16JsonProjection) -> Option<HistoryInput>
     }
 }
 
-fn normalize_compact_metadata_keys(value: Value) -> Value {
-    match value {
-        Value::Object(object) => Value::Object(
-            object
-                .into_iter()
-                .map(|(key, value)| {
-                    let mut parts = key.split('_');
-                    let mut camel = parts.next().unwrap_or_default().to_string();
-                    for part in parts {
-                        let mut chars = part.chars();
-                        if let Some(first) = chars.next() {
-                            camel.extend(first.to_uppercase());
-                            camel.extend(chars);
-                        }
-                    }
-                    let value = if camel == "setAt" {
-                        normalize_system_time_keys(value)
-                    } else {
-                        normalize_compact_metadata_keys(value)
-                    };
-                    (camel, value)
-                })
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(
-            values
-                .into_iter()
-                .map(normalize_compact_metadata_keys)
-                .collect::<Vec<_>>(),
-        ),
-        scalar => scalar,
+fn normalize_compact_metadata_projection(
+    projection: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    if let Some(entries) = projection.object_entries() {
+        let mut fields = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let key = String::from_utf16(entry.code_units).ok();
+            let normalized_key = key.as_deref().map(snake_to_camel);
+            let key_units: Vec<u16> = match normalized_key.as_deref() {
+                Some(key) => key.encode_utf16().collect(),
+                None => entry.code_units.to_vec(),
+            };
+            let child = projection.subprojection_property_units(entry.code_units)?;
+            let normalized_child = if normalized_key.as_deref() == Some("setAt") {
+                normalize_system_time_projection(&child)?
+            } else {
+                normalize_compact_metadata_projection(&child)?
+            };
+            fields.push((key_units, normalized_child));
+        }
+        return Utf16JsonProjection::object_units(fields);
     }
+
+    if let Some(len) = projection
+        .at_pointer("")
+        .and_then(|value| value.array_len())
+    {
+        let values = (0..len)
+            .map(|index| {
+                let child = projection.subprojection(&format!("/{index}"))?;
+                normalize_compact_metadata_projection(&child)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Utf16JsonProjection::array(values);
+    }
+
+    Ok(projection.clone())
 }
 
-fn normalize_system_time_keys(value: Value) -> Value {
-    let Value::Object(object) = value else {
-        return value;
+fn normalize_system_time_projection(
+    projection: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, lingxi_core::types::utf16_json::Utf16JsonProjectionError> {
+    let Some(entries) = projection.object_entries() else {
+        return Ok(projection.clone());
     };
-    Value::Object(
-        object
-            .into_iter()
-            .map(|(key, value)| {
-                let key = match key.as_str() {
-                    "secsSinceEpoch" => "secs_since_epoch".to_string(),
-                    "nanosSinceEpoch" => "nanos_since_epoch".to_string(),
-                    _ => key,
-                };
-                (key, value)
-            })
-            .collect(),
-    )
+    let fields = entries
+        .into_iter()
+        .map(|entry| {
+            let key: Vec<u16> = match String::from_utf16(entry.code_units).as_deref() {
+                Ok("secsSinceEpoch") => "secs_since_epoch".encode_utf16().collect(),
+                Ok("nanosSinceEpoch") => "nanos_since_epoch".encode_utf16().collect(),
+                _ => entry.code_units.to_vec(),
+            };
+            Ok((
+                key,
+                projection.subprojection_property_units(entry.code_units)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, lingxi_core::types::utf16_json::Utf16JsonProjectionError>>()?;
+    Utf16JsonProjection::object_units(fields)
+}
+
+fn snake_to_camel(key: &str) -> String {
+    let mut parts = key.split('_');
+    let mut camel = parts.next().unwrap_or_default().to_owned();
+    for part in parts {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            camel.extend(first.to_uppercase());
+            camel.extend(chars);
+        }
+    }
+    camel
 }
 
 fn projected_text_block(
@@ -554,71 +614,80 @@ fn parse_assistant_content(projection: Option<&Utf16JsonProjection>) -> Vec<Cont
     let Some(projection) = projection else {
         return Vec::new();
     };
-    let content = &projection.value;
-    if let Some(text) = content.as_str() {
+    if let Some(text) = projection.string_at("") {
         return vec![projected_text_block(projection, "", text)];
     }
-    let Some(blocks) = content.as_array() else {
+    let Some(block_count) = projection
+        .at_pointer("")
+        .and_then(|value| value.array_len())
+    else {
         return Vec::new();
     };
 
-    blocks
-        .iter()
-        .enumerate()
-        .filter_map(
-            |(index, block)| match block.get("type").and_then(Value::as_str)? {
+    (0..block_count)
+        .filter_map(|index| {
+            let block = projection.at_pointer(&format!("/{index}"))?;
+            match block
+                .get_property("type")
+                .and_then(|value| value.as_str())?
+            {
                 "text" => Some(projected_text_block(
                     projection,
                     &format!("/{index}/text"),
-                    block.get("text")?.as_str()?,
+                    block.get_property("text")?.as_str()?,
                 )),
                 "thinking" => Some(ContentBlock::Thinking {
-                    thinking: block.get("thinking")?.as_str()?.to_string(),
+                    thinking: block.get_property("thinking")?.as_str()?.to_owned(),
                     signature: block
-                        .get("signature")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                        .get_property("signature")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned),
                 }),
                 "redacted_thinking" => Some(ContentBlock::RedactedThinking {
-                    data: block.get("data")?.as_str()?.to_string(),
+                    data: block.get_property("data")?.as_str()?.to_owned(),
                 }),
                 "tool_use" => {
-                    let provider_id = block.get("id")?.as_str()?.to_string();
+                    let provider_id = block.get_property("id")?.as_str()?.to_owned();
                     Some(ContentBlock::ToolUse {
                         id: ToolUseId::from(provider_id.clone()),
-                        name: block.get("name")?.as_str()?.to_string(),
-                        input: block.get("input").cloned().unwrap_or(Value::Null),
-                        input_projection: projection.subprojection(&format!("/{index}/input")).ok(),
+                        name: block.get_property("name")?.as_str()?.to_owned(),
+                        input: projection
+                            .subprojection(&format!("/{index}/input"))
+                            .unwrap_or_else(|_| Utf16JsonProjection::from("null")),
                         provider_id: Some(provider_id),
                     })
                 }
                 "server_tool_use" => Some(ContentBlock::ServerToolUse {
-                    id: block.get("id")?.as_str()?.to_string(),
-                    name: block.get("name")?.as_str()?.to_string(),
-                    input: block.get("input").cloned().unwrap_or(Value::Null),
+                    id: block.get_property("id")?.as_str()?.to_owned(),
+                    name: block.get_property("name")?.as_str()?.to_owned(),
+                    input: projection
+                        .subprojection(&format!("/{index}/input"))
+                        .unwrap_or_else(|_| Utf16JsonProjection::from("null")),
                 }),
                 "connector_text" => Some(ContentBlock::ConnectorText {
                     connector_text: block
-                        .get("connector_text")
-                        .and_then(Value::as_str)
+                        .get_property("connector_text")
+                        .and_then(|value| value.as_str())
                         .unwrap_or_default()
-                        .to_string(),
+                        .to_owned(),
                     signature: block
-                        .get("signature")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
+                        .get_property("signature")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned),
                 }),
                 "advisor_tool_result" => Some(ContentBlock::AdvisorToolResult {
-                    tool_use_id: block.get("tool_use_id")?.as_str()?.to_string(),
-                    content: block.get("content").cloned().unwrap_or(Value::Null),
+                    tool_use_id: block.get_property("tool_use_id")?.as_str()?.to_owned(),
+                    content: projection
+                        .subprojection(&format!("/{index}/content"))
+                        .unwrap_or_else(|_| Utf16JsonProjection::from("null")),
                     is_error: block
-                        .get("is_error")
-                        .and_then(Value::as_bool)
+                        .get_property("is_error")
+                        .and_then(|value| value.as_bool())
                         .unwrap_or(false),
                 }),
                 _ => None,
-            },
-        )
+            }
+        })
         .collect()
 }
 
@@ -675,18 +744,13 @@ pub fn emit_replay_ack_projected_queued(
     original: &Utf16JsonProjection,
     session_id: &str,
 ) -> Result<(), InputError> {
-    let uuid = original
-        .value
-        .get("uuid")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let content = original
-        .value
-        .pointer("/message/content")
-        .cloned()
-        .unwrap_or(Value::String(String::new()));
-    let timestamp = original.value.get("timestamp").and_then(Value::as_str);
-    let mut replay = Utf16JsonProjection::plain(build_replay_ack_frame(
+    let uuid = original.string_at("/uuid").unwrap_or_default();
+    let content_projection = original
+        .subprojection("/message/content")
+        .unwrap_or_else(|_| Utf16JsonProjection::from(""));
+    let content = display_value(&content_projection);
+    let timestamp = original.string_at("/timestamp");
+    let mut replay = projection_from_value(&build_replay_ack_frame(
         uuid, &content, timestamp, session_id,
     ));
     for field in ["uuid", "timestamp"] {
@@ -696,10 +760,10 @@ pub fn emit_replay_ack_projected_queued(
                 .map_err(|_| InputError::MalformedJson)?;
         }
     }
-    if let Ok(content) = original.subprojection("/message/content") {
-        let mut message = Utf16JsonProjection::plain(json!({"role":"user"}));
+    if original.contains_property("message") {
+        let mut message = projection_from_value(&json!({"role":"user"}));
         message
-            .set_field("content", content)
+            .set_field("content", content_projection)
             .map_err(|_| InputError::MalformedJson)?;
         replay
             .set_field("message", message)
@@ -759,14 +823,17 @@ pub fn content_to_prompt(content: &Value) -> String {
 
 /// Flatten text using exact JavaScript code units for provider request input.
 pub fn content_to_prompt_projection(content: &Utf16JsonProjection) -> Utf16JsonProjection {
-    let units = if content.value.is_string() {
+    let units = if content.string_units("").is_some() {
         content.string_units("").unwrap_or_default()
-    } else if let Some(blocks) = content.value.as_array() {
-        blocks
-            .iter()
-            .enumerate()
-            .filter(|(_, block)| block.get("type").and_then(Value::as_str) == Some("text"))
-            .flat_map(|(index, _)| {
+    } else if let Some(blocks) = content.at_pointer("").and_then(|value| value.array_len()) {
+        (0..blocks)
+            .filter(|index| {
+                content
+                    .at_pointer(&format!("/{index}/type"))
+                    .and_then(|value| value.as_str())
+                    == Some("text")
+            })
+            .flat_map(|index| {
                 content
                     .string_units(&format!("/{index}/text"))
                     .unwrap_or_default()
@@ -1090,14 +1157,14 @@ impl ControlPlaneWriter {
         request_id: Utf16JsonProjection,
         message: &str,
     ) -> Result<(), InputError> {
-        let mut response = Utf16JsonProjection::plain(json!({"subtype":"error"}));
+        let mut response = projection_from_value(&json!({"subtype":"error"}));
         response
             .set_field("request_id", request_id)
             .map_err(|_| InputError::MalformedJson)?;
         response
-            .set_field("error", Utf16JsonProjection::plain(json!(message)))
+            .set_field("error", Utf16JsonProjection::from(message))
             .map_err(|_| InputError::MalformedJson)?;
-        let mut frame = Utf16JsonProjection::plain(json!({"type":"control_response"}));
+        let mut frame = projection_from_value(&json!({"type":"control_response"}));
         frame
             .set_field("response", response)
             .map_err(|_| InputError::MalformedJson)?;
@@ -1116,7 +1183,7 @@ impl ControlPlaneWriter {
         request_id: Utf16JsonProjection,
         payload: Option<Utf16JsonProjection>,
     ) -> Result<(), InputError> {
-        let mut response = Utf16JsonProjection::plain(json!({"subtype":"success"}));
+        let mut response = projection_from_value(&json!({"subtype":"success"}));
         response
             .set_field("request_id", request_id)
             .map_err(|_| InputError::MalformedJson)?;
@@ -1125,7 +1192,7 @@ impl ControlPlaneWriter {
                 .set_field("response", payload)
                 .map_err(|_| InputError::MalformedJson)?;
         }
-        let mut frame = Utf16JsonProjection::plain(json!({"type":"control_response"}));
+        let mut frame = projection_from_value(&json!({"type":"control_response"}));
         frame
             .set_field("response", response)
             .map_err(|_| InputError::MalformedJson)?;
@@ -1373,10 +1440,12 @@ mod tests {
         let preserved = metadata.preserved_messages.unwrap();
         assert_eq!(preserved.uuids, ["tail"]);
         assert!(preserved.all_uuids.is_empty());
-        assert!(serde_json::to_value(preserved)
-            .unwrap()
-            .get("allUuids")
-            .is_none());
+        assert!(
+            serde_json::to_value(preserved)
+                .unwrap()
+                .get("allUuids")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1479,7 +1548,7 @@ mod tests {
         // Verify the frame carries the request field.
         if let FrameAction::ControlRequest(frame) = result {
             assert!(
-                frame.value.get("request").is_some(),
+                frame.contains_property("request"),
                 "ControlRequest frame must carry the request field"
             );
         }
@@ -1491,7 +1560,7 @@ mod tests {
         let result = process_line(line, &mut fresh_seen()).unwrap();
         match result {
             FrameAction::ControlCancel(request_id) => {
-                assert_eq!(request_id.value, "req-cancel-1");
+                assert_eq!(request_id.string_at(""), Some("req-cancel-1"));
             }
             _ => panic!("expected ControlCancel"),
         }
@@ -1803,30 +1872,40 @@ mod tests {
                 "unsupported",
             )
             .unwrap();
-        assert_eq!(outbound_line(rx.try_recv().unwrap()), "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"\\ud800\",\"error\":\"unsupported\"}}\n");
+        assert_eq!(
+            outbound_line(rx.try_recv().unwrap()),
+            "{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"\\ud800\",\"error\":\"unsupported\"}}\n"
+        );
         writer
             .reply_success_projected(
-                Utf16JsonProjection::plain(json!("id")),
+                Utf16JsonProjection::from("id"),
                 Some(Utf16JsonProjection::parse(r#"{"\udfff":"\ud800"}"#).unwrap()),
             )
             .unwrap();
-        assert_eq!(outbound_line(rx.try_recv().unwrap()), "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"id\",\"response\":{\"\\udfff\":\"\\ud800\"}}}\n");
+        assert_eq!(
+            outbound_line(rx.try_recv().unwrap()),
+            "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"id\",\"response\":{\"\\udfff\":\"\\ud800\"}}}\n"
+        );
     }
 
     #[test]
     fn control_key_normalization_rebases_exact_identity() {
         let FrameAction::ControlRequest(frame) = process_line(r#"{"type":"control_request","requestId":"\ud800","request":{"subtype":"x","\udfff":"\ud801"}}"#, &mut fresh_seen()).unwrap() else { panic!("request") };
         assert_eq!(frame.string_units("/request_id"), Some(vec![0xd800]));
-        assert!(frame
-            .to_json_string()
-            .unwrap()
-            .contains(r#""request_id":"\ud800""#));
-        assert!(frame
-            .subprojection("/request")
-            .unwrap()
-            .to_json_string()
-            .unwrap()
-            .contains(r#""\udfff":"\ud801""#));
+        assert!(
+            frame
+                .to_json_string()
+                .unwrap()
+                .contains(r#""request_id":"\ud800""#)
+        );
+        assert!(
+            frame
+                .subprojection("/request")
+                .unwrap()
+                .to_json_string()
+                .unwrap()
+                .contains(r#""\udfff":"\ud801""#)
+        );
     }
 
     #[test]
@@ -1843,7 +1922,10 @@ mod tests {
         );
         let (tx, mut rx) = mpsc::unbounded_channel();
         emit_replay_ack_projected_queued(&tx, &turn.frame_projection, "sess").unwrap();
-        assert_eq!(outbound_line(rx.try_recv().unwrap()), "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\\ud800\"},{\"type\":\"text\",\"text\":\"\\udfff\"}]},\"session_id\":\"sess\",\"parent_tool_use_id\":null,\"uuid\":\"u\",\"timestamp\":\"t\",\"isReplay\":true}\n");
+        assert_eq!(
+            outbound_line(rx.try_recv().unwrap()),
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"a\\ud800\"},{\"type\":\"text\",\"text\":\"\\udfff\"}]},\"session_id\":\"sess\",\"parent_tool_use_id\":null,\"uuid\":\"u\",\"timestamp\":\"t\",\"isReplay\":true}\n"
+        );
     }
 
     #[test]
@@ -1916,7 +1998,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(
-            matches!(control, StdinControlFrame::Request(frame) if frame.value["request_id"] == "interrupt")
+            matches!(control, StdinControlFrame::Request(frame) if frame.string_at("/request_id") == Some("interrupt"))
         );
         for index in 0..100 {
             let Some(StreamInput::User(turn)) = channels.input_rx.recv().await else {

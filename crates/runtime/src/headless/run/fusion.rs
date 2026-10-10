@@ -1,6 +1,7 @@
 use crate::headless::exit_codes;
 use crate::headless::output::OutputSink;
 use lingxi_core::host::FusionPublicationStatus;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Extract a `local_fusion` task id from `/fusion`'s `Handled` display text
 /// (`"{task_id}  {preset}  {scope}"`, `harness-runtime/src/desktop/
@@ -28,8 +29,9 @@ pub(super) fn pending_local_fusion_task_id(display: &str) -> Option<&str> {
 /// Whether `input` dispatches to the `/fusion` command by name, per the same
 /// name extraction [`SlashCommandDispatcher::dispatch`] itself uses
 /// (`command_api::parser::parse_slash_command`).
-pub(super) fn dispatches_to_fusion_command(input: &str) -> bool {
-    command_api::parser::parse_slash_command(input).is_some_and(|parsed| parsed.name == "fusion")
+pub(super) fn dispatches_to_fusion_command(input: &Utf16JsonProjection) -> bool {
+    command_api::parser::parse_slash_command(input)
+        .is_some_and(|parsed| parsed.name.string_at("") == Some("fusion"))
 }
 
 /// The `local_fusion` task id (if any) `run_slash_command_with_budget`
@@ -40,7 +42,10 @@ pub(super) fn dispatches_to_fusion_command(input: &str) -> bool {
 /// with that shape triggered a registry lookup for a task that never
 /// existed, silently exiting print mode non-zero for a command that
 /// actually succeeded.
-pub(super) fn local_fusion_task_id_to_await<'a>(input: &str, display: &'a str) -> Option<&'a str> {
+pub(super) fn local_fusion_task_id_to_await<'a>(
+    input: &Utf16JsonProjection,
+    display: &'a str,
+) -> Option<&'a str> {
     dispatches_to_fusion_command(input)
         .then(|| pending_local_fusion_task_id(display))
         .flatten()
@@ -61,7 +66,7 @@ pub(super) fn local_fusion_task_id_to_await<'a>(input: &str, display: &'a str) -
 /// CLI-wide convention for every `Handled` command's argument errors
 /// (`CommandResult::Done` carries no error channel), and special-casing
 /// `/fusion` alone there would be a new inconsistency, not a fix.
-pub(super) fn fusion_spawn_failure_exit_code(input: &str, display: &str) -> i32 {
+pub(super) fn fusion_spawn_failure_exit_code(input: &Utf16JsonProjection, display: &str) -> i32 {
     if dispatches_to_fusion_command(input)
         && (display.starts_with("fusion failed to start: ")
             || display.starts_with("fusion publication retry failed: "))

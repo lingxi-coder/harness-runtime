@@ -315,7 +315,7 @@ async fn mount_prepared(
             Vec::new(),
             config.customization_gates.safe_mode,
         );
-        if let Some(command) = command_api::parse_slash_command("/reload-skills") {
+        if let Some(command) = command_api::parse_slash_command(&"/reload-skills".into()) {
             use command_api::BuiltinCommandHandler;
             let _ = handler.handle(&command).await;
         }
@@ -331,7 +331,9 @@ pub async fn rewind_files(
 ) -> Result<session::file_history::RewindOutcome, String> {
     let prepared = prepared.ok_or("--rewind-files requires --resume")?;
     let invalid = || {
-        format!("--rewind-files requires a user message UUID, but {message_id} is not a user message in this session")
+        format!(
+            "--rewind-files requires a user message UUID, but {message_id} is not a user message in this session"
+        )
     };
     if !prepared
         .messages

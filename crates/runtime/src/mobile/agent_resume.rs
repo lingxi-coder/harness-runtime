@@ -30,7 +30,7 @@ impl lingxi_core::host::fork_resume_gate::ForkResumeGate for MobileForkResumeGat
             &label,
             &status,
             task_forked_skill_name,
-            witness.as_deref(),
+            witness.as_ref(),
         )
         .map_err(|reason| reason.message)?;
         let Some(scoping) = scoping else {

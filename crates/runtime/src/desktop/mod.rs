@@ -2146,7 +2146,7 @@ impl DesktopBashRunner {
         // A minimal per-call context for a user-initiated `!` command: no
         // tool_use_id, empty history, inert options. The model id is unused for
         // execution (only `BashTool::prompt` reads it).
-        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone(), None);
+        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
         match tool
             .call(
                 source_object([("command", command.into())]),
@@ -2341,7 +2341,7 @@ impl DesktopWorktreeCommandHandler {
         input: Utf16JsonProjection,
     ) -> Utf16JsonProjection {
         let (progress_tx, _progress_rx) = tool_api::progress_channel();
-        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone(), None);
+        let use_ctx = tool_api::ToolUseContext::model_seed(self.ctx.default_model.clone());
         match tool.call(input, use_ctx, progress_tx).await {
             Ok(result) => result
                 .model_content
@@ -2690,6 +2690,70 @@ impl DesktopRuntime {
                 .agent_session_statistics(session_id)
                 .snapshot(),
         )
+    }
+
+    pub(crate) async fn stage_fork_history(&self, messages: Vec<session::jsonl::JsonlMessage>) {
+        if self.fork_writer.is_some() {
+            *self.pending_fork_history.lock().await = Some(PendingForkHistory {
+                messages,
+                next: 0,
+                prompt_id: None,
+            });
+        }
+    }
+
+    /// Persist inherited fork rows at first prompt admission, after the host's
+    /// native queue records and before the next turn writes its user row.
+    /// The ordinary writer owns bytes, identity indexes, and durable retries.
+    pub async fn flush_prepared_fork_history(&self) -> Result<(), String> {
+        let mut pending = self.pending_fork_history.lock().await;
+        let Some(history) = pending.as_mut() else {
+            return Ok(());
+        };
+        let Some(writer) = self.fork_writer.as_ref() else {
+            return Ok(());
+        };
+        let session_id = self
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        let prompt_id = match history.prompt_id.as_ref() {
+            Some(prompt_id) => prompt_id.clone(),
+            None => {
+                let prompt_id = self.orchestrator.reserve_next_prompt_id().await;
+                history.prompt_id = Some(prompt_id.clone());
+                prompt_id
+            }
+        };
+        history.flush(writer, &session_id, &prompt_id).await?;
+        *pending = None;
+        Ok(())
+    }
+
+    /// Publish automatic report/hook work after the host's startup barrier.
+    /// Ordinary desktop builds activate during assembly; deferred builds must
+    /// call this only after restoring the session and initializing output.
+    pub async fn activate_deferred_startup(&self) {
+        let Some(startup) = self.deferred_startup.lock().await.take() else {
+            return;
+        };
+        if !startup.sdk_mcp_configs.is_empty() {
+            self.mcp_registry.connect_all(startup.sdk_mcp_configs).await;
+            let registered = tool_mcp::build_registered_mcp_tools(
+                self.mcp_registry.as_ref(),
+                startup.mcp_tool_context,
+            )
+            .await;
+            self.tools.replace_mcp_tools(registered);
+            assembly::reconcile_mcp_prompt_catalog(
+                self.mcp_registry.as_ref(),
+                &self.shared_command_registry,
+            )
+            .await;
+        }
+        activate_startup_producers(&self.orchestrator, &startup.async_hook_responses).await;
     }
 
     /// The names of every tool this build registered, by value.
@@ -5035,9 +5099,40 @@ impl AsyncHookResponseBuffer {
         self.attach_rewake_handle(&target);
     }
 
+    fn attach_rewake_handle(&self, target: &Arc<dyn OrchestratorHandle>) {
+        let pending = {
+            let mut pending = self
+                .pending_rewakes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = self.rewake_target.set(Arc::downgrade(target));
+            std::mem::take(&mut *pending)
+        };
+        for generation_cancel in pending {
+            self.schedule_rewake(generation_cancel);
+        }
+    }
+
     fn schedule_rewake(&self, generation_cancel: Option<lingxi_core::host::CancellationToken>) {
-        let Some(target) = self.rewake_target.get().and_then(std::sync::Weak::upgrade) else {
+        if generation_cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.is_cancelled())
+        {
             return;
+        }
+        let target = {
+            let mut pending = self
+                .pending_rewakes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match self.rewake_target.get().and_then(std::sync::Weak::upgrade) {
+                Some(target) => target,
+                None if self.rewake_target.get().is_none() => {
+                    pending.push(generation_cancel);
+                    return;
+                }
+                None => return,
+            }
         };
         tokio::spawn(async move {
             if let Err(error) = target.run_async_hook_rewake(generation_cancel).await {
@@ -5699,6 +5794,10 @@ use fusion_services::FusionCatalogRefreshingCopilotConnect;
 use fusion_services::FusionCatalogRefreshingCredentialWriter;
 use fusion_services::FusionCatalogRefreshingOAuthConnect;
 pub use fusion_services::FusionCatalogRegistry;
+use fusion_services::{
+    desktop_fusion_attempts, desktop_fusion_catalog_row, desktop_fusion_runtime_config,
+    filter_fusion_catalog, fusion_route_flag, register_fusion_catalog_refresher,
+};
 pub use orchestrator::config::ModRenderSurface;
 use permission_config::append_mcp_permission_rules;
 use permission_config::append_restricted_builtin_denies;
@@ -5724,6 +5823,7 @@ use permission_config::sandbox_auto_allow_from_settings_tiers;
 use permission_config::sandbox_runtime_config_from_settings_tiers;
 use permission_config::should_enforce_permissions;
 use permission_config::strict_allowlist_override;
+use permission_config::BootPermissionTiers;
 pub use shutdown::refresh_process_session_presence;
 #[cfg(any(unix, windows))]
 pub use shutdown::supervisor_exit_sink;

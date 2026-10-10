@@ -15,7 +15,6 @@ use lingxi_core::host::team_spawn::{
 };
 use lingxi_core::host::teammate_worker::{PaneTeammateManifest, ParentToWorker, WorkerToParent};
 use lingxi_core::host::OutputStream;
-use lingxi_core::host::OutputStream;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{AgentId, SessionId};
 use tasks::handlers::TaskStatusSink;
@@ -518,7 +517,8 @@ impl PaneTeammateSpawner {
                     let sink = CoordinatorStatusSink::new(owner.team.clone(), owner.output.clone());
                     sink.set_status(&watched_id, TaskStatus::Running).await;
                     let tool = SendMessageTool::new(owner.team.clone(), tool_ui::send_message::truncate_preview).with_spawn_seam(Arc::new(owner.clone()));
-                    let mut ctx = ToolUseContext::model_seed(selection.model, selection.model_profile);
+                    let mut ctx = ToolUseContext::model_seed(selection.model);
+                    ctx.options.model_profile = selection.model_profile;
                     ctx.agent_id = Some(agent_id); ctx.agent_name = Some(name);
                     ctx.team_name = Some(team_name); ctx.origin_session_id = Some(owner.session_id);
                     let mut ended = false;
@@ -973,6 +973,7 @@ mod tests {
             _: &str,
             _: &Utf16JsonProjection,
             _: &Utf16JsonProjection,
+            _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         ) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
@@ -998,6 +999,7 @@ mod tests {
             _: &str,
             _: &Utf16JsonProjection,
             _: &Utf16JsonProjection,
+            _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         ) {
         }
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}

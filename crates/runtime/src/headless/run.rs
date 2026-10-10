@@ -16,9 +16,8 @@ use crate::headless::stream_json::{
     build_init_params, permission_mode_str, StreamJsonInitHostMetadata, StreamJsonStream,
 };
 use crate::headless::stream_json_input::{
-    content_to_prompt, control_frame_request_id, control_request_subtype,
-    emit_projected_frame_queued, emit_replay_ack_projected_queued, emit_replay_ack_queued,
-    ControlPlaneWriter, StdinControlFrame, StdinReaderStatus, StreamInput,
+    content_to_prompt, emit_projected_frame_queued, emit_replay_ack_projected_queued,
+    emit_replay_ack_queued, ControlPlaneWriter, StdinControlFrame, StdinReaderStatus, StreamInput,
 };
 use crate::headless::HeadlessRuntime as Runtime;
 use command_api::format_description_with_source;
@@ -338,12 +337,15 @@ async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink
     if command == "/tasks" {
         if let Some(parsed) = lingxi_core::host::human_task_message::parse(args) {
             let result = match parsed {
-                Ok((task_id, message)) if runtime.orchestrator.workspace_trusted().await => runtime
-                    .task_registry
-                    .send_human_task_message(task_id, message)
-                    .await
-                    .map(|()| format!("Message accepted for task {task_id}"))
-                    .map_err(|error| error.to_string()),
+                Ok((task_id, message)) if runtime.orchestrator.workspace_trusted().await => {
+                    let message = Utf16JsonProjection::from(message);
+                    runtime
+                        .task_registry
+                        .send_human_task_message(task_id, &message)
+                        .await
+                        .map(|()| format!("Message accepted for task {task_id}"))
+                        .map_err(|error| error.to_string())
+                }
                 Ok(_) => Err("Trust this workspace before messaging a task".into()),
                 Err(error) => Err(error.into()),
             };
@@ -483,10 +485,11 @@ async fn run_stream_compact_command(
     let started = std::time::Instant::now();
     let uuid = command_uuid.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let instructions_source = Utf16JsonProjection::from(instructions);
     let result = runtime
         .orchestrator
         .force_compact_with_instructions_and_cancel(
-            (!instructions.is_empty()).then_some(instructions),
+            (!instructions.is_empty()).then_some(&instructions_source),
             cancel,
         )
         .await;
@@ -633,14 +636,14 @@ async fn run_stream_json_print_inner(
         let mut all_cmds: Vec<String> = reg_guard
             .list_all()
             .into_iter()
-            .map(|c| c.name.clone())
+            .map(|c| c.name.string_at("").unwrap_or_default().to_owned())
             .collect();
         all_cmds.sort();
         let mut skill_names: Vec<String> = reg_guard
             .list_all()
             .into_iter()
             .filter(|c| c.loaded_from.as_deref() == Some("skills"))
-            .map(|c| c.name.clone())
+            .map(|c| c.name.string_at("").unwrap_or_default().to_owned())
             .collect();
         // sort for determinism.
         skill_names.sort();
@@ -888,14 +891,14 @@ async fn run_stream_json_input_loop_inner(
         let mut all_cmds: Vec<String> = reg_guard
             .list_all()
             .into_iter()
-            .map(|c| c.name.clone())
+            .map(|c| c.name.string_at("").unwrap_or_default().to_owned())
             .collect();
         all_cmds.sort();
         let mut skill_names: Vec<String> = reg_guard
             .list_all()
             .into_iter()
             .filter(|c| c.loaded_from.as_deref() == Some("skills"))
-            .map(|c| c.name.clone())
+            .map(|c| c.name.string_at("").unwrap_or_default().to_owned())
             .collect();
         skill_names.sort();
         drop(reg_guard);
@@ -1027,9 +1030,11 @@ async fn run_stream_json_input_loop_inner(
             .filter(|c| c.user_invocable != Some(false))
             .map(|c| {
                 json!({
-                    "name": c.name,
+                    "name": c.name.string_at("").unwrap_or_default(),
                     "description": format_description_with_source(c),
-                    "argumentHint": c.argument_hint.as_deref().unwrap_or("")
+                    "argumentHint": c.argument_hint.as_ref()
+                        .and_then(|hint| hint.string_at(""))
+                        .unwrap_or("")
                 })
             })
             .collect();
@@ -1143,8 +1148,8 @@ async fn run_stream_json_input_loop_inner(
                     continue;
                 }
                 StdinControlFrame::Request(frame) => {
-                    let request_id = control_frame_request_id(&frame.value).to_string();
-                    let subtype = control_request_subtype(&frame.value).to_string();
+                    let request_id = frame.string_at("/request_id").unwrap_or("").to_owned();
+                    let subtype = frame.string_at("/request/subtype").unwrap_or("").to_owned();
                     if let Err(error) = dispatch_control_request(
                         &subtype,
                         &request_id,
@@ -1362,7 +1367,7 @@ async fn run_stream_json_input_loop_inner(
             .frame_projection
             .subprojection("/uuid")
             .ok()
-            .filter(|value| value.value.as_str().is_some_and(|uuid| !uuid.is_empty()));
+            .filter(|value| value.string_at("").is_some_and(|uuid| !uuid.is_empty()));
         let consumed = primary.iter().cloned().collect();
         if let Err(error) = stream.begin_request_markers(primary, consumed, false) {
             last_turn_err = Some(orchestrator::OrchestratorError::Internal(error));
@@ -1607,7 +1612,7 @@ async fn run_stream_json_input_loop_inner(
         let cost = runtime.orchestrator.snapshot_cost().await;
         stream
             .emit_result_success(
-                &lingxi_core::types::utf16_json::Utf16JsonProjection::plain(serde_json::json!("")),
+                &Utf16JsonProjection::from(""),
                 "end_turn",
                 &cost,
                 &model_str,
@@ -1857,20 +1862,14 @@ async fn run_slash_command_with_budget(
             // recover it from the `/fusion` `Done` display's own format
             // (`fusion_command.rs`: `"{task_id}  {preset}  {scope}"`) and
             // await that one task to a terminal status before returning.
-            match local_fusion_task_id_to_await(
-                input.string_at("").unwrap_or_default(),
-                display_text,
-            ) {
+            match local_fusion_task_id_to_await(input, display_text) {
                 Some(task_id) => {
                     let outcome =
                         await_local_fusion_result(task_id, runtime.task_registry.as_ref(), sink)
                             .await;
                     fusion_result_exit_code(outcome.as_ref())
                 }
-                None => fusion_spawn_failure_exit_code(
-                    input.string_at("").unwrap_or_default(),
-                    display_text,
-                ),
+                None => fusion_spawn_failure_exit_code(input, display_text),
             }
         }
         // A prompt-expanding command (`/loop`, Markdown/Plugin): run the expanded

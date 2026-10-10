@@ -382,6 +382,7 @@ pub fn mock_message_response(
 /// the orchestrator's emitted output after wrapping the stream in an `Arc`.
 #[derive(Clone)]
 pub struct MockOutputStream {
+    tool_result_mcp_meta: Arc<Mutex<Vec<Option<Utf16JsonProjection>>>>,
     partial_stream_events: Arc<Mutex<Vec<String>>>,
     include_partial_stream_events: bool,
     lifecycle_events: Arc<Mutex<Vec<Utf16JsonProjection>>>,
@@ -413,6 +414,9 @@ pub struct MockOutputStream {
 }
 
 impl MockOutputStream {
+    pub async fn tool_result_mcp_meta_snapshot(&self) -> Vec<Option<Utf16JsonProjection>> {
+        self.tool_result_mcp_meta.lock().await.clone()
+    }
     pub async fn lifecycle_event_snapshot(&self) -> Vec<Utf16JsonProjection> {
         self.lifecycle_events.lock().await.clone()
     }
@@ -425,6 +429,7 @@ impl MockOutputStream {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            tool_result_mcp_meta: Arc::new(Mutex::new(Vec::new())),
             partial_stream_events: Arc::new(Mutex::new(Vec::new())),
             include_partial_stream_events: false,
             events: Arc::new(Mutex::new(Vec::new())),
@@ -722,7 +727,12 @@ impl OutputStream for MockOutputStream {
         tool: &str,
         model_text: &Utf16JsonProjection,
         result: &Utf16JsonProjection,
+        mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
+        self.tool_result_mcp_meta
+            .lock()
+            .await
+            .push(mcp_meta.cloned());
         self.events.lock().await.push(OutputEvent::ToolResult {
             id: id.clone(),
             tool: tool.to_string(),
@@ -749,7 +759,8 @@ impl OutputStream for MockOutputStream {
             .push((id.clone(), denial_kind.to_string()));
         // Still record the ordinary result event so existing assertions that
         // count/inspect `ToolResult` keep seeing denied tools.
-        self.emit_tool_result(id, tool, model_text, result).await;
+        self.emit_tool_result(id, tool, model_text, result, None)
+            .await;
     }
     async fn emit_end_turn(&self, stop_reason: &str, cost: &CostSnapshot) {
         self.events.lock().await.push(OutputEvent::EndTurn {
@@ -783,7 +794,7 @@ impl OutputStream for MockOutputStream {
         messages_before: u32,
         messages_after: u32,
         bytes_saved: u64,
-        summary: &str,
+        summary: &Utf16JsonProjection,
     ) {
         self.events
             .lock()
@@ -792,7 +803,7 @@ impl OutputStream for MockOutputStream {
                 messages_before,
                 messages_after,
                 bytes_saved,
-                summary: summary.to_string(),
+                summary: summary.clone(),
             });
     }
     async fn emit_thinking(&self, thinking: &str, signature: Option<&str>) {
@@ -1976,7 +1987,8 @@ mod tests {
             Utf16JsonProjection::from_serde_value(&serde_json::json!({"content": "ok"})).unwrap();
         m.emit_tool_call(&id, "Read", &input).await;
         m.emit_tool_heartbeat(&id, "Read", 1_250).await;
-        m.emit_tool_result(&id, "Read", &"ok".into(), &result).await;
+        m.emit_tool_result(&id, "Read", &"ok".into(), &result, None)
+            .await;
         let snap = m.snapshot().await;
         assert_eq!(snap.len(), 3);
         assert!(matches!(&snap[0], OutputEvent::ToolCall { id: gid, .. } if *gid == id));
@@ -2044,7 +2056,7 @@ mod tests {
     #[tokio::test]
     async fn mock_output_records_compaction_completed() {
         let m = MockOutputStream::new();
-        m.emit_compaction_completed(42, 7, 1234, "Summary:\nkept context")
+        m.emit_compaction_completed(42, 7, 1234, &"Summary:\nkept context".into())
             .await;
         let events = m.snapshot().await;
         let last = events.last().expect("at least one event");

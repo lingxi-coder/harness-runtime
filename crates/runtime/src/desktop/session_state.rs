@@ -29,6 +29,8 @@ use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 const COST_QUEUE_CAPACITY: usize = 64;
 
 mod attempts;
+mod resume;
+pub(crate) use resume::capture_resume_cost;
 mod retention;
 mod tool_execution;
 use attempts::AttemptProjection;

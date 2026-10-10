@@ -700,7 +700,8 @@ mod regressions {
             "status": "async_launched",
             "agentId": "7a1c9e0e-0000-4000-8000-00000000abcd",
         });
-        let spawns = std::collections::HashMap::from([(spawn.to_string(), data.clone())]);
+        let spawns =
+            std::collections::HashMap::from([(spawn.to_string(), generated_source(&data))]);
 
         let result_json = |dtos: &[MessageDto], index: usize| {
             let MessageBlockDto::ToolResult { result_json, .. } = &dtos[index].blocks[0] else {

@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -39,7 +38,7 @@ use permission::{
 use crate::headless::permission_prompt_notify::{
     PermissionPromptNotifier, PermissionPromptNotifyGuard,
 };
-use crate::headless::stream_json::{serialize_ndjson_line, OutboundMsg, OutboundTx};
+use crate::headless::stream_json::{OutboundMsg, OutboundTx};
 
 /// Cap on the resolved-tool-use dedup ring (claude-code
 /// `MAX_RESOLVED_TOOL_USE_IDS`, oldest-evicted).
@@ -101,12 +100,15 @@ impl PendingRequestBroker {
         self.pending.lock().await.remove(request_id)
     }
 
-    async fn ui_answer_is_unsettled(&self, request_id: &str, response: &Value) -> bool {
+    async fn ui_answer_is_unsettled(
+        &self,
+        request_id: &str,
+        response: &Utf16JsonProjection,
+    ) -> bool {
         let pending = self.pending.lock().await;
         let Some(subtype) = pending
             .get(request_id)
-            .and_then(|entry| entry.envelope.value.pointer("/request/subtype"))
-            .and_then(Value::as_str)
+            .and_then(|entry| entry.envelope.string_at("/request/subtype"))
         else {
             return false;
         };
@@ -127,14 +129,7 @@ impl PendingRequestBroker {
         let pending = self.pending.lock().await;
         let mut snapshots: Vec<_> = pending
             .values()
-            .filter(|entry| {
-                entry
-                    .envelope
-                    .value
-                    .pointer("/request/subtype")
-                    .and_then(Value::as_str)
-                    == Some(subtype)
-            })
+            .filter(|entry| entry.envelope.string_at("/request/subtype") == Some(subtype))
             .map(|entry| (entry.sequence, entry.envelope.clone()))
             .collect();
         snapshots.sort_by_key(|(sequence, _)| *sequence);
@@ -346,42 +341,44 @@ impl StdioControlPlane {
         tool_use_id: Option<&str>,
         agent_id: Option<&str>,
         decision_reason_type: Option<&str>,
-        decision_reason: Option<&str>,
-        message: &str,
+        decision_reason: Option<&Utf16JsonProjection>,
+        message: &Utf16JsonProjection,
     ) {
         let session_id = match self.session_id.get() {
             Some(handle) => handle.lock().await.clone(),
             None => String::new(),
         };
-        // Build in the ORACLE key order (serde_json `preserve_order` is on, so
-        // insertion order is the wire order): type, subtype, tool_name,
-        // tool_use_id, agent_id, decision_reason_type, decision_reason, message,
-        // uuid, session_id. Optional fields are inserted at their position and
-        // omitted entirely when absent (never null).
-        let mut map = serde_json::Map::new();
-        map.insert("type".into(), json!("system"));
-        map.insert("subtype".into(), json!("permission_denied"));
-        map.insert("tool_name".into(), json!(tool_name));
+        // Build in oracle key order; the source projection keeps insertion order
+        // on the wire: type, subtype, tool_name, tool_use_id, agent_id,
+        // decision_reason_type, decision_reason, message, uuid, session_id.
+        // Optional fields are inserted at their position and omitted entirely
+        // when absent (never null).
+        let mut fields = vec![
+            ("type".to_owned(), "system".into()),
+            ("subtype".to_owned(), "permission_denied".into()),
+            ("tool_name".to_owned(), tool_name.into()),
+        ];
         if let Some(id) = tool_use_id {
-            map.insert("tool_use_id".into(), json!(id));
+            fields.push(("tool_use_id".to_owned(), id.into()));
         }
         if let Some(agent) = agent_id {
-            map.insert("agent_id".into(), json!(agent));
+            fields.push(("agent_id".to_owned(), agent.into()));
         }
         if let Some(rt) = decision_reason_type {
-            map.insert("decision_reason_type".into(), json!(rt));
+            fields.push(("decision_reason_type".to_owned(), rt.into()));
         }
         if let Some(reason) = decision_reason {
-            map.insert("decision_reason".into(), json!(reason));
+            fields.push(("decision_reason".to_owned(), reason.clone()));
         }
-        map.insert("message".into(), json!(message));
-        map.insert("uuid".into(), json!(Uuid::new_v4().to_string()));
-        map.insert("session_id".into(), json!(session_id));
-        let _ = self
-            .outbound_tx
-            .send(OutboundMsg::Line(serialize_ndjson_line(&Value::Object(
-                map,
-            ))));
+        fields.push(("message".to_owned(), message.clone()));
+        fields.push(("uuid".to_owned(), Uuid::new_v4().to_string().into()));
+        fields.push(("session_id".to_owned(), session_id.into()));
+        let frame = Utf16JsonProjection::object(fields)
+            .expect("permission denied frame has unique generated members");
+        let _ = self.outbound_tx.send(OutboundMsg::Line(
+            crate::headless::stream_json::serialize_projected_ndjson_line(&frame)
+                .expect("permission denied frame is valid JSON"),
+        ));
     }
 
     /// Wire the orphaned-permission recovery sink (the run loop's mpsc receiver
@@ -456,15 +453,16 @@ impl StdioControlPlane {
     /// drop its prompt, remove the pending entry locally (tracking its tool_use_id
     /// so a late response is deduped), and let the awaiting future fall through.
     pub async fn cancel_request(&self, request_id: &Utf16JsonProjection) {
-        let identity = request_id.value.as_str().unwrap_or_default();
+        let identity = request_id.string_at("").unwrap_or_default();
         let entry = self.broker.remove(identity).await;
         if let Some(tuid) = entry.and_then(|e| e.tool_use_id) {
             self.track_resolved(tuid).await;
         }
-        let mut frame = Utf16JsonProjection::plain(json!({"type":"control_cancel_request"}));
-        frame
-            .set_field("request_id", request_id.clone())
-            .expect("valid request identity projection");
+        let frame = Utf16JsonProjection::object(vec![
+            ("type".into(), "control_cancel_request".into()),
+            ("request_id".into(), request_id.clone()),
+        ])
+        .expect("valid control cancellation members");
         let line = crate::headless::stream_json::serialize_projected_ndjson_line(&frame)
             .expect("valid cancellation projection");
         let _ = self.outbound_tx.send(OutboundMsg::Line(line));
@@ -484,14 +482,12 @@ impl StdioControlPlane {
         oneshot::Receiver<Result<Utf16JsonProjection, String>>,
     ) {
         let request_id = Uuid::new_v4().to_string();
-        let mut frame = Utf16JsonProjection::plain(json!({
-            "type": "control_request",
-            "request_id": request_id,
-        }));
-        // Preserve arbitrary host/tool payload strings and property names.
-        frame
-            .set_field("request", request)
-            .expect("valid control request projection");
+        let frame = Utf16JsonProjection::object(vec![
+            ("type".into(), "control_request".into()),
+            ("request_id".into(), request_id.clone().into()),
+            ("request".into(), request),
+        ])
+        .expect("valid control request projection");
         let (tx, rx) = oneshot::channel();
         self.broker
             .admit(
@@ -543,17 +539,16 @@ impl StdioControlPlane {
         if self.stopped.is_cancelled() {
             return;
         }
-        let Some(response) = frame.value.get("response") else {
+        let Ok(response) = frame.subprojection("/response") else {
             return;
         };
         let request_id = response
-            .get("request_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+            .string_units("/request_id")
+            .and_then(|units| String::from_utf16(&units).ok())
+            .unwrap_or_default();
         if self
             .broker
-            .ui_answer_is_unsettled(&request_id, response)
+            .ui_answer_is_unsettled(&request_id, &response)
             .await
         {
             return;
@@ -563,10 +558,9 @@ impl StdioControlPlane {
             // No matching pending entry. Two cases (claude-code `processLine`
             // orphan path, structuredIO.ts:374-399):
             let tool_use_id = response
-                .get("response")
-                .and_then(|p| p.get("toolUseID"))
-                .and_then(Value::as_str);
-            if let Some(tuid) = tool_use_id {
+                .string_units("/response/toolUseID")
+                .and_then(|units| String::from_utf16(&units).ok());
+            if let Some(tuid) = tool_use_id.as_deref() {
                 if self.is_resolved(tuid).await {
                     // §1.5 dedup: the payload's `toolUseID` was already resolved (a
                     // websocket-reconnect double-delivery) — drop so it can't
@@ -591,10 +585,14 @@ impl StdioControlPlane {
             // 'orphaned-permission', orphanedPermission:{permissionResult,…}})`
             // (print.ts:5291). Without a sink, keep the legacy warn+drop.
             let orphan_tx = self.orphan_tx.lock().await.clone();
-            if let (Some(tx), Some(tuid)) = (orphan_tx, tool_use_id) {
-                let permission_decision = frame
-                    .subprojection("/response/response")
-                    .unwrap_or_else(|_| Utf16JsonProjection::plain(json!({})));
+            if let (Some(tx), Some(tuid)) = (orphan_tx, tool_use_id.as_deref()) {
+                let permission_decision =
+                    frame
+                        .subprojection("/response/response")
+                        .unwrap_or_else(|_| {
+                            Utf16JsonProjection::parse("{}")
+                                .expect("empty permission decision is valid JSON")
+                        });
                 let cmd = OrphanedPermission {
                     tool_use_id: lingxi_core::types::ToolUseId::from(tuid),
                     permission_decision,
@@ -618,22 +616,21 @@ impl StdioControlPlane {
         if let Some(tuid) = entry.tool_use_id.clone() {
             self.track_resolved(tuid).await;
         }
-        let subtype = response
-            .get("subtype")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let subtype = response.string_at("/subtype").unwrap_or("");
         let result = if subtype == "error" {
             Err(response
-                .get("error")
-                .and_then(Value::as_str)
+                .string_at("/error")
                 .unwrap_or("control_response error")
-                .to_string())
+                .to_owned())
         } else {
             // SUCCESS: payload at `response.response`; absent ⇒ `{}` (the
             // `rn(gt)` no-payload case omits the key, parsed as empty).
             Ok(frame
                 .subprojection("/response/response")
-                .unwrap_or_else(|_| Utf16JsonProjection::plain(json!({}))))
+                .unwrap_or_else(|_| {
+                    Utf16JsonProjection::parse("{}")
+                        .expect("empty control response payload is valid JSON")
+                }))
         };
         let _ = entry.responder.send(result);
     }
@@ -780,21 +777,21 @@ impl StdioControlPermissionGate {
         // claude-code `KNe(t.name)` — the SAME display name feeds both the
         // request's `display_name` field and the SH-02 notification message.
         let display_name = permission_display_name(name);
-        let mut request = json!({
-            "subtype": "can_use_tool",
-            "tool_name": name,
+        let mut fields = vec![
+            ("subtype".to_owned(), "can_use_tool".into()),
+            ("tool_name".to_owned(), name.into()),
             // claude-code `createCanUseTool` sends `display_name:h1e(tool_name)`
             // UNCONDITIONALLY (a human-readable label the SDK host renders):
             // strip any MCP `__`-namespaced prefix segments, `_`→space, and
             // title-case each word initial (see `permission_display_name`).
-            "display_name": display_name.clone(),
-            "tool_use_id": tool_use_id,
-        });
+            ("display_name".to_owned(), display_name.clone().into()),
+            ("tool_use_id".to_owned(), tool_use_id.clone().into()),
+        ];
         if let Some(w) = &ctx.worker {
-            request["agent_id"] = json!(w.name);
+            fields.push(("agent_id".to_owned(), w.name.as_str().into()));
         }
         if let Some(reason) = &ctx.decision_reason {
-            request["decision_reason"] = json!(reason);
+            fields.push(("decision_reason".to_owned(), reason.into()));
         }
         // GATE-WIRE-01: `decision_reason_type: decisionReason?.type` (the
         // DISCRIMINATED reason kind — `rule`/`mode`/`subcommandResults`/… — which
@@ -803,44 +800,60 @@ impl StdioControlPermissionGate {
         // when `None` (the LingXi-internal denial/auto-mode/bypass reasons carry
         // no CC `.type`).
         if let Some(rt) = &ctx.decision_reason_type {
-            request["decision_reason_type"] = json!(rt);
+            fields.push(("decision_reason_type".to_owned(), rt.as_str().into()));
         }
         if let Some(approvable) = ctx.classifier_approvable {
-            request["classifier_approvable"] = json!(approvable);
+            fields.push((
+                "classifier_approvable".to_owned(),
+                Utf16JsonProjection::parse(if approvable { "true" } else { "false" })
+                    .expect("generated classifier boolean is valid JSON"),
+            ));
         }
         if let Some(rule) = &ctx.matched_ask_rule {
-            let mut wire_rule = json!({
-                "source": rule.source,
-                "tool_name": rule.tool_name,
-            });
+            let mut rule_fields = vec![
+                ("source".to_owned(), rule.source.as_str().into()),
+                ("tool_name".to_owned(), rule.tool_name.as_str().into()),
+            ];
             if let Some(content) = &rule.rule_content {
-                wire_rule["rule_content"] = json!(content);
+                rule_fields.push(("rule_content".to_owned(), content.clone()));
             }
-            request["matched_ask_rule"] = wire_rule;
+            fields.push((
+                "matched_ask_rule".to_owned(),
+                Utf16JsonProjection::object(rule_fields)
+                    .expect("matched ask rule has unique generated members"),
+            ));
         }
         // Upstream uses `requiresUserInteraction?.() || undefined`: false is
         // represented by absence, never by a literal false field.
         if ctx.requires_user_interaction {
-            request["requires_user_interaction"] = json!(true);
+            fields.push((
+                "requires_user_interaction".to_owned(),
+                Utf16JsonProjection::parse("true")
+                    .expect("generated interaction flag is valid JSON"),
+            ));
         }
         // A requiresUserInteraction ask must not expose or honor a persistent
         // AllowAlways choice. Keep the key additive/optional for older hosts;
         // when supported, the exact oracle wire spelling is snake_case.
         if ctx.suppress_always_allow_rule {
-            request["suppress_always_allow_rule"] = json!(true);
+            fields.push((
+                "suppress_always_allow_rule".to_owned(),
+                Utf16JsonProjection::parse("true")
+                    .expect("generated suppression flag is valid JSON"),
+            ));
         }
         // Eligibility is computed by the engine and carried opaquely to the
         // host. Do not let a client infer an Auto action from tool name/input.
         if let Some(prompt) = ctx.auto_mode_prompt {
-            request["auto_mode_prompt"] = json!(prompt.as_wire());
+            fields.push(("auto_mode_prompt".to_owned(), prompt.as_wire().into()));
         }
         // Suggestions and blocked paths are emitted only when a structured
         // producer supplied them; never parse either out of display text.
         if let Some(suggestions) = &ctx.permission_suggestions {
-            request["permission_suggestions"] = suggestions.clone();
+            fields.push(("permission_suggestions".to_owned(), suggestions.clone()));
         }
         if let Some(path) = &ctx.blocked_path {
-            request["blocked_path"] = json!(path);
+            fields.push(("blocked_path".to_owned(), path.as_str().into()));
         }
         // SH-02 — `A=Cou(KNe(t.name))` (oracle @ 307031502): arm the 6 s timer
         // AROUND the round trip. Every exit from here — response, host error,
@@ -849,10 +862,9 @@ impl StdioControlPermissionGate {
         // inside 6 s therefore fires no `Notification` hook at all.
         let _notify_guard =
             PermissionPromptNotifyGuard::arm(self.prompt_notifier.get(), &display_name);
-        let mut request = Utf16JsonProjection::plain(request);
-        request
-            .set_field("input", input.clone())
-            .expect("permission input is already a validated source projection");
+        fields.push(("input".to_owned(), input.clone()));
+        let request = Utf16JsonProjection::object(fields)
+            .expect("permission request has unique source members");
         let (request_id, rx) = self.plane.send_request(request, Some(tool_use_id)).await;
 
         // There is NO timeout on the can_use_tool request (§3.1): block until a
@@ -864,11 +876,13 @@ impl StdioControlPermissionGate {
                 tokio::select! {
                     r = rx => r,
                     () = token.cancelled() => {
-                        self.plane.cancel_request(&Utf16JsonProjection::plain(json!(request_id))).await;
+                        self.plane
+                            .cancel_request(&Utf16JsonProjection::from(request_id.as_str()))
+                            .await;
                         // claude-code rejects a turn-aborted request with
                         // `new AbortError()`, so `String(error)` → "AbortError".
                         return PermissionOutcome::Deny {
-                            reason: "Tool permission request failed: AbortError".to_string(),
+                            reason: "Tool permission request failed: AbortError".into(),
                         };
                     }
                 }
@@ -936,14 +950,14 @@ impl StdioControlPermissionGate {
                 outcome
             }
             Ok(Err(err)) => PermissionOutcome::Deny {
-                reason: format!("Tool permission request failed: {err}"),
+                reason: format!("Tool permission request failed: {err}").into(),
             },
             Err(_) => PermissionOutcome::Deny {
                 // The oneshot dropped without a value (the plane was torn down):
                 // the same closed-stream condition the binary rejects with
                 // Error("Tool permission stream closed before response received").
                 reason: "Tool permission request failed: Tool permission stream closed before response received"
-                    .to_string(),
+                    .into(),
             },
         }
     }
@@ -960,7 +974,7 @@ impl StdioControlPermissionGate {
     ///
     /// Live application is owned by the outer `PolicyPermissionGate`; this
     /// transport owns only the settings paths and therefore the durable half.
-    async fn persist_permission_updates_to_disk(&self, updates: &[Value]) {
+    async fn persist_permission_updates_to_disk(&self, updates: &[Utf16JsonProjection]) {
         if !self
             .persistence_enabled
             .load(std::sync::atomic::Ordering::Acquire)
@@ -986,17 +1000,19 @@ impl StdioControlPermissionGate {
 
     /// Map a `PermissionToolOutput` payload onto a [`PermissionOutcome`] (§3.3).
     async fn map_payload(&self, projection: Utf16JsonProjection) -> PermissionOutcome {
-        let payload = &projection.value;
-        match payload.get("behavior").and_then(Value::as_str) {
+        match projection.string_at("/behavior") {
             Some("allow") => {
                 // §3.3 / strict schema: an allow result REQUIRES an `updatedInput`
                 // object key (claude-code `PermissionAllowResultSchema`); a missing
                 // (or non-object) key is a malformed allow → deny. The value may be
                 // `{}` (no rewrite); only a NON-EMPTY object substitutes the tool
                 // input (claude-code applies `updatedInput` "when it has keys").
-                match payload.get("updatedInput") {
-                    Some(Value::Object(map)) => {
-                        let updated_input = if map.is_empty() {
+                match projection.get_property("updatedInput") {
+                    Some(updated_input_view) if updated_input_view.object_entries().is_some() => {
+                        let updated_input = if updated_input_view
+                            .object_entries()
+                            .is_some_and(|entries| entries.is_empty())
+                        {
                             None
                         } else {
                             projection.subprojection("/updatedInput").ok()
@@ -1009,13 +1025,20 @@ impl StdioControlPermissionGate {
                         // oracle's `.catch(undefined)` — a malformed array is IGNORED,
                         // never a deny). The raw wire array is carried through and
                         // parsed + persisted by the consumer ([`Self::decide_outcome`]).
-                        let permission_updates = match payload.get("updatedPermissions") {
-                            Some(Value::Array(arr)) => arr.clone(),
-                            _ => Vec::new(),
-                        };
-                        let decision_classification = payload
-                            .get("decisionClassification")
-                            .and_then(Value::as_str)
+                        let permission_updates = projection
+                            .array_len("/updatedPermissions")
+                            .map(|count| {
+                                (0..count)
+                                    .map(|index| {
+                                        projection
+                                            .subprojection(&format!("/updatedPermissions/{index}"))
+                                            .expect("source array member exists")
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let decision_classification = projection
+                            .string_at("/decisionClassification")
                             .and_then(|value| match value {
                                 "user_temporary" => Some(
                                     lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary,
@@ -1028,11 +1051,10 @@ impl StdioControlPermissionGate {
                                 ),
                                 _ => None,
                             });
-                        let auto_selected = payload
-                            .get("permissionMode")
-                            .or_else(|| payload.get("mode"))
-                            .and_then(Value::as_str)
-                            .is_some_and(|mode| mode == "auto");
+                        let auto_selected = projection
+                            .string_at("/permissionMode")
+                            .or_else(|| projection.string_at("/mode"))
+                            == Some("auto");
                         if auto_selected {
                             PermissionOutcome::AllowAuto { updated_input }
                         } else {
@@ -1045,15 +1067,18 @@ impl StdioControlPermissionGate {
                     }
                     _ => PermissionOutcome::Deny {
                         reason: "Tool permission request failed: malformed allow result (missing updatedInput)"
-                            .to_string(),
+                            .into(),
                     },
                 }
             }
             Some("allow_auto") => {
-                let updated_input = payload
-                    .get("updatedInput")
-                    .and_then(Value::as_object)
-                    .filter(|map| !map.is_empty())
+                let updated_input = projection
+                    .get_property("updatedInput")
+                    .filter(|value| {
+                        value
+                            .object_entries()
+                            .is_some_and(|entries| !entries.is_empty())
+                    })
                     .and_then(|_| projection.subprojection("/updatedInput").ok());
                 PermissionOutcome::AllowAuto { updated_input }
             }
@@ -1062,30 +1087,35 @@ impl StdioControlPermissionGate {
                 // is a Zod parse failure → the createCanUseTool catch denies with
                 // the "Tool permission request failed: <error>" family, NOT a
                 // hard-coded "Permission denied".
-                let Some(message) = payload.get("message").and_then(Value::as_str) else {
+                let Some(_message) = projection
+                    .get_property("message")
+                    .filter(|value| value.as_str().is_some())
+                else {
                     return PermissionOutcome::Deny {
                         reason: "Tool permission request failed: malformed deny result (missing message)"
-                            .to_string(),
+                            .into(),
                     };
                 };
-                let message = message.to_string();
-                if payload
-                    .get("interrupt")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
+                if projection
+                    .get_property("interrupt")
+                    .is_some_and(|value| value.as_bool() == Some(true))
                 {
                     // deny+interrupt: abort the whole turn, not just this tool
                     // (§3.4 — the binary calls `ctx.abortController.abort()`).
                     self.plane.cancel_active_turn().await;
                 }
-                PermissionOutcome::Deny { reason: message }
+                PermissionOutcome::Deny {
+                    reason: projection
+                        .subprojection("/message")
+                        .expect("validated source message exists"),
+                }
             }
             // Any non-allow/deny behavior is a schema-invalid result; the oracle
             // funnels it through the same "Tool permission request failed: …"
             // catch (the exact suffix is a ZodError serialization we don't
             // reproduce — the byte-faithful part is the prefix).
             _ => PermissionOutcome::Deny {
-                reason: "Tool permission request failed: invalid permission result".to_string(),
+                reason: "Tool permission request failed: invalid permission result".into(),
             },
         }
     }
@@ -1113,35 +1143,32 @@ enum PersistentPermissionUpdate {
 
 /// Strictly parse one `permissionUpdateSchema` union member. A malformed rule
 /// makes the whole member invalid so persistence cannot apply a partial prefix.
-fn parse_persistent_permission_update(raw: &Value) -> Option<PersistentPermissionUpdate> {
-    let obj = raw.as_object()?;
-    let kind = obj.get("type").and_then(Value::as_str)?;
-    let destination = obj
-        .get("destination")
-        .and_then(Value::as_str)
-        .and_then(parse_destination)?;
+fn parse_persistent_permission_update(
+    raw: &Utf16JsonProjection,
+) -> Option<PersistentPermissionUpdate> {
+    let kind = raw.string_at("/type")?;
+    let destination = raw.string_at("/destination").and_then(parse_destination)?;
     match kind {
         "addRules" | "replaceRules" | "removeRules" => {
-            let behavior = obj
-                .get("behavior")
-                .and_then(Value::as_str)
-                .and_then(parse_behavior)?;
+            let behavior = raw.string_at("/behavior").and_then(parse_behavior)?;
             let source = source_for_destination(destination);
-            let rules = obj
-                .get("rules")
-                .and_then(Value::as_array)?
-                .iter()
-                .map(|rule_value| {
-                    let rule = rule_value.as_object()?;
-                    let tool_name = rule.get("toolName").and_then(Value::as_str)?;
-                    let rule_content = match rule.get("ruleContent") {
+            let count = raw.array_len("/rules")?;
+            let rules = (0..count)
+                .map(|index| {
+                    let pointer = format!("/rules/{index}");
+                    raw.at_pointer(&pointer)?.object_entries()?;
+                    let tool_name = source_string_to_string(raw, &format!("{pointer}/toolName"))?;
+                    let rule_content_pointer = format!("{pointer}/ruleContent");
+                    let rule_content = match raw.at_pointer(&rule_content_pointer) {
                         None => None,
-                        Some(Value::String(content)) => Some(content.clone()),
+                        Some(value) if value.as_str().is_some() => {
+                            Some(raw.subprojection(&rule_content_pointer).ok()?)
+                        }
                         Some(_) => return None,
                     };
                     Some(PermissionRule {
                         value: PermissionRuleValue {
-                            tool_name: permission::rule::normalize_legacy_tool_name(tool_name),
+                            tool_name: permission::rule::normalize_legacy_tool_name(&tool_name),
                             rule_content,
                         },
                         behavior,
@@ -1168,7 +1195,7 @@ fn parse_persistent_permission_update(raw: &Value) -> Option<PersistentPermissio
             }
         }
         "setMode" => {
-            let mode = obj.get("mode").and_then(Value::as_str)?;
+            let mode = raw.string_at("/mode")?;
             if !matches!(
                 mode,
                 "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk" | "auto"
@@ -1181,12 +1208,9 @@ fn parse_persistent_permission_update(raw: &Value) -> Option<PersistentPermissio
             })
         }
         "addDirectories" | "removeDirectories" => {
-            let directories = obj
-                .get("directories")
-                .and_then(Value::as_array)?
-                .iter()
-                .map(Value::as_str)
-                .map(|value| value.map(str::to_string))
+            let count = raw.array_len("/directories")?;
+            let directories = (0..count)
+                .map(|index| source_string_to_string(raw, &format!("/directories/{index}")))
                 .collect::<Option<Vec<_>>>()?;
             // `persistPermissionUpdates` rejects the whole directory update
             // when any member contains NUL. Validate before handing the array
@@ -1207,6 +1231,12 @@ fn parse_persistent_permission_update(raw: &Value) -> Option<PersistentPermissio
         }
         _ => None,
     }
+}
+
+/// Convert a source string only when every UTF-16 code unit forms valid Rust
+/// text; permission rules and paths use scalar-value host APIs downstream.
+fn source_string_to_string(source: &Utf16JsonProjection, pointer: &str) -> Option<String> {
+    String::from_utf16(&source.string_units(pointer)?).ok()
 }
 
 fn directory_update_null_byte_reason(update_type: &str, directory: &str) -> String {
@@ -1362,7 +1392,7 @@ impl PermissionGate for StdioControlPermissionGate {
         self.decide_outcome(name, input, ctx).await
     }
 
-    async fn persist_permission_updates(&self, updates: &[Value]) {
+    async fn persist_permission_updates(&self, updates: &[Utf16JsonProjection]) {
         self.persist_permission_updates_to_disk(updates).await;
     }
 
@@ -1375,8 +1405,8 @@ impl PermissionGate for StdioControlPermissionGate {
         name: &str,
         ctx: &PermissionCheckContext,
         decision_reason_type: Option<&str>,
-        decision_reason: Option<&str>,
-        message: &str,
+        decision_reason: Option<&Utf16JsonProjection>,
+        message: &Utf16JsonProjection,
     ) {
         self.plane
             .emit_permission_denied(
@@ -1395,7 +1425,20 @@ impl PermissionGate for StdioControlPermissionGate {
 mod tests {
     use super::*;
     use permission::gate::MatchedAskRule;
+    use serde_json::{json, Value};
     use tokio::sync::mpsc;
+
+    fn source(value: Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("test JSON value is valid")
+    }
+
+    fn value(source: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&source.to_json_string().unwrap()).unwrap()
+    }
+
+    fn parse_test_update(value: Value) -> Option<PersistentPermissionUpdate> {
+        parse_persistent_permission_update(&source(value))
+    }
 
     /// Build a plane wired to an in-memory outbound channel; the receiver lets a
     /// test read the frames the plane emits (simulating the host on stdin).
@@ -1457,7 +1500,7 @@ mod tests {
     #[test]
     fn replaced_render_owner_cannot_retire_or_reply_for_new_generation() {
         let (plane, _) = plane_with_channel();
-        let id = Utf16JsonProjection::plain(json!("render"));
+        let id = source(json!("render"));
         let old = plane.begin_inbound_ui_request(&id).unwrap();
         let current = plane.begin_inbound_ui_request(&id).unwrap();
         old.reply_if_live(|| panic!("replaced render must not reply"))
@@ -1470,7 +1513,7 @@ mod tests {
     }
 
     fn success_response(request_id: &str, payload: Value) -> Utf16JsonProjection {
-        Utf16JsonProjection::plain(json!({
+        source(json!({
             "type": "control_response",
             "response": {
                 "subtype": "success",
@@ -1487,6 +1530,8 @@ mod tests {
         let (plane, mut rx) = plane_with_channel();
         let sid = Arc::new(Mutex::new("sess-123".to_string()));
         plane.set_session_id(sid);
+        let reason = Utf16JsonProjection::from("dangerous rm");
+        let message = Utf16JsonProjection::from("Permission denied: rm");
 
         plane
             .emit_permission_denied(
@@ -1494,8 +1539,8 @@ mod tests {
                 Some("tu-9"),
                 Some("agent-A"),
                 Some("safetyCheck"),
-                Some("dangerous rm"),
-                "Permission denied: rm",
+                Some(&reason),
+                &message,
             )
             .await;
 
@@ -1536,8 +1581,9 @@ mod tests {
         let (plane, mut rx) = plane_with_channel();
         // No session id wired, no optionals — the oracle `.optional()` fields are
         // OMITTED (never emitted as null).
+        let message = Utf16JsonProjection::from("denied");
         plane
-            .emit_permission_denied("Read", None, None, None, None, "denied")
+            .emit_permission_denied("Read", None, None, None, None, &message)
             .await;
         let f: Value = serde_json::from_str(&outbound_line(rx.recv().await.unwrap())).unwrap();
         assert_eq!(f["subtype"], "permission_denied");
@@ -1559,8 +1605,9 @@ mod tests {
         let sid = Arc::new(Mutex::new(String::new()));
         plane.set_session_id(sid.clone());
         *sid.lock().await = "sess-late".to_string();
+        let message = Utf16JsonProjection::from("x");
         plane
-            .emit_permission_denied("Bash", None, None, None, None, "x")
+            .emit_permission_denied("Bash", None, None, None, None, &message)
             .await;
         let f: Value = serde_json::from_str(&outbound_line(rx.recv().await.unwrap())).unwrap();
         assert_eq!(f["session_id"], "sess-late");
@@ -1571,7 +1618,7 @@ mod tests {
         let (plane, mut rx) = plane_with_channel();
         let (req_id, fut) = plane
             .send_request(
-                Utf16JsonProjection::plain(json!({"subtype": "can_use_tool", "tool_name": "Bash"})),
+                source(json!({"subtype": "can_use_tool", "tool_name": "Bash"})),
                 Some("tu1".to_string()),
             )
             .await;
@@ -1586,26 +1633,21 @@ mod tests {
             .resolve_response(&success_response(&req_id, json!({"behavior": "allow"})))
             .await;
         let payload = fut.await.unwrap().unwrap();
-        assert_eq!(payload.value["behavior"], "allow");
+        assert_eq!(value(&payload)["behavior"], "allow");
     }
 
     #[tokio::test]
     async fn resolve_response_error_subtype_rejects() {
         let (plane, _rx) = plane_with_channel();
         let (req_id, fut) = plane
-            .send_request(
-                Utf16JsonProjection::plain(json!({"subtype": "can_use_tool"})),
-                None,
-            )
+            .send_request(source(json!({"subtype": "can_use_tool"})), None)
             .await;
 
         let resp = json!({
             "type": "control_response",
             "response": {"subtype": "error", "request_id": req_id, "error": "boom"}
         });
-        plane
-            .resolve_response(&Utf16JsonProjection::plain(resp.clone()))
-            .await;
+        plane.resolve_response(&source(resp.clone())).await;
         assert_eq!(fut.await.unwrap().unwrap_err(), "boom");
     }
 
@@ -1613,17 +1655,15 @@ mod tests {
     async fn success_with_no_inner_payload_resolves_empty_object() {
         let (plane, _rx) = plane_with_channel();
         let (req_id, fut) = plane
-            .send_request(Utf16JsonProjection::plain(json!({"subtype": "x"})), None)
+            .send_request(source(json!({"subtype": "x"})), None)
             .await;
         // `response` key absent (the `rn(gt)` no-payload case).
         let resp = json!({
             "type": "control_response",
             "response": {"subtype": "success", "request_id": req_id}
         });
-        plane
-            .resolve_response(&Utf16JsonProjection::plain(resp.clone()))
-            .await;
-        assert_eq!(fut.await.unwrap().unwrap().value, json!({}));
+        plane.resolve_response(&source(resp.clone())).await;
+        assert_eq!(value(&fut.await.unwrap().unwrap()), json!({}));
     }
 
     #[tokio::test]
@@ -1634,7 +1674,7 @@ mod tests {
         let token = CancellationToken::new();
         plane.set_active_turn(token.clone()).await;
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
         // Drain the can_use_tool request, then abort the turn.
@@ -1648,7 +1688,7 @@ mod tests {
         assert_eq!(
             check.await.unwrap(),
             PermissionDecision::Deny {
-                reason: "Tool permission request failed: AbortError".to_string()
+                reason: "Tool permission request failed: AbortError".into()
             }
         );
         // A control_cancel_request frame is emitted to the host.
@@ -1665,7 +1705,7 @@ mod tests {
         let (plane, _rx) = plane_with_channel();
         let (req_id, fut) = plane
             .send_request(
-                Utf16JsonProjection::plain(json!({"subtype": "can_use_tool"})),
+                source(json!({"subtype": "can_use_tool"})),
                 Some("tu-dup".to_string()),
             )
             .await;
@@ -1675,7 +1715,7 @@ mod tests {
                 json!({"behavior": "allow", "toolUseID": "tu-dup"}),
             ))
             .await;
-        assert_eq!(fut.await.unwrap().unwrap().value["behavior"], "allow");
+        assert_eq!(value(&fut.await.unwrap().unwrap())["behavior"], "allow");
 
         // The duplicate has a NEW request_id (orphan) but the same toolUseID.
         let dup = json!({
@@ -1687,9 +1727,7 @@ mod tests {
             }
         });
         // Must not panic / double-resolve; the tool_use_id is in the resolved ring.
-        plane
-            .resolve_response(&Utf16JsonProjection::plain(dup.clone()))
-            .await;
+        plane.resolve_response(&source(dup.clone())).await;
         assert!(plane.is_resolved("tu-dup").await);
     }
 
@@ -1699,16 +1737,10 @@ mod tests {
         // awaiting gate does not hang forever.
         let (plane, _rx) = plane_with_channel();
         let (_id1, fut1) = plane
-            .send_request(
-                Utf16JsonProjection::plain(json!({"subtype": "can_use_tool"})),
-                Some("a".into()),
-            )
+            .send_request(source(json!({"subtype": "can_use_tool"})), Some("a".into()))
             .await;
         let (_id2, fut2) = plane
-            .send_request(
-                Utf16JsonProjection::plain(json!({"subtype": "can_use_tool"})),
-                Some("b".into()),
-            )
+            .send_request(source(json!({"subtype": "can_use_tool"})), Some("b".into()))
             .await;
         plane
             .fail_all_pending("Tool permission stream closed before response received")
@@ -1732,7 +1764,7 @@ mod tests {
         // (denied) when fail_all_pending fires on EOF.
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
         // Drain the emitted can_use_tool request, then simulate stdin EOF.
         let _ = rx.recv().await.unwrap();
@@ -1741,7 +1773,10 @@ mod tests {
             .await;
         match check.await.unwrap() {
             PermissionDecision::Deny { reason } => {
-                assert!(reason.contains("Tool permission stream closed before response received"));
+                assert!(reason
+                    .string_at("")
+                    .unwrap()
+                    .contains("Tool permission stream closed before response received"));
             }
             other => panic!("expected Deny on EOF, got {other:?}"),
         }
@@ -1777,9 +1812,9 @@ mod tests {
 
         let cmd = orphan_rx.try_recv().expect("orphan command forwarded");
         assert_eq!(cmd.tool_use_id.as_str(), "toolu_orphan_1");
-        assert_eq!(cmd.permission_decision.value["behavior"], "allow");
+        assert_eq!(value(&cmd.permission_decision)["behavior"], "allow");
         assert_eq!(
-            cmd.permission_decision.value["updatedInput"]["command"],
+            value(&cmd.permission_decision)["updatedInput"]["command"],
             "ls -la"
         );
     }
@@ -1792,7 +1827,7 @@ mod tests {
 
         // Drive a NORMAL allow round-trip so the toolUseID is tracked as resolved.
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({"command": "ls"}));
+        let input = source(json!({"command": "ls"}));
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
         let line = outbound_line(rx.recv().await.unwrap());
         let frame: Value = serde_json::from_str(&line).unwrap();
@@ -1828,7 +1863,7 @@ mod tests {
     async fn gate_allow_maps_to_allow() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({"command": "ls"}));
+        let input = source(json!({"command": "ls"}));
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
         let line = outbound_line(rx.recv().await.unwrap());
@@ -1851,7 +1886,7 @@ mod tests {
     async fn gate_deny_maps_to_deny_with_message() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move { gate.check("Write", &input).await });
 
         let line = outbound_line(rx.recv().await.unwrap());
@@ -1868,7 +1903,7 @@ mod tests {
         assert_eq!(
             check.await.unwrap(),
             PermissionDecision::Deny {
-                reason: "not allowed".to_string()
+                reason: "not allowed".into()
             }
         );
     }
@@ -1900,7 +1935,7 @@ mod tests {
         // (claude-code sends it unconditionally).
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let _check =
             tokio::spawn(async move { gate.check("mcp__github__create_issue", &input).await });
 
@@ -1917,7 +1952,7 @@ mod tests {
         let token = CancellationToken::new();
         plane.set_active_turn(token.clone()).await;
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
         let line = outbound_line(rx.recv().await.unwrap());
@@ -1934,7 +1969,7 @@ mod tests {
         assert_eq!(
             check.await.unwrap(),
             PermissionDecision::Deny {
-                reason: "stop".to_string()
+                reason: "stop".into()
             }
         );
         assert!(token.is_cancelled(), "deny+interrupt must cancel the turn");
@@ -1961,7 +1996,7 @@ mod tests {
     async fn gate_error_response_maps_to_deny() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
         let line = outbound_line(rx.recv().await.unwrap());
@@ -1973,13 +2008,11 @@ mod tests {
             "type": "control_response",
             "response": {"subtype": "error", "request_id": req_id, "error": "host failure"}
         });
-        plane
-            .resolve_response(&Utf16JsonProjection::plain(resp.clone()))
-            .await;
+        plane.resolve_response(&source(resp.clone())).await;
         assert_eq!(
             check.await.unwrap(),
             PermissionDecision::Deny {
-                reason: "Tool permission request failed: host failure".to_string()
+                reason: "Tool permission request failed: host failure".into()
             }
         );
     }
@@ -1988,7 +2021,7 @@ mod tests {
     async fn gate_check_with_worker_sets_agent_id() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let worker = PromptWorker {
             name: "researcher".to_string(),
             team: None,
@@ -2016,10 +2049,10 @@ mod tests {
         // minted uuid). #2a: a non-empty updatedInput flows back as the rewrite.
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({"command": "ls"}));
+        let input = source(json!({"command": "ls"}));
         let ctx = PermissionCheckContext {
             tool_use_id: Some("toolu_real_42".to_string()),
-            decision_reason: Some("needs review".to_string()),
+            decision_reason: Some(Utf16JsonProjection::from("needs review")),
             ..PermissionCheckContext::default()
         };
         let check =
@@ -2042,10 +2075,7 @@ mod tests {
             .await;
         match check.await.unwrap() {
             PermissionOutcome::Allow { updated_input, .. } => {
-                assert_eq!(
-                    updated_input,
-                    Some(Utf16JsonProjection::plain(json!({"command": "ls -la"})))
-                );
+                assert_eq!(updated_input, Some(source(json!({"command": "ls -la"}))));
             }
             other => panic!("expected Allow with updated_input, got {other:?}"),
         }
@@ -2055,12 +2085,12 @@ mod tests {
     async fn context_emits_structured_optional_permission_metadata() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let ctx = PermissionCheckContext {
             tool_use_id: Some("toolu_9".to_string()),
-            permission_suggestions: Some(json!([
+            permission_suggestions: Some(source(json!([
                 {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "ls *"}], "behavior": "allow", "destination": "session"}
-            ])),
+            ]))),
             blocked_path: Some("/etc/secret".to_string()),
             classifier_approvable: Some(false),
             requires_user_interaction: true,
@@ -2110,7 +2140,7 @@ mod tests {
     async fn eligible_auto_response_is_forwarded_without_permission_updates() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({"command": "echo hi"}));
+        let input = source(json!({"command": "echo hi"}));
         let ctx = PermissionCheckContext {
             auto_mode_prompt: Some(
                 lingxi_core::host::permission_gate::AutoModePrompt::WorkflowBash,
@@ -2141,7 +2171,7 @@ mod tests {
     async fn context_omits_optional_permission_metadata_when_absent() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
 
         let line = outbound_line(rx.recv().await.unwrap());
@@ -2184,7 +2214,7 @@ mod tests {
         // bare allow is malformed → deny.
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
         let line = outbound_line(rx.recv().await.unwrap());
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
@@ -2196,7 +2226,13 @@ mod tests {
             .await;
         match check.await.unwrap() {
             PermissionDecision::Deny { reason } => {
-                assert!(reason.contains("malformed allow result"), "got {reason}");
+                assert!(
+                    reason
+                        .string_at("")
+                        .unwrap()
+                        .contains("malformed allow result"),
+                    "got {reason:?}"
+                );
             }
             other => panic!("expected Deny for malformed allow, got {other:?}"),
         }
@@ -2224,7 +2260,7 @@ mod tests {
         ] {
             let (plane, mut rx) = plane_with_channel();
             let gate = StdioControlPermissionGate::new(plane.clone());
-            let input = Utf16JsonProjection::plain(json!({}));
+            let input = source(json!({}));
             let check = tokio::spawn(async move { gate.check("Bash", &input).await });
             let line = outbound_line(rx.recv().await.unwrap());
             let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
@@ -2237,10 +2273,16 @@ mod tests {
             match check.await.unwrap() {
                 PermissionDecision::Deny { reason } => {
                     assert!(
-                        reason.starts_with("Tool permission request failed: "),
-                        "got {reason}"
+                        reason
+                            .string_at("")
+                            .unwrap()
+                            .starts_with("Tool permission request failed: "),
+                        "got {reason:?}"
                     );
-                    assert!(reason.contains(needle), "got {reason}");
+                    assert!(
+                        reason.string_at("").unwrap().contains(needle),
+                        "got {reason:?}"
+                    );
                 }
                 other => panic!("expected Deny, got {other:?}"),
             }
@@ -2253,7 +2295,7 @@ mod tests {
     fn parse_persistent_add_rules_models_each_rule() {
         // The host's addRules wire entry → one PermissionUpdate per rule, carrying
         // the parsed behavior + destination and the destination-derived source.
-        let raw = json!({
+        let raw = source(json!({
             "type": "addRules",
             "rules": [
                 { "toolName": "Bash", "ruleContent": "npm install" },
@@ -2261,7 +2303,7 @@ mod tests {
             ],
             "behavior": "allow",
             "destination": "localSettings",
-        });
+        }));
         let PersistentPermissionUpdate::AddRules(updates) =
             parse_persistent_permission_update(&raw).unwrap()
         else {
@@ -2289,12 +2331,12 @@ mod tests {
 
     #[test]
     fn parse_persistent_rules_preserves_current_agent_tool_name() {
-        let raw = json!({
+        let raw = source(json!({
             "type": "addRules",
             "rules": [{ "toolName": "Agent", "ruleContent": "general-purpose" }],
             "behavior": "deny",
             "destination": "userSettings",
-        });
+        }));
         let PersistentPermissionUpdate::AddRules(updates) =
             parse_persistent_permission_update(&raw).unwrap()
         else {
@@ -2312,20 +2354,20 @@ mod tests {
     #[test]
     fn parse_persistent_update_models_all_variants_and_rejects_malformed_atomically() {
         assert!(matches!(
-            parse_persistent_permission_update(&json!({
+            parse_test_update(json!({
             "type": "replaceRules", "rules": [{ "toolName": "Bash" }],
             "behavior": "allow", "destination": "localSettings"
             })),
             Some(PersistentPermissionUpdate::ReplaceRules { .. })
         ));
         assert!(matches!(
-            parse_persistent_permission_update(&json!({
+            parse_test_update(json!({
             "type": "setMode", "mode": "auto", "destination": "localSettings"
             })),
             Some(PersistentPermissionUpdate::SetMode { .. })
         ));
         assert!(matches!(
-            parse_persistent_permission_update(&json!({
+            parse_test_update(json!({
                 "type": "addDirectories", "directories": ["/extra"],
                 "destination": "projectSettings"
             })),
@@ -2334,27 +2376,27 @@ mod tests {
 
         // Unknown behavior / destination / missing rules are ignored, and one
         // malformed rule invalidates the complete union member.
-        assert!(parse_persistent_permission_update(&json!({
+        assert!(parse_test_update(json!({
             "type": "addRules", "rules": [{ "toolName": "Bash" }],
             "behavior": "bogus", "destination": "localSettings"
         }))
         .is_none());
-        assert!(parse_persistent_permission_update(&json!({
+        assert!(parse_test_update(json!({
             "type": "addRules", "rules": [{ "toolName": "Bash" }],
             "behavior": "allow", "destination": "bogus"
         }))
         .is_none());
-        assert!(parse_persistent_permission_update(&json!({
+        assert!(parse_test_update(json!({
             "type": "addRules", "behavior": "allow", "destination": "localSettings"
         }))
         .is_none());
-        assert!(parse_persistent_permission_update(&json!({
+        assert!(parse_test_update(json!({
             "type": "addRules",
             "rules": [{ "toolName": "Read" }, { "toolName": "Bash", "ruleContent": 1 }],
             "behavior": "allow", "destination": "localSettings"
         }))
         .is_none());
-        assert!(parse_persistent_permission_update(&json!({
+        assert!(parse_test_update(json!({
             "type": "addDirectories",
             "directories": ["/extra", "bad\u{0000}path"],
             "destination": "localSettings"
@@ -2364,7 +2406,7 @@ mod tests {
             directory_update_null_byte_reason("addDirectories", "bad\0path"),
             "addDirectories carries a directory containing a null byte: bad\0path"
         );
-        assert!(parse_persistent_permission_update(&json!("nonsense")).is_none());
+        assert!(parse_test_update(json!("nonsense")).is_none());
     }
 
     #[tokio::test]
@@ -2373,7 +2415,7 @@ mod tests {
         // outcome; a missing array is simply empty (not a deny).
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move {
             gate.check_with_context("Bash", &input, &PermissionCheckContext::default())
                 .await
@@ -2413,7 +2455,7 @@ mod tests {
     async fn allow_carries_host_decision_classification() {
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move {
             gate.check_with_context("Bash", &input, &PermissionCheckContext::default())
                 .await
@@ -2451,7 +2493,7 @@ mod tests {
         // — it must NOT turn the allow into a deny. A non-array value → empty.
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone());
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move { gate.check("Bash", &input).await });
         let line = outbound_line(rx.recv().await.unwrap());
         let req_id = serde_json::from_str::<Value>(&line).unwrap()["request_id"]
@@ -2480,7 +2522,7 @@ mod tests {
         };
         let (plane, mut rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane.clone()).with_persist(paths);
-        let input = Utf16JsonProjection::plain(json!({}));
+        let input = source(json!({}));
         let check = tokio::spawn(async move {
             gate.check_with_context("Bash", &input, &PermissionCheckContext::default())
                 .await
@@ -2530,11 +2572,11 @@ mod tests {
         };
         let (plane, _rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane).with_persist(paths);
-        gate.persist_permission_updates_to_disk(&[json!({
+        gate.persist_permission_updates_to_disk(&[source(json!({
             "type": "addDirectories",
             "directories": ["/extra", "bad\u{0000}path"],
             "destination": "localSettings"
-        })])
+        }))])
         .await;
 
         assert!(
@@ -2560,39 +2602,39 @@ mod tests {
         let (plane, _rx) = plane_with_channel();
         let gate = StdioControlPermissionGate::new(plane).with_persist(paths);
         gate.persist_permission_updates_to_disk(&[
-            json!({
+            source(json!({
                 "type": "replaceRules",
                 "rules": [{"toolName": "Read"}, {"toolName": "Edit", "ruleContent": "src/**"}],
                 "behavior": "allow",
                 "destination": "localSettings"
-            }),
-            json!({
+            })),
+            source(json!({
                 "type": "removeRules",
                 "rules": [{"toolName": "Read"}],
                 "behavior": "allow",
                 "destination": "localSettings"
-            }),
-            json!({
+            })),
+            source(json!({
                 "type": "addRules",
                 "rules": [{"toolName": "Bash", "ruleContent": "cargo test"}],
                 "behavior": "deny",
                 "destination": "localSettings"
-            }),
-            json!({
+            })),
+            source(json!({
                 "type": "setMode",
                 "mode": "auto",
                 "destination": "localSettings"
-            }),
-            json!({
+            })),
+            source(json!({
                 "type": "addDirectories",
                 "directories": ["/extra", "/removed"],
                 "destination": "localSettings"
-            }),
-            json!({
+            })),
+            source(json!({
                 "type": "removeDirectories",
                 "directories": ["/removed"],
                 "destination": "localSettings"
-            }),
+            })),
         ])
         .await;
 
@@ -2615,6 +2657,11 @@ mod tests {
 #[cfg(test)]
 mod close_scope_tests {
     use super::*;
+    use serde_json::json;
+
+    fn source(value: serde_json::Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("test JSON value is valid")
+    }
     #[tokio::test]
     async fn broker_retains_unpaired_utf16_in_requests_and_responses() {
         let (out, mut frames) = tokio::sync::mpsc::unbounded_channel();
@@ -2664,19 +2711,13 @@ mod close_scope_tests {
         let (out, mut frames) = tokio::sync::mpsc::unbounded_channel();
         let plane = StdioControlPlane::new(Arc::new(out));
         let (_, first) = plane
-            .send_request(
-                Utf16JsonProjection::plain(json!({"subtype":"can_use_tool"})),
-                None,
-            )
+            .send_request(source(json!({"subtype":"can_use_tool"})), None)
             .await;
         assert!(frames.recv().await.is_some());
         plane.close_input("closed fixture").await;
         assert!(first.await.unwrap().is_err());
         let (_, later) = plane
-            .send_request(
-                Utf16JsonProjection::plain(json!({"subtype":"can_use_tool"})),
-                None,
-            )
+            .send_request(source(json!({"subtype":"can_use_tool"})), None)
             .await;
         assert!(later.await.unwrap().is_err());
         assert!(

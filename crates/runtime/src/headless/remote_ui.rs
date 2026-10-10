@@ -2,7 +2,6 @@
 use super::control_plane::StdioControlPlane;
 use lingxi_core::host::{ModRemoteUiAnswer, ModRemoteUiClient, ModRemoteUiHost};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -64,9 +63,8 @@ impl ModRemoteUiHost for HeadlessRemoteUiHost {
             let answer = match tokio::time::timeout(Duration::from_millis(5_000), receiver).await {
                 Ok(Ok(Ok(answer))) => Some(answer),
                 _ => {
-                    plane
-                        .cancel_request(&Utf16JsonProjection::plain(json!(id)))
-                        .await;
+                    let request_id = Utf16JsonProjection::from(id.as_str());
+                    plane.cancel_request(&request_id).await;
                     None
                 }
             };
@@ -77,27 +75,42 @@ impl ModRemoteUiHost for HeadlessRemoteUiHost {
 }
 
 /// Invalid answers and error envelopes do not settle native UI callbacks.
-pub(super) fn valid_ui_answer(subtype: &str, response: &Value) -> bool {
-    if response.get("subtype").and_then(Value::as_str) == Some("error") {
+pub(super) fn valid_ui_answer(subtype: &str, response: &Utf16JsonProjection) -> bool {
+    if response.string_at("/subtype") == Some("error") {
         return false;
     }
-    let Some(payload) = response.get("response").filter(|value| value.is_object()) else {
+    let Some(payload) = response
+        .get_property("response")
+        .filter(|value| value.object_entries().is_some())
+    else {
         return false;
     };
     match subtype {
-        "ui_copy" => payload.get("copied").is_some_and(Value::is_boolean),
-        "ui_prompt_fill" => payload.get("filled").is_some_and(Value::is_boolean),
-        "ui_prompt_suggest" => payload.get("shown").is_some_and(Value::is_boolean),
+        "ui_copy" => payload
+            .get_property("copied")
+            .is_some_and(|value| value.as_bool().is_some()),
+        "ui_prompt_fill" => payload
+            .get_property("filled")
+            .is_some_and(|value| value.as_bool().is_some()),
+        "ui_prompt_suggest" => payload
+            .get_property("shown")
+            .is_some_and(|value| value.as_bool().is_some()),
         "ui_prompt_read" => {
-            payload.get("text").is_some_and(Value::is_string)
+            payload
+                .get_property("text")
+                .is_some_and(|value| value.as_str().is_some())
                 && payload
-                    .get("cursor")
-                    .and_then(Value::as_f64)
+                    .get_property("cursor")
+                    .and_then(|value| value.as_number())
                     .is_some_and(|cursor| cursor >= 0.0 && cursor.fract() == 0.0)
         }
         "ui_read_selection" => {
-            payload.get("text").is_none_or(Value::is_string)
-                && payload.get("instance_id").is_none_or(Value::is_string)
+            payload
+                .get_property("text")
+                .is_none_or(|value| value.as_str().is_some())
+                && payload
+                    .get_property("instance_id")
+                    .is_none_or(|value| value.as_str().is_some())
         }
         _ => true,
     }
@@ -107,22 +120,27 @@ pub(super) fn valid_ui_answer(subtype: &str, response: &Value) -> bool {
 mod tests {
     use super::*;
     use crate::headless::stream_json::OutboundMsg;
+    use serde_json::{json, Value};
+
+    fn source(value: &Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(value).expect("test value is valid JSON")
+    }
 
     #[test]
     fn ui_answer_integer_validation_matches_javascript_numbers() {
         assert!(valid_ui_answer(
             "ui_prompt_read",
-            &json!({"subtype":"success","response":{"text":"text","cursor":1.0}})
+            &source(&json!({"subtype":"success","response":{"text":"text","cursor":1.0}}))
         ));
         for cursor in [json!(-1), json!(1.5), json!("1")] {
             assert!(!valid_ui_answer(
                 "ui_prompt_read",
-                &json!({"subtype":"success","response":{"text":"text","cursor":cursor}})
+                &source(&json!({"subtype":"success","response":{"text":"text","cursor":cursor}}))
             ));
         }
         assert!(valid_ui_answer(
             "ui_copy",
-            &json!({"subtype":"success","response":{"copied":false}})
+            &source(&json!({"subtype":"success","response":{"copied":false}}))
         ));
     }
 
@@ -136,8 +154,8 @@ mod tests {
         let sender = host.clone();
         let pending = tokio::spawn(async move {
             sender
-                .request(Utf16JsonProjection::plain(
-                    json!({"subtype":"ui_prompt_read","surface":"mobile","client_id":"phone"}),
+                .request(source(
+                    &json!({"subtype":"ui_prompt_read","surface":"mobile","client_id":"phone"}),
                 ))
                 .await
         });
@@ -145,14 +163,18 @@ mod tests {
             panic!("request");
         };
         let request = Utf16JsonProjection::parse(&line).unwrap();
-        let id = request.value["request_id"].as_str().unwrap();
-        plane.resolve_response(&Utf16JsonProjection::plain(json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":"not this window"}}))).await;
+        let id = request.string_at("/request_id").unwrap();
+        plane
+            .resolve_response(&source(
+                &json!({"type":"control_response","response":{"subtype":"error","request_id":id,"error":"not this window"}}),
+            ))
+            .await;
         tokio::task::yield_now().await;
         assert!(!pending.is_finished());
         let mut response=Utf16JsonProjection::parse(r#"{"type":"control_response","response":{"subtype":"success","response":{"text":"\ud800","cursor":1}}}"#).unwrap();
         let mut inner = response.subprojection("/response").unwrap();
         inner
-            .set_field("request_id", Utf16JsonProjection::plain(json!(id)))
+            .set_field("request_id", Utf16JsonProjection::from(id))
             .unwrap();
         response.set_field("response", inner).unwrap();
         plane.resolve_response(&response).await;
@@ -162,7 +184,7 @@ mod tests {
     }
 
     fn response(id: &str, text: &str) -> Utf16JsonProjection {
-        Utf16JsonProjection::plain(json!({"type":"control_response","response":{
+        source(&json!({"type":"control_response","response":{
             "subtype":"success","request_id":id,"response":{"text":text}
         }}))
     }
@@ -185,12 +207,12 @@ mod tests {
             for client in ["one", "two"] {
                 let host = host.clone();
                 callbacks.push(async move {
-                    host.request(Utf16JsonProjection::plain(json!({"subtype":"ui_read_selection","client_id":client,"surface":"mobile"}))).await
+                    host.request(source(&json!({"subtype":"ui_read_selection","client_id":client,"surface":"mobile"}))).await
                 });
             }
             while let Some(Some(answer)) = callbacks.next().await {
-                if answer.value["text"]
-                    .as_str()
+                if answer
+                    .string_at("/text")
                     .is_some_and(|text| !text.is_empty())
                 {
                     return answer;
@@ -210,7 +232,7 @@ mod tests {
         let winner = callback_id(&mut rx).await;
         let loser = callback_id(&mut rx).await;
         plane.resolve_response(&response(&winner, "chosen")).await;
-        assert_eq!(selection.await.unwrap().value["text"], "chosen");
+        assert_eq!(selection.await.unwrap().string_at("/text"), Some("chosen"));
         let joining = {
             let owner = owner.clone();
             tokio::spawn(async move { owner.join().await })

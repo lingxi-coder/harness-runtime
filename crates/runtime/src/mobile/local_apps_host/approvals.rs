@@ -140,7 +140,7 @@ impl LocalAppsHostBroker {
                         event: AppEventDto::LocalAppOperationFailed {
                             app_id: Some(app_id.to_string()),
                             code: LocalAppPluginErrorCodeDto::ProposalInvalid,
-                            message: message.clone(),
+                            message: message.clone().into(),
                             request_id: Some(request_id.clone()),
                         },
                     })
@@ -158,7 +158,7 @@ impl LocalAppsHostBroker {
                         event: AppEventDto::LocalAppOperationFailed {
                             app_id: Some(app_id.to_string()),
                             code: LocalAppPluginErrorCodeDto::ProposalInvalid,
-                            message: message.clone(),
+                            message: message.clone().into(),
                             request_id: Some(request_id.clone()),
                         },
                     })

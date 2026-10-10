@@ -72,6 +72,13 @@ pub struct ToolRegistry {
     /// Optional session-scoped built-in filter. `None` preserves historical
     /// behavior; restricted sessions install this before sharing the registry.
     builtin_filter: Option<BuiltinToolFilter>,
+    /// Builtins needed to fulfill explicit execution configuration. These
+    /// bypass selection and composition filters, but still obey the complete
+    /// session capability allowlist.
+    required_builtins: std::collections::HashSet<String>,
+    /// Composition-level builtin catalog, independent of user selection and
+    /// dynamic MCP tools. Required execution tools are added after this catalog.
+    builtin_catalog: Option<std::collections::HashSet<String>>,
     /// Optional complete session capability allowlist. Unlike
     /// `builtin_filter`, this applies to every registry partition so a dynamic
     /// MCP/LSP/plugin refresh cannot re-introduce a tool hidden by the session
@@ -122,6 +129,8 @@ impl ToolRegistry {
             deferral: Arc::new(DeferralState::disabled()),
             tool_search_view: Arc::new(SharedToolSearchView::new()),
             builtin_filter: None,
+            required_builtins: std::collections::HashSet::new(),
+            builtin_catalog: None,
             session_allowlist: None,
             main_loop_model: RwLock::new(None),
             bash_precommit_skills_provider: RwLock::new(None),
@@ -168,10 +177,19 @@ impl ToolRegistry {
     }
 
     /// Install the restricted-session built-in filter. Values are flattened by
-    /// comma/whitespace and legacy aliases are normalized by the permission
-    /// crate, keeping `--tools` compatible with its existing parser surface.
-    /// Calling this with `None` leaves the normal registry unchanged.
+    /// comma/whitespace and aliases are normalized by the permission crate.
+    /// `None` installs the restricted default deny set; an explicit empty
+    /// selection disables ordinary builtins. Selecting `default` clears only
+    /// this user filter, leaving the composition catalog in place.
     pub fn set_restricted_builtin_filter(&mut self, tools: Option<&[String]>) {
+        if tools.is_some_and(|values| {
+            values
+                .iter()
+                .any(|value| value.split(',').any(|name| name.trim() == "default"))
+        }) {
+            self.builtin_filter = None;
+            return;
+        }
         let explicit_allowlist = tools.map(|values| {
             values
                 .iter()
@@ -185,6 +203,12 @@ impl ToolRegistry {
                 .collect()
         });
         self.builtin_filter = Some(BuiltinToolFilter { explicit_allowlist });
+    }
+
+    /// Select the built-in catalog for a composition without hiding dynamic
+    /// MCP/LSP/plugin tools or changing empty `--tools` Mod policy.
+    pub fn set_builtin_catalog(&mut self, names: &[&str]) {
+        self.builtin_catalog = Some(names.iter().map(|name| (*name).to_owned()).collect());
     }
 
     /// Install a complete session capability allowlist for built-ins and hide
@@ -229,10 +253,15 @@ impl ToolRegistry {
 
     fn builtin_allowed(&self, name: &str) -> bool {
         self.session_allows(name)
-            && self
-                .builtin_filter
-                .as_ref()
-                .is_none_or(|filter| filter.allows(name))
+            && (self.required_builtins.contains(name)
+                || (self
+                    .builtin_catalog
+                    .as_ref()
+                    .is_none_or(|catalog| catalog.contains(name))
+                    && self
+                        .builtin_filter
+                        .as_ref()
+                        .is_none_or(|filter| filter.allows(name))))
     }
 
     /// The shared Tool Search deferral state.
@@ -315,6 +344,14 @@ impl ToolRegistry {
     /// Register a builtin tool. Insertion order is preserved.
     pub fn register_builtin(&mut self, tool: Arc<dyn Tool>) {
         self.builtin.push(tool);
+    }
+
+    /// Register a tool required to fulfill explicit execution configuration.
+    /// This bypasses builtin catalog and user-selection filters, but not the
+    /// complete session capability allowlist or the tool's own enablement gate.
+    pub fn register_required_builtin(&mut self, tool: Arc<dyn Tool>) {
+        self.required_builtins.insert(tool.name().to_owned());
+        self.register_builtin(tool);
     }
 
     /// Publish the session's main-loop model, the port of claude-code's
@@ -988,6 +1025,85 @@ mod tests {
             .map(|tool| tool.name().to_string())
             .collect();
         assert_eq!(names, vec!["Bash", "Read", "WebFetch", "mcp__srv__run"]);
+    }
+
+    #[test]
+    fn builtin_catalog_intersects_user_selection_and_preserves_dynamic_tools() {
+        let mut registry = ToolRegistry::new();
+        for name in ["Bash", "Edit", "Read", "Agent", "WebFetch"] {
+            registry.register_builtin(Arc::new(NamedTool(name)));
+        }
+        registry.set_builtin_catalog(&["Bash", "Edit", "Read"]);
+        registry.register_mcp_tools(
+            McpConnectionId::new(),
+            vec![Arc::new(NamedTool("mcp__fixture__tool"))],
+        );
+
+        // An explicit empty selection hides ordinary builtins, but it neither
+        // removes the bare composition catalog nor suppresses dynamic MCP.
+        registry.set_restricted_builtin_filter(Some(&[String::new()]));
+        assert!(registry.mod_registration_disabled());
+        assert_eq!(
+            registry
+                .available_tools(&ToolStaticContext::default())
+                .iter()
+                .map(|tool| tool.name().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["mcp__fixture__tool"]
+        );
+
+        // The `default` choice clears the user selection while keeping the
+        // composition-level bare catalog in force.
+        registry.set_restricted_builtin_filter(Some(&["default".into()]));
+        assert!(!registry.mod_registration_disabled());
+        assert_eq!(
+            registry
+                .available_tools(&ToolStaticContext::default())
+                .iter()
+                .map(|tool| tool.name().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["Bash", "Edit", "Read", "mcp__fixture__tool"]
+        );
+        assert!(registry.find_by_name("Agent").is_none());
+
+        // A concrete `--tools` selection intersects with the bare catalog;
+        // it cannot reintroduce WebFetch outside that catalog.
+        registry.set_restricted_builtin_filter(Some(&["Bash,WebFetch,Read".into()]));
+        assert_eq!(
+            registry
+                .available_tools(&ToolStaticContext::default())
+                .iter()
+                .map(|tool| tool.name().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["Bash", "Read", "mcp__fixture__tool"]
+        );
+    }
+
+    #[test]
+    fn required_builtin_bypasses_selection_and_catalog_but_obeys_session_allowlist() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NamedTool("Bash")));
+        registry.set_builtin_catalog(&["Bash"]);
+        registry.register_required_builtin(Arc::new(NamedTool("StructuredOutput")));
+        registry.set_restricted_builtin_filter(Some(&[String::new()]));
+
+        assert!(registry.mod_registration_disabled());
+        assert!(registry.find_by_name("Bash").is_none());
+        assert!(registry.find_by_name("StructuredOutput").is_some());
+        assert_eq!(
+            registry
+                .available_tools(&ToolStaticContext::default())
+                .iter()
+                .map(|tool| tool.name().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["StructuredOutput"]
+        );
+
+        registry.set_session_tool_allowlist(&[]);
+        assert!(registry.find_by_name("StructuredOutput").is_none());
+        assert!(registry
+            .available_tools(&ToolStaticContext::default())
+            .is_empty());
     }
 
     #[test]

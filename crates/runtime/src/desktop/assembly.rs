@@ -78,7 +78,7 @@ use super::{
 /// connection snapshot that serves prompts/get. Holding both read/write guards
 /// while projecting prevents a concurrent plugin disable from restoring a
 /// retired prompt after it has removed the server.
-async fn reconcile_mcp_prompt_catalog(
+pub(super) async fn reconcile_mcp_prompt_catalog(
     mcp_registry: &mcp::McpRegistry,
     command_registry: &Arc<RwLock<CommandRegistry>>,
 ) {
@@ -1820,7 +1820,7 @@ pub async fn build_with_credential_stack(
     let mcp_transport = new_desktop_mcp_transport();
     let mcp_services = super::DesktopMcpServices {
         transport: mcp_transport.clone() as Arc<dyn McpTransport>,
-        raw_connections: mcp_transport as Arc<dyn mcp::RawConnectionProvider>,
+        raw_connections: mcp_transport.clone() as Arc<dyn mcp::RawConnectionProvider>,
     };
     let mcp_services = match cfg.mcp_services_factory.as_ref() {
         Some(factory) => factory(mcp_services),

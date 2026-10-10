@@ -1086,7 +1086,7 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
         .list_all()
         .into_iter()
         .filter(|command| {
-            matches!(command.name.as_str(), "verify" | "simplify")
+            matches!(command.name.string_at(""), Some("verify" | "simplify"))
                 && matches!(
                     command.loaded_from.as_deref(),
                     Some("skills" | "commands_DEPRECATED")

@@ -288,6 +288,8 @@ pub struct DesktopConfig {
         Option<llm_runtime::auth::anthropic::environment::EnvironmentLookup>,
     /// Restore the mounted session before the host fires startup lifecycle hooks.
     pub defer_session_start: bool,
+    /// Maximum repair attempts for a rejected structured output.
+    pub max_structured_output_retries: i64,
     /// Host package identity used by `/version`.
     pub build_info: command_api::builtins::BuildInfo,
     /// Whether this runtime owns versioned automation dispatch. CLI defaults to
@@ -305,10 +307,6 @@ pub struct DesktopConfig {
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
-    /// Explicit Native Anthropic wire metadata. Only admitted first-party
-    /// Messages routes use this; other providers retain their own wire policy.
-    pub anthropic_client_metadata:
-        Option<lingxi_llm_client::providers::anthropic::request_policy::AnthropicClientMetadata>,
     /// Anthropic API key. Empty string is valid — the orchestrator builds
     /// successfully and only fails at `run_turn` with a 401, so slash-command
     /// dispatch still works with no key configured.
@@ -1104,7 +1102,6 @@ impl Default for DesktopConfig {
             mod_render_surface: None,
             inline_visualization: false,
             api_base: "https://api.anthropic.com".to_string(),
-            anthropic_client_metadata: None,
             api_key: String::new(),
             api_key_source: llm_runtime::CredentialSource::Configured,
             // Production reads the real keychain; only isolated hosts opt out.

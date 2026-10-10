@@ -1437,6 +1437,13 @@ impl ConversationOrchestrator {
             );
             return;
         }
+        let mcp_meta = self
+            .transcript
+            .tool_use_mcp_meta
+            .lock()
+            .await
+            .get(id.as_str())
+            .cloned();
         match denial_kind {
             Some(kind) => {
                 self.output
@@ -1445,7 +1452,7 @@ impl ConversationOrchestrator {
             }
             None => {
                 self.output
-                    .emit_tool_result(id, tool, model_text, result)
+                    .emit_tool_result(id, tool, model_text, result, mcp_meta.as_ref())
                     .await
             }
         }
@@ -1554,6 +1561,16 @@ impl ConversationOrchestrator {
         } else {
             result
         };
+        let mcp_meta = if substituted {
+            None
+        } else {
+            self.transcript
+                .tool_use_mcp_meta
+                .lock()
+                .await
+                .get(id.as_str())
+                .cloned()
+        };
         let denial_kind = denial_kind_from_side_table.or(pending_denial_kind);
         match denial_kind {
             Some(kind) => {
@@ -1563,7 +1580,7 @@ impl ConversationOrchestrator {
             }
             None => {
                 self.output
-                    .emit_tool_result(id, &tool, content, &result)
+                    .emit_tool_result(id, &tool, content, &result, mcp_meta.as_ref())
                     .await
             }
         }

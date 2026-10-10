@@ -1495,7 +1495,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         }
     }
 
-    fn tool_is_concurrency_safe(&self, name: &str, input: &serde_json::Value) -> Option<bool> {
+    fn tool_is_concurrency_safe(&self, name: &str, input: &Utf16JsonProjection) -> Option<bool> {
         self.inner
             .get()
             .and_then(|invoker| invoker.tool_is_concurrency_safe(name, input))
@@ -1510,7 +1510,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke_supplied_detailed(
         &self,
         name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
         supplied: Arc<dyn std::any::Any + Send + Sync>,
@@ -1534,7 +1534,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke_detailed(
         &self,
         name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
     ) -> Result<
@@ -1557,9 +1557,9 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke(
         &self,
         name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
@@ -1580,10 +1580,10 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     async fn invoke_with_workspace_lease(
         &self,
         name: &str,
-        input: serde_json::Value,
+        input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
         workspace_lease_token: Option<u64>,
-    ) -> Result<serde_json::Value, lingxi_core::host::tool_invoker::ToolInvokerError> {
+    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
@@ -1938,23 +1938,24 @@ fn validate_namespaced_local_app_external_args(
     let Some(name) = spec.name.as_deref() else {
         return Ok(());
     };
-    let Some(object) = spec.args.as_ref().and_then(serde_json::Value::as_object) else {
+    let Some(entries) = spec.args.as_ref().and_then(|args| args.object_entries()) else {
         return Ok(());
     };
-    for key in object.keys() {
+    for entry in entries {
+        let key = entry.display_key;
         let allowed = match name {
             name if name == crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID => {
-                BUILD_EXTERNAL_ARG_KEYS.contains(&key.as_str())
+                BUILD_EXTERNAL_ARG_KEYS.contains(&key)
             }
             name if name
                 == crate::mobile::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID =>
             {
-                USE_TEST_EXTERNAL_ARG_KEYS.contains(&key.as_str())
+                USE_TEST_EXTERNAL_ARG_KEYS.contains(&key)
             }
             name if name
                 == crate::mobile::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID =>
             {
-                MCP_AUTHORING_EXTERNAL_ARG_KEYS.contains(&key.as_str())
+                MCP_AUTHORING_EXTERNAL_ARG_KEYS.contains(&key)
             }
             _ => true,
         };
@@ -2155,7 +2156,14 @@ fn apply_materialized_local_app_collections_with_identity(
             "local-app build workflow requires args.app_id and a materialized manifest".to_string(),
         )
     })?;
-    let object = args.as_object_mut().ok_or_else(|| {
+    let args_consumer =
+        lingxi_core::types::utf16_json::Utf16JsonConsumer::new(&[args]).map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot inspect local-app build workflow args: {error}"
+            ))
+        })?;
+    let mut args_value = args_consumer.values()[0].clone();
+    let object = args_value.as_object_mut().ok_or_else(|| {
         tool_workflow::WorkflowLaunchError(
             "local-app build workflow args must be an object containing app_id".to_string(),
         )
@@ -2361,6 +2369,11 @@ fn apply_materialized_local_app_collections_with_identity(
             }),
         );
     }
+    *args = args_consumer.restore(&args_value).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!(
+            "cannot restore local-app build workflow args: {error}"
+        ))
+    })?;
     Ok(Some(scope))
 }
 
@@ -2705,8 +2718,17 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         }) || expected_workflow_id
             == Some(crate::mobile::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
         if is_build_workflow_launch {
-            if let Some(object) = spec.args.as_mut().and_then(Value::as_object_mut) {
-                object.insert("workflow_run_id".into(), Value::String(run_id.clone()));
+            if let Some(args) = spec
+                .args
+                .as_mut()
+                .filter(|args| args.object_entries().is_some())
+            {
+                args.set_field("workflow_run_id", run_id.clone().into())
+                    .map_err(|error| {
+                        tool_workflow::WorkflowLaunchError(format!(
+                            "cannot add Host workflow run id: {error}"
+                        ))
+                    })?;
             }
         }
         let mut local_app_scope = apply_materialized_local_app_collections_with_identity(
@@ -2720,14 +2742,23 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         // The create path receives the run id as a Host-injected field only;
         // it is not part of the external Workflow tool contract.
         if is_build_workflow_launch {
-            if let Some(context) = spec
-                .args
-                .as_mut()
-                .and_then(Value::as_object_mut)
-                .and_then(|object| object.get_mut("host_context"))
-                .and_then(Value::as_object_mut)
-            {
-                context.insert("workflow_run_id".into(), Value::String(run_id.clone()));
+            if let Some(args) = spec.args.as_mut() {
+                if let Ok(mut context) = args.subprojection("/host_context") {
+                    if context.object_entries().is_some() {
+                        context
+                            .set_field("workflow_run_id", run_id.clone().into())
+                            .map_err(|error| {
+                                tool_workflow::WorkflowLaunchError(format!(
+                                    "cannot add Host workflow run id to context: {error}"
+                                ))
+                            })?;
+                        args.set_field("host_context", context).map_err(|error| {
+                            tool_workflow::WorkflowLaunchError(format!(
+                                "cannot update Host workflow context: {error}"
+                            ))
+                        })?;
+                    }
+                }
             }
         }
         // A by-name launch proves the plugin identity through
@@ -2756,9 +2787,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             if let Some(app_id) = spec
                 .args
                 .as_ref()
-                .and_then(Value::as_object)
-                .and_then(|object| object.get("app_id"))
-                .and_then(Value::as_str)
+                .and_then(|args| args.string_at("/app_id"))
             {
                 local_app_scope = Some(if is_use_test_launch {
                     tasks::scope::LocalAppWorkflowTaskScope::for_use_test(app_id).map_err(
@@ -2945,7 +2974,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                         args: spec
                             .args
                             .as_ref()
-                            .map(|v| serde_json::to_string(v).unwrap_or_default()),
+                            .map(|value| value.to_json_string().unwrap_or_default()),
                         run_id: Some(run_id.clone()),
                         invocation_mode: Some(invocation_mode),
                         workflow_source: Some(workflow_source),
@@ -2961,7 +2990,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                             .and_then(lingxi_core::types::AgentId::parse_prefixed),
                         scope: local_app_scope,
                     },
-                    task_description,
+                    task_description.into(),
                 )
                 .await
                 .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
@@ -2972,7 +3001,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             let args_json = spec
                 .args
                 .as_ref()
-                .map(|value| serde_json::to_string(value).unwrap_or_default());
+                .map(|value| value.to_json_string().unwrap_or_default());
             let pending_events = match self.checkpoints.upsert(
                 &session_uuid,
                 WorkflowCheckpoint {
@@ -3080,7 +3109,12 @@ fn enrich_persisted_plugin_workflow_context(
     let args = spec.args.as_mut().ok_or_else(|| {
         tool_workflow::WorkflowLaunchError(format!("{name} requires Host-enriched args"))
     })?;
-    let object = args.as_object_mut().ok_or_else(|| {
+    let args_consumer =
+        lingxi_core::types::utf16_json::Utf16JsonConsumer::new(&[args]).map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!("cannot inspect {name} args: {error}"))
+        })?;
+    let mut args_value = args_consumer.values()[0].clone();
+    let object = args_value.as_object_mut().ok_or_else(|| {
         tool_workflow::WorkflowLaunchError(format!("{name} args must be an object"))
     })?;
     let app_id = object
@@ -3174,6 +3208,9 @@ fn enrich_persisted_plugin_workflow_context(
                 "active_catalog": manifest.active_mcp_catalog.clone(),
             }),
         );
+        *args = args_consumer.restore(&args_value).map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!("cannot restore {name} args: {error}"))
+        })?;
         return Ok(());
     }
     let active_authoring_contract_sha256 =
@@ -3222,6 +3259,9 @@ fn enrich_persisted_plugin_workflow_context(
             "dependency_snapshot": {"verified": true},
         }),
     );
+    *args = args_consumer.restore(&args_value).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!("cannot restore {name} args: {error}"))
+    })?;
     Ok(())
 }
 
@@ -3260,7 +3300,11 @@ fn sanitize_namespaced_local_app_args(
     if !is_local_app_workflow {
         return;
     }
-    let Some(object) = spec.args.as_mut().and_then(Value::as_object_mut) else {
+    let Some(args) = spec
+        .args
+        .as_mut()
+        .filter(|args| args.object_entries().is_some())
+    else {
         return;
     };
     for key in [
@@ -3280,7 +3324,9 @@ fn sanitize_namespaced_local_app_args(
         "update_ui_impact",
         "staging",
     ] {
-        object.remove(key);
+        // These are Host-owned ASCII authority fields. Remove only the exact
+        // named members while leaving all other source strings and keys intact.
+        let _ = args.remove_field(key);
     }
 }
 

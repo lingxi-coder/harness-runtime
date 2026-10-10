@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use command_api::{BundledPromptFn, CommandRegistry, CommandSource, SlashCommandKind};
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use visualization::VisualizationStore;
 
 /// `loaded_from` tag of the registered skill; `/reload-skills` leaves it alone.
@@ -66,14 +67,23 @@ pub async fn followup_text(
     visualization::context::followup_prompt(&store, session.as_uuid(), &reference, &text).await
 }
 
-struct VisualizePrompt(String);
+struct VisualizePrompt(Utf16JsonProjection);
 
 impl BundledPromptFn for VisualizePrompt {
-    fn build(&self, args: &str) -> String {
-        if args.trim().is_empty() {
+    fn build(&self, args: &Utf16JsonProjection) -> Utf16JsonProjection {
+        if args
+            .string_at("")
+            .expect("prompt argument is text")
+            .trim()
+            .is_empty()
+        {
             self.0.clone()
         } else {
-            format!("{}\n\n## User Request\n\n{args}", self.0)
+            let mut units = self.0.string_units("").expect("prompt template is text");
+            units.extend("\n\n## User Request\n\n".encode_utf16());
+            units.extend(args.string_units("").expect("prompt argument is text"));
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("prompt display matches its source units")
         }
     }
 }

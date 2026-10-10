@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod activity;
 pub mod ask_user_question_broker;
 pub mod computer_access_broker;
 pub mod controls;

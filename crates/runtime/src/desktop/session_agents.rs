@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use client::adapter::ClientEventSink;
 use client::protocol::events::ClientEvent;
 use client::protocol::listings::{SessionAgentMessageRowDto, SessionAgentSummaryDto};
-use lingxi_core::types::{ConversationMessage, SessionId};
+use client::protocol::text::ClientTextDto;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::{ContentBlock, ConversationMessage, SessionId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,6 +26,18 @@ fn complete_transcript_lines(raw: &[u8]) -> impl Iterator<Item = &[u8]> {
         })
 }
 
+/// Parse the nested conversation row from its original JSON source. Parsing
+/// the outer record through `serde_json::Value` first would normalize isolated
+/// UTF-16 surrogates before `ConversationMessage`'s raw-field deserializer can
+/// retain them.
+fn transcript_message(line: &[u8]) -> Option<ConversationMessage> {
+    let source = std::str::from_utf8(line).ok()?;
+    let row = Utf16JsonProjection::parse(source).ok()?;
+    let message = row.subprojection("/message").ok()?;
+    let message_source = message.to_json_string().ok()?;
+    serde_json::from_str(&message_source).ok()
+}
+
 /// Count valid message records in a transcript prefix.  The raw count is a
 /// monotonic watermark even when a visible compact summary is replaced, so a
 /// revision-aware renderer cannot mistake a changed snapshot for a duplicate.
@@ -31,9 +45,7 @@ fn complete_transcript_lines(raw: &[u8]) -> impl Iterator<Item = &[u8]> {
 pub fn transcript_revision(raw: &[u8]) -> u64 {
     complete_transcript_lines(raw)
         .filter(|line| !line.is_empty())
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-        .filter_map(|value| value.get("message").cloned())
-        .filter_map(|message| serde_json::from_value::<ConversationMessage>(message).ok())
+        .filter_map(transcript_message)
         .count() as u64
 }
 
@@ -61,9 +73,7 @@ pub fn conversation_is_visible(message: &ConversationMessage) -> bool {
 pub fn parse_transcript_messages(raw: &[u8]) -> Vec<ConversationMessage> {
     complete_transcript_lines(raw)
         .filter(|line| !line.is_empty())
-        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-        .filter_map(|value| value.get("message").cloned())
-        .filter_map(|message| serde_json::from_value::<ConversationMessage>(message).ok())
+        .filter_map(transcript_message)
         .filter(|message| {
             !matches!(
                 message,
@@ -88,11 +98,7 @@ pub fn first_corrupt_transcript_line(raw: &[u8]) -> Option<usize> {
             if line.is_empty() {
                 return None;
             }
-            let valid = serde_json::from_slice::<serde_json::Value>(line)
-                .ok()
-                .and_then(|value| value.get("message").cloned())
-                .and_then(|message| serde_json::from_value::<ConversationMessage>(message).ok())
-                .is_some();
+            let valid = transcript_message(line).is_some();
             (!valid).then_some(index + 1)
         })
 }
@@ -193,24 +199,29 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn activity(message: &ConversationMessage) -> Option<String> {
+fn projection_activity(text: &Utf16JsonProjection) -> Option<ClientTextDto> {
+    let code_units = text.string_units("")?;
+    client::adapter::activity::summarize_activity_line(&code_units)
+}
+
+fn activity(message: &ConversationMessage) -> Option<ClientTextDto> {
     let blocks = match message {
         ConversationMessage::Assistant { content, .. }
         | ConversationMessage::User { content, .. } => Some(content.as_slice()),
-        ConversationMessage::System { content, .. } => {
-            let text = content.string_at("")?;
-            return (!text.is_empty()).then(|| text.chars().take(160).collect());
-        }
+        ConversationMessage::System { content, .. } => return projection_activity(content),
     }?;
     blocks.iter().find_map(|block| match block {
-        lingxi_core::types::ContentBlock::Text { text, .. } if !text.is_empty() => {
-            Some(text.chars().take(160).collect())
+        ContentBlock::Text { text, .. } if !text.is_empty() => {
+            let code_units = text.encode_utf16().collect::<Vec<_>>();
+            client::adapter::activity::summarize_activity_line(&code_units)
         }
-        lingxi_core::types::ContentBlock::ToolUse { name, .. } => Some(name.clone()),
-        lingxi_core::types::ContentBlock::ToolResult { content, .. } => content
-            .string_at("")
-            .filter(|text| !text.is_empty())
-            .map(|text| text.chars().take(160).collect()),
+        ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } if !utf16_code_units.is_empty() => {
+            client::adapter::activity::summarize_activity_line(utf16_code_units)
+        }
+        ContentBlock::ToolUse { name, .. } => Some(ClientTextDto::from_utf8(name)),
+        ContentBlock::ToolResult { content, .. } => projection_activity(content),
         _ => None,
     })
 }
@@ -218,7 +229,7 @@ fn activity(message: &ConversationMessage) -> Option<String> {
 #[derive(Clone)]
 struct BoundAgent {
     session_id: String,
-    name: String,
+    name: ClientTextDto,
     agent_type: String,
     model: String,
     model_profile: Option<String>,
@@ -367,7 +378,7 @@ impl DesktopSessionAgentObserver {
             );
     }
 
-    async fn emit_activity(&self, agent_id: lingxi_core::types::AgentId, activity: String) {
+    async fn emit_activity(&self, agent_id: lingxi_core::types::AgentId, activity: ClientTextDto) {
         // A workflow retry can arrive through a different observer worker.
         // Check and update under one lock so delayed telemetry cannot revive
         // an idle or terminal child between separate liveness checks.
@@ -442,7 +453,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                 &self.allocated_session_id(*origin_session_id),
                 &SessionAgentSummaryDto {
                     agent_id: agent_id.to_string(),
-                    name: name.clone().unwrap_or_else(|| agent_type.clone()),
+                    name: ClientTextDto::from(name.clone().unwrap_or_else(|| agent_type.clone())),
                     agent_type: agent_type.clone(),
                     model: Some(model.clone()),
                     model_profile: model_profile.clone(),
@@ -486,7 +497,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                     || self.allocated_session_id(origin_session_id),
                     |observed| observed.session_id,
                 );
-                let name = name.unwrap_or_else(|| agent_type.clone());
+                let name = ClientTextDto::from(name.unwrap_or_else(|| agent_type.clone()));
                 self.bound_agents.lock().await.insert(
                     agent_id.to_string(),
                     BoundAgent {
@@ -687,7 +698,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                     .await;
             }
             SubagentObservation::Failed { agent_id, error } => {
-                self.emit_terminal_with_activity(agent_id, "failed", Some(error))
+                self.emit_terminal_with_activity(agent_id, "failed", Some(error.into()))
                     .await;
             }
             SubagentObservation::Killed { agent_id } => {
@@ -700,7 +711,7 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
             } => {
                 self.emit_activity(
                     agent_id,
-                    format!("{tool_use_count} tool uses · {token_count} tokens"),
+                    format!("{tool_use_count} tool uses · {token_count} tokens").into(),
                 )
                 .await;
             }
@@ -714,7 +725,8 @@ impl lingxi_core::host::subagent_spawn::SubagentSpawnObserver for DesktopSession
                     format!("Retrying (attempt {attempt}): {reason}")
                         .chars()
                         .take(160)
-                        .collect(),
+                        .collect::<String>()
+                        .into(),
                 )
                 .await;
             }
@@ -732,7 +744,7 @@ impl DesktopSessionAgentObserver {
         &self,
         agent_id: lingxi_core::types::AgentId,
         status: &str,
-        latest_activity: Option<String>,
+        latest_activity: Option<ClientTextDto>,
     ) {
         self.emit_update(agent_id, status, latest_activity, true)
             .await;
@@ -742,7 +754,7 @@ impl DesktopSessionAgentObserver {
         &self,
         agent_id: lingxi_core::types::AgentId,
         status: &str,
-        latest_activity: Option<String>,
+        latest_activity: Option<ClientTextDto>,
         clear_state: bool,
     ) {
         let key = agent_id.to_string();
@@ -831,6 +843,18 @@ mod tests {
                 origin_session_id: None,
             })
             .await;
+    }
+
+    fn displayed_activity(
+        observer: &DesktopSessionAgentObserver,
+        session_id: &str,
+        agent_id: lingxi_core::types::AgentId,
+    ) -> Option<String> {
+        observer
+            .snapshot(session_id)
+            .get(&agent_id.to_string())
+            .and_then(|agent| agent.latest_activity.as_ref())
+            .map(ClientTextDto::display)
     }
 
     fn completed(agent_id: lingxi_core::types::AgentId) -> SubagentObservation {
@@ -979,9 +1003,7 @@ mod tests {
             })
             .await;
         assert_eq!(
-            observer.snapshot("session-a")[&agent_id.to_string()]
-                .latest_activity
-                .as_deref(),
+            displayed_activity(&observer, "session-a", agent_id).as_deref(),
             Some("3 tool uses · 42 tokens")
         );
         observer
@@ -992,9 +1014,7 @@ mod tests {
             })
             .await;
         assert_eq!(
-            observer.snapshot("session-a")[&agent_id.to_string()]
-                .latest_activity
-                .as_deref(),
+            displayed_activity(&observer, "session-a", agent_id).as_deref(),
             Some("Retrying (attempt 2): waiting for response")
         );
         observer.on_event(completed(agent_id)).await;
@@ -1139,6 +1159,28 @@ mod tests {
         );
         assert_eq!(transcript_revision(raw.as_bytes()), 2);
         assert_eq!(parse_transcript_messages(raw.as_bytes()).len(), 1);
+    }
+
+    #[test]
+    fn transcript_source_and_activity_keep_isolated_utf16_surrogates() {
+        let raw = br#"{"message":{"role":"assistant","id":"11111111-1111-4111-8111-111111111111","content":[{"type":"text","text":"before\ud800after"}]}}
+"#;
+        assert_eq!(transcript_revision(raw), 1);
+        let messages = parse_transcript_messages(raw);
+        assert_eq!(messages.len(), 1);
+        let latest = activity(&messages[0]).expect("assistant text is visible activity");
+        assert_eq!(
+            latest.code_units,
+            "before"
+                .encode_utf16()
+                .chain([0xd800])
+                .chain("after".encode_utf16())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            serde_json::to_string(&latest).unwrap(),
+            r#""before\ud800after""#
+        );
     }
 
     #[test]

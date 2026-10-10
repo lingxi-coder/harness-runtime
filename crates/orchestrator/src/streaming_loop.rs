@@ -502,8 +502,8 @@ pub(crate) fn tombstone_message_for_row(
         model: (!row.model.is_empty()).then(|| row.model.clone()),
         stop_reason: row.stop_reason.clone(),
         stop_details: row.stop_details.as_ref().map(|details| {
-            let value = serde_json::to_value(details).expect("stop details serialize");
-            lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&value)
+            let raw = serde_json::to_string(details).expect("stop details serialize");
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&raw)
                 .expect("generated stop details are valid JSON")
         }),
         usage: row.usage.as_ref().and_then(assistant_usage_value),
@@ -2890,6 +2890,38 @@ mod tests {
             panic!("expected Text block, got {:?}", turn.assistant_blocks[0]);
         }
         assert!(turn.tool_uses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fallback_tombstone_preserves_exact_refusal_stop_details() {
+        let source = r#"{"category":"bio","explanation":"left\ud800right"}"#;
+        let details: llm_runtime::HistoryStopDetails = serde_json::from_str(source).unwrap();
+        let out: Arc<dyn OutputStream> = Arc::new(MockOutputStream::new());
+        let turn = pump_stream(
+            boxed(vec![
+                message_start("refusal", "claude-opus-4-7"),
+                content_block_start_text(0),
+                text_delta(0, "refusal"),
+                content_block_stop(0),
+                HistoryEvent::MessageDelta {
+                    delta: llm_runtime::HistoryMessageDelta {
+                        stop_reason: Some("refusal".into()),
+                        stop_details: Some(details),
+                        resumable: None,
+                    },
+                    usage: None,
+                },
+                message_stop(),
+            ]),
+            &out,
+        )
+        .await
+        .unwrap();
+        let tombstone = tombstone_message_for_row(&turn.assistant_rows[0]);
+        assert_eq!(
+            tombstone.stop_details.unwrap().to_json_string().unwrap(),
+            source
+        );
     }
 
     #[tokio::test]

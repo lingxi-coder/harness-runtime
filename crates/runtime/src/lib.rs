@@ -39,6 +39,9 @@ pub mod desktop_visualization;
 mod parked_agent_restore;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]
+mod session_agent_transcript;
+
+#[cfg(any(feature = "desktop", feature = "mobile"))]
 mod main_report_waker;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]

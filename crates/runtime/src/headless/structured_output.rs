@@ -2,17 +2,9 @@
 //!
 //! In print mode the model calls a
 //! `StructuredOutput` tool whose `input_schema` is the user-supplied schema.
-//! Returned arguments are validated at the canonical tool call boundary.
-//! The existing query driver owns continuation and its retry budget. This
-//! module contains configuration parsing and the shared validation entrypoint.
-//!
-//! Validation is shared with `orchestrator::structured_output::StructuredOutputTool`.
-//! Its strict Draft 7 Boon evaluator and native Ajv diagnostics cover references,
-//! combinators, bounds, lengths, patterns and object/array constraints. Schema
-//! load and compilation failures are errors; this module never silently passes
-//! constraints that its own ad hoc walker does not recognize.
-
-use serde_json::Value;
+//! Returned arguments are compiled and validated by the host-owned JSON Schema
+//! service at the canonical tool boundary. The orchestrator owns continuation
+//! and retries; this module parses the CLI retry budget.
 
 /// `MAX_STRUCTURED_OUTPUT_RETRIES` default (claude-code reads the env of the
 /// same name, defaulting to `5`).
@@ -65,26 +57,47 @@ pub fn resolve_max_retries(env_value: Option<&str>) -> i64 {
     }
 }
 
-/// Validate with the same strict schema evaluator and error renderer used by
-/// the StructuredOutput tool. The complete native diagnostic remains one item
-/// so its ordered errors, paths, punctuation, and wording are preserved.
-#[must_use]
-pub fn validate(value: &Value, schema: &Value) -> Vec<String> {
-    orchestrator::structured_output::validate_output(schema, value)
-        .err()
-        .into_iter()
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use lingxi_core::host::json_schema_validator::{
+        CompiledJsonSchema, JsonSchemaValidation, JsonSchemaValidator, JsonSchemaValidatorSession,
+        SchemaProfile,
+    };
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use serde_json::{Value, json};
+
+    type TestValidator = crate::json_schema_validator::BunJsonSchemaValidator;
+
+    fn test_validator() -> std::sync::Arc<TestValidator> {
+        TestValidator::new_from_host_environment()
+    }
+
+    async fn validate(validator: &TestValidator, value: &Value, schema: &Value) -> Vec<String> {
+        let schema = Utf16JsonProjection::from_serde_value(schema)
+            .expect("test JSON schema converts to a source projection");
+        let value = Utf16JsonProjection::from_serde_value(value)
+            .expect("test output converts to a source projection");
+        let session = validator.new_session(SchemaProfile::StructuredOutputDraft7);
+        let compiled = match session.compile(&schema).await {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                return vec![format!("Output does not match required schema: {error}")];
+            }
+        };
+        match compiled.validate(&value).await {
+            Ok(JsonSchemaValidation::Valid) => Vec::new(),
+            Ok(JsonSchemaValidation::Invalid { detail, .. }) => vec![format!(
+                "Output does not match required schema: {}",
+                detail.string_at("").unwrap_or("<invalid validator detail>")
+            )],
+            Err(error) => vec![format!("Output does not match required schema: {error}")],
+        }
+    }
 
     #[cfg(feature = "desktop")]
     #[tokio::test]
     async fn configured_schema_capture_is_not_shadowed_by_the_real_ui_catalog() {
-        use lingxi_core::types::utf16_json::Utf16JsonProjection;
         use std::sync::{Arc, Mutex};
         use tool_api::{Tool, ToolStaticContext, ToolUseContext};
         let mut registry = tool_api::ToolRegistry::new();
@@ -95,9 +108,10 @@ mod tests {
             timed_out: false,
         });
         tool_ui::register_all_without_ask_user_question(&mut registry, ctx);
-        let schema = Utf16JsonProjection::plain(
-            json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}),
-        );
+        let schema = Utf16JsonProjection::from_serde_value(
+            &json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}),
+        )
+        .unwrap();
         let slot: orchestrator::structured_output::StructuredOutputSlot =
             Arc::new(Mutex::new(None));
         let dynamic: Arc<dyn Tool> =
@@ -127,7 +141,7 @@ mod tests {
         let (tx, _rx) = tool_api::progress::progress_channel();
         let result = selected
             .call(
-                json!({"answer":"captured"}),
+                Utf16JsonProjection::from_serde_value(&json!({"answer":"captured"})).unwrap(),
                 ToolUseContext::model_seed("schema-owner".into(), None),
                 tx,
             )
@@ -135,8 +149,13 @@ mod tests {
             .unwrap();
         assert!(selected.result_ends_turn(&result));
         assert_eq!(
-            slot.lock().unwrap().as_ref().unwrap().value,
-            json!({"answer":"captured"})
+            slot.lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .to_json_string()
+                .unwrap(),
+            r#"{"answer":"captured"}"#
         );
     }
 
@@ -151,20 +170,26 @@ mod tests {
         assert_eq!(resolve_max_retries(Some("  7 ")), 7); // trimmed
     }
 
-    #[test]
-    fn valid_object_passes() {
+    #[tokio::test]
+    async fn valid_object_passes() {
+        let validator = test_validator();
         let schema = json!({
             "type": "object",
             "required": ["name", "age"],
             "properties": { "name": { "type": "string" }, "age": { "type": "integer" } }
         });
-        assert!(validate(&json!({"name": "Ada", "age": 36}), &schema).is_empty());
+        assert!(
+            validate(&validator, &json!({"name": "Ada", "age": 36}), &schema)
+                .await
+                .is_empty()
+        );
     }
 
-    #[test]
-    fn missing_required_property_fails() {
+    #[tokio::test]
+    async fn missing_required_property_fails() {
+        let validator = test_validator();
         let schema = json!({ "type": "object", "required": ["name"] });
-        let errs = validate(&json!({}), &schema);
+        let errs = validate(&validator, &json!({}), &schema).await;
         assert_eq!(errs.len(), 1);
         assert!(
             errs[0].contains("must have required property 'name'"),
@@ -172,39 +197,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn wrong_property_type_fails() {
+    #[tokio::test]
+    async fn wrong_property_type_fails() {
+        let validator = test_validator();
         let schema = json!({
             "type": "object",
             "properties": { "age": { "type": "integer" } }
         });
-        let errs = validate(&json!({"age": "old"}), &schema);
+        let errs = validate(&validator, &json!({"age": "old"}), &schema).await;
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("/age: must be integer"), "{errs:?}");
     }
 
-    #[test]
-    fn integer_accepts_integral_float_rejects_fraction() {
+    #[tokio::test]
+    async fn integer_accepts_integral_float_rejects_fraction() {
+        let validator = test_validator();
         let schema = json!({ "type": "integer" });
-        assert!(validate(&json!(5.0), &schema).is_empty());
-        assert!(!validate(&json!(5.5), &schema).is_empty());
+        assert!(validate(&validator, &json!(5.0), &schema).await.is_empty());
+        assert!(!validate(&validator, &json!(5.5), &schema).await.is_empty());
     }
 
-    #[test]
-    fn enum_constraint() {
+    #[tokio::test]
+    async fn enum_constraint() {
+        let validator = test_validator();
         let schema = json!({ "enum": ["a", "b"] });
-        assert!(validate(&json!("a"), &schema).is_empty());
-        assert!(!validate(&json!("c"), &schema).is_empty());
+        assert!(validate(&validator, &json!("a"), &schema).await.is_empty());
+        assert!(!validate(&validator, &json!("c"), &schema).await.is_empty());
     }
 
-    #[test]
-    fn nested_array_items_validated() {
+    #[tokio::test]
+    async fn nested_array_items_validated() {
+        let validator = test_validator();
         let schema = json!({
             "type": "array",
             "items": { "type": "object", "required": ["id"], "properties": { "id": { "type": "integer" } } }
         });
-        assert!(validate(&json!([{"id": 1}, {"id": 2}]), &schema).is_empty());
-        let errs = validate(&json!([{"id": 1}, {"name": "x"}]), &schema);
+        assert!(
+            validate(&validator, &json!([{"id": 1}, {"id": 2}]), &schema)
+                .await
+                .is_empty()
+        );
+        let errs = validate(&validator, &json!([{"id": 1}, {"name": "x"}]), &schema).await;
         assert_eq!(errs.len(), 1);
         assert!(
             errs[0].contains("/1: must have required property 'id'"),
@@ -212,23 +245,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn type_array_accepts_either() {
+    #[tokio::test]
+    async fn type_array_accepts_either() {
+        let validator = test_validator();
         let schema = json!({ "type": ["string", "null"] });
-        assert!(validate(&json!("x"), &schema).is_empty());
-        assert!(validate(&json!(null), &schema).is_empty());
-        assert!(!validate(&json!(42), &schema).is_empty());
+        assert!(validate(&validator, &json!("x"), &schema).await.is_empty());
+        assert!(validate(&validator, &json!(null), &schema).await.is_empty());
+        assert!(!validate(&validator, &json!(42), &schema).await.is_empty());
     }
 
-    #[test]
-    fn additional_properties_false_rejects_extras() {
+    #[tokio::test]
+    async fn additional_properties_false_rejects_extras() {
+        let validator = test_validator();
         let schema = json!({
             "type": "object",
             "properties": { "a": { "type": "string" } },
             "additionalProperties": false
         });
-        assert!(validate(&json!({"a": "x"}), &schema).is_empty());
-        let errs = validate(&json!({"a": "x", "b": 1}), &schema);
+        assert!(
+            validate(&validator, &json!({"a": "x"}), &schema)
+                .await
+                .is_empty()
+        );
+        let errs = validate(&validator, &json!({"a": "x", "b": 1}), &schema).await;
         assert_eq!(errs.len(), 1);
         assert!(
             errs[0].contains("must NOT have additional properties ('b' is not allowed)"),
@@ -236,8 +275,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn constraints_previously_ignored_are_enforced() {
+    #[tokio::test]
+    async fn constraints_previously_ignored_are_enforced() {
+        let validator = test_validator();
         for (schema, valid, invalid) in [
             (
                 json!({"$ref":"#/definitions/positive", "definitions":{"positive":{"type":"number","minimum":10}}}),
@@ -291,42 +331,62 @@ mod tests {
             ),
         ] {
             assert!(
-                validate(&valid, &schema).is_empty(),
+                validate(&validator, &valid, &schema).await.is_empty(),
                 "valid instance rejected: {schema}"
             );
             assert!(
-                !validate(&invalid, &schema).is_empty(),
+                !validate(&validator, &invalid, &schema).await.is_empty(),
                 "constraint silently passed: {schema}"
             );
         }
     }
 
-    #[test]
-    fn false_schema_and_unresolvable_reference_are_not_accepted() {
-        assert!(!validate(&json!({}), &json!(false)).is_empty());
-        assert!(!validate(&json!({}), &json!({"$ref":"#/definitions/missing"})).is_empty());
-        assert!(!validate(&json!({}), &json!({"type":"not-a-json-schema-type"})).is_empty());
+    #[tokio::test]
+    async fn false_schema_and_unresolvable_reference_are_not_accepted() {
+        let validator = test_validator();
+        assert!(
+            !validate(&validator, &json!({}), &json!(false))
+                .await
+                .is_empty()
+        );
+        assert!(
+            !validate(
+                &validator,
+                &json!({}),
+                &json!({"$ref":"#/definitions/missing"})
+            )
+            .await
+            .is_empty()
+        );
+        assert!(
+            !validate(
+                &validator,
+                &json!({}),
+                &json!({"type":"not-a-json-schema-type"})
+            )
+            .await
+            .is_empty()
+        );
     }
 
-    #[test]
-    fn shared_native_diagnostics_are_retained_verbatim() {
+    #[tokio::test]
+    async fn shared_native_diagnostics_are_retained_verbatim() {
+        let validator = test_validator();
         let schema = json!({"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}});
         assert_eq!(
-            validate(&json!({"answer":42}), &schema),
+            validate(&validator, &json!({"answer":42}), &schema).await,
             vec!["Output does not match required schema: /answer: must be string"]
         );
         assert_eq!(
-            validate(&json!({}), &schema),
+            validate(&validator, &json!({}), &schema).await,
             vec![
                 "Output does not match required schema: root: must have required property 'answer'"
             ]
         );
-        assert_eq!(
-            validate(&json!({"answer":42}), &schema),
-            orchestrator::structured_output::validate_output(&schema, &json!({"answer":42}))
-                .err()
-                .into_iter()
-                .collect::<Vec<_>>()
+        assert!(
+            validate(&validator, &json!({"answer":"ok"}), &schema)
+                .await
+                .is_empty()
         );
     }
 }

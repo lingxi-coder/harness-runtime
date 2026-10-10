@@ -750,6 +750,7 @@ mod tests {
             _tool: &str,
             _model_text: &Utf16JsonProjection,
             _result: &Utf16JsonProjection,
+            _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         ) {
             self.tool_results
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2744,6 +2745,7 @@ mod tests {
             _tool: &str,
             _model_text: &Utf16JsonProjection,
             _result: &Utf16JsonProjection,
+            _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         ) {
             self.events.lock().unwrap().push(format!("result:{id}"));
         }

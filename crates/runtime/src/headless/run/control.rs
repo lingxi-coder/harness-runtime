@@ -2,7 +2,7 @@ use super::suggestions::StreamFileSuggestionIndex;
 use crate::headless::stream_json_input::ControlPlaneWriter;
 use crate::headless::HeadlessRuntime as Runtime;
 use lingxi_core::host::OrchestratorHandle;
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use permission;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -20,16 +20,19 @@ pub(super) enum SetModelTarget {
 }
 
 pub(super) fn resolve_set_model_target(
-    field: Option<&Value>,
+    field: Option<JsonValueView<'_>>,
     default_model: &str,
 ) -> SetModelTarget {
     // CC: `fr != null` — in JS `!= null` covers both `null` and `undefined`, so
     // an explicit JSON `null` is treated as absent (→ default), not a type
     // error. `model ?? "default"` collapses absent/null to `"default"`.
     let requested = match field {
-        Some(Value::String(m)) => m.as_str(),
-        None | Some(Value::Null) => "default",
-        Some(_) => return SetModelTarget::Reject,
+        Some(value) if value.is_null() => "default",
+        None => "default",
+        Some(value) => match value.as_str() {
+            Some(requested) => requested,
+            None => return SetModelTarget::Reject,
+        },
     };
     // CC: `or.trim().toLowerCase() === "default"` — trimmed, case-insensitive.
     if requested.trim().to_lowercase() == "default" {
@@ -38,6 +41,11 @@ pub(super) fn resolve_set_model_target(
         // CC: `vr = Jr ? SE() : or` — the RAW requested string (untrimmed).
         SetModelTarget::Apply(requested.to_string())
     }
+}
+
+fn nonnegative_u32_integer(value: f64) -> Option<u32> {
+    (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= f64::from(u32::MAX))
+        .then_some(value as u32)
 }
 
 /// Dispatch a single `control_request` frame using initialization data collected
@@ -70,7 +78,7 @@ pub(super) async fn dispatch_control_request(
     // JSON; serde Value cannot represent an unpaired UTF-16 request id.
     let request_projection = frame
         .subprojection("/request")
-        .unwrap_or_else(|_| Utf16JsonProjection::plain(json!({})));
+        .unwrap_or_else(|_| Utf16JsonProjection::parse("{}").expect("valid empty object"));
     let sdk_configs = (subtype == "initialize")
         .then(|| crate::headless::sdk_mcp_transport::sdk_servers_from_initialize(frame));
     let writer = RequestReplyWriter {
@@ -78,11 +86,10 @@ pub(super) async fn dispatch_control_request(
         delivery_error: std::sync::Mutex::new(None),
         request_id: frame
             .subprojection("/request_id")
-            .unwrap_or_else(|_| Utf16JsonProjection::plain(json!(request_id))),
+            .unwrap_or_else(|_| Utf16JsonProjection::from(request_id)),
     };
-    let frame = &frame.value;
-    // Request body fields live at `frame.request.<field>` (already key-normalized).
-    let field = |k: &str| frame.get("request").and_then(|r| r.get(k));
+    // The request projection keeps exact source strings and keys across dispatch.
+    let field = |key: &str| request_projection.get_property(key);
 
     match subtype {
         "initialize" => {
@@ -127,15 +134,17 @@ pub(super) async fn dispatch_control_request(
             }
         }
         "interrupt" => {
-            let cancel_queued = field("cancel_queued").and_then(Value::as_bool) == Some(true);
-            if !cancel_queued && field("send_now").and_then(Value::as_bool) == Some(true) {
+            let cancel_queued =
+                field("cancel_queued").and_then(JsonValueView::as_bool) == Some(true);
+            if !cancel_queued && field("send_now").and_then(JsonValueView::as_bool) == Some(true) {
                 let waiting = lifecycle.queued.still_queued();
                 let named = field("message_uuid")
                     .filter(|value| !value.is_null() && value.as_str() != Some(""));
                 let has_waiting = match named {
                     None => !waiting.is_empty(),
-                    Some(Value::String(uuid)) => waiting.iter().any(|queued| queued == uuid),
-                    Some(_) => false,
+                    Some(value) => value
+                        .as_str()
+                        .is_some_and(|uuid| waiting.iter().any(|queued| queued == uuid)),
                 };
                 let outcome = if !has_waiting {
                     "nothing_waiting"
@@ -191,13 +200,13 @@ pub(super) async fn dispatch_control_request(
         }
         "cancel_async_message" => {
             let cancelled = field("message_uuid")
-                .and_then(Value::as_str)
+                .and_then(JsonValueView::as_str)
                 .is_some_and(|uuid| lifecycle.queued.cancel_one(uuid));
             if cancelled {
                 writer.record(
                     lifecycle.emit(
                         field("message_uuid")
-                            .and_then(Value::as_str)
+                            .and_then(JsonValueView::as_str)
                             .expect("matched string UUID"),
                         crate::headless::queued_commands::LIFECYCLE_CANCELLED,
                     ),
@@ -229,16 +238,18 @@ pub(super) async fn dispatch_control_request(
         }
         "set_max_thinking_tokens" => {
             let max_tokens = match field("max_thinking_tokens") {
-                Some(Value::Null) => None,
-                Some(Value::Number(value)) => value.as_u64().and_then(|v| u32::try_from(v).ok()),
-                None | Some(_) => None,
+                Some(value) if value.is_null() => None,
+                Some(value) => value.as_number().and_then(nonnegative_u32_integer),
+                None => None,
             };
-            let max_tokens_valid =
-                matches!(field("max_thinking_tokens"), Some(Value::Null)) || max_tokens.is_some();
+            let max_tokens_valid = field("max_thinking_tokens").is_some_and(JsonValueView::is_null)
+                || max_tokens.is_some();
             let display_valid = match field("thinking_display") {
-                None | Some(Value::Null) => true,
-                Some(Value::String(value)) => value == "summarized" || value == "omitted",
-                Some(_) => false,
+                None => true,
+                Some(value) if value.is_null() => true,
+                Some(value) => value
+                    .as_str()
+                    .is_some_and(|value| value == "summarized" || value == "omitted"),
             };
             if !max_tokens_valid || !display_valid {
                 writer.reply_error(
@@ -255,16 +266,17 @@ pub(super) async fn dispatch_control_request(
                 None => llm_runtime::model::thinking::ThinkingConfig::Adaptive,
             };
             orchestrator.set_thinking_config(thinking);
-            orchestrator.set_thinking_display(field("thinking_display").and_then(Value::as_str));
+            orchestrator
+                .set_thinking_display(field("thinking_display").and_then(JsonValueView::as_str));
             writer.reply_success(request_id, None);
         }
         "rename_session" => {
-            let title = field("title").and_then(Value::as_str).unwrap_or("");
+            let title = field("title").and_then(JsonValueView::as_str).unwrap_or("");
             if title.trim().is_empty() {
                 writer.reply_error(request_id, "title must be non-empty");
                 return writer.finish();
             }
-            match orchestrator.rename_session(title.to_string()).await {
+            match orchestrator.rename_session(title.to_string().into()).await {
                 Ok(()) => writer.reply_success(request_id, None),
                 Err(err) => writer.reply_error(request_id, &format!("rename_session: {err}")),
             }
@@ -275,7 +287,7 @@ pub(super) async fn dispatch_control_request(
         },
         "mcp_message" => {
             let result = match (
-                field("server_name").and_then(Value::as_str),
+                field("server_name").and_then(JsonValueView::as_str),
                 request_projection.subprojection("/message"),
                 control_plane.sdk_mcp_transport(),
             ) {
@@ -289,8 +301,8 @@ pub(super) async fn dispatch_control_request(
         }
         "mcp_read_resource" => {
             let result = match (
-                field("serverName").and_then(Value::as_str),
-                field("uri").and_then(Value::as_str),
+                field("serverName").and_then(JsonValueView::as_str),
+                field("uri").and_then(JsonValueView::as_str),
             ) {
                 (None, _) => Err("mcp_read_resource: serverName must be a string".to_owned()),
                 (_, None) => Err("mcp_read_resource: uri must be a string".to_owned()),
@@ -304,17 +316,18 @@ pub(super) async fn dispatch_control_request(
                 Err(error) => writer.reply_error(request_id, &error),
             }
         }
-        "ui_attach" => match validate_ui_attach(&request_projection.value) {
+        "ui_attach" => match validate_ui_attach(&request_projection) {
             Ok((client, surface, viewport)) => {
-                let answers = field("answers").and_then(Value::as_array).map(|answers| {
-                    answers
-                        .iter()
-                        .filter_map(Value::as_str)
+                let answers = field("answers").map(|answers| {
+                    (0..answers.array_len().unwrap_or_default())
+                        .filter_map(|index| {
+                            answers.get_index(index).and_then(JsonValueView::as_str)
+                        })
                         .filter_map(lingxi_core::host::ModRemoteUiAnswer::parse)
                         .collect()
                 });
                 let (surfaces, event) =
-                    orchestrator.prepare_sdk_ui_surface_attach(client, surface, viewport, answers);
+                    orchestrator.prepare_sdk_ui_surface_attach(&client, surface, viewport, answers);
                 writer.reply_success(request_id, Some(json!({"surfaces":surfaces})));
                 writer.finish()?;
                 spawn_ui_surface_event(
@@ -328,7 +341,7 @@ pub(super) async fn dispatch_control_request(
         },
         "ui_detach" => {
             if let Some(client) = field("client_id")
-                .and_then(Value::as_str)
+                .and_then(JsonValueView::as_str)
                 .filter(|client| orchestrator::mod_surface_roster::valid_client_id(client))
             {
                 let (detached, surfaces, event) =
@@ -446,7 +459,7 @@ pub(super) async fn dispatch_control_request(
         }
         "stop_task" => {
             // §2.2 #38: best-effort kill; not_found/not_running ⇒ success `{}`.
-            if let Some(task_id) = field("task_id").and_then(|v| v.as_str()) {
+            if let Some(task_id) = field("task_id").and_then(JsonValueView::as_str) {
                 // The control-channel `stopTask` — claude-code's `source:"user"`
                 // caller, which inherits `killedBy = "user"`.
                 let _ = task_registry.kill_with_reason(task_id, "user").await;
@@ -468,10 +481,13 @@ pub(super) async fn dispatch_control_request(
                 Invalid,
             }
             let target = match field("tool_use_id") {
-                None | Some(Value::Null) => Target::All,
-                Some(Value::String(id)) if id.is_empty() => Target::All,
-                Some(Value::String(id)) => Target::One(id.clone()),
-                Some(_) => Target::Invalid,
+                None => Target::All,
+                Some(value) if value.is_null() => Target::All,
+                Some(value) => match value.as_str() {
+                    Some("") => Target::All,
+                    Some(id) => Target::One(id.to_owned()),
+                    None => Target::Invalid,
+                },
             };
             match target {
                 Target::Invalid => {
@@ -495,10 +511,14 @@ pub(super) async fn dispatch_control_request(
             }
         }
         "register_repo_root" => {
-            let request_value = frame.get("request").cloned().unwrap_or_else(|| json!({}));
-            match serde_json::from_value::<lingxi_core::host::RegisterRepoRootRequest>(
-                request_value,
-            ) {
+            let request = request_projection
+                .to_json_string()
+                .map_err(|error| error.to_string())
+                .and_then(|json| {
+                    serde_json::from_str::<lingxi_core::host::RegisterRepoRootRequest>(&json)
+                        .map_err(|error| error.to_string())
+                });
+            match request {
                 Ok(request) if !request.path.trim().is_empty() => {
                     match orchestrator.register_repo_root(request).await {
                         Ok(outcome) => match serde_json::to_value(outcome) {
@@ -533,12 +553,12 @@ pub(super) async fn dispatch_control_request(
             // performs the move.
             let request = permission::set_cwd::SetCwdRequest {
                 path: field("path")
-                    .and_then(|v| v.as_str())
+                    .and_then(JsonValueView::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                trust_accepted: field("trust_accepted").and_then(serde_json::Value::as_bool),
+                trust_accepted: field("trust_accepted").and_then(JsonValueView::as_bool),
                 trusted_directory: field("trusted_directory")
-                    .and_then(|v| v.as_str())
+                    .and_then(JsonValueView::as_str)
                     .map(str::to_string),
             };
             let trimmed = request.path.trim().to_string();
@@ -694,7 +714,9 @@ pub(super) async fn dispatch_control_request(
             // §2.2 #4: the net-new runtime mode-mutation surface. The gate
             // parses + validates the wire mode and applies it live; success
             // echoes `{mode}`, an invalid/disallowed mode returns an error frame.
-            let mode = field("mode").and_then(|v| v.as_str()).unwrap_or("default");
+            let mode = field("mode")
+                .and_then(JsonValueView::as_str)
+                .unwrap_or("default");
             match orchestrator.set_permission_mode(mode).await {
                 Ok(()) => {
                     host.remember_permission_mode(mode);
@@ -705,38 +727,41 @@ pub(super) async fn dispatch_control_request(
         }
         "set_mcp_permission_mode_override" => {
             let server_name = field("serverName")
-                .and_then(|v| v.as_str())
+                .and_then(JsonValueView::as_str)
                 .unwrap_or("")
                 .to_string();
             let mode = match field("mode") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(s)) if s == "default" || s == "auto" => Some(s.as_str()),
-                Some(Value::String(s))
-                    if matches!(
-                        s.as_str(),
-                        "acceptEdits"
-                            | "auto"
-                            | "bypassPermissions"
-                            | "default"
-                            | "dontAsk"
-                            | "plan"
-                    ) =>
-                {
-                    writer.reply_error(
-                        request_id,
-                        &format!(
-                            "Permission mode override over the control channel is tighten-only ('default', 'auto', or null); rejected '{s}'"
-                        ),
-                    );
-                    return writer.finish();
-                }
-                _ => {
-                    writer.reply_error(
-                        request_id,
-                        "Cannot set permission mode: must be one of acceptEdits, auto, bypassPermissions, default, dontAsk, plan",
-                    );
-                    return writer.finish();
-                }
+                None => None,
+                Some(value) if value.is_null() => None,
+                Some(value) => match value.as_str() {
+                    Some("default" | "auto") => value.as_str(),
+                    Some(s)
+                        if matches!(
+                            s,
+                            "acceptEdits"
+                                | "auto"
+                                | "bypassPermissions"
+                                | "default"
+                                | "dontAsk"
+                                | "plan"
+                        ) =>
+                    {
+                        writer.reply_error(
+                            request_id,
+                            &format!(
+                                "Permission mode override over the control channel is tighten-only ('default', 'auto', or null); rejected '{s}'"
+                            ),
+                        );
+                        return writer.finish();
+                    }
+                    _ => {
+                        writer.reply_error(
+                            request_id,
+                            "Cannot set permission mode: must be one of acceptEdits, auto, bypassPermissions, default, dontAsk, plan",
+                        );
+                        return writer.finish();
+                    }
+                },
             };
             let known = orchestrator
                 .list_mcp_servers()
@@ -780,7 +805,7 @@ pub(super) async fn dispatch_control_request(
             end_notify.notify_one();
         }
         "file_suggestions" => {
-            let query = field("query").and_then(Value::as_str).unwrap_or("");
+            let query = field("query").and_then(JsonValueView::as_str).unwrap_or("");
             let suggestions = file_suggestions
                 .suggestions(&session_cwd.cwd(), query)
                 .await
@@ -791,8 +816,8 @@ pub(super) async fn dispatch_control_request(
         }
         "seed_read_state" => {
             if let (Some(path), Some(mtime)) = (
-                field("path").and_then(Value::as_str),
-                field("mtime").and_then(Value::as_f64),
+                field("path").and_then(JsonValueView::as_str),
+                field("mtime").and_then(JsonValueView::as_number),
             ) {
                 let _ = orchestrator.seed_read_state_from_host(path, mtime).await;
             }
@@ -815,7 +840,7 @@ pub(super) async fn dispatch_control_request(
             // `Ur(_t)`), `mcp_authenticate` → success `{}`. Full flows tracked
             // as a follow-up.
             let server_name = field("serverName")
-                .and_then(|v| v.as_str())
+                .and_then(JsonValueView::as_str)
                 .unwrap_or("")
                 .to_string();
             let known: Vec<String> = orchestrator
@@ -862,8 +887,15 @@ pub(super) enum PureControlReply {
 /// Classify the control arms that need no async orchestrator/registry access,
 /// including the byte-exact `Unsupported control request subtype` fallthrough.
 ///
-pub(super) fn pure_control_response(subtype: &str, frame: &serde_json::Value) -> PureControlReply {
-    let field = |k: &str| frame.get("request").and_then(|r| r.get(k));
+pub(super) fn pure_control_response(
+    subtype: &str,
+    frame: &Utf16JsonProjection,
+) -> PureControlReply {
+    let field = |key: &str| {
+        frame
+            .get_property("request")
+            .and_then(|request| request.get_property(key))
+    };
     match subtype {
         // §2.2 #8: `{version, buildTime}`.
         "get_binary_version" => PureControlReply::Success(Some(json!({
@@ -878,7 +910,9 @@ pub(super) fn pure_control_response(subtype: &str, frame: &serde_json::Value) ->
         // live). The port keeps no active-flow registry in the stream-json
         // server, so this is always the faithful reply.
         "mcp_oauth_callback_url" => {
-            let server_name = field("serverName").and_then(|v| v.as_str()).unwrap_or("");
+            let server_name = field("serverName")
+                .and_then(JsonValueView::as_str)
+                .unwrap_or("");
             PureControlReply::Error(format!("No active OAuth flow for server: {server_name}"))
         }
         // CLI-ORIGINATED subtypes: `can_use_tool` / `request_user_dialog` /
@@ -954,25 +988,30 @@ pub(super) fn orphan_decision_from_payload(
     projection: &Utf16JsonProjection,
 ) -> permission::gate::PermissionOutcome {
     use permission::gate::PermissionOutcome;
-    let payload = &projection.value;
-    match payload.get("behavior").and_then(serde_json::Value::as_str) {
+    match projection.string_at("/behavior") {
         Some("allow") => {
             // Carry `updatedInput` only when it is a non-empty object (claude-code
             // applies it "when it has keys"); otherwise fall back to the original.
-            let updated_input = match payload.get("updatedInput") {
-                Some(serde_json::Value::Object(m)) if !m.is_empty() => {
-                    projection.subprojection("/updatedInput").ok()
-                }
-                _ => None,
-            };
-            let permission_updates = payload
-                .get("updatedPermissions")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let decision_classification = payload
-                .get("decisionClassification")
-                .and_then(serde_json::Value::as_str)
+            let updated_input = projection
+                .get_property("updatedInput")
+                .filter(|value| {
+                    value
+                        .object_entries()
+                        .is_some_and(|entries| !entries.is_empty())
+                })
+                .and_then(|_| projection.subprojection("/updatedInput").ok());
+            let permission_updates = projection
+                .array_len("/updatedPermissions")
+                .into_iter()
+                .flat_map(|length| 0..length)
+                .filter_map(|index| {
+                    projection
+                        .subprojection(&format!("/updatedPermissions/{index}"))
+                        .ok()
+                })
+                .collect();
+            let decision_classification = projection
+                .string_at("/decisionClassification")
                 .and_then(|value| match value {
                     "user_temporary" => {
                         Some(lingxi_core::host::permission_gate::ToolDecisionClassification::UserTemporary)
@@ -992,17 +1031,18 @@ pub(super) fn orphan_decision_from_payload(
             }
         }
         Some("deny") => PermissionOutcome::Deny {
-            reason: payload
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("Tool permission denied")
-                .to_string(),
+            reason: projection
+                .get_property("message")
+                .filter(|message| message.as_str().is_some())
+                .and_then(|_| projection.subprojection("/message").ok())
+                .unwrap_or_else(|| Utf16JsonProjection::from("Tool permission denied")),
         },
         // Any non-allow/deny behaviour is a schema-invalid result; deny safely
         // rather than execute on a malformed recovered decision.
         _ => PermissionOutcome::Deny {
-            reason: "Tool permission request failed: malformed orphaned control_response"
-                .to_string(),
+            reason: Utf16JsonProjection::from(
+                "Tool permission request failed: malformed orphaned control_response",
+            ),
         },
     }
 }
@@ -1248,48 +1288,63 @@ struct RequestReplyWriter<'a> {
 }
 
 fn validate_ui_attach(
-    request: &Value,
-) -> Result<(&str, orchestrator::config::ModRenderSurface, Option<Value>), &'static str> {
+    request: &Utf16JsonProjection,
+) -> Result<
+    (
+        String,
+        orchestrator::config::ModRenderSurface,
+        Option<Value>,
+    ),
+    &'static str,
+> {
     const INVALID: &str = "ui_attach: surface must be \"desktop\", \"mobile\" or \"vscode\", client_id 1-64 of letters, digits, . _ - (the colon is the engine's), viewport (when given) positive integer columns and rows with isFullscreen (when given) a boolean, and answers (when given) a list of \"ui_copy\", \"ui_prompt_read\", \"ui_prompt_fill\", \"ui_prompt_suggest\", \"ui_read_selection\"";
-    let surface = match request.get("surface").and_then(Value::as_str) {
+    let field = |key: &str| request.get_property(key);
+    let surface = match field("surface").and_then(JsonValueView::as_str) {
         Some("desktop") => orchestrator::config::ModRenderSurface::Desktop,
         Some("mobile") => orchestrator::config::ModRenderSurface::Mobile,
         Some("vscode") => orchestrator::config::ModRenderSurface::Vscode,
         _ => return Err(INVALID),
     };
-    let client = request
-        .get("client_id")
-        .and_then(Value::as_str)
+    let client = field("client_id")
+        .and_then(JsonValueView::as_str)
         .filter(|client| orchestrator::mod_surface_roster::valid_client_id(client))
-        .ok_or(INVALID)?;
-    let viewport = match request.get("viewport") {
+        .ok_or(INVALID)?
+        .to_owned();
+    let viewport = match field("viewport") {
         None => None,
-        Some(value)
-            if value.is_object()
-                && ["columns", "rows"].iter().all(|key| {
-                    value
-                        .get(key)
-                        .and_then(Value::as_f64)
-                        .is_some_and(|number| number > 0.0 && number.fract() == 0.0)
-                })
-                && value.get("isFullscreen").is_none_or(Value::is_boolean) =>
-        {
-            let mut viewport = json!({"columns":value["columns"],"rows":value["rows"]});
-            if let Some(fullscreen) = value.get("isFullscreen") {
-                viewport["isFullscreen"] = fullscreen.clone();
+        Some(value) => {
+            let Some(columns) = value
+                .get_property("columns")
+                .and_then(JsonValueView::as_number)
+                .filter(|number| *number > 0.0 && number.fract() == 0.0)
+            else {
+                return Err(INVALID);
+            };
+            let Some(rows) = value
+                .get_property("rows")
+                .and_then(JsonValueView::as_number)
+                .filter(|number| *number > 0.0 && number.fract() == 0.0)
+            else {
+                return Err(INVALID);
+            };
+            let mut viewport = json!({"columns": columns, "rows": rows});
+            if let Some(fullscreen) = value.get_property("isFullscreen") {
+                let Some(fullscreen) = fullscreen.as_bool() else {
+                    return Err(INVALID);
+                };
+                viewport["isFullscreen"] = json!(fullscreen);
             }
             Some(viewport)
         }
-        Some(_) => return Err(INVALID),
     };
-    if let Some(answers) = request.get("answers") {
-        let Some(answers) = answers.as_array() else {
+    if let Some(answers) = field("answers") {
+        let Some(length) = answers.array_len() else {
             return Err(INVALID);
         };
-        if answers.len() > 5
-            || !answers.iter().all(|answer| {
+        if length > 5
+            || !(0..length).all(|index| {
                 matches!(
-                    answer.as_str(),
+                    answers.get_index(index).and_then(JsonValueView::as_str),
                     Some(
                         "ui_copy"
                             | "ui_prompt_read"
@@ -1334,12 +1389,12 @@ impl RequestReplyWriter<'_> {
         permissions: Vec<Utf16JsonProjection>,
         dialogs: Vec<Utf16JsonProjection>,
     ) {
-        let mut response = Utf16JsonProjection::plain(json!({"subtype":"success"}));
+        let mut response = projection_from_value(&json!({"subtype":"success"}));
         response
             .set_field("request_id", self.request_id.clone())
             .expect("valid request identity");
         response
-            .set_field("response", Utf16JsonProjection::plain(payload))
+            .set_field("response", projection_from_value(&payload))
             .expect("valid initialize payload");
         response
             .set_field("pending_permission_requests", projected_array(permissions))
@@ -1347,7 +1402,7 @@ impl RequestReplyWriter<'_> {
         response
             .set_field("pending_user_dialog_requests", projected_array(dialogs))
             .expect("valid pending dialog projections");
-        let mut frame = Utf16JsonProjection::plain(json!({"type":"control_response"}));
+        let mut frame = projection_from_value(&json!({"type":"control_response"}));
         frame
             .set_field("response", response)
             .expect("valid initialization response");
@@ -1356,7 +1411,7 @@ impl RequestReplyWriter<'_> {
     fn reply_success(&self, _request_id: &str, payload: Option<Value>) {
         self.record(self.writer.reply_success_projected(
             self.request_id.clone(),
-            payload.map(Utf16JsonProjection::plain),
+            payload.as_ref().map(projection_from_value),
         ));
     }
 
@@ -1372,12 +1427,18 @@ impl RequestReplyWriter<'_> {
 mod tests {
     #[test]
     fn attach_viewport_is_canonical_and_accepts_positive_integer_numbers() {
-        let (_, _, viewport) = super::validate_ui_attach(&serde_json::json!({"surface":"mobile","client_id":"phone","viewport":{"columns":80.0,"rows":24,"isFullscreen":false,"unrecognized":true}})).unwrap();
+        let request = projection_from_value(
+            &serde_json::json!({"surface":"mobile","client_id":"phone","viewport":{"columns":80.0,"rows":24,"isFullscreen":false,"unrecognized":true}}),
+        );
+        let (_, _, viewport) = super::validate_ui_attach(&request).unwrap();
         assert_eq!(
             viewport.unwrap(),
             serde_json::json!({"columns":80.0,"rows":24,"isFullscreen":false})
         );
-        assert!(super::validate_ui_attach(&serde_json::json!({"surface":"mobile","client_id":"phone","viewport":{"columns":80.5,"rows":24}})).is_err());
+        let request = projection_from_value(
+            &serde_json::json!({"surface":"mobile","client_id":"phone","viewport":{"columns":80.5,"rows":24}}),
+        );
+        assert!(super::validate_ui_attach(&request).is_err());
     }
 
     use super::*;
@@ -1399,7 +1460,9 @@ mod tests {
     }
 
     fn apply(field: Option<serde_json::Value>) -> Option<String> {
-        match resolve_set_model_target(field.as_ref(), "session-default") {
+        let projection = field.as_ref().map(projection_from_value);
+        let value = projection.as_ref().and_then(|value| value.at_pointer(""));
+        match resolve_set_model_target(value, "session-default") {
             SetModelTarget::Apply(t) => Some(t),
             SetModelTarget::Reject => None,
         }
@@ -1452,10 +1515,14 @@ mod tests {
         assert!(apply(Some(serde_json::json!(["x"]))).is_none());
     }
 
-    fn req(subtype: &str, body: serde_json::Value) -> serde_json::Value {
+    fn req(subtype: &str, body: serde_json::Value) -> Utf16JsonProjection {
         let mut request = body;
         request["subtype"] = json!(subtype);
-        json!({"type": "control_request", "request_id": "r1", "request": request})
+        projection_from_value(&json!({
+            "type": "control_request",
+            "request_id": "r1",
+            "request": request
+        }))
     }
 
     #[test]
@@ -1610,41 +1677,23 @@ mod tests {
 }
 
 fn projected_array(values: Vec<Utf16JsonProjection>) -> Utf16JsonProjection {
-    let mut projection = Utf16JsonProjection::plain(Value::Array(Vec::with_capacity(values.len())));
-    for (index, child) in values.into_iter().enumerate() {
-        projection
-            .value
-            .as_array_mut()
-            .expect("array")
-            .push(child.value);
-        projection
-            .strings
-            .extend(child.strings.into_iter().map(|mut s| {
-                s.pointer = format!("/{index}{}", s.pointer);
-                s
-            }));
-        projection.keys.extend(child.keys.into_iter().map(|mut k| {
-            k.pointer = format!("/{index}{}", k.pointer);
-            k
-        }));
-    }
-    projection
-        .validate()
-        .expect("valid request snapshot projections");
-    projection
+    Utf16JsonProjection::array(values).expect("valid request snapshot projections")
 }
 
-fn parse_interrupt_turn_aim(value: Option<&Value>) -> Option<Vec<String>> {
-    let values = value?.as_array()?;
-    if !(1..=8).contains(&values.len()) {
+fn parse_interrupt_turn_aim(value: Option<JsonValueView<'_>>) -> Option<Vec<String>> {
+    let length = value?.array_len()?;
+    if !(1..=8).contains(&length) {
         return None;
     }
-    values
-        .iter()
-        .map(|value| {
-            let uuid = value.as_str()?;
+    (0..length)
+        .map(|index| {
+            let uuid = value?.get_index(index)?.as_str()?;
             uuid::Uuid::parse_str(uuid).ok()?;
             Some(uuid.to_owned())
         })
         .collect()
+}
+
+fn projection_from_value(value: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("generated JSON value is valid")
 }

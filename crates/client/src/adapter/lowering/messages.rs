@@ -1,5 +1,4 @@
 //! Message and transcript conversion.
-use super::value_to_json_string;
 use crate::protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
 use crate::protocol::message::{VisualizationContextDto, VisualizationRefDto};
 use crate::protocol::text::ClientTextDto;
@@ -325,7 +324,7 @@ pub fn lower_transcript(history: &[ConversationMessage]) -> Vec<MessageDto> {
 #[must_use]
 pub fn lower_transcript_with_tool_results<S: std::hash::BuildHasher>(
     history: &[ConversationMessage],
-    tool_results: &std::collections::HashMap<String, serde_json::Value, S>,
+    tool_results: &std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection, S>,
 ) -> Vec<MessageDto> {
     lower_transcript_with_identities(history, tool_results)
         .into_iter()
@@ -338,7 +337,7 @@ pub fn lower_transcript_with_tool_results<S: std::hash::BuildHasher>(
 #[must_use]
 pub fn lower_transcript_with_identities<S: std::hash::BuildHasher>(
     history: &[ConversationMessage],
-    tool_results: &std::collections::HashMap<String, serde_json::Value, S>,
+    tool_results: &std::collections::HashMap<String, lingxi_core::types::utf16_json::Utf16JsonProjection, S>,
 ) -> Vec<(lingxi_core::types::MessageId, MessageDto)> {
     let mut transcript = lower_transcript_inner(history);
     // A post-pass rather than a hook inside `lower_content_block_with`: that
@@ -355,7 +354,7 @@ pub fn lower_transcript_with_identities<S: std::hash::BuildHasher>(
             } = block
             {
                 if let Some(data) = tool_results.get(id.as_str()) {
-                    *result_json = value_to_json_string(data);
+                    *result_json = data.to_json_string().expect("persisted tool result is a valid source projection").into();
                 }
             }
         }
@@ -539,5 +538,39 @@ mod identity_projection_tests {
             rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
             lower_transcript(&history)
         );
+    }
+
+    #[test]
+    fn tool_result_projection_preserves_exact_utf16_json_source() {
+        use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
+
+        let tool_use_id = ToolUseId::new();
+        let history = vec![ConversationMessage::User {
+            api_message_override: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: "visible tool result".into(),
+                is_error: Some(false),
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
+        }];
+        let raw_result = r#"{"message":"left\ud800right"}"#;
+        let result = Utf16JsonProjection::parse(raw_result).expect("valid raw tool result");
+        let tool_results = std::collections::HashMap::from([(tool_use_id.to_string(), result)]);
+
+        let rows = lower_transcript_with_identities(&history, &tool_results);
+        let MessageBlockDto::ToolResult { result_json, .. } = &rows[0].1.blocks[0] else {
+            panic!("expected a ToolResult block");
+        };
+        assert_eq!(result_json, raw_result);
     }
 }

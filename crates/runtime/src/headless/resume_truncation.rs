@@ -30,7 +30,7 @@
 //! flatten channel that preserves unmodelled outer fields verbatim, so this
 //! port needs no schema change.
 
-use serde_json::Value;
+use lingxi_core::types::utf16_json::JsonValueView;
 use session::jsonl::JsonlMessage;
 
 /// Oracle `EEy` — the refusal prefix.
@@ -154,19 +154,19 @@ fn is_uuid(s: &str) -> bool {
 }
 
 fn extra_bool(m: &JsonlMessage, key: &str) -> bool {
-    m.extra.get(key).and_then(Value::as_bool) == Some(true)
+    m.extra.get_property(key).and_then(|value| value.as_bool()) == Some(true)
 }
 
-fn content(m: &JsonlMessage) -> Option<&Value> {
-    m.message.get("content")
+fn content(m: &JsonlMessage) -> Option<JsonValueView<'_>> {
+    m.message.get_property("content")
 }
 
 /// Oracle `e.attachment.type` for an `attachment` entry.
 fn attachment_type(m: &JsonlMessage) -> Option<&str> {
     m.extra
-        .get("attachment")
-        .and_then(|a| a.get("type"))
-        .and_then(Value::as_str)
+        .get_property("attachment")
+        .and_then(|attachment| attachment.get_property("type"))
+        .and_then(|value| value.as_str())
 }
 
 /// Oracle `rct(e,t)` — the entry pointer interpolated into every reason.
@@ -184,10 +184,11 @@ fn describe(m: &JsonlMessage, index: usize) -> String {
 
 /// Oracle `pnu(e){return e.origin===void 0||e.origin.kind==="human"||e.origin.kind==="auto-continuation"}`
 fn is_locally_sourced(m: &JsonlMessage) -> bool {
-    match m.extra.get("origin") {
-        None | Some(Value::Null) => true,
+    match m.extra.get_property("origin") {
+        None => true,
+        Some(origin) if origin.is_null() => true,
         Some(origin) => matches!(
-            origin.get("kind").and_then(Value::as_str),
+            origin.get_property("kind").and_then(|value| value.as_str()),
             Some("human" | "auto-continuation")
         ),
     }
@@ -200,16 +201,15 @@ fn is_interrupt_sentinel(m: &JsonlMessage) -> bool {
     if let Some(text) = c.as_str() {
         return text == INTERRUPTED_BY_USER || text == INTERRUPTED_FOR_TOOL_USE;
     }
-    let Some(arr) = c.as_array() else {
-        return false;
-    };
-    if arr.len() != 1 {
+    if c.array_len() != Some(1) {
         return false;
     }
-    let b = &arr[0];
-    b.get("type").and_then(Value::as_str) == Some("text")
+    let Some(block) = c.get_index(0) else {
+        return false;
+    };
+    block.get_property("type").and_then(|value| value.as_str()) == Some("text")
         && matches!(
-            b.get("text").and_then(Value::as_str),
+            block.get_property("text").and_then(|value| value.as_str()),
             Some(INTERRUPTED_BY_USER | INTERRUPTED_FOR_TOOL_USE)
         )
 }
@@ -231,15 +231,25 @@ fn is_rejection_body(s: &str) -> bool {
 /// Oracle `GI0(e)` — every block is an errored `tool_result` whose string
 /// content is one of the rejection bodies.
 fn is_all_rejected_tool_results(m: &JsonlMessage) -> bool {
-    let Some(arr) = content(m).and_then(Value::as_array) else {
+    let Some(arr) = content(m) else {
         return false;
     };
-    !arr.is_empty()
-        && arr.iter().all(|b| {
-            b.get("type").and_then(Value::as_str) == Some("tool_result")
-                && b.get("is_error").and_then(Value::as_bool) == Some(true)
-                && b.get("content")
-                    .and_then(Value::as_str)
+    let Some(len) = arr.array_len() else {
+        return false;
+    };
+    len > 0
+        && (0..len).all(|index| {
+            let Some(block) = arr.get_index(index) else {
+                return false;
+            };
+            block.get_property("type").and_then(|value| value.as_str()) == Some("tool_result")
+                && block
+                    .get_property("is_error")
+                    .and_then(|value| value.as_bool())
+                    == Some(true)
+                && block
+                    .get_property("content")
+                    .and_then(|value| value.as_str())
                     .is_some_and(is_rejection_body)
         })
 }
@@ -247,13 +257,19 @@ fn is_all_rejected_tool_results(m: &JsonlMessage) -> bool {
 /// Oracle `wEy(e)` — every block is a `tool_result` (a tool-result carrier
 /// user line, i.e. the turn's own tool plumbing).
 fn is_all_tool_results(m: &JsonlMessage) -> bool {
-    let Some(arr) = content(m).and_then(Value::as_array) else {
+    let Some(arr) = content(m) else {
         return false;
     };
-    !arr.is_empty()
-        && arr
-            .iter()
-            .all(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+    let Some(len) = arr.array_len() else {
+        return false;
+    };
+    len > 0
+        && (0..len).all(|index| {
+            arr.get_index(index)
+                .and_then(|block| block.get_property("type"))
+                .and_then(|value| value.as_str())
+                == Some("tool_result")
+        })
 }
 
 /// Oracle `g8(e)` — an interrupt/abort user entry (string content starting with
@@ -266,16 +282,26 @@ fn is_interrupt_entry(m: &JsonlMessage) -> bool {
     if let Some(text) = c.as_str() {
         return INTERRUPT_PREFIXES.iter().any(|p| text.starts_with(p));
     }
-    let Some(arr) = c.as_array() else {
+    let Some(len) = c.array_len() else {
         return false;
     };
-    !arr.is_empty()
-        && arr.iter().all(|b| {
-            let ty = b.get("type").and_then(Value::as_str);
+    len > 0
+        && (0..len).all(|index| {
+            let Some(block) = c.get_index(index) else {
+                return false;
+            };
+            let ty = block.get_property("type").and_then(|value| value.as_str());
             let s = match ty {
-                Some("text") => b.get("text").and_then(Value::as_str),
-                Some("tool_result") if b.get("is_error").and_then(Value::as_bool) == Some(true) => {
-                    b.get("content").and_then(Value::as_str)
+                Some("text") => block.get_property("text").and_then(|value| value.as_str()),
+                Some("tool_result")
+                    if block
+                        .get_property("is_error")
+                        .and_then(|value| value.as_bool())
+                        == Some(true) =>
+                {
+                    block
+                        .get_property("content")
+                        .and_then(|value| value.as_str())
                 }
                 _ => None,
             };
@@ -285,15 +311,23 @@ fn is_interrupt_entry(m: &JsonlMessage) -> bool {
 
 /// Oracle `KI0(e)` — the synthetic "No response requested." assistant line.
 fn is_synthetic_no_response(m: &JsonlMessage) -> bool {
-    if m.message.get("model").and_then(Value::as_str) != Some("<synthetic>") {
+    if m.message.string_at("/model") != Some("<synthetic>") {
         return false;
     }
-    let Some(arr) = content(m).and_then(Value::as_array) else {
+    let Some(arr) = content(m) else {
         return false;
     };
-    arr.len() == 1
-        && arr[0].get("type").and_then(Value::as_str) == Some("text")
-        && arr[0].get("text").and_then(Value::as_str) == Some("No response requested.")
+    arr.array_len() == Some(1)
+        && arr
+            .get_index(0)
+            .and_then(|block| block.get_property("type"))
+            .and_then(|value| value.as_str())
+            == Some("text")
+        && arr
+            .get_index(0)
+            .and_then(|block| block.get_property("text"))
+            .and_then(|value| value.as_str())
+            == Some("No response requested.")
 }
 
 /// Oracle `WI0(e)` — leading entries the range may carry BEFORE the declared
@@ -312,7 +346,7 @@ fn is_skippable_leading(m: &JsonlMessage) -> bool {
                 && !extra_bool(m, "isCompactSummary")
                 && (is_interrupt_sentinel(m)
                     || is_all_rejected_tool_results(m)
-                    || (extra_bool(m, "isMeta") && !m.extra.contains_key("promptSource")))
+                    || (extra_bool(m, "isMeta") && !m.extra.contains_property("promptSource")))
         }
         "assistant" => is_synthetic_no_response(m),
         "system" | "progress" => true,
@@ -414,7 +448,7 @@ pub fn verify_dropped_turn(range: &[JsonlMessage], turn_uuid: &str) -> Result<()
                 {
                     continue;
                 }
-                if extra_bool(entry, "isMeta") && entry.extra.contains_key("promptSource") {
+                if extra_bool(entry, "isMeta") && entry.extra.contains_property("promptSource") {
                     return Err(format!(
                         "range contains a system-injected turn prompt; {}",
                         describe(entry, o)
@@ -432,7 +466,7 @@ pub fn verify_dropped_turn(range: &[JsonlMessage], turn_uuid: &str) -> Result<()
                 return Err(format!(
                     "range contains an unrecognized entry; {}",
                     describe(entry, o)
-                ))
+                ));
             }
         }
     }

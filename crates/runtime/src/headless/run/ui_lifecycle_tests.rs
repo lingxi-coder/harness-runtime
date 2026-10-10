@@ -5,6 +5,10 @@ use crate::headless::remote_ui::HeadlessRemoteUiHost;
 use crate::headless::stream_json::OutboundMsg;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
+fn project(value: &Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(value).expect("valid test JSON")
+}
+
 async fn dispatch(
     runtime: &Runtime,
     plane: &Arc<StdioControlPlane>,
@@ -16,9 +20,7 @@ async fn dispatch(
     request: Value,
 ) {
     let subtype = request["subtype"].as_str().unwrap().to_owned();
-    let frame = Utf16JsonProjection::plain(
-        json!({"type":"control_request","request_id":id,"request":request}),
-    );
+    let frame = project(&json!({"type":"control_request","request_id":id,"request":request}));
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
         dispatch_control_request(
@@ -119,7 +121,7 @@ async fn actual_mod_render_cancel_keeps_owner_and_stop_controls_remain_responsiv
     .await;
     let callback = frame(&mut rx).await;
     assert_eq!(callback["request"]["subtype"], "ui_prompt_read");
-    plane.cancel_inbound_request(&Utf16JsonProjection::plain(json!("render")));
+    plane.cancel_inbound_request(&project(&json!("render")));
     dispatch(
         &runtime,
         &plane,
@@ -146,7 +148,7 @@ async fn actual_mod_render_cancel_keeps_owner_and_stop_controls_remain_responsiv
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
-    plane.resolve_response(&Utf16JsonProjection::plain(json!({"type":"control_response","response":{
+    plane.resolve_response(&project(&json!({"type":"control_response","response":{
         "subtype":"success","request_id":callback["request_id"],"response":{"text":"settled","cursor":7}
     }}))).await;
     tokio::time::timeout(std::time::Duration::from_secs(3), joining)

@@ -255,3 +255,26 @@ matrix never proves all unknown behavior.
 ## Frozen 2.1.295 target and historical release evidence
 
 The final comparison target is Claude Code 2.1.295 at the binary path and SHA recorded above, matching the official v2.1.295 release tag. The public 2.1.293 captures remain the historical base fixtures; the separately captured 2.1.294 Stop and SubagentStop prompts remain intermediate release-delta evidence. Neither historical version substitutes for target-sensitive 2.1.295 acceptance, and no version after 2.1.295 will be tracked in this pass. A fixed stub proves hook reachability and prompt bytes only, not model judgment quality. All historical raw baselines remain unchanged.
+
+
+## 2026-10-09 scope correction
+The user explicitly removed Local Apps from the parity scope because it will move to a separate plugin. Local Apps behavior and its dedicated parity acceptance are out of scope. Existing current-build interface adaptations remain build integration work only, never Local Apps parity evidence. Do not expand this lane further or exclude active production source to manufacture a passing build.
+
+
+## 2026-10-09 current feature-consumer candidate
+The Product runtime feature union (`collaboration,desktop,engine,fusion,mobile,uniffi,workflow`)
+now compiles with zero errors on the frozen r3 source fingerprint
+`fc274f0040641e240306c64a5b7db1c8c89f6f99b374f0cf8b3b063673901a5b`.
+This supersedes the 487-runtime-error / 32-error / 1-error build feedback.
+The same source passed eight raw client text protocol regressions and three
+shared UTF-16 activity-preview regressions. The compiled client artifact includes
+`adapter,default,presentation,uniffi`. Receipts are in the integration sibling
+`acceptance/harness-client-union-check-r3-result-20261009.json` and
+`acceptance/harness-client-focused-tests-r3-result-20261009.json`.
+
+These are production compilation and focused regression evidence, not final
+Native byte parity, full workspace test, Product canonical dependency, or package
+acceptance. Newly added MCP accepted-result metadata, refusal tombstone,
+structured-output validator and runtime lifecycle regressions still require their
+respective execution gates. Native 2.1.295 refusal captures now exist separately
+under `acceptance/stop-details-295`; candidate replay is still open.

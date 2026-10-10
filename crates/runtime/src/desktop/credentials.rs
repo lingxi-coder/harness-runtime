@@ -905,13 +905,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // the ApiKey strategy can't shadow it.
     let has_oauth =
         is_subscriber && (oauth_auth_state.is_some() || environment_oauth_delegate.is_some());
-    let oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> =
-        environment_oauth_delegate.or_else(|| {
-            oauth_auth_state.clone().map(|state| {
-                let driver = Arc::new(RefreshDriver::new(state));
-                Arc::new(OAuthCredentialProvider::new(driver))
-                    as Arc<dyn llm_runtime::CredentialProvider>
-            })
+    let stored_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> =
+        oauth_auth_state.clone().map(|state| {
+            let driver = Arc::new(RefreshDriver::new(state));
+            Arc::new(OAuthCredentialProvider::new(driver))
+                as Arc<dyn llm_runtime::CredentialProvider>
         });
     let oauth_delegate: Option<Arc<dyn llm_runtime::CredentialProvider>> = if let Some(lookup) = cfg
         .oauth_environment_lookup

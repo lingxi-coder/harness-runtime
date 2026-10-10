@@ -1,13 +1,13 @@
-use super::BridgeFailure;
-use super::LOCAL_APP_BRIDGE_CONTROL_BYTES;
-use super::LOCAL_APP_BRIDGE_FILE_BYTES;
-use super::LOCAL_APP_BRIDGE_LLM_BYTES;
-use super::LocalAppsHostBroker;
-use super::MAX_NETWORK_RESPONSE_BYTES;
-use super::UI_TIMEOUT;
 use super::public_ip;
 use super::read_limited_stream;
 use super::required_string;
+use super::BridgeFailure;
+use super::LocalAppsHostBroker;
+use super::LOCAL_APP_BRIDGE_CONTROL_BYTES;
+use super::LOCAL_APP_BRIDGE_FILE_BYTES;
+use super::LOCAL_APP_BRIDGE_LLM_BYTES;
+use super::MAX_NETWORK_RESPONSE_BYTES;
+use super::UI_TIMEOUT;
 use crate::mobile::local_apps_mcp::LocalAppsMcpHost;
 use client::protocol::events::ClientEvent;
 use client::protocol::local_apps::AppAuthorizationDecisionDto;
@@ -19,14 +19,14 @@ use client::protocol::local_apps::AppUiRequestDto;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use local_apps::load_manifest;
 use local_apps::load_permissions;
+use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
-use serde_json::json;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use tokio::sync::oneshot;
-use tokio::time::Duration;
 use tokio::time::timeout;
+use tokio::time::Duration;
 
 impl LocalAppsHostBroker {
     pub(super) async fn request_ui(&self, request: AppUiRequestDto) -> Result<Value, String> {

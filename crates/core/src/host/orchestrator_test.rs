@@ -123,6 +123,7 @@ mod tests {
                 _tool: &str,
                 _model_text: &crate::types::utf16_json::Utf16JsonProjection,
                 _result: &crate::types::utf16_json::Utf16JsonProjection,
+                _mcp_meta: Option<&crate::types::utf16_json::Utf16JsonProjection>,
             ) {
             }
             async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
@@ -487,6 +488,7 @@ mod tests {
                 _tool: &str,
                 _model_text: &crate::types::utf16_json::Utf16JsonProjection,
                 _result: &crate::types::utf16_json::Utf16JsonProjection,
+                _mcp_meta: Option<&crate::types::utf16_json::Utf16JsonProjection>,
             ) {
             }
             async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}
@@ -568,6 +570,7 @@ mod tests {
                 _tool: &str,
                 _model_text: &crate::types::utf16_json::Utf16JsonProjection,
                 _result: &crate::types::utf16_json::Utf16JsonProjection,
+                _mcp_meta: Option<&crate::types::utf16_json::Utf16JsonProjection>,
             ) {
             }
             async fn emit_end_turn(&self, _stop_reason: &str, _cost: &CostSnapshot) {}

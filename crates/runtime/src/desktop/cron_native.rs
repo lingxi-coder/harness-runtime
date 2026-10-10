@@ -261,6 +261,7 @@ impl lingxi_core::host::OutputStream for QuietOutput {
         _: &str,
         _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
         _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+        _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
     }
 }

@@ -4,13 +4,15 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use orchestrator::prompt::mid_turn_input::{MidTurnInput, MidTurnInputPoint, MidTurnInputSource};
 use tokio::sync::{mpsc, Mutex};
 
 use super::{QueueLifecycle, LIFECYCLE_STARTED};
 use crate::headless::stream_json::StreamJsonStream;
 use crate::headless::stream_json_input::{
-    content_to_prompt, emit_replay_ack_projected_queued, PendingInputQueue, StreamInput, UserTurn,
+    content_to_prompt_projection, emit_replay_ack_projected_queued, PendingInputQueue, StreamInput,
+    UserTurn,
 };
 
 struct InputState {
@@ -104,7 +106,10 @@ impl SdkInputQueue {
                 .or_else(|| reader_pending.pop_front());
             match input {
                 Some(StreamInput::User(turn))
-                    if !content_to_prompt(&turn.content).starts_with('/') =>
+                    if !content_to_prompt_projection(&turn.content_projection)
+                        .string_at("")
+                        .unwrap_or_default()
+                        .starts_with('/') =>
                 {
                     turns.push(turn);
                 }
@@ -125,7 +130,7 @@ impl MidTurnInputSource for SdkInputQueue {
         point == MidTurnInputPoint::AfterTools
     }
 
-    async fn take_mid_turn_input(&self) -> Option<String> {
+    async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
         None
     }
 
@@ -164,7 +169,7 @@ impl MidTurnInputSource for SdkInputQueue {
         let inputs = accepted
             .iter()
             .map(|turn| MidTurnInput {
-                text: content_to_prompt(&turn.content),
+                text: content_to_prompt_projection(&turn.content_projection),
                 origin_kind: None,
                 projected_content: Some(turn.content_projection.clone()),
                 queue_delivery: turn.queue_delivery.clone(),
@@ -172,7 +177,7 @@ impl MidTurnInputSource for SdkInputQueue {
                     .frame_projection
                     .subprojection("/uuid")
                     .ok()
-                    .filter(|uuid| uuid.value.as_str().is_some_and(|uuid| !uuid.is_empty())),
+                    .filter(|uuid| uuid.string_at("").is_some_and(|uuid| !uuid.is_empty())),
             })
             .collect();
         self.state.lock().await.folded.extend(accepted);
@@ -224,8 +229,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn user(id: &str, text: &str) -> StreamInput {
-        let frame =
-            Utf16JsonProjection::plain(serde_json::json!({"uuid":id,"message":{"content":text}}));
+        let frame = Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"uuid":id,"message":{"content":text}}),
+        )
+        .unwrap();
         StreamInput::User(UserTurn {
             queue_delivery: None,
             content: serde_json::json!(text),
@@ -335,7 +342,7 @@ mod tests {
         source.lifecycle.queued.on_queued(id);
         tx.send(user(id, "HEADLESS_BATCH_B")).await.unwrap();
         orch.run_turn_streaming_with_cancel_projected_content(
-            &Utf16JsonProjection::plain(serde_json::json!("HEADLESS_BATCH_A")),
+            &Utf16JsonProjection::from_serde_value(&serde_json::json!("HEADLESS_BATCH_A")).unwrap(),
             CancellationToken::new(),
             None,
         )
@@ -365,7 +372,7 @@ mod tests {
         ];
         let (source, tx, api, orch) = setup(vec![tool, text_response()]).await;
         let id = "00000000-0000-4000-8000-000000000042";
-        let marker = Utf16JsonProjection::plain(serde_json::json!("primary"));
+        let marker = Utf16JsonProjection::from_serde_value(&serde_json::json!("primary")).unwrap();
         source
             .stream
             .begin_request_markers(Some(marker.clone()), vec![marker], false)
@@ -375,7 +382,8 @@ mod tests {
         source.lifecycle.queued.on_queued(id);
         tx.send(user(id, "HEADLESS_MIDTOOL_B")).await.unwrap();
         orch.run_turn_streaming_with_cancel_projected_content(
-            &Utf16JsonProjection::plain(serde_json::json!("HEADLESS_MIDTOOL_A")),
+            &Utf16JsonProjection::from_serde_value(&serde_json::json!("HEADLESS_MIDTOOL_A"))
+                .unwrap(),
             CancellationToken::new(),
             None,
         )
@@ -448,7 +456,7 @@ mod tests {
         let (source, tx, api, orch) = setup(vec![tool, text_response()]).await;
         let first = "00000000-0000-4000-8000-000000000042";
         let last = "00000000-0000-4000-8000-000000000043";
-        let marker = Utf16JsonProjection::plain(serde_json::json!("primary"));
+        let marker = Utf16JsonProjection::from_serde_value(&serde_json::json!("primary")).unwrap();
         source
             .stream
             .begin_request_markers(Some(marker.clone()), vec![marker], false)
@@ -458,7 +466,7 @@ mod tests {
             tx.send(user(id, text)).await.unwrap();
         }
         orch.run_turn_streaming_with_cancel_projected_content(
-            &Utf16JsonProjection::plain(serde_json::json!("initial")),
+            &Utf16JsonProjection::from_serde_value(&serde_json::json!("initial")).unwrap(),
             CancellationToken::new(),
             None,
         )
@@ -583,7 +591,7 @@ mod tests {
         source.lifecycle.queued.on_queued(source_id);
         tx.send(StreamInput::User(turn)).await.unwrap();
         orch.run_turn_streaming_with_cancel_projected_content(
-            &Utf16JsonProjection::plain(serde_json::json!("initial")),
+            &Utf16JsonProjection::from_serde_value(&serde_json::json!("initial")).unwrap(),
             CancellationToken::new(),
             None,
         )
@@ -675,7 +683,7 @@ mod tests {
         }
         assert_eq!(source.len().await, 76);
         orch.run_turn_streaming_with_cancel_projected_content(
-            &Utf16JsonProjection::plain(serde_json::json!("initial")),
+            &Utf16JsonProjection::from_serde_value(&serde_json::json!("initial")).unwrap(),
             CancellationToken::new(),
             None,
         )
@@ -730,7 +738,7 @@ mod tests {
         fn admits_at(&self, point: MidTurnInputPoint) -> bool {
             point == MidTurnInputPoint::AfterTools
         }
-        async fn take_mid_turn_input(&self) -> Option<String> {
+        async fn take_mid_turn_input(&self) -> Option<Utf16JsonProjection> {
             None
         }
         async fn take_mid_turn_batch(&self) -> Option<Vec<MidTurnInput>> {
@@ -780,7 +788,7 @@ mod tests {
         source.lifecycle.queued.on_queued(first);
         tx.send(user(first, "before snapshot")).await.unwrap();
         orch.run_turn_streaming_with_cancel_projected_content(
-            &Utf16JsonProjection::plain(serde_json::json!("initial")),
+            &Utf16JsonProjection::from_serde_value(&serde_json::json!("initial")).unwrap(),
             CancellationToken::new(),
             None,
         )

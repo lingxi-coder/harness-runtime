@@ -2,7 +2,6 @@
 //! client UUIDs; generated transcript identities are not request markers.
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use serde_json::{json, Value};
 
 const LIMIT: usize = 64;
 
@@ -14,7 +13,7 @@ struct Marker {
 
 impl Marker {
     fn new(projection: Utf16JsonProjection) -> Result<Self, String> {
-        if !projection.value.is_string() {
+        if projection.string_units("").is_none() {
             return Err("request marker UUID must be a string".into());
         }
         let identity = projection
@@ -71,7 +70,12 @@ impl RequestMarkers {
     }
 
     fn consume(&mut self, marker: Marker) {
-        if marker.projection.value.as_str() == Some("") || self.contains(&marker) {
+        if marker
+            .projection
+            .string_units("")
+            .is_some_and(|units| units.is_empty())
+            || self.contains(&marker)
+        {
             return;
         }
         if self.consumed.len() < LIMIT {
@@ -87,9 +91,12 @@ impl RequestMarkers {
         &mut self,
         attachment: &Utf16JsonProjection,
     ) -> Result<(), String> {
-        if attachment.value.get("type").and_then(Value::as_str) != Some("queued_command")
-            || attachment.value.get("commandMode").and_then(Value::as_str) != Some("prompt")
-            || attachment.value.get("isMeta").and_then(Value::as_bool) == Some(true)
+        if attachment.string_at("/type") != Some("queued_command")
+            || attachment.string_at("/commandMode") != Some("prompt")
+            || attachment
+                .at_pointer("/isMeta")
+                .and_then(|value| value.as_bool())
+                == Some(true)
             || self.staged.len() >= LIMIT
         {
             return Ok(());
@@ -153,22 +160,19 @@ impl RequestMarkers {
         let Some(primary) = self.primary() else {
             return Ok(None);
         };
-        let mut fields = Utf16JsonProjection::plain(json!({
-            "user_message_uuid":primary.projection.value,
-            "user_message_uuids":self.consumed.iter().map(|value| value.projection.value.clone()).collect::<Vec<_>>()
-        }));
-        fields
-            .set_pointer("/user_message_uuid", primary.projection.clone())
-            .map_err(|error| error.to_string())?;
-        for (index, marker) in self.consumed.iter().enumerate() {
-            fields
-                .set_pointer(
-                    &format!("/user_message_uuids/{index}"),
-                    marker.projection.clone(),
-                )
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(Some(fields))
+        let uuids = Utf16JsonProjection::array(
+            self.consumed
+                .iter()
+                .map(|marker| marker.projection.clone())
+                .collect(),
+        )
+        .map_err(|error| error.to_string())?;
+        Utf16JsonProjection::object(vec![
+            ("user_message_uuid".into(), primary.projection.clone()),
+            ("user_message_uuids".into(), uuids),
+        ])
+        .map(Some)
+        .map_err(|error| error.to_string())
     }
 
     pub(super) fn stamp(&mut self, frame: &mut Utf16JsonProjection) -> Result<(), String> {
@@ -176,11 +180,10 @@ impl RequestMarkers {
             return Ok(());
         };
         let identity = primary.identity.clone();
-        let kind = frame.value.get("type").and_then(Value::as_str);
+        let kind = frame.string_at("/type");
         let main = frame
-            .value
-            .get("parent_tool_use_id")
-            .is_none_or(Value::is_null);
+            .get_property("parent_tool_use_id")
+            .is_none_or(|value| value.is_null());
         let fields = match kind {
             Some("result") => self.fields()?,
             Some("assistant") if main && self.assistant_stamp.as_ref() != Some(&identity) => {
@@ -189,28 +192,22 @@ impl RequestMarkers {
             }
             Some("stream_event")
                 if main
-                    && frame.value.pointer("/event/type").and_then(Value::as_str)
-                        != Some("ping")
+                    && frame.string_at("/event/type") != Some("ping")
                     && self.stream_stamp.as_ref() != Some(&identity) =>
             {
                 self.stream_stamp = Some(identity);
                 self.fields()?
             }
+            Some("system") if frame.string_at("/subtype") == Some("thinking_tokens") => Some(
+                Utf16JsonProjection::object(vec![(
+                    "user_message_uuid".into(),
+                    primary.projection.clone(),
+                )])
+                .map_err(|error| error.to_string())?,
+            ),
             Some("system")
-                if frame.value.get("subtype").and_then(Value::as_str)
-                    == Some("thinking_tokens") =>
-            {
-                let mut fields = Utf16JsonProjection::plain(
-                    json!({"user_message_uuid":primary.projection.value}),
-                );
-                fields
-                    .set_pointer("/user_message_uuid", primary.projection.clone())
-                    .map_err(|error| error.to_string())?;
-                Some(fields)
-            }
-            Some("system")
-                if frame.value.get("subtype").and_then(Value::as_str) == Some("status")
-                    && frame.value.get("status").and_then(Value::as_str) == Some("requesting") =>
+                if frame.string_at("/subtype") == Some("status")
+                    && frame.string_at("/status") == Some("requesting") =>
             {
                 self.fields()?
                     .map(|fields| fields.pick_object_fields(&["user_message_uuids"]))
@@ -220,17 +217,12 @@ impl RequestMarkers {
             _ => None,
         };
         if let Some(fields) = fields {
-            for key in fields
-                .value
-                .as_object()
-                .expect("owned marker object")
-                .keys()
-            {
+            for entry in fields.object_entries().expect("owned marker object") {
                 let value = fields
-                    .subprojection(&format!("/{key}"))
+                    .subprojection_property_units(entry.code_units)
                     .map_err(|error| error.to_string())?;
                 frame
-                    .set_field(key, value)
+                    .set_field(entry.display_key, value)
                     .map_err(|error| error.to_string())?;
             }
         }
@@ -241,17 +233,19 @@ impl RequestMarkers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
 
     fn id(value: &str) -> Utf16JsonProjection {
-        Utf16JsonProjection::plain(json!(value))
+        Utf16JsonProjection::from(value)
     }
     fn field(owner: &RequestMarkers) -> Value {
-        owner.fields().unwrap().unwrap().value
+        serde_json::from_str(&owner.fields().unwrap().unwrap().to_json_string().unwrap()).unwrap()
     }
     fn attachment(uuid: &str, meta: bool) -> Utf16JsonProjection {
-        Utf16JsonProjection::plain(
-            json!({"type":"queued_command","commandMode":"prompt","isMeta":meta,"source_uuid":uuid}),
+        Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"type":"queued_command","commandMode":"prompt","isMeta":meta,"source_uuid":uuid}),
         )
+        .unwrap()
     }
 
     #[test]
@@ -300,22 +294,26 @@ mod tests {
     fn independent_scalar_latches_skip_ping_subagents_and_tool_continuation() {
         let mut owner = RequestMarkers::begin(Some(id("typed")), vec![id("typed")], false).unwrap();
         let stamp = |owner: &mut RequestMarkers, value: Value| {
-            let mut frame = Utf16JsonProjection::plain(value);
+            let mut frame = Utf16JsonProjection::from_serde_value(&value).unwrap();
             owner.stamp(&mut frame).unwrap();
-            frame.value
+            serde_json::from_str(&frame.to_json_string().unwrap()).unwrap()
         };
-        assert!(stamp(
-            &mut owner,
-            json!({"type":"stream_event","event":{"type":"ping"}})
-        )
-        .get("user_message_uuid")
-        .is_none());
-        assert!(stamp(
-            &mut owner,
-            json!({"type":"assistant","parent_tool_use_id":"child"})
-        )
-        .get("user_message_uuid")
-        .is_none());
+        assert!(
+            stamp(
+                &mut owner,
+                json!({"type":"stream_event","event":{"type":"ping"}})
+            )
+            .get("user_message_uuid")
+            .is_none()
+        );
+        assert!(
+            stamp(
+                &mut owner,
+                json!({"type":"assistant","parent_tool_use_id":"child"})
+            )
+            .get("user_message_uuid")
+            .is_none()
+        );
         assert_eq!(
             stamp(&mut owner, json!({"type":"assistant"}))["user_message_uuid"],
             "typed"
@@ -329,15 +327,19 @@ mod tests {
         );
         owner.note_attachment(&attachment("later", false)).unwrap();
         owner.note_command_started(id("later")).unwrap();
-        assert!(stamp(&mut owner, json!({"type":"assistant"}))
+        assert!(
+            stamp(&mut owner, json!({"type":"assistant"}))
+                .get("user_message_uuid")
+                .is_none()
+        );
+        assert!(
+            stamp(
+                &mut owner,
+                json!({"type":"stream_event","event":{"type":"message_start"}})
+            )
             .get("user_message_uuid")
-            .is_none());
-        assert!(stamp(
-            &mut owner,
-            json!({"type":"stream_event","event":{"type":"message_start"}})
-        )
-        .get("user_message_uuid")
-        .is_none());
+            .is_none()
+        );
         assert_eq!(
             stamp(&mut owner, json!({"type":"result"}))["user_message_uuids"],
             json!(["typed", "later"])
@@ -360,7 +362,7 @@ mod tests {
     fn meta_consumption_restamps_each_kind_and_marker_carrier_keeps_unpaired_utf16() {
         let exact = Utf16JsonProjection::parse(r#""\ud800""#).unwrap();
         let mut owner = RequestMarkers::begin(Some(exact.clone()), vec![exact], true).unwrap();
-        let mut first = Utf16JsonProjection::plain(json!({"type":"assistant"}));
+        let mut first = Utf16JsonProjection::parse(r#"{"type":"assistant"}"#).unwrap();
         owner.stamp(&mut first).unwrap();
         assert_eq!(
             first.to_json_string().unwrap(),
@@ -368,9 +370,9 @@ mod tests {
         );
         owner.note_attachment(&attachment("human", false)).unwrap();
         owner.note_command_started(id("human")).unwrap();
-        let mut second = Utf16JsonProjection::plain(json!({"type":"assistant"}));
+        let mut second = Utf16JsonProjection::parse(r#"{"type":"assistant"}"#).unwrap();
         owner.stamp(&mut second).unwrap();
-        assert_eq!(second.value["user_message_uuid"], "human");
+        assert_eq!(second.string_at("/user_message_uuid"), Some("human"));
         assert_eq!(
             second
                 .subprojection("/user_message_uuids/0")

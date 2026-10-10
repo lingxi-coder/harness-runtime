@@ -193,7 +193,7 @@ define_client_event! {
         messages_after: u32,
         bytes_saved: u64,
         #[serde(default)]
-        summary: String,
+        summary: ClientTextDto,
     },
 
     // ── Listing / screen events (F1-05) ───────────────────────────────────

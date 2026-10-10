@@ -130,17 +130,16 @@ fn native_opening_state(
     let sid = session_id.as_uuid().to_string();
     let row = transcript
         .lines()
-        .filter_map(|line| {
-            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
-                .ok()
-                .map(|projection| projection.value)
+        .filter_map(|line| lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line).ok())
+        .filter(|row| {
+            row.string_at("/type") == Some("cost-state")
+                && row.string_at("/sessionId") == Some(sid.as_str())
         })
-        .filter(|row| row["type"] == "cost-state" && row["sessionId"] == sid)
         .last();
     let Some(row) = row else { return Ok(None) };
     let mut state = CostState {
         session_id,
-        total_nano_usd: nano_usd(&row["totalCostUSD"])?,
+        total_nano_usd: nano_usd(row.number_at("/totalCostUSD"))?,
         total_api_duration_ms: counter(&row, "totalAPIDuration"),
         total_api_duration_without_retries_ms: counter(&row, "totalAPIDurationWithoutRetries"),
         total_tool_duration_ms: counter(&row, "totalToolDuration"),
@@ -148,9 +147,19 @@ fn native_opening_state(
         total_lines_removed: counter(&row, "totalLinesRemoved"),
         ..Default::default()
     };
-    if let Some(models) = row["modelUsage"].as_object() {
-        for (model, usage) in models {
-            let provider = match usage["provider"].as_str() {
+    if let Ok(models) = row.subprojection("/modelUsage") {
+        for entry in models.object_entries().unwrap_or_default() {
+            let model = String::from_utf16(&entry.code_units)
+                .map_err(|_| "native cost state model is not valid Unicode")?;
+            let usage = models
+                .subprojection_property_units(entry.code_units)
+                .map_err(|error| error.to_string())?;
+            let provider_name = usage
+                .string_units("/provider")
+                .map(|units| String::from_utf16(&units))
+                .transpose()
+                .map_err(|_| "native cost state provider is not valid Unicode")?;
+            let provider = match provider_name.as_deref() {
                 None | Some("firstParty") => ProviderId::Anthropic,
                 Some("bedrock") => ProviderId::AmazonBedrock,
                 Some("openai") => ProviderId::OpenAI,
@@ -163,7 +172,7 @@ fn native_opening_state(
                 provider,
                 model: model.clone(),
             };
-            let web_search_requests = u32::try_from(counter(usage, "webSearchRequests"))
+            let web_search_requests = u32::try_from(counter(&usage, "webSearchRequests"))
                 .map_err(|_| "native web-search counter overflow")?;
             state.total_web_search_requests = state
                 .total_web_search_requests
@@ -172,11 +181,11 @@ fn native_opening_state(
                 model_ref: model_ref.clone(),
                 usage: Usage {
                     tokens: TokenUsage {
-                        input: counter(usage, "inputTokens"),
-                        output: counter(usage, "outputTokens"),
-                        reasoning_output: counter(usage, "thinkingTokens"),
-                        cache_read: counter(usage, "cacheReadInputTokens"),
-                        cache_write: counter(usage, "cacheCreationInputTokens"),
+                        input: counter(&usage, "inputTokens"),
+                        output: counter(&usage, "outputTokens"),
+                        reasoning_output: counter(&usage, "thinkingTokens"),
+                        cache_read: counter(&usage, "cacheReadInputTokens"),
+                        cache_write: counter(&usage, "cacheCreationInputTokens"),
                         ..Default::default()
                     },
                     server_tool_use: Some(ServerToolUsage {
@@ -184,11 +193,15 @@ fn native_opening_state(
                     }),
                     ..Default::default()
                 },
-                cache_read_input_tokens: counter(usage, "cacheReadInputTokens"),
-                cache_creation_input_tokens: counter(usage, "cacheCreationInputTokens"),
-                cost_nano_usd: nano_usd(&usage["costUSD"])?,
+                cache_read_input_tokens: counter(&usage, "cacheReadInputTokens"),
+                cache_creation_input_tokens: counter(&usage, "cacheCreationInputTokens"),
+                cost_nano_usd: nano_usd(usage.number_at("/costUSD"))?,
             };
-            if row["hasUnknownModelCost"].as_bool() == Some(true) && model_usage.cost_nano_usd == 0
+            if row
+                .get_property("hasUnknownModelCost")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+                && model_usage.cost_nano_usd == 0
             {
                 state.unpriced_models.insert(model_ref.clone());
             }
@@ -198,14 +211,21 @@ fn native_opening_state(
     Ok(Some(state))
 }
 
-fn counter(row: &serde_json::Value, name: &str) -> u64 {
-    row[name].as_u64().unwrap_or(0)
+fn counter(row: &lingxi_core::types::utf16_json::Utf16JsonProjection, name: &str) -> u64 {
+    row.get_property(name)
+        .and_then(|value| value.as_number())
+        .filter(|value| {
+            value.is_finite()
+                && *value >= 0.0
+                && value.fract() == 0.0
+                && *value < 18_446_744_073_709_551_616.0
+        })
+        .map(|value| value as u64)
+        .unwrap_or(0)
 }
 
-fn nano_usd(value: &serde_json::Value) -> Result<u64, String> {
-    let usd = value
-        .as_f64()
-        .ok_or("native cost state has no numeric USD value")?;
+fn nano_usd(value: Option<f64>) -> Result<u64, String> {
+    let usd = value.ok_or("native cost state has no numeric USD value")?;
     if !usd.is_finite() || usd < 0.0 || usd > u64::MAX as f64 / 1_000_000_000.0 {
         return Err("native cost state USD value is out of range".into());
     }

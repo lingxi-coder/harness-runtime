@@ -73,7 +73,11 @@ pub fn parse_main_session_agent_message_rows(
             .find(|row| row.uuid == message_uuid);
         let api_error_json = match original {
             Some(row)
-                if row.extra.get("isApiErrorMessage") == Some(&serde_json::Value::Bool(true)) =>
+                if row
+                    .extra
+                    .get_property("isApiErrorMessage")
+                    .and_then(|value| value.as_bool())
+                    == Some(true) =>
             {
                 Some(
                     String::from_utf8(
@@ -85,8 +89,7 @@ pub fn parse_main_session_agent_message_rows(
             }
             Some(row) => row
                 .extra
-                .get("server_fallback_api_error_json")
-                .and_then(serde_json::Value::as_str)
+                .string_at("/server_fallback_api_error_json")
                 .map(str::to_owned),
             None => None,
         };
@@ -103,42 +106,11 @@ pub fn parse_main_session_agent_message_rows(
 fn session_agent_message_from_projection(
     row: &lingxi_core::types::utf16_json::Utf16JsonProjection,
 ) -> Result<lingxi_core::types::ConversationMessage, String> {
-    use lingxi_core::types::{ContentBlock, ConversationMessage};
-
-    let value = row
-        .value
-        .get("message")
-        .cloned()
-        .ok_or_else(|| "session-agent transcript row omitted its message".to_string())?;
-    let mut message: ConversationMessage = serde_json::from_value(value)
-        .map_err(|error| format!("invalid session-agent message: {error}"))?;
-    let content = match &mut message {
-        ConversationMessage::User { content, .. }
-        | ConversationMessage::Assistant { content, .. } => content,
-        ConversationMessage::System { .. } => return Ok(message),
-    };
-    for (index, block) in content.iter_mut().enumerate() {
-        let pointer = format!("/message/content/{index}/text");
-        let Some(code_units) = row.string_units(&pointer) else {
-            continue;
-        };
-        let ContentBlock::Text { text, citations } = block else {
-            return Err(format!(
-                "session-agent exact text points to a non-text block at {pointer}"
-            ));
-        };
-        if String::from_utf16_lossy(&code_units) != *text {
-            return Err(format!(
-                "session-agent exact text display does not match {pointer}"
-            ));
-        }
-        *block = ContentBlock::TextJsUtf16 {
-            text: text.clone(),
-            utf16_code_units: code_units,
-            citations: citations.clone(),
-        };
-    }
-    Ok(message)
+    let source = row
+        .subprojection("/message")
+        .map_err(|error| error.to_string())?;
+    let raw = source.to_json_string().map_err(|error| error.to_string())?;
+    serde_json::from_str(&raw).map_err(|error| format!("invalid session-agent message: {error}"))
 }
 
 /// Read or explicitly import identity facts through the session's existing writer.
@@ -189,7 +161,9 @@ fn parse_session_agent_message_rows_with_identity(
             .map_err(|error| format!("invalid session-agent transcript UTF-8: {error}"))?;
         let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line)
             .map_err(|error| format!("invalid session-agent transcript row: {error}"))?;
-        let value = &projection.value;
+        let decoded = lingxi_core::types::exact_json::parse_exact_json(line)
+            .map_err(|error| error.to_string())?;
+        let value = &decoded.value;
         // Source-attachment sidecars retain a duplicate `message` projection
         // beside their payload; they are not another conversation row.
         if value.get("type").and_then(serde_json::Value::as_str) == Some("attachment") {
@@ -221,13 +195,12 @@ fn parse_session_agent_message_rows_with_identity(
             message_index,
             message_uuid,
             message,
-            api_error_json: value
-                .get("server_fallback_api_error_json")
-                .and_then(serde_json::Value::as_str)
+            api_error_json: projection
+                .string_at("/server_fallback_api_error_json")
                 .map(str::to_owned)
                 .or_else(|| {
                     (value.get("isApiErrorMessage") == Some(&serde_json::Value::Bool(true)))
-                        .then(|| serde_json::to_string(value).ok())
+                        .then(|| projection.to_json_string().ok())
                         .flatten()
                 }),
         });
@@ -285,6 +258,10 @@ pub fn session_agent_conversation_is_visible(
             }
             | lingxi_core::types::ConversationMessage::User {
                 is_visible_in_transcript_only: true,
+                turn_companion: None,
+                usage_limit_note: None,
+                origin: None,
+                turn_origin: None,
                 ..
             }
     )

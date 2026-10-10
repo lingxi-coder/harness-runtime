@@ -486,6 +486,7 @@ impl OutputStream for RecordingFallbackOutput {
         _tool: &str,
         _model_text: &Utf16JsonProjection,
         _result: &Utf16JsonProjection,
+        _mcp_meta: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
     ) {
     }
 

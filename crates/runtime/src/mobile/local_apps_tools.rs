@@ -33,6 +33,7 @@
 
 use std::sync::Arc;
 
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::Value;
@@ -40,7 +41,7 @@ use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
     DescriptionOptions, InterruptBehavior, PromptOptions, Tool, ToolCallResult, ToolError,
-    ToolStaticContext,
+    ToolInputRepairMetadata, ToolInputRepairSchema, ToolInputSchemaProvenance, ToolStaticContext,
 };
 
 use crate::mobile::local_apps_mcp::LocalAppsMcpTransport;
@@ -141,8 +142,8 @@ pub struct LocalAppTool {
     name: &'static str,
     /// Provider operation this dispatches to, e.g. `build`.
     operation: &'static str,
-    description: String,
-    input_schema: Value,
+    description: Utf16JsonProjection,
+    input_schema: Utf16JsonProjection,
     read_only: bool,
     /// The local app this SESSION is rooted in, resolved once at construction
     /// from the engine cwd.
@@ -156,7 +157,7 @@ pub struct LocalAppTool {
     /// model finds it through ToolSearch instead of carrying its description
     /// and schema in every request.
     defer: bool,
-    search_hint: Option<String>,
+    search_hint: Option<Utf16JsonProjection>,
     transport: Arc<LocalAppsMcpTransport>,
 }
 
@@ -165,12 +166,12 @@ impl LocalAppTool {
     pub fn new(
         name: &'static str,
         operation: &'static str,
-        description: String,
-        input_schema: Value,
+        description: Utf16JsonProjection,
+        input_schema: Utf16JsonProjection,
         read_only: bool,
         session_app_id: Option<String>,
         defer: bool,
-        search_hint: Option<String>,
+        search_hint: Option<Utf16JsonProjection>,
         transport: Arc<LocalAppsMcpTransport>,
     ) -> Self {
         Self {
@@ -285,8 +286,16 @@ impl Tool for LocalAppTool {
         self.name
     }
 
-    fn input_schema(&self) -> &Value {
+    fn input_schema(&self) -> &Utf16JsonProjection {
         &self.input_schema
+    }
+
+    fn input_repair_metadata(&self) -> ToolInputRepairMetadata {
+        ToolInputRepairMetadata::Known {
+            schema: ToolInputRepairSchema::Advertised,
+            schema_provenance: ToolInputSchemaProvenance::GeneratedBuiltin,
+            exempt_top_level_keys: None,
+        }
     }
 
     fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
@@ -303,8 +312,8 @@ impl Tool for LocalAppTool {
         self.defer
     }
 
-    fn search_hint(&self) -> Option<&str> {
-        self.search_hint.as_deref()
+    fn search_hint(&self) -> Option<Utf16JsonProjection> {
+        self.search_hint.clone()
     }
 
     fn max_result_size_chars(&self) -> usize {
@@ -353,7 +362,7 @@ impl Tool for LocalAppTool {
     /// (ten minutes), not an open-ended build — and buys the guarantee
     /// that the model always learns the outcome of the mutation it just
     /// caused, instead of leaving durable state an engine restart must repair.
-    fn interrupt_behavior(&self, _input: &Value) -> InterruptBehavior {
+    fn interrupt_behavior(&self, _input: &Utf16JsonProjection) -> InterruptBehavior {
         if self.operation == "create" || self.operation == "scaffold" {
             InterruptBehavior::Block
         } else {
@@ -361,7 +370,7 @@ impl Tool for LocalAppTool {
         }
     }
 
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+    fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
         // TRUE for all of them, matching the MCP adapter these replaced.
         //
         // This answers "may this overlap other tools?", NOT "is this a
@@ -376,9 +385,12 @@ impl Tool for LocalAppTool {
     /// Input-aware, like `ConfigTool`/`ArtifactTool`: a per-tool flag cannot
     /// express `read_app_events`, which only leaves the cursor alone when the
     /// caller passes `peek=true`.
-    fn is_read_only(&self, input: &Value) -> bool {
+    fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         if self.operation == "read_app_events" {
-            return input.get("peek").and_then(Value::as_bool).unwrap_or(false);
+            return input
+                .get_property("peek")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
         }
         self.read_only
     }
@@ -386,11 +398,15 @@ impl Tool for LocalAppTool {
     /// The tool has NO opinion — the policy layer decides from the defaults
     /// table plus any matching rule. Same "allow-all-gate" convention the
     /// native file tools use; the real gate is `PolicyPermissionGate`.
-    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(
+        &self,
+        input: &Utf16JsonProjection,
+        ctx: &ToolUseContext,
+    ) -> PermissionResult {
         if self.bound_app_id(ctx).is_none() && self.requires_bound_session_for_auto_allow() {
             let target = input
-                .get("app_id")
-                .and_then(Value::as_str)
+                .get_property("app_id")
+                .and_then(|value| value.as_str().map(str::to_owned))
                 .map(|app_id| format!(" app `{app_id}`"))
                 .unwrap_or_else(|| " local apps outside an app-bound workspace".to_string());
             return PermissionResult::Ask {
@@ -403,7 +419,8 @@ impl Tool for LocalAppTool {
                         "This conversation is not bound to a single local app. \
                          Confirm before {} accesses{}.",
                         self.name, target
-                    ),
+                    )
+                    .into(),
                     options: vec!["Deny".into(), "Allow once".into(), "Always allow".into()],
                 },
                 pending_classifier_check: None,
@@ -420,17 +437,24 @@ impl Tool for LocalAppTool {
         }
     }
 
-    async fn description(&self, _input: &Value, _opts: &DescriptionOptions) -> String {
-        self.description.clone()
+    async fn description(
+        &self,
+        _input: &Utf16JsonProjection,
+        _opts: &DescriptionOptions,
+    ) -> String {
+        self.description
+            .string_at("")
+            .unwrap_or_default()
+            .to_owned()
     }
 
-    async fn prompt(&self, _opts: &PromptOptions) -> String {
+    async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
         self.description.clone()
     }
 
     async fn call(
         &self,
-        input: Value,
+        input: Utf16JsonProjection,
         _ctx: ToolUseContext,
         progress_tx: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -439,14 +463,16 @@ impl Tool for LocalAppTool {
         // these replaced emitted one, so dropping it was a visible regression.
         // Best-effort `try_send`, like that adapter.
         if let Some(tool_use_id) = _ctx.tool_use_id.clone() {
+            let data = serde_json::json!({
+                "type": "local_app_progress",
+                "status": "started",
+                "tool": self.name,
+                "operation": self.operation,
+            });
             let _ = progress_tx.try_send(tool_api::progress::ToolProgress {
                 tool_use_id,
-                data: serde_json::json!({
-                    "type": "local_app_progress",
-                    "status": "started",
-                    "tool": self.name,
-                    "operation": self.operation,
-                }),
+                data: Utf16JsonProjection::from_serde_value(&data)
+                    .expect("generated progress event is valid JSON"),
             });
         }
         // HOST-BIND `app_id` to the session's own app.
@@ -464,34 +490,57 @@ impl Tool for LocalAppTool {
         // created), and there the ordinary permission gate is the control.
         let input = match self.bound_app_id(&_ctx) {
             None => input,
-            Some(session_app) => match input.get("app_id") {
+            Some(session_app) => match input.get_property("app_id") {
                 // Absent → fill it in, so a workspace session never has to name
                 // its own app.
                 None => {
                     let mut bound = input;
-                    if let Some(object) = bound.as_object_mut() {
-                        object.insert("app_id".into(), Value::String(session_app));
+                    if bound.object_entries().is_some() {
+                        bound
+                            .set_field("app_id", session_app.into())
+                            .map_err(|error| {
+                                ToolError::Internal(
+                                    format!("could not bind local-app id: {error}").into(),
+                                )
+                            })?;
                     }
                     bound
                 }
-                Some(Value::String(requested)) if *requested == session_app => input,
+                Some(requested) if requested.as_str() == Some(session_app.as_str()) => input,
                 // A mismatch OR a non-string (`null`, a number, an array) fails
                 // CLOSED. Letting a non-string through would slip past both the
                 // comparison and the fill-in and reach the provider unbound.
-                other => {
-                    return Err(ToolError::InvalidInput(format!(
-                        "{}: app_id {other:?} does not belong to this workspace \
+                Some(_) => {
+                    let requested = input
+                        .subprojection("/app_id")
+                        .ok()
+                        .and_then(|value| value.to_json_string().ok())
+                        .unwrap_or_else(|| "<unserializable>".into());
+                    return Err(ToolError::InvalidInput(
+                        format!(
+                            "{}: app_id {requested} does not belong to this workspace \
                          (bound to {session_app:?})",
-                        self.name
-                    )));
+                            self.name
+                        )
+                        .into(),
+                    ));
                 }
             },
         };
+        // The Local Apps host operation API still consumes serde values. Use
+        // the same explicit raw-JSON boundary as the MCP transport so invalid
+        // source UTF-16 is rejected rather than silently replacement-decoded.
+        let input_json = input
+            .to_json_string()
+            .map_err(|error| ToolError::Internal(error.to_string().into()))?;
+        let input: Value = serde_json::from_str(&input_json).map_err(|error| {
+            ToolError::Internal(format!("invalid source JSON value: {error}").into())
+        })?;
         let result = self
             .transport
             .call_host_operation(self.operation, input)
             .await
-            .map_err(|error| ToolError::Internal(error.to_string()))?;
+            .map_err(|error| ToolError::Internal(error.to_string().into()))?;
         Ok(envelope_to_tool_result(result))
     }
 }
@@ -502,7 +551,7 @@ impl Tool for LocalAppTool {
 /// metadata/summary path.  Local App QA metadata is Host-shaped and small, but
 /// treating the envelope as untrusted keeps a malformed evidence response from
 /// smuggling a second pixel payload into session text.
-fn safe_ephemeral_metadata(value: &Value) -> Value {
+fn safe_ephemeral_metadata_value(value: &Value) -> Value {
     const MAX_STRING_CHARS: usize = 4096;
     const MAX_ARRAY_ITEMS: usize = 256;
     const MAX_ID_LIST_ITEMS: usize = 4096;
@@ -566,15 +615,95 @@ fn safe_ephemeral_metadata(value: &Value) -> Value {
     sanitize(value, MAX_ARRAY_ITEMS)
 }
 
-fn ephemeral_image_summary(metadata: &Value, image_count: usize) -> String {
-    let details = serde_json::json!({
-        "image_count": image_count,
-        "metadata": metadata,
-    });
+fn safe_ephemeral_metadata(value: &Utf16JsonProjection) -> Utf16JsonProjection {
+    // The consumer owns a reversible namespace for unpaired source units.
+    // Sanitize the bounded metadata shape, then restore those units before it
+    // crosses back into Source-bearing result data.
+    let consumer = lingxi_core::types::utf16_json::Utf16JsonConsumer::new(&[value])
+        .expect("MCP metadata can be represented by the reversible consumer");
+    let sanitized = safe_ephemeral_metadata_value(&consumer.values()[0]);
+    consumer
+        .restore(&sanitized)
+        .expect("sanitized MCP metadata restores to its exact source projection")
+}
+
+fn ephemeral_image_summary(
+    metadata: &Utf16JsonProjection,
+    image_count: usize,
+) -> Utf16JsonProjection {
+    let count =
+        Utf16JsonProjection::parse(&image_count.to_string()).expect("image count is valid JSON");
+    let details = Utf16JsonProjection::object(vec![
+        ("image_count".into(), count),
+        ("metadata".into(), metadata.clone()),
+    ])
+    .expect("ephemeral image details form an object");
+    let details_json = details
+        .to_json_string()
+        .expect("ephemeral image details are valid source JSON");
     format!(
         "Temporary local-app view capture attached; pixels are not persisted. QA metadata: {}",
-        serde_json::to_string(&details).unwrap_or_else(|_| "{}".into())
+        details_json
     )
+    .into()
+}
+
+fn mcp_text_content(content: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
+    if let Some(units) = content.string_units("") {
+        return Some(
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                .expect("MCP text content is a valid source string"),
+        );
+    }
+    let length = content.array_len("")?;
+    let mut chunks = Vec::new();
+    for index in 0..length {
+        let pointer = format!("/{index}/text");
+        if let Some(units) = content.string_units(&pointer) {
+            chunks.push(units);
+        }
+    }
+    if chunks.is_empty() {
+        return None;
+    }
+    let total_units = chunks.iter().map(Vec::len).sum::<usize>() + chunks.len().saturating_sub(1);
+    let mut units = Vec::with_capacity(total_units);
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        if index > 0 {
+            units.push(u16::from(b'\n'));
+        }
+        units.extend(chunk);
+    }
+    Some(
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("joined MCP text is a valid source string"),
+    )
+}
+
+fn mcp_image_content(
+    content: &Utf16JsonProjection,
+) -> Vec<(Utf16JsonProjection, Utf16JsonProjection)> {
+    let Some(length) = content.array_len("") else {
+        return Vec::new();
+    };
+    (0..length)
+        .filter_map(|index| {
+            let block = content.subprojection(&format!("/{index}")).ok()?;
+            if block.string_at("/type") != Some("image") {
+                return None;
+            }
+            let data = block.subprojection("/data").ok()?;
+            if data.string_units("").is_none_or(|units| units.is_empty()) {
+                return None;
+            }
+            let media_type = block
+                .subprojection("/mimeType")
+                .ok()
+                .filter(|value| value.string_units("").is_some())
+                .unwrap_or_else(|| "image/jpeg".into());
+            Some((data, media_type))
+        })
+        .collect()
 }
 
 /// Turn the provider's MCP envelope into a builtin tool result.
@@ -596,22 +725,12 @@ fn envelope_to_tool_result(result: lingxi_core::host::McpToolResultDto) -> ToolC
     //
     // Unwrap it: the structured payload is the data, and the envelope's
     // text is the model-facing rendering.
-    let text = result
-        .content
-        .as_array()
-        .and_then(|blocks| {
-            let joined: Vec<&str> = blocks
-                .iter()
-                .filter_map(|block| block.get("text").and_then(Value::as_str))
-                .collect();
-            (!joined.is_empty()).then(|| joined.join("\n"))
-        })
-        .or_else(|| result.content.as_str().map(str::to_owned));
+    let text = mcp_text_content(&result.content);
     let data = result
         .structured_content
         .clone()
-        .or_else(|| text.clone().map(Value::String))
-        .unwrap_or(Value::Null);
+        .or_else(|| text.clone())
+        .unwrap_or_else(|| Utf16JsonProjection::parse("null").expect("null is valid JSON"));
     // A capture carries an IMAGE content block, and the unwrap above keeps
     // only `text` blocks — so handing `from_data` the structured metadata
     // alone gives the model the viewport and SILENTLY DROPS THE FRAME. That
@@ -634,26 +753,7 @@ fn envelope_to_tool_result(result: lingxi_core::host::McpToolResultDto) -> ToolC
     // that case is an error (`local_apps_mcp.rs` answers `tool_error` for an
     // empty frame); falling through to the text path here agrees with it
     // instead of manufacturing a success.
-    let image_blocks: Vec<(String, String)> = result
-        .content
-        .as_array()
-        .into_iter()
-        .flat_map(|blocks| blocks.iter())
-        .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
-        .filter_map(|block| {
-            let data = block.get("data").and_then(Value::as_str)?;
-            (!data.is_empty()).then(|| {
-                (
-                    data.to_string(),
-                    block
-                        .get("mimeType")
-                        .and_then(Value::as_str)
-                        .unwrap_or("image/jpeg")
-                        .to_string(),
-                )
-            })
-        })
-        .collect();
+    let image_blocks = mcp_image_content(&result.content);
     if !image_blocks.is_empty() {
         // Keep the established `{type:image,file:{base64,type}}` shape so the
         // shared turn egress emits a real image content block. The generic
@@ -661,17 +761,34 @@ fn envelope_to_tool_result(result: lingxi_core::host::McpToolResultDto) -> ToolC
         // a safe count for any additional frames rather than duplicating their
         // base64 in metadata or model text.
         let (base64, media_type) = &image_blocks[0];
-        let metadata =
-            safe_ephemeral_metadata(&result.structured_content.clone().unwrap_or(Value::Null));
+        let metadata = result
+            .structured_content
+            .as_ref()
+            .map(safe_ephemeral_metadata)
+            .unwrap_or_else(|| Utf16JsonProjection::parse("null").expect("null is valid JSON"));
         let summary = ephemeral_image_summary(&metadata, image_blocks.len());
-        let mut out = ToolCallResult::from_data(serde_json::json!({
-            "type": "image",
-            "file": { "base64": base64, "type": media_type },
-            "image_count": image_blocks.len(),
-            "metadata": metadata,
-            "_lingxi_ephemeral": true,
-            "summary": summary,
-        }));
+        let file = Utf16JsonProjection::object(vec![
+            ("base64".into(), base64.clone()),
+            ("type".into(), media_type.clone()),
+        ])
+        .expect("local-app image file forms an object");
+        let data = Utf16JsonProjection::object(vec![
+            ("type".into(), "image".into()),
+            ("file".into(), file),
+            (
+                "image_count".into(),
+                Utf16JsonProjection::parse(&image_blocks.len().to_string())
+                    .expect("image count is valid JSON"),
+            ),
+            ("metadata".into(), metadata),
+            (
+                "_lingxi_ephemeral".into(),
+                Utf16JsonProjection::parse("true").expect("true is valid JSON"),
+            ),
+            ("summary".into(), summary.clone()),
+        ])
+        .expect("ephemeral image result forms an object");
+        let mut out = ToolCallResult::from_data(data);
         // NOT `text`: for a capture envelope `content` is image-only, so `text`
         // is None and `tool_result_to_model_text` would fall through to a JSON
         // dump of `data` — putting the ~230 KB of base64 into the tool_result
@@ -683,12 +800,19 @@ fn envelope_to_tool_result(result: lingxi_core::host::McpToolResultDto) -> ToolC
         // reason; keeping it JSON is load-bearing, because
         // `redact_ephemeral_tool_result_images` finds `_lingxi_ephemeral` by
         // PARSING this string.
+        let model_marker = Utf16JsonProjection::object(vec![
+            (
+                "_lingxi_ephemeral".into(),
+                Utf16JsonProjection::parse("true").expect("true is valid JSON"),
+            ),
+            ("summary".into(), summary),
+        ])
+        .expect("ephemeral image model marker forms an object");
         out.model_content = Some(
-            serde_json::json!({
-                "_lingxi_ephemeral": true,
-                "summary": out.data["summary"].clone(),
-            })
-            .to_string(),
+            model_marker
+                .to_json_string()
+                .expect("ephemeral image model marker is valid JSON")
+                .into(),
         );
         out.is_error = result.is_error;
         return out;
@@ -705,6 +829,35 @@ fn envelope_to_tool_result(result: lingxi_core::host::McpToolResultDto) -> ToolC
 mod tests {
     use super::*;
 
+    fn projection(value: Value) -> Utf16JsonProjection {
+        Utf16JsonProjection::from_serde_value(&value).expect("test value is valid JSON")
+    }
+
+    fn json_value(value: &Utf16JsonProjection) -> Value {
+        serde_json::from_str(&value.to_json_string().expect("projection is valid JSON"))
+            .expect("projection serializes as JSON")
+    }
+
+    fn mcp_result(
+        content: Value,
+        is_error: bool,
+        structured_content: Option<Value>,
+    ) -> lingxi_core::host::McpToolResultDto {
+        lingxi_core::host::McpToolResultDto {
+            content: projection(content),
+            is_error,
+            meta: None,
+            structured_content: structured_content.map(projection),
+        }
+    }
+
+    fn model_text(out: &ToolCallResult) -> &str {
+        out.model_content
+            .as_ref()
+            .and_then(|content| content.string_at(""))
+            .expect("model-facing content is a string")
+    }
+
     /// A captured frame must survive the envelope unwrap.
     ///
     /// REGRESSION: it did not. The unwrap kept only `text` blocks, so the model
@@ -719,40 +872,35 @@ mod tests {
     #[test]
     fn a_captured_frame_survives_the_envelope_unwrap() {
         const DATA: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
-        let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
-            result_projection: None,
-
-            content: serde_json::json!([
+        let out = envelope_to_tool_result(mcp_result(
+            serde_json::json!([
                 { "type": "image", "data": DATA, "mimeType": "image/jpeg" }
             ]),
-            is_error: false,
-            structured_content: Some(serde_json::json!({
+            false,
+            Some(serde_json::json!({
                 "ok": true,
                 "action": "capture_view",
                 "viewport": { "width": 414, "height": 804 },
             })),
-            ..Default::default()
-        });
+        ));
 
-        assert_eq!(out.data["type"], "image", "the frame must ride as an image");
-        assert_eq!(out.data["file"]["base64"], DATA);
-        assert_eq!(out.data["file"]["type"], "image/jpeg");
+        let data = json_value(&out.data);
+        assert_eq!(data["type"], "image", "the frame must ride as an image");
+        assert_eq!(data["file"]["base64"], DATA);
+        assert_eq!(data["file"]["type"], "image/jpeg");
         assert_eq!(
-            out.data["_lingxi_ephemeral"], true,
+            data["_lingxi_ephemeral"], true,
             "pixels must stay out of session persistence, or a QA loop that \
              captures every round grows the transcript by a JPEG a turn"
         );
         // The viewport is what makes the frame readable as evidence — the same
         // app is a different layout on a tablet, and pixels do not say which.
-        assert_eq!(out.data["metadata"]["viewport"]["width"], 414);
+        assert_eq!(data["metadata"]["viewport"]["width"], 414);
         // The model-facing STRING must not be the base64. It is what lands in
         // session history and in the client's tool-result event, and the
         // sanitizer reads `_lingxi_ephemeral` out of it by parsing it as JSON —
         // so it has to stay JSON AND stay small.
-        let model_content = out
-            .model_content
-            .as_deref()
-            .expect("an image result must carry a model-facing marker string");
+        let model_content = model_text(&out);
         assert!(
             !model_content.contains(DATA),
             "the base64 must not ride in the tool_result text: {model_content}"
@@ -771,15 +919,13 @@ mod tests {
     fn qa_image_projection_keeps_identity_dimensions_and_all_frame_count_without_pixels() {
         const FRAME_A: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
         const FRAME_B: &str = "iVBORw0KGgoAAAANSUhEUg==";
-        let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
-            result_projection: None,
-
-            content: serde_json::json!([
+        let out = envelope_to_tool_result(mcp_result(
+            serde_json::json!([
                 { "type": "image", "data": FRAME_A, "mimeType": "image/jpeg" },
                 { "type": "image", "data": FRAME_B, "mimeType": "image/png" }
             ]),
-            is_error: false,
-            structured_content: Some(serde_json::json!({
+            false,
+            Some(serde_json::json!({
                 "ok": true,
                 "qa_handle": "qa_0123456789abcdef0123456789abcdef",
                 "qa_evidence_ids": ["qa-evidence-1", "qa-evidence-2"],
@@ -797,8 +943,7 @@ mod tests {
                 // pixels through the metadata side channel.
                 "data": FRAME_A,
             })),
-            ..Default::default()
-        });
+        ));
 
         let projected = tool_api::tool_result_media::media_content_blocks(&out.data)
             .expect("the actual subagent media projection must see the image");
@@ -807,9 +952,12 @@ mod tests {
             1,
             "the established projection emits the primary frame once"
         );
-        assert_eq!(projected[0]["source"]["data"], FRAME_A);
+        assert_eq!(json_value(&projected[0])["source"]["data"], FRAME_A);
         let summary = tool_api::tool_result_media::ephemeral_summary(&out.data)
             .expect("the subagent runner must use the compact summary");
+        let summary = summary
+            .string_at("")
+            .expect("ephemeral summary is source text");
         assert!(summary.contains("qa_0123456789abcdef0123456789abcdef"));
         assert!(summary.contains("qa-evidence-1"));
         assert!(summary.contains("qa-evidence-2"));
@@ -821,7 +969,7 @@ mod tests {
         assert!(!summary.contains(FRAME_B));
 
         // The main model receives the model_content string, not `data`.
-        let model_content = out.model_content.as_deref().expect("model-facing marker");
+        let model_content = model_text(&out);
         assert!(model_content.contains("qa-evidence-2"));
         assert!(model_content.contains("primary-action"));
         assert!(!model_content.contains(FRAME_A));
@@ -844,14 +992,12 @@ mod tests {
     #[test]
     fn qa_read_evidence_image_projection_retains_evidence_identity() {
         const DATA: &str = "RkFLRS1GUkFNRQ==";
-        let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
-            result_projection: None,
-
-            content: serde_json::json!([
+        let out = envelope_to_tool_result(mcp_result(
+            serde_json::json!([
                 { "type": "image", "data": DATA, "mimeType": "image/webp" }
             ]),
-            is_error: false,
-            structured_content: Some(serde_json::json!({
+            false,
+            Some(serde_json::json!({
                 "evidence": {
                     "evidence_id": "ev-capture-9",
                     "scenario_id": "checkout",
@@ -864,12 +1010,17 @@ mod tests {
                 "qa_handle": "qa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "qa_evidence_ids": ["ev-capture-9"]
             })),
-            ..Default::default()
-        });
+        ));
         let projected = tool_api::tool_result_media::media_content_blocks(&out.data)
             .expect("QaReadEvidence capture must remain an actual image");
-        assert_eq!(projected[0]["source"]["media_type"], "image/webp");
-        let summary = tool_api::tool_result_media::ephemeral_summary(&out.data).unwrap();
+        assert_eq!(
+            json_value(&projected[0])["source"]["media_type"],
+            "image/webp"
+        );
+        let summary = tool_api::tool_result_media::ephemeral_summary(&out.data)
+            .unwrap()
+            .string_at("")
+            .expect("ephemeral summary is source text");
         for identity in ["ev-capture-9", "checkout", "ipad", "event-9", "artifact-9"] {
             assert!(
                 summary.contains(identity),
@@ -887,16 +1038,13 @@ mod tests {
     /// answers `tool_error` for an empty frame; this layer has to agree.
     #[test]
     fn an_empty_frame_falls_through_to_the_text_path() {
-        let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
-            result_projection: None,
-
-            content: serde_json::json!([{ "type": "image", "data": "", "mimeType": "image/jpeg" }]),
-            is_error: true,
-            structured_content: Some(serde_json::json!({ "ok": false })),
-            ..Default::default()
-        });
+        let out = envelope_to_tool_result(mcp_result(
+            serde_json::json!([{ "type": "image", "data": "", "mimeType": "image/jpeg" }]),
+            true,
+            Some(serde_json::json!({ "ok": false })),
+        ));
         assert!(
-            out.data.get("file").is_none(),
+            out.data.get_property("file").is_none(),
             "an empty payload must not become an image block: {:?}",
             out.data
         );
@@ -910,17 +1058,17 @@ mod tests {
     /// them would be a far larger regression than the one it fixes.
     #[test]
     fn a_text_envelope_is_unwrapped_unchanged() {
-        let out = envelope_to_tool_result(lingxi_core::host::McpToolResultDto {
-            result_projection: None,
-
-            content: serde_json::json!([{ "type": "text", "text": "{\"records\":[]}" }]),
-            is_error: false,
-            structured_content: Some(serde_json::json!({ "records": [] })),
-            ..Default::default()
-        });
-        assert!(out.data.get("type").is_none(), "not an image result");
-        assert_eq!(out.data["records"], serde_json::json!([]));
-        assert_eq!(out.model_content.as_deref(), Some("{\"records\":[]}"));
+        let out = envelope_to_tool_result(mcp_result(
+            serde_json::json!([{ "type": "text", "text": "{\"records\":[]}" }]),
+            false,
+            Some(serde_json::json!({ "records": [] })),
+        ));
+        assert!(
+            out.data.get_property("type").is_none(),
+            "not an image result"
+        );
+        assert_eq!(json_value(&out.data)["records"], serde_json::json!([]));
+        assert_eq!(model_text(&out), "{\"records\":[]}");
     }
 
     /// `LocalAppScaffold` must `Block` on interrupt, exactly like `create`.
@@ -939,8 +1087,8 @@ mod tests {
         let scaffold = LocalAppTool::new(
             "LocalAppScaffold",
             "scaffold",
-            String::new(),
-            serde_json::json!({}),
+            String::new().into(),
+            projection(serde_json::json!({})),
             false,
             None,
             false,
@@ -949,7 +1097,7 @@ mod tests {
         );
         assert!(
             matches!(
-                scaffold.interrupt_behavior(&serde_json::json!({})),
+                scaffold.interrupt_behavior(&projection(serde_json::json!({}))),
                 InterruptBehavior::Block
             ),
             "LocalAppScaffold must report InterruptBehavior::Block, not the \
@@ -961,8 +1109,8 @@ mod tests {
         let list = LocalAppTool::new(
             "LocalAppList",
             "list",
-            String::new(),
-            serde_json::json!({}),
+            String::new().into(),
+            projection(serde_json::json!({})),
             true,
             None,
             false,
@@ -970,7 +1118,7 @@ mod tests {
             transport,
         );
         assert!(matches!(
-            list.interrupt_behavior(&serde_json::json!({})),
+            list.interrupt_behavior(&projection(serde_json::json!({}))),
             InterruptBehavior::Cancel
         ));
     }

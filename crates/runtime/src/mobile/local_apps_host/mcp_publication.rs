@@ -34,6 +34,24 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+fn optional_projection_json_string(
+    value: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> Result<Option<String>, String> {
+    value
+        .map(|projection| {
+            projection
+                .to_json_string()
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+}
+
+fn source_root_string(
+    value: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+) -> Option<String> {
+    value.and_then(|projection| projection.string_at("").map(str::to_owned))
+}
+
 pub(super) fn lower_managed_mcp_status(status: AppMcpStatus) -> ManagedLocalAppMcpStatusDto {
     match status {
         AppMcpStatus::Disabled => ManagedLocalAppMcpStatusDto::Disabled,
@@ -49,15 +67,12 @@ pub(super) fn tool_meta_resource_uri(
     definition: &lingxi_core::host::McpToolDefinitionDto,
 ) -> Option<String> {
     let meta = definition.meta.as_ref()?;
-    meta.get("ui")
-        .and_then(Value::as_object)
-        .and_then(|ui| ui.get("resourceUri"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    meta.get_property("ui")
+        .and_then(|ui| ui.get_property("resourceUri"))
+        .and_then(|uri| uri.as_str().map(str::to_owned))
         .or_else(|| {
-            meta.get("openai/outputTemplate")
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            meta.get_property("openai/outputTemplate")
+                .and_then(|uri| uri.as_str().map(str::to_owned))
         })
 }
 
@@ -185,8 +200,9 @@ pub(super) fn managed_mcp_widget_resource(
         };
         let name = definition
             .title
-            .clone()
-            .or_else(|| definition.description.clone())
+            .as_ref()
+            .and_then(|value| value.string_at("").map(str::to_owned))
+            .or_else(|| source_root_string(definition.description.as_ref()))
             .unwrap_or_else(|| format!("{app_name} widget"));
         validate_managed_mcp_widget_file(layout, &resource_sha256, LOCAL_APP_WIDGET_MIME)?;
         return Ok(Some((
@@ -198,7 +214,7 @@ pub(super) fn managed_mcp_widget_resource(
             mcp::registry::ManagedLocalAppResource {
                 uri,
                 name,
-                description: definition.description.clone(),
+                description: source_root_string(definition.description.as_ref()),
                 mime_type: Some(LOCAL_APP_WIDGET_MIME.into()),
                 meta: None,
             },
@@ -215,14 +231,16 @@ pub(super) fn mcp_tool_surface(
 ) -> Result<LocalAppMcpToolSurfaceDto, String> {
     Ok(LocalAppMcpToolSurfaceDto {
         name: definition.name,
-        title: definition.title,
-        description: definition.description,
-        input_schema_json: serde_json::to_string(&definition.input_schema)
+        title: source_root_string(definition.title.as_ref()),
+        description: source_root_string(definition.description.as_ref()),
+        input_schema_json: definition
+            .input_schema
+            .to_json_string()
             .map_err(|error| error.to_string())?,
-        output_schema_json: optional_json_string(definition.output_schema.as_ref())?,
+        output_schema_json: optional_projection_json_string(definition.output_schema.as_ref())?,
         annotations_json: optional_json_string(definition.annotations.as_ref())?,
         execution_json: optional_json_string(definition.execution.as_ref())?,
-        visible_meta_json: optional_json_string(definition.meta.as_ref())?,
+        visible_meta_json: optional_projection_json_string(definition.meta.as_ref())?,
         semantic_flow_json: serde_json::to_string(&flow).map_err(|error| error.to_string())?,
         permission_ceiling: match ceiling {
             lingxi_core::host::McpPermissionCeiling::Allow => "allow",

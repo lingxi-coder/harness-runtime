@@ -59,14 +59,6 @@ use super::{
     LOCAL_APPS_MCP_TIMEOUT_MS, MOBILE_CRON_HANDLES,
 };
 
-fn source_string_projection(text: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
-    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
-        text.to_owned(),
-        text.encode_utf16().collect(),
-    )
-    .expect("Rust strings are valid UTF-16 projections")
-}
-
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
 /// `harness_runtime::desktop::build`).
@@ -2014,11 +2006,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     // File-backed plugin changes take effect when the native client reconnects.
     let plugin_settings = mobile_provider_settings(&cfg)
         .map_err(|error| MobileBuildError::Orchestrator(format!("plugin settings: {error}")))?;
-    let plugin_settings_value = serde_json::to_value(&plugin_settings)
-        .map_err(|error| MobileBuildError::Orchestrator(format!("plugin settings: {error}")))?;
-    let plugin_configs = plugin_settings_value
-        .as_object()
-        .map(plugin::PluginUserConfig::from_settings_map)
+    let plugin_configs = plugin_settings
+        .plugin_configs
+        .as_ref()
+        .map(plugin::PluginUserConfig::from_plugin_configs_source)
         .unwrap_or_default();
     let enabled_plugins: std::collections::BTreeMap<String, bool> = plugin_settings
         .enabled_plugins
@@ -2802,10 +2793,16 @@ pub(super) async fn build_mobile_inner_with_ask(
                         .map(|outcome| {
                             let tail =
                                 &outcome.agent_id[outcome.agent_id.len().saturating_sub(4)..];
-                            format!(
-                                "\u{2442} started code-review in background as {} ({tail})",
-                                outcome.name
+                            let mut units = "\u{2442} started code-review in background as "
+                                .encode_utf16()
+                                .collect::<Vec<_>>();
+                            units.extend(outcome.name.string_units("").unwrap_or_default());
+                            units.extend(format!(" ({tail})").encode_utf16());
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                                String::from_utf16_lossy(&units),
+                                units,
                             )
+                            .expect("background launch text is a valid UTF-16 string")
                         })
                         .map_err(|error| error.to_string())
                 })
@@ -2848,7 +2845,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             cwd.clone(),
             device_skill_tools.clone(),
         );
-        if let Some(parsed) = parse_slash_command("/reload-skills") {
+        if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
             let _ = handler.handle(&parsed).await;
         }
     }
@@ -3457,41 +3454,38 @@ pub fn build_mobile_engine_inner(
                         .as_ref()
                         .and_then(|command| command.text_projection().map(|source| (command, source)))
                         .map(|(command, source)| {
-                            let raw = source.string_at("").unwrap_or_default();
                             if command.source == msgqueue::QueueSource::Cron {
                                 if let Some(state) = loop_scheduler.loop_runtime() {
                                     state
                                         .try_resolve_loop_default_fire(
-                                            raw,
+                                            source,
                                             &orch.project_root(),
                                             &orch.current_cwd(),
                                         )
                                         .map(|resolved| {
-                                            resolved.map(|resolved| {
-                                                if resolved == raw {
-                                                    source.clone()
-                                                } else {
-                                                    source_string_projection(&resolved)
-                                                }
-                                            })
+                                            if resolved == *source {
+                                                (*source).clone()
+                                            } else {
+                                                resolved
+                                            }
                                         })
                                         .inspect(|_prompt| {
                                             if command.uuid.starts_with("loop-wakeup-") {
-                                                state.begin_tick(raw.into());
+                                                state.begin_tick((*source).clone());
                                             } else {
                                                 state.take_in_flight_prompt();
                                                 state.invalidate_noop_streak();
                                             }
                                         })
                                 } else {
-                                    Ok(Some(source.clone()))
+                                    Ok((*source).clone())
                                 }
                             } else {
                                 if let Some(state) = loop_scheduler.loop_runtime() {
                                     state.take_in_flight_prompt();
                                     state.invalidate_noop_streak();
                                 }
-                                Ok(Some(source.clone()))
+                                Ok((*source).clone())
                             }
                         })
                         .transpose();

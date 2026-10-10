@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use lingxi_core::host::*;
-use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::McpConnectionId;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -96,7 +96,7 @@ impl SdkMcpTransport {
             .find(|endpoint| endpoint.server == server)
             .cloned()
             .ok_or_else(|| format!("MCP server {server} is not connected"))?;
-        let message = jsonrpc::Message::from_projection(message.clone())
+        let message = jsonrpc_message_from_projection(message)
             .map_err(|error| format!("Invalid MCP message: {error}"))?;
         endpoint
             .inbound
@@ -111,8 +111,13 @@ impl SdkMcpTransport {
         names: &[String],
         projection: Option<&Utf16JsonProjection>,
     ) -> Option<Value> {
-        let projection = projection.filter(|value| !value.value.is_null())?;
-        let value = &projection.value;
+        let projection = projection?;
+        if projection
+            .at_pointer("")
+            .is_some_and(JsonValueView::is_null)
+        {
+            return None;
+        }
         let connected: Vec<_> = self
             .endpoints
             .lock()
@@ -129,33 +134,35 @@ impl SdkMcpTransport {
             .map(|endpoint| endpoint.server.clone())
             .collect();
         let mut statuses = serde_json::Map::new();
-        let Some(entries) = value.as_object() else {
+        if projection.object_entries().is_none() {
             for name in names {
                 statuses.insert(name.clone(), json!("malformed"));
             }
             return Some(Value::Object(statuses));
-        };
+        }
         let mut manifests = self
             .manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for name in names {
-            let Some(entry) = entries.get(name) else {
+            let Some(entry) = projection.get_property(name) else {
                 continue;
             };
             let initialize = entry
-                .get("initializeResult")
-                .filter(|value| value.is_object());
+                .get_property("initializeResult")
+                .filter(|value| value.object_entries().is_some());
             let tools = entry
-                .get("toolsListResult")
+                .get_property("toolsListResult")
                 .filter(|value| !value.is_null());
-            let status = if initialize.is_none() || tools.is_some_and(|value| !value.is_object()) {
+            let status = if initialize.is_none()
+                || tools.is_some_and(|value| value.object_entries().is_none())
+            {
                 "malformed"
             } else if connected.contains(name) {
                 "already_connected"
             } else if initialize
-                .and_then(|value| value.get("protocolVersion"))
-                .and_then(Value::as_str)
+                .and_then(|value| value.get_property("protocolVersion"))
+                .and_then(|value| value.as_str())
                 != Some(::mcp::initialize_params::LATEST_PROTOCOL_VERSION)
             {
                 "protocol_version_mismatch"
@@ -192,17 +199,36 @@ fn closed() -> jsonrpc::ConnectionError {
     jsonrpc::ConnectionError::Router(jsonrpc::RouterError::WriterClosed)
 }
 
-fn capture_initialize(endpoint: &Endpoint, result: &Value) {
+fn jsonrpc_message_from_projection(
+    projection: &Utf16JsonProjection,
+) -> Result<jsonrpc::Message, serde_json::Error> {
+    let source = projection
+        .to_json_string()
+        .map_err(|error| <serde_json::Error as serde::de::Error>::custom(error.to_string()))?;
+    serde_json::from_str(&source)
+}
+
+fn projection_from_jsonrpc_message(
+    message: &jsonrpc::Message,
+) -> Result<Utf16JsonProjection, jsonrpc::ConnectionError> {
+    let source = serde_json::to_string(message).map_err(jsonrpc::RouterError::Serialize)?;
+    Utf16JsonProjection::parse(&source).map_err(projection_error)
+}
+
+fn projection_from_jsonrpc_payload(payload: &jsonrpc::JsonPayload) -> Option<Utf16JsonProjection> {
+    Utf16JsonProjection::parse(payload.as_json()).ok()
+}
+
+fn capture_initialize(endpoint: &Endpoint, result: &Utf16JsonProjection) {
     *endpoint
         .metadata
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(McpServerMetadataDto {
-        raw_capabilities: result.get("capabilities").cloned(),
-        server_info: result.get("serverInfo").cloned(),
+        raw_capabilities: result.subprojection("/capabilities").ok(),
+        server_info: result.subprojection("/serverInfo").ok(),
         instructions: result
-            .get("instructions")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+            .string_at("/instructions")
+            .and_then(|_| result.subprojection("/instructions").ok()),
         ..Default::default()
     });
 }
@@ -226,22 +252,27 @@ fn replay_manifest(endpoint: &Endpoint, message: &jsonrpc::Message) -> Replay {
                 *manifest = None;
                 return Replay::Forward;
             };
-            let params = request.params.as_ref();
-            if params.and_then(|params| params.get("protocolVersion"))
-                != result.value.get("protocolVersion")
-                || !params
-                    .and_then(|params| params.get("capabilities"))
-                    .and_then(Value::as_object)
-                    .is_some_and(serde_json::Map::is_empty)
-                || !valid_manifest_result(&result.value)
+            let params = request
+                .params
+                .as_ref()
+                .and_then(projection_from_jsonrpc_payload);
+            if params
+                .as_ref()
+                .and_then(|params| params.string_at("/protocolVersion"))
+                != result.string_at("/protocolVersion")
+                || !params.as_ref().is_some_and(has_sdk_initialize_capabilities)
+                || !valid_manifest_result(&result)
             {
                 *manifest = None;
                 return Replay::Forward;
             }
             cache.swallow_initialized = true;
-            capture_initialize(endpoint, &result.value);
+            capture_initialize(endpoint, &result);
+            let result_json = result
+                .to_json_string()
+                .expect("validated manifest is valid JSON");
             Replay::Response(
-                jsonrpc::Response::success_projected(request.id.clone(), result)
+                jsonrpc::Response::success_raw_json(request.id.clone(), result_json)
                     .expect("validated manifest projection"),
             )
         }
@@ -257,13 +288,19 @@ fn replay_manifest(endpoint: &Endpoint, message: &jsonrpc::Message) -> Replay {
                 && !request
                     .params
                     .as_ref()
-                    .is_some_and(|params| params.get("cursor").is_some()) =>
+                    .and_then(projection_from_jsonrpc_payload)
+                    .is_some_and(|params| params.contains_property("cursor")) =>
         {
             match cache.tools.take() {
-                Some(result) if valid_manifest_result(&result.value) => Replay::Response(
-                    jsonrpc::Response::success_projected(request.id.clone(), result)
-                        .expect("validated manifest projection"),
-                ),
+                Some(result) if valid_manifest_result(&result) => {
+                    let result_json = result
+                        .to_json_string()
+                        .expect("validated tools manifest is valid JSON");
+                    Replay::Response(
+                        jsonrpc::Response::success_raw_json(request.id.clone(), result_json)
+                            .expect("validated manifest projection"),
+                    )
+                }
                 _ => {
                     *manifest = None;
                     Replay::Forward
@@ -277,21 +314,52 @@ fn replay_manifest(endpoint: &Endpoint, message: &jsonrpc::Message) -> Replay {
     }
 }
 
-fn valid_manifest_result(value: &Value) -> bool {
-    let Some(meta) = value.get("_meta") else {
+fn valid_manifest_result(value: &Utf16JsonProjection) -> bool {
+    let Some(meta) = value.get_property("_meta") else {
         return true;
     };
-    let Some(meta) = meta.as_object() else {
+    if meta.object_entries().is_none() {
         return false;
-    };
+    }
     if meta
-        .get("progressToken")
-        .is_some_and(|value| !value.is_string() && !value.is_number())
+        .get_property("progressToken")
+        .is_some_and(|value| value.as_str().is_none() && value.as_number().is_none())
     {
         return false;
     }
-    meta.get("io.modelcontextprotocol/related-task")
-        .is_none_or(|task| task.is_object() && task.get("taskId").is_some_and(Value::is_string))
+    meta.get_property("io.modelcontextprotocol/related-task")
+        .is_none_or(|task| {
+            task.object_entries().is_some()
+                && task
+                    .get_property("taskId")
+                    .is_some_and(|task_id| task_id.as_str().is_some())
+        })
+}
+
+fn has_sdk_initialize_capabilities(params: &Utf16JsonProjection) -> bool {
+    let Some(capabilities) = params.get_property("capabilities") else {
+        return false;
+    };
+    if !capabilities
+        .object_entries()
+        .is_some_and(|entries| entries.len() == 2)
+    {
+        return false;
+    }
+    let roots = capabilities.get_property("roots");
+    let elicitation = capabilities.get_property("elicitation");
+    roots.is_some_and(|roots| {
+        roots
+            .object_entries()
+            .is_some_and(|entries| entries.len() == 1)
+            && roots
+                .get_property("listChanged")
+                .is_some_and(|list_changed| list_changed.as_bool() == Some(true))
+    }) && elicitation.is_some_and(|elicitation| {
+        elicitation
+            .object_entries()
+            .is_some_and(|entries| entries.is_empty())
+    })
 }
 
 struct EndpointConnectGuard {
@@ -338,32 +406,36 @@ async fn send_message(
     }
     let initialize =
         matches!(&message, jsonrpc::Message::Request(request) if request.method=="initialize");
-    let wire = message.projected().map_err(projection_error)?;
-    let mut request =
-        Utf16JsonProjection::plain(json!({"subtype":"mcp_message","server_name":endpoint.server}));
-    request
-        .set_field("message", wire)
-        .map_err(projection_error)?;
+    let wire = projection_from_jsonrpc_message(&message)?;
+    let request = Utf16JsonProjection::object(vec![
+        ("subtype".into(), "mcp_message".into()),
+        ("server_name".into(), endpoint.server.as_str().into()),
+        ("message".into(), wire),
+    ])
+    .expect("MCP control request has unique fields");
     let (id, response) = plane.send_request(request, None).await;
+    let request_id = Utf16JsonProjection::from(id.as_str());
     let payload = tokio::select! {
         result = tokio::time::timeout(Duration::from_millis(70_000), response) => match result {
             Ok(Ok(Ok(payload))) => payload,
-            _ => {plane.cancel_request(&Utf16JsonProjection::plain(json!(id))).await;return Err(closed());}
+            _ => {plane.cancel_request(&request_id).await;return Err(closed());}
         },
-        () = endpoint.closed.cancelled() => {plane.cancel_request(&Utf16JsonProjection::plain(json!(id))).await;return Err(closed());}
+        () = endpoint.closed.cancelled() => {plane.cancel_request(&request_id).await;return Err(closed());}
     };
-    if let Some(reply) = payload.value.get("mcp_response") {
+    if payload.contains_property("mcp_response") {
         if initialize {
-            if let Some(result) = reply.get("result") {
-                capture_initialize(endpoint, result);
+            if let Ok(reply) = payload.subprojection("/mcp_response") {
+                if let Ok(result) = reply.subprojection("/result") {
+                    capture_initialize(endpoint, &result);
+                }
             }
         }
-        let reply = jsonrpc::Message::from_projection(
-            payload
-                .subprojection("/mcp_response")
-                .map_err(projection_error)?,
-        )
-        .map_err(projection_error)?;
+        let reply_source = payload
+            .subprojection("/mcp_response")
+            .map_err(projection_error)?;
+        let reply = jsonrpc_message_from_projection(&reply_source).map_err(|error| {
+            jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Deserialize(error))
+        })?;
         endpoint.inbound.send(reply).map_err(|_| closed())?;
     }
     Ok(())
@@ -372,11 +444,12 @@ async fn send_message(
 fn projection_error(
     error: lingxi_core::types::utf16_json::Utf16JsonProjectionError,
 ) -> jsonrpc::ConnectionError {
-    jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Projection(error))
+    let error = <serde_json::Error as serde::de::Error>::custom(error.to_string());
+    jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Deserialize(error))
 }
 
 fn sdk_error(error: impl std::fmt::Display) -> McpError {
-    McpError::Connection(error.to_string())
+    McpError::Connection(error.to_string().into())
 }
 
 #[async_trait]
@@ -422,8 +495,11 @@ impl McpTransport for SdkMcpTransport {
             endpoint: endpoint.clone(),
             disarmed: false,
         };
-        let client =
-            Arc::new(::mcp::McpClient::new(server.clone(), self.cwd.clone(), connection).await);
+        let client = Arc::new(
+            ::mcp::McpClient::new(server.clone(), self.cwd.clone(), connection)
+                .await
+                .with_transport_kind(McpTransportKind::SdkControl),
+        );
         endpoint
             .client
             .set(client)
@@ -486,7 +562,7 @@ impl McpTransport for SdkMcpTransport {
             .client
             .get()
             .expect("initialized client handle")
-            .initialize_sdk()
+            .initialize()
             .await
             .map_err(sdk_error)?;
         endpoint
@@ -542,20 +618,20 @@ impl McpTransport for SdkMcpTransport {
         let Some(endpoint) = self.endpoint(conn.connection_id) else {
             return self.delegate.transport.list_resource_templates(conn).await;
         };
-        let result: Value = endpoint
+        let response = endpoint
             .connection
             .get()
             .expect("connection")
-            .call("resources/templates/list", json!({}))
+            .call_raw_json("resources/templates/list", "{}".to_owned())
             .await
             .map_err(sdk_error)?;
-        serde_json::from_value(
-            result
-                .get("resourceTemplates")
-                .cloned()
-                .unwrap_or_else(|| json!([])),
-        )
-        .map_err(sdk_error)
+        let result = Utf16JsonProjection::parse(&response).map_err(sdk_error)?;
+        let templates = match result.subprojection("/resourceTemplates") {
+            Ok(templates) => templates,
+            Err(_) => Utf16JsonProjection::parse("[]").expect("empty array is valid JSON"),
+        };
+        let templates = templates.to_json_string().map_err(sdk_error)?;
+        serde_json::from_str(&templates).map_err(sdk_error)
     }
     async fn list_prompts(&self, conn: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
         match self.endpoint(conn.connection_id) {
@@ -573,7 +649,7 @@ impl McpTransport for SdkMcpTransport {
         &self,
         conn: &McpRawConnection,
         tool: &str,
-        input: Value,
+        input: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         match self.endpoint(conn.connection_id) {
             Some(endpoint) => endpoint
@@ -595,7 +671,7 @@ impl McpTransport for SdkMcpTransport {
     async fn read_resource(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         match self.endpoint(conn.connection_id) {
             Some(endpoint) => endpoint
@@ -611,7 +687,7 @@ impl McpTransport for SdkMcpTransport {
     async fn read_resource_rich(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &Utf16JsonProjection,
         output: &std::path::Path,
     ) -> Result<Vec<McpResourceContentsRich>, McpError> {
         match self.endpoint(conn.connection_id) {
@@ -662,7 +738,8 @@ impl McpTransport for SdkMcpTransport {
     ) -> Result<ElicitResultDto, McpError> {
         if self.endpoint(conn.connection_id).is_some() {
             Ok(ElicitResultDto {
-                data: json!({"action":"cancel"}),
+                data: Utf16JsonProjection::parse(r#"{"action":"cancel"}"#)
+                    .expect("default-deny elicitation result is valid JSON"),
             })
         } else {
             self.delegate
@@ -713,27 +790,39 @@ impl ::mcp::RawConnectionProvider for SdkMcpTransport {
 
 /// Parse native initialize SDK server declarations with the current MCP schema.
 pub fn sdk_servers_from_initialize(frame: &Utf16JsonProjection) -> Vec<::mcp::McpServerConfig> {
-    let Some(request) = frame.value.get("request") else {
-        return Vec::new();
-    };
-    let Some(names) = request.get("sdkMcpServers").and_then(Value::as_array) else {
+    let Some(name_count) = frame.array_len("/request/sdkMcpServers") else {
         return Vec::new();
     };
     let mut servers = serde_json::Map::new();
-    for name in names.iter().filter_map(Value::as_str) {
+    for index in 0..name_count {
+        let name_pointer = format!("/request/sdkMcpServers/{index}");
+        let Some(name) = frame
+            .string_units(&name_pointer)
+            .and_then(|units| String::from_utf16(&units).ok())
+        else {
+            continue;
+        };
         let mut config = json!({"type":"sdk","name":name});
-        if let Some(settings) = request
-            .get("sdkMcpServerConfigs")
-            .and_then(|configs| configs.get(name))
-            .and_then(Value::as_object)
-        {
+        let settings = frame
+            .subprojection("/request/sdkMcpServerConfigs")
+            .ok()
+            .and_then(|configs| {
+                let units = name.encode_utf16().collect::<Vec<_>>();
+                configs.subprojection_property_units(&units).ok()
+            });
+        if let Some(settings) = settings.filter(|settings| settings.object_entries().is_some()) {
             for key in ["timeout", "disableAutoBackground"] {
-                if let Some(value) = settings.get(key) {
-                    if key == "timeout" && value.as_u64().is_some_and(|timeout| timeout > 0)
-                        || key == "disableAutoBackground" && value.as_bool() == Some(true)
-                    {
-                        config[key] = value.clone();
+                if key == "timeout" {
+                    let timeout = projection_u64_at(&settings, "/timeout");
+                    if let Some(timeout) = timeout.filter(|timeout| *timeout > 0) {
+                        config[key] = json!(timeout);
                     }
+                } else if settings
+                    .at_pointer("/disableAutoBackground")
+                    .and_then(|value| value.as_bool())
+                    == Some(true)
+                {
+                    config[key] = json!(true);
                 }
             }
         }
@@ -744,6 +833,18 @@ pub fn sdk_servers_from_initialize(frame: &Utf16JsonProjection) -> Vec<::mcp::Mc
         ::mcp::ConfigScope::Dynamic,
     )
     .unwrap_or_default()
+}
+
+fn projection_u64_at(projection: &Utf16JsonProjection, pointer: &str) -> Option<u64> {
+    let number = projection.number_at(pointer)?;
+    if !number.is_finite()
+        || number.fract() != 0.0
+        || !(0.0..18_446_744_073_709_551_616.0).contains(&number)
+    {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(number as u64)
 }
 
 #[cfg(test)]
@@ -804,7 +905,12 @@ mod tests {
         assert_eq!(tools.len(), 1);
         let schema = tools[0].input_schema_projection.as_ref().unwrap();
         assert_eq!(
-            schema.subprojection("/properties").unwrap().keys[0].code_units,
+            schema
+                .subprojection("/properties")
+                .unwrap()
+                .object_entries()
+                .unwrap()[0]
+                .code_units,
             vec![0xd800]
         );
         assert!(schema.to_json_string().unwrap().contains(r#""\ud801""#));
@@ -831,7 +937,8 @@ mod tests {
         let plane = StdioControlPlane::new(Arc::new(tx));
         let (endpoint, mut inbound) = endpoint();
         let endpoint = Arc::new(endpoint);
-        let message = jsonrpc::Message::from_projection(Utf16JsonProjection::parse(r#"{"jsonrpc":"2.0","id":"\ud800","method":"tools/call","params":{"name":"exact","arguments":{"\ud801":"\udfff"}}}"#).unwrap()).unwrap();
+        let source = Utf16JsonProjection::parse(r#"{"jsonrpc":"2.0","id":"\ud800","method":"tools/call","params":{"name":"exact","arguments":{"\ud801":"\udfff"}}}"#).unwrap();
+        let message = jsonrpc_message_from_projection(&source).unwrap();
         let task_endpoint = endpoint.clone();
         let task_plane = plane.clone();
         let pending =
@@ -847,7 +954,10 @@ mod tests {
         let arguments = request
             .subprojection("/request/message/params/arguments")
             .unwrap();
-        assert_eq!(arguments.keys[0].code_units, vec![0xd801]);
+        assert_eq!(
+            arguments.object_entries().unwrap()[0].code_units,
+            vec![0xd801]
+        );
         let mut response = Utf16JsonProjection::parse(r#"{"type":"control_response","response":{"subtype":"success","response":{"mcp_response":{"jsonrpc":"2.0","id":"\ud800","result":{"content":[{"type":"text","text":"\udfff"}],"\ud801":true}}}}}"#).unwrap();
         let mut envelope = response.subprojection("/response").unwrap();
         envelope
@@ -856,14 +966,19 @@ mod tests {
         response.set_field("response", envelope).unwrap();
         plane.resolve_response(&response).await;
         pending.await.unwrap().unwrap();
-        let received = inbound.recv().await.unwrap().projected().unwrap();
+        let received = projection_from_jsonrpc_message(&inbound.recv().await.unwrap()).unwrap();
         assert_eq!(received.string_units("/id"), Some(vec![0xd800]));
         assert_eq!(
             received.string_units("/result/content/0/text"),
             Some(vec![0xdfff])
         );
         assert_eq!(
-            received.subprojection("/result").unwrap().keys[0].code_units,
+            received
+                .subprojection("/result")
+                .unwrap()
+                .object_entries()
+                .unwrap()[1]
+                .code_units,
             vec![0xd801]
         );
     }
@@ -919,12 +1034,10 @@ mod tests {
         let Replay::Response(response) = replay_manifest(&endpoint, &request) else {
             panic!("manifest")
         };
+        let response_result =
+            Utf16JsonProjection::parse(response.result.as_ref().unwrap().as_json()).unwrap();
         assert_eq!(
-            response
-                .projected_result()
-                .unwrap()
-                .to_json_string()
-                .unwrap(),
+            response_result.to_json_string().unwrap(),
             result.to_json_string().unwrap()
         );
         assert!(matches!(

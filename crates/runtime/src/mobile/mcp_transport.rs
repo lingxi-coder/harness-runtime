@@ -11,9 +11,9 @@ use lingxi_core::host::{
     McpResourceTemplateDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
     McpTransportSpec, ServerCapabilitiesDto,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
 use platform_common::RemoteMcpTransport;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -50,7 +50,7 @@ impl MobileMcpTransport {
             .map_err(|_| McpError::Internal("mobile MCP route map poisoned".into()))?
             .get(&id)
             .copied()
-            .ok_or_else(|| McpError::Connection(format!("no such connection: {id}")))
+            .ok_or_else(|| McpError::Connection(format!("no such connection: {id}").into()))
     }
 
     fn remember(&self, id: McpConnectionId, route: Route) -> Result<(), McpError> {
@@ -178,7 +178,7 @@ impl McpTransport for MobileMcpTransport {
         &self,
         conn: &McpRawConnection,
         tool: &str,
-        input: Value,
+        input: Utf16JsonProjection,
     ) -> Result<McpToolResultDto, McpError> {
         match self.route_for(conn.connection_id)? {
             Route::LocalApps => self.local_apps.call_tool(conn, tool, input).await,
@@ -189,7 +189,7 @@ impl McpTransport for MobileMcpTransport {
     async fn read_resource(
         &self,
         conn: &McpRawConnection,
-        uri: &str,
+        uri: &Utf16JsonProjection,
     ) -> Result<McpResourceContentDto, McpError> {
         match self.route_for(conn.connection_id)? {
             Route::LocalApps => self.local_apps.read_resource(conn, uri).await,

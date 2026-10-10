@@ -426,6 +426,7 @@ async fn read_restored_transcript(
                     id: lingxi_core::types::MessageId::new(),
                     content: content.into(),
                     subtype: Some("mod_attachment_source".into()),
+                    api_system: None,
                     compact_metadata: None,
                     refusal_fallback: None,
                     model_fallback: None,

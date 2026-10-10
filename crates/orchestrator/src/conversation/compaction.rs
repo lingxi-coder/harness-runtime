@@ -2906,7 +2906,7 @@ impl ConversationOrchestrator {
                 messages_before,
                 messages_after,
                 bytes_saved,
-                visible_summary.string_at("").unwrap_or_default(),
+                &visible_summary,
             )
             .await;
 

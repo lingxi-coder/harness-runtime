@@ -452,7 +452,7 @@ fn compaction_completed_round_trips() {
         messages_before: 50,
         messages_after: 12,
         bytes_saved: 4096,
-        summary: "Summary:\nkept context".to_string(),
+        summary: "Summary:\nkept context".into(),
     };
     let json = serde_json::to_value(&ev).expect("serialize CompactionCompleted");
     assert_eq!(json["type"], "compaction_completed");

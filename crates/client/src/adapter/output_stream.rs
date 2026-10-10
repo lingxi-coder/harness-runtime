@@ -861,7 +861,10 @@ impl OutputStream for AdapterOutputStream {
         tool: &str,
         _model_text: &Utf16JsonProjection,
         result: &Utf16JsonProjection,
+        _mcp_meta: Option<&Utf16JsonProjection>,
     ) {
+        // MCP metadata belongs to the native stream-json envelope. This
+        // adapter emits the separate, frozen client UI event shape.
         // The `client::protocol` `ToolUseResult` DTO is wire-frozen, so we do NOT
         // add a `model_text` field yet — the adapter ignores it and keeps
         // lowering the full metadata `data` into `result_json`. `is_error` still
@@ -966,14 +969,14 @@ impl OutputStream for AdapterOutputStream {
         messages_before: u32,
         messages_after: u32,
         bytes_saved: u64,
-        summary: &str,
+        summary: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) {
         self.sink
             .emit(ClientEvent::CompactionCompleted {
                 messages_before,
                 messages_after,
                 bytes_saved,
-                summary: summary.to_string(),
+                summary: ClientTextDto::from_projection(summary).expect("compaction summary is text"),
             })
             .await;
     }
@@ -1803,7 +1806,7 @@ mod tests {
         let result = serde_json::json!({"content": "ok", "lines": 3});
         let result_source = json_projection(&result);
         stream
-            .emit_tool_result(&id, "Read", &projection("ok"), &result_source)
+            .emit_tool_result(&id, "Read", &projection("ok"), &result_source, None)
             .await;
 
         let events = sink.events().await;
@@ -1837,7 +1840,13 @@ mod tests {
         let result = serde_json::json!({"error": "file not found"});
         let result_source = json_projection(&result);
         stream
-            .emit_tool_result(&id, "Read", &projection("file not found"), &result_source)
+            .emit_tool_result(
+                &id,
+                "Read",
+                &projection("file not found"),
+                &result_source,
+                None,
+            )
             .await;
 
         let events = sink.events().await;
@@ -2016,7 +2025,7 @@ mod tests {
         let stream = AdapterOutputStream::new(sink.clone());
 
         stream
-            .emit_compaction_completed(42, 8, 1_024, "Summary:\nkept context")
+            .emit_compaction_completed(42, 8, 1_024, &"Summary:\nkept context".into())
             .await;
 
         let events = sink.events().await;
@@ -2027,7 +2036,7 @@ mod tests {
                 messages_before: 42,
                 messages_after: 8,
                 bytes_saved: 1_024,
-                summary: "Summary:\nkept context".to_string(),
+                summary: "Summary:\nkept context".into(),
             }
         );
     }
@@ -2266,7 +2275,7 @@ mod tests {
         let stream = AdapterOutputStream::new(sink.clone());
         stream.emit_tool_call(&id, tool, &input_source).await;
         stream
-            .emit_tool_result(&id, tool, &projection(""), &result_source)
+            .emit_tool_result(&id, tool, &projection(""), &result_source, None)
             .await;
         let live = sink
             .events()
