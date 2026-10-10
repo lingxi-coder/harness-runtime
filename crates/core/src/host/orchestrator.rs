@@ -1602,7 +1602,10 @@ pub fn reasoning_control_spec_for_model(
                 // page lists its efforts as low/medium/high/xhigh/max), so the
                 // explicit Disabled selection must stay off this row even
                 // though its siblings can be turned off.
-                "gpt-6-astra" => (vec!["low", "medium", "high", "xhigh", "max"], false),
+                // GPT-6.1 Sol's page likewise lists low..max with no `none`.
+                "gpt-6-astra" | "gpt-6.1-sol" => {
+                    (vec!["low", "medium", "high", "xhigh", "max"], false)
+                }
                 "gpt-5.1"
                 | "gpt-5.2"
                 | "gpt-5.3-codex-spark"
@@ -1613,7 +1616,9 @@ pub fn reasoning_control_spec_for_model(
                 | "gpt-5.6"
                 | "gpt-5.6-sol"
                 | "gpt-5.6-terra"
-                | "gpt-5.6-luna" => (vec!["low", "medium", "high", "xhigh", "max"], true),
+                | "gpt-5.6-luna"
+                | "gpt-6-sol"
+                | "gpt-6-luna" => (vec!["low", "medium", "high", "xhigh", "max"], true),
                 "gpt-5.1-codex" | "gpt-5.1-codex-mini" | "gpt-5.2-codex" => {
                     (vec!["low", "medium", "high"], false)
                 }
@@ -1875,11 +1880,23 @@ pub fn is_curated_model(provider_id: &str, request_model: &str) -> bool {
         ),
         "openai" => matches!(
             request_model,
-            "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+            "gpt-6-astra"
+                | "gpt-6.1-sol"
+                | "gpt-6-sol"
+                | "gpt-6-luna"
+                | "gpt-5.6-sol"
+                | "gpt-5.6-terra"
+                | "gpt-5.6-luna"
         ),
         "openai-chatgpt" => matches!(
             request_model,
-            "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+            "gpt-6-astra"
+                | "gpt-6.1-sol"
+                | "gpt-6-sol"
+                | "gpt-6-luna"
+                | "gpt-5.6-sol"
+                | "gpt-5.6-terra"
+                | "gpt-5.6-luna"
         ),
         "deepseek" => matches!(request_model, "deepseek-flash" | "deepseek-v4-pro"),
         "kimi" => request_model == "kimi-k3",
@@ -1984,8 +2001,8 @@ pub fn provider_fallback_order() -> &'static [&'static str] {
 pub fn provider_default_model(provider_id: &str) -> Option<&'static str> {
     Some(match provider_id {
         "anthropic" | "builtin" => "claude-sonnet-5",
-        "openai" => "gpt-5.6-sol",
-        "openai-chatgpt" => "gpt-5.6-sol",
+        "openai" => "gpt-6.1-sol",
+        "openai-chatgpt" => "gpt-6.1-sol",
         "deepseek" => "deepseek-flash",
         "kimi" => "kimi-k3",
         "kimi-code" => "k3",

@@ -184,11 +184,25 @@ pub fn builtin_presets() -> BuiltinCatalog {
         };
         chatgpt.supports_websockets = true;
         chatgpt.pricing.billing_mode = Some(lingxi_core::host::ModelBillingMode::Subscription);
-        chatgpt.models.retain(|m| {
-            matches!(
-                m.request_model.as_str(),
-                "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
-            )
+        // Served to ChatGPT sign-in, in OpenAI's recommended order (newest
+        // first; the picker keeps catalog order). GPT-5.6 stays routable while
+        // OpenAI keeps serving it during the GPT-6 rollout.
+        const CHATGPT_SIGN_IN_MODELS: &[&str] = &[
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ];
+        chatgpt
+            .models
+            .retain(|m| CHATGPT_SIGN_IN_MODELS.contains(&m.request_model.as_str()));
+        chatgpt.models.sort_by_key(|m| {
+            CHATGPT_SIGN_IN_MODELS
+                .iter()
+                .position(|id| *id == m.request_model)
         });
         for model in &mut chatgpt.models {
             model.metadata.pricing = Some(ModelPricing {
