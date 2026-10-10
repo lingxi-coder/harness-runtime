@@ -919,7 +919,7 @@ fn current_contract_index() -> ContractIndex {
 
     // ── ClientCommand (commands.rs) ───────────────────────────────────────
     put("ClientCommand::SendPrompt", "send_prompt");
-    put("ClientCommand::SendPrompt.text", "String");
+    put("ClientCommand::SendPrompt.text", "ClientTextDto");
     put(
         "ClientCommand::SendPrompt.prompt_mode",
         "Option<PromptModeDto>",
@@ -1045,7 +1045,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::SetFastMode", "set_fast_mode");
     put("ClientCommand::SetFastMode.enabled", "bool");
     put("ClientCommand::RunSlashCommand", "run_slash_command");
-    put("ClientCommand::RunSlashCommand.raw", "String");
+    put("ClientCommand::RunSlashCommand.raw", "ClientTextDto");
     put("ClientCommand::RunSlashCommand.turn_id", "Option<u64>");
 
     put("ClientCommand::RefreshListings", "refresh_listings");

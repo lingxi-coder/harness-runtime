@@ -648,7 +648,7 @@ mod tests {
         let frame = Frame::Request(crate::wire::BridgeRequest {
             id: 1,
             method: "test".into(),
-            params: serde_json::Value::Null,
+            params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap(),
         });
         let socket = BackpressuredSocket {
             inbound: Some(Message::Text(serde_json::to_string(&frame).unwrap())),
@@ -760,7 +760,7 @@ mod tests {
             let frame = Frame::Request(crate::wire::BridgeRequest {
                 id,
                 method: method.into(),
-                params: serde_json::Value::Null,
+                params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap(),
             });
             client
                 .send(Message::Text(serde_json::to_string(&frame).unwrap()))
@@ -842,7 +842,7 @@ mod tests {
             let frame = Frame::Request(crate::wire::BridgeRequest {
                 id,
                 method: method.into(),
-                params: serde_json::Value::Null,
+                params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap(),
             });
             client
                 .send(Message::Text(serde_json::to_string(&frame).unwrap()))

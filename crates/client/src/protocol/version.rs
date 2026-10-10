@@ -142,4 +142,9 @@
 /// source-preserving `ClientTextDto` introduced by the UTF-16 carrier update.
 /// These retyped fields change generated UniFFI record layouts. `UiNotify` is
 /// appended and does not add another breaking change.
-pub const CLIENT_PROTOCOL_VERSION: &str = "21.0.0";
+///
+/// Bumped to 22.0.0 for exact prompt/slash input text, command catalog fields,
+/// agent summaries and compaction summaries. These existing fields now carry
+/// `ClientTextDto`; JSON remains string-valued while UniFFI layouts change.
+/// Current hosts and generated native consumers must use the same contract.
+pub const CLIENT_PROTOCOL_VERSION: &str = "22.0.0";

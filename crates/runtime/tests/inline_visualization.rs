@@ -7,9 +7,19 @@ use std::sync::Arc;
 use command_api::{CommandRegistry, SlashCommandKind};
 use harness_runtime::inline_visualization::{followup_text, register_skill, shared_store};
 use lingxi_core::host::FileSystem;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 fn names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_string()).collect()
+}
+
+fn source_json(value: serde_json::Value) -> Utf16JsonProjection {
+    Utf16JsonProjection::from_serde_value(&value).expect("test JSON is projectable")
+}
+
+fn response_json(source: Utf16JsonProjection) -> serde_json::Value {
+    serde_json::from_str(&source.to_json_string().expect("response is valid JSON"))
+        .expect("response JSON is valid")
 }
 
 fn body(registry: &CommandRegistry) -> Option<String> {
@@ -25,7 +35,13 @@ fn body(registry: &CommandRegistry) -> Option<String> {
         frontmatter.allowed_tools.is_none(),
         "the skill grants nothing"
     );
-    Some(prompt.build(""))
+    Some(
+        prompt
+            .build(&Utf16JsonProjection::from(""))
+            .string_at("")
+            .unwrap()
+            .to_owned(),
+    )
 }
 
 #[test]
@@ -100,27 +116,37 @@ async fn stores_are_shared_per_config_home_and_follow_ups_snapshot_state() {
         home.path(),
         &session.to_string(),
         Some(&dto),
-        "Why?".to_string(),
+        Utf16JsonProjection::from("Why?"),
     )
     .await;
-    let (attachment, typed) = visualization::context::split_context(&text).unwrap();
+    let display = text.string_at("").unwrap();
+    let (attachment, typed) = visualization::context::split_context(display).unwrap();
     assert_eq!((attachment.title.as_str(), typed), ("Sales", "Why?"));
-    assert!(text.contains("{\"region\":\"EU\"}"));
+    assert!(display.contains("{\"region\":\"EU\"}"));
     assert_eq!(
         followup_text(
             fs.clone(),
             home.path(),
             &session.to_string(),
             None,
-            "plain".into()
+            Utf16JsonProjection::from("plain")
         )
-        .await,
-        "plain"
+        .await
+        .string_at(""),
+        Some("plain")
     );
     let bare = session.as_uuid().to_string();
     assert_ne!(
-        followup_text(fs, home.path(), &bare, Some(&dto), "x".into()).await,
-        "x",
+        followup_text(
+            fs,
+            home.path(),
+            &bare,
+            Some(&dto),
+            Utf16JsonProjection::from("x")
+        )
+        .await
+        .string_at(""),
+        Some("x"),
         "a bare session uuid resolves too"
     );
 }
@@ -151,34 +177,38 @@ async fn desktop_requests_mount_serve_and_write_by_op() {
         .reference;
     let host = DesktopVisualizationHost::for_config_home(fs, home.path());
     let mount = |session_id: String, id: &str| {
-        json!({
+        source_json(json!({
             "op": "mount", "session_id": session_id, "id": id, "revision": reference.revision,
             "theme": { "dark": true, "tokens": {} }, "locale": "en", "expanded": false,
-        })
+        }))
     };
 
     let ticket = host
         .handle(mount(session.as_uuid().to_string(), reference.id.as_str()))
         .await
+        .map(response_json)
         .unwrap();
     assert_eq!(ticket["title"], "Sales");
     let token = ticket["token"].as_str().unwrap().to_string();
     let doc_url = ticket["doc_url"].as_str().unwrap();
     let path = doc_url.strip_prefix("lingxi-viz://visualization").unwrap();
     assert_eq!(
-        host.handle(mount(
-            lingxi_core::types::SessionId::new().to_string(),
-            reference.id.as_str()
-        ))
-        .await
-        .unwrap(),
+        response_json(
+            host.handle(mount(
+                lingxi_core::types::SessionId::new().to_string(),
+                reference.id.as_str()
+            ))
+            .await
+            .unwrap()
+        ),
         Value::Null,
         "another conversation cannot mount this revision"
     );
 
     let served = host
-        .handle(json!({ "op": "serve", "path": path }))
+        .handle(source_json(json!({ "op": "serve", "path": path })))
         .await
+        .map(response_json)
         .unwrap();
     assert_eq!(served["status"], 200);
     assert!(served["headers"]
@@ -187,22 +217,23 @@ async fn desktop_requests_mount_serve_and_write_by_op() {
         .iter()
         .any(|header| header[0] == "Content-Security-Policy"));
     let again = host
-        .handle(json!({ "op": "serve", "path": path }))
+        .handle(source_json(json!({ "op": "serve", "path": path })))
         .await
+        .map(response_json)
         .unwrap();
     assert_eq!(again["status"], 404, "documents are single use");
 
     let write = |base: u64| {
-        json!({
+        source_json(json!({
             "op": "write_state", "token": token, "generation": ticket["generation"], "base_version": base,
             "model_content": "{\"k\":1}", "private_content": "null",
-        })
+        }))
     };
     assert_eq!(
-        host.handle(write(0)).await.unwrap(),
+        response_json(host.handle(write(0)).await.unwrap()),
         json!({ "saved": true, "version": 1 })
     );
-    let conflict = host.handle(write(0)).await.unwrap();
+    let conflict = response_json(host.handle(write(0)).await.unwrap());
     assert_eq!(
         (conflict["reason"].as_str(), conflict["version"].as_u64()),
         (Some("conflict"), Some(1))
@@ -210,31 +241,46 @@ async fn desktop_requests_mount_serve_and_write_by_op() {
     assert_eq!(conflict["current_state"]["modelContent"], json!({ "k": 1 }));
 
     let listed = host
-        .handle(json!({ "op": "list", "session_id": session.to_string() }))
+        .handle(source_json(
+            json!({ "op": "list", "session_id": session.to_string() }),
+        ))
         .await
+        .map(response_json)
         .unwrap();
     assert_eq!(listed[0]["title"], "Sales");
-    assert!(host
-        .handle(json!({ "op": "notices" }))
-        .await
-        .unwrap()
-        .is_string());
+    assert!(response_json(
+        host.handle(source_json(json!({ "op": "notices" })))
+            .await
+            .unwrap()
+    )
+    .is_string());
 
-    host.handle(json!({ "op": "unmount", "token": token }))
+    host.handle(source_json(json!({ "op": "unmount", "token": token })))
         .await
         .unwrap();
     assert_eq!(
-        host.handle(write(1)).await.unwrap()["reason"],
+        response_json(host.handle(write(1)).await.unwrap())["reason"],
         "stale_mount"
     );
     assert!(host
-        .handle(json!({ "op": "delete_everything" }))
+        .handle(source_json(json!({ "op": "delete_everything" })))
         .await
         .is_err());
     assert!(host
-        .handle(json!({ "op": "unmount", "token": "t", "extra": 1 }))
+        .handle(source_json(
+            json!({ "op": "unmount", "token": "t", "extra": 1 })
+        ))
         .await
         .is_err());
+
+    let mut malformed_units = r#"{"op":"serve","path":""#.encode_utf16().collect::<Vec<_>>();
+    malformed_units.push(0xd800);
+    malformed_units.extend(r#""}"#.encode_utf16());
+    let malformed = Utf16JsonProjection::parse_utf16_json(&malformed_units).unwrap();
+    assert_eq!(
+        host.handle(malformed).await.unwrap_err(),
+        "invalid visualization request"
+    );
 }
 
 #[test]

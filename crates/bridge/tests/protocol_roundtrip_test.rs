@@ -14,6 +14,11 @@ use client::protocol::computer_access::{
 use client::protocol::events::{ClientEvent, ErrorKindDto};
 use client::protocol::permission::{PermissionKindDto, PermissionRequest};
 use client::protocol::version::CLIENT_PROTOCOL_VERSION;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+fn projection(json: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::parse(json).expect("test JSON projection is valid")
+}
 
 fn roundtrip<T>(v: &T) -> T
 where
@@ -62,8 +67,12 @@ fn bridge_request_roundtrip() {
     let r = BridgeRequest {
         id: 7,
         method: "run_turn".into(),
-        params: serde_json::json!({ "text": "hi" }),
+        params: projection(r#"{"text":"hi"}"#),
     };
+    assert_eq!(
+        serde_json::to_string(&r).unwrap(),
+        r#"{"id":7,"method":"run_turn","params":{"text":"hi"}}"#
+    );
     assert_eq!(roundtrip(&r), r);
 }
 
@@ -71,9 +80,13 @@ fn bridge_request_roundtrip() {
 fn bridge_response_roundtrip() {
     let ok = BridgeResponse {
         id: 7,
-        result: Some(serde_json::json!({ "ok": true })),
+        result: Some(projection(r#"{"ok":true}"#)),
         error: None,
     };
+    assert_eq!(
+        serde_json::to_string(&ok).unwrap(),
+        r#"{"id":7,"result":{"ok":true},"error":null}"#
+    );
     assert_eq!(roundtrip(&ok), ok);
     let err = BridgeResponse {
         id: 8,
@@ -110,7 +123,7 @@ fn frame_request_round_trips() {
     let f = Frame::Request(BridgeRequest {
         id: 11,
         method: "submit".into(),
-        params: serde_json::json!({ "type": "send_prompt", "text": "hi" }),
+        params: projection(r#"{"type":"send_prompt","text":"hi"}"#),
     });
     assert_eq!(roundtrip(&f), f);
     // Externally tagged on `type`, snake_case.
@@ -123,7 +136,7 @@ fn frame_request_round_trips() {
 fn frame_response_round_trips() {
     let ok = Frame::Response(BridgeResponse {
         id: 11,
-        result: Some(serde_json::json!({ "ok": true })),
+        result: Some(projection(r#"{"ok":true}"#)),
         error: None,
     });
     assert_eq!(roundtrip(&ok), ok);
@@ -264,9 +277,61 @@ fn approve_and_deny_computer_access_commands_match_exact_wire_shape() {
     let framed = Frame::Request(BridgeRequest {
         id: 1,
         method: "submit".into(),
-        params: serde_json::to_value(&approve).unwrap(),
+        params: projection(&serde_json::to_string(&approve).unwrap()),
     });
     assert_eq!(roundtrip(&framed), framed);
+}
+
+#[test]
+fn raw_source_json_survives_bridge_request_response_and_event_frames() {
+    let request_json =
+        r#"{"type":"request","payload":{"id":9,"method":"run_turn","params":{"text":"\ud800"}}}"#;
+    let request: Frame = serde_json::from_str(request_json).unwrap();
+    let Frame::Request(request) = request else {
+        panic!("request frame")
+    };
+    assert_eq!(request.params.string_units("/text").unwrap(), [0xd800]);
+    let request_wire = serde_json::to_string(&Frame::Request(request.clone())).unwrap();
+    assert!(request_wire.contains(r#""params":{"text":"\ud800"}"#));
+    let request_again: Frame = serde_json::from_str(&request_wire).unwrap();
+    let Frame::Request(request_again) = request_again else {
+        panic!("request frame")
+    };
+    assert_eq!(
+        request_again.params.string_units("/text").unwrap(),
+        [0xd800]
+    );
+
+    let response_json =
+        r#"{"type":"response","payload":{"id":9,"result":{"text":"\ud801"},"error":null}}"#;
+    let response: Frame = serde_json::from_str(response_json).unwrap();
+    let Frame::Response(response) = response else {
+        panic!("response frame")
+    };
+    assert_eq!(
+        response
+            .result
+            .as_ref()
+            .unwrap()
+            .string_units("/text")
+            .unwrap(),
+        [0xd801]
+    );
+    let response_wire = serde_json::to_string(&Frame::Response(response)).unwrap();
+    assert!(response_wire.contains(r#""result":{"text":"\ud801"}"#));
+
+    let event_json = r#"{"type":"event","payload":{"type":"text_delta","text":"\ud802"}}"#;
+    let event: Frame = serde_json::from_str(event_json).unwrap();
+    let Frame::Event(ClientEvent::TextDelta { text }) = event else {
+        panic!("text delta event")
+    };
+    assert_eq!(text.code_units, [0xd802]);
+    let event_wire = serde_json::to_string(&Frame::Event(ClientEvent::TextDelta { text })).unwrap();
+    assert!(event_wire.contains(r#""text":"\ud802""#));
+
+    let null_response: BridgeResponse =
+        serde_json::from_str(r#"{"id":10,"result":null,"error":null}"#).unwrap();
+    assert_eq!(null_response.result, None);
 }
 
 #[test]

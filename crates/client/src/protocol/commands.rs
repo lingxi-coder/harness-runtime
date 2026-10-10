@@ -43,6 +43,7 @@ use crate::protocol::local_apps::{
     AppSurfaceDto, PluginCommandDto,
 };
 use crate::protocol::permission::PermissionResponseDto;
+use crate::protocol::text::ClientTextDto;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 use std::collections::HashMap;
@@ -273,7 +274,7 @@ define_client_command! {
     // client turn correlator. Carries NO `session_id` (decision §0.5).
     SendPrompt {
         // The user prompt text.
-        text: String,
+        text: ClientTextDto,
         // Optional prompt-input mode. Skipped from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_mode: Option<PromptModeDto>,
@@ -416,7 +417,7 @@ define_client_command! {
     // commands reuse `turn_id` for the ordinary turn stream.
     RunSlashCommand {
         // The raw command line (e.g. `"/model opus"`), leading `/` included.
-        raw: String,
+        raw: ClientTextDto,
         // Optional client turn id used to correlate prompt-like slash commands
         // with the normal streaming turn lifecycle.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1494,6 +1495,20 @@ where
     serde_json::from_str(raw.get()).map_err(E::custom)
 }
 
+fn command_raw_optional<T, E>(
+    fields: &mut HashMap<String, Box<RawValue>>,
+    name: &'static str,
+) -> Result<Option<T>, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    match fields.remove(name) {
+        Some(raw) => serde_json::from_str::<Option<T>>(raw.get()).map_err(E::custom),
+        None => Ok(None),
+    }
+}
+
 fn command_raw_fallback_json<E>(
     tag: &str,
     fields: HashMap<String, Box<RawValue>>,
@@ -1521,6 +1536,20 @@ impl<'de> Deserialize<'de> for ClientCommand {
         let RawEnvelopeFields(mut fields) = RawEnvelopeFields::deserialize(deserializer)?;
         let tag = command_raw_required::<String, D::Error>(&mut fields, "type")?;
         match tag.as_str() {
+            // These prompt fields are Source text. Decode their raw member
+            // tokens directly so serde's internally-tagged Content buffer
+            // cannot normalize isolated UTF-16 surrogates first.
+            "send_prompt" => Ok(Self::SendPrompt {
+                text: command_raw_required(&mut fields, "text")?,
+                prompt_mode: command_raw_optional(&mut fields, "prompt_mode")?,
+                images: command_raw_required(&mut fields, "images")?,
+                turn_id: command_raw_optional(&mut fields, "turn_id")?,
+                visualization_context: command_raw_optional(&mut fields, "visualization_context")?,
+            }),
+            "run_slash_command" => Ok(Self::RunSlashCommand {
+                raw: command_raw_required(&mut fields, "raw")?,
+                turn_id: command_raw_optional(&mut fields, "turn_id")?,
+            }),
             "answer_ask_user_question" => Ok(Self::AnswerAskUserQuestion {
                 request_id: command_raw_required(&mut fields, "request_id")?,
                 answers: command_raw_required(&mut fields, "answers")?,

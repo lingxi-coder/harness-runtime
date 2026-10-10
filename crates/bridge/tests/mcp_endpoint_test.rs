@@ -130,10 +130,13 @@ struct EchoPump;
 
 #[async_trait::async_trait]
 impl FramePump for EchoPump {
-    async fn on_frame(&self, _frame: Frame, out: FrameSink) {
-        let reply = Frame::Event(ClientEvent::TextDelta {
-            text: "pong".to_string().into(),
-        });
+    async fn on_frame(&self, frame: Frame, out: FrameSink) {
+        let reply = match frame {
+            Frame::Request(request) => Frame::Request(request),
+            _ => Frame::Event(ClientEvent::TextDelta {
+                text: "pong".to_string().into(),
+            }),
+        };
         let _ = out.send(reply);
     }
 }
@@ -195,6 +198,30 @@ async fn frame_pump_invoked_on_inbound_frame() {
         }),
         "the stub pump must have echoed its deterministic reply frame"
     );
+
+    // Exercise the actual WebSocket text ingress with an escaped isolated
+    // surrogate. The pump echoes the decoded frame, so the source units must
+    // survive both Frame deserialization and outbound serialization.
+    ws.send(Message::Text(
+        r#"{"type":"request","payload":{"id":9,"method":"run_turn","params":{"text":"\ud803"}}}"#
+            .into(),
+    ))
+    .await
+    .expect("send raw source request");
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("source request must be echoed within the timeout")
+        .expect("stream must yield a message")
+        .expect("message must not be an error");
+    let text = match msg {
+        Message::Text(t) => t,
+        other => panic!("expected a text frame, got {other:?}"),
+    };
+    let echoed: Frame = serde_json::from_str(&text).expect("deserialize echoed source request");
+    let Frame::Request(request) = echoed else {
+        panic!("request frame")
+    };
+    assert_eq!(request.params.string_units("/text").unwrap(), [0xd803]);
 
     endpoint.shutdown().await;
 }

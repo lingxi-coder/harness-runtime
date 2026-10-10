@@ -7,6 +7,7 @@
 use crate::document::{escape_html, script_json};
 use crate::reference::{VisualizationId, VisualizationRef};
 use crate::store::VisualizationStore;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 const OPEN: &str = "<visualization-context ";
 const CLOSE: &str = "</visualization-context>";
@@ -91,22 +92,42 @@ pub async fn followup_prompt(
     store: &VisualizationStore,
     root_session: uuid::Uuid,
     reference: &VisualizationRef,
-    prompt: &str,
-) -> String {
-    if prompt.trim_start().starts_with('/') {
-        return prompt.to_string();
+    prompt: &Utf16JsonProjection,
+) -> Utf16JsonProjection {
+    let Some(prompt_units) = prompt.string_units("") else {
+        return prompt.clone();
+    };
+    if starts_with_slash_after_trim_start(&prompt_units) {
+        return prompt.clone();
     }
     let Ok(revision) = store.read_revision(root_session, reference).await else {
-        return prompt.to_string();
+        return prompt.clone();
     };
     let state = store
         .read_state(root_session, reference)
         .await
         .unwrap_or_default();
-    format!(
-        "{}\n\n{prompt}",
-        context_block(reference, &revision.title, &state.model_content)
-    )
+    let mut units = context_block(reference, &revision.title, &state.model_content)
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend("\n\n".encode_utf16());
+    units.extend(prompt_units);
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("context prompt display matches its exact source units")
+}
+
+/// Preserve `str::trim_start().starts_with('/')` semantics while examining
+/// the exact source. Malformed surrogate units are ordinary non-whitespace
+/// input, so they stop the slash check without being replaced or removed.
+fn starts_with_slash_after_trim_start(units: &[u16]) -> bool {
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) if character.is_whitespace() => continue,
+            Ok('/') => return true,
+            Ok(_) | Err(_) => return false,
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -169,21 +190,113 @@ mod tests {
             )
             .await
             .unwrap();
-        let prompt = followup_prompt(&store, session, &reference, "Why is EU flat?").await;
-        assert!(prompt.contains("{\"region\":\"EU\"}"));
+        let prompt = followup_prompt(
+            &store,
+            session,
+            &reference,
+            &Utf16JsonProjection::from("Why is EU flat?"),
+        )
+        .await;
+        assert!(prompt
+            .string_at("")
+            .unwrap()
+            .contains("{\"region\":\"EU\"}"));
         assert!(
-            !prompt.contains("secret"),
+            !prompt.string_at("").unwrap().contains("secret"),
             "privateContent never reaches the model"
         );
-        let (attachment, typed) = split_context(&prompt).unwrap();
+        let (attachment, typed) = split_context(prompt.string_at("").unwrap()).unwrap();
         assert_eq!(attachment.title, "Sales");
         assert_eq!(typed, "Why is EU flat?");
         assert_eq!(
-            followup_prompt(&store, session, &reference, "/compact").await,
-            "/compact"
+            followup_prompt(
+                &store,
+                session,
+                &reference,
+                &Utf16JsonProjection::from("/compact")
+            )
+            .await
+            .string_at(""),
+            Some("/compact")
         );
         let other = uuid::Uuid::new_v4();
-        assert_eq!(followup_prompt(&store, other, &reference, "hi").await, "hi");
+        assert_eq!(
+            followup_prompt(&store, other, &reference, &Utf16JsonProjection::from("hi"))
+                .await
+                .string_at(""),
+            Some("hi")
+        );
+        let unknown_units = vec![0xd800, 0xd83d, 0xde03];
+        let unknown_prompt = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&unknown_units),
+            unknown_units.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            followup_prompt(&store, other, &reference, &unknown_prompt)
+                .await
+                .string_units(""),
+            Some(unknown_units)
+        );
         assert!(split_context("hello").is_none());
+    }
+
+    #[tokio::test]
+    async fn followup_context_prefix_preserves_lone_and_paired_surrogates() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: std::sync::Arc<dyn lingxi_core::host::FileSystem> = std::sync::Arc::new(
+            platform_posix::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
+        let store = VisualizationStore::new(fs, dir.path().to_path_buf());
+        let session = uuid::Uuid::new_v4();
+        let reference = store
+            .publish(
+                &crate::store::Publisher {
+                    root_session: session,
+                    agent_id: None,
+                },
+                None,
+                "Chart",
+                "<p>ready</p>",
+                0,
+            )
+            .await
+            .unwrap()
+            .reference;
+        store
+            .write_state(session, &reference, 0, "{}", "{}")
+            .await
+            .unwrap();
+
+        let typed_units = vec![b'x' as u16, 0xd800, 0xd83d, 0xde03];
+        let typed = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&typed_units),
+            typed_units.clone(),
+        )
+        .unwrap();
+        let followed = followup_prompt(&store, session, &reference, &typed).await;
+        let followed_units = followed.string_units("").unwrap();
+        assert!(followed_units.ends_with(&typed_units));
+
+        let slash_units = vec![b' ' as u16, b'/' as u16, b'c' as u16, 0xd800];
+        let slash = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&slash_units),
+            slash_units.clone(),
+        )
+        .unwrap();
+        let bypassed = followup_prompt(&store, session, &reference, &slash).await;
+        assert_eq!(bypassed.string_units(""), Some(slash_units));
+
+        let malformed_before_slash_units = vec![0xd800, b'/' as u16, b'c' as u16];
+        let malformed_before_slash = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&malformed_before_slash_units),
+            malformed_before_slash_units.clone(),
+        )
+        .unwrap();
+        let prefixed = followup_prompt(&store, session, &reference, &malformed_before_slash).await;
+        assert!(prefixed
+            .string_units("")
+            .unwrap()
+            .ends_with(&malformed_before_slash_units));
     }
 }

@@ -15,7 +15,10 @@ use client::protocol::computer_access::ComputerAccessRequestDto;
 use client::protocol::events::ClientEvent;
 use client::protocol::permission::PermissionRequest;
 use client::protocol::version::CLIENT_PROTOCOL_VERSION;
-use serde::{Deserialize, Serialize};
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use serde::de::IgnoredAny;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 
 /// Bridge wire-protocol version this build speaks.
 ///
@@ -121,8 +124,8 @@ pub struct ServerHello {
 /// A framed JSON-RPC-style request from client to server.
 ///
 /// M9 maps `method`/`params` onto `lingxi_core::types::Effect` execution; M8 keeps the
-/// envelope generic (a `serde_json::Value` payload) so the wire shape is locked
-/// without coupling to the concrete effect enum yet.
+/// envelope generic as a source-preserving JSON payload so the wire shape is
+/// locked without coupling to the concrete effect enum yet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BridgeRequest {
     /// Correlation id (echoed in the matching [`BridgeResponse`]).
@@ -130,7 +133,8 @@ pub struct BridgeRequest {
     /// Method name (e.g. `"run_turn"`, `"dispatch_tool"`).
     pub method: String,
     /// Method parameters. // M9: typed against `lingxi_core::types::Effect`.
-    pub params: serde_json::Value,
+    #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
+    pub params: Utf16JsonProjection,
 }
 
 /// A framed reply to a [`BridgeRequest`].
@@ -139,7 +143,8 @@ pub struct BridgeResponse {
     /// Correlation id of the originating request.
     pub id: u64,
     /// Success payload. // M9: typed against `lingxi_core::types::EffectResult`.
-    pub result: Option<serde_json::Value>,
+    #[serde(default, with = "raw_json_option")]
+    pub result: Option<Utf16JsonProjection>,
     /// Error payload (mutually exclusive with `result`).
     pub error: Option<BridgeWireError>,
 }
@@ -212,7 +217,7 @@ pub struct AuthResponse {
 /// tagged on `type` — nesting it under `payload` keeps the frame discriminator
 /// from colliding with the event's own `type` field. `#[non_exhaustive]` so a
 /// future frame kind is additive.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Frame {
@@ -232,6 +237,144 @@ pub enum Frame {
     /// `ApproveComputerAccess`/`DenyComputerAccess` correlated by
     /// [`ComputerAccessRequestDto::request_id`].
     ComputerAccessRequest(ComputerAccessRequestDto),
+}
+
+/// `Option<Value>` historically treated both an absent `result` and an
+/// explicit JSON `null` as `None`. Keep that behavior while retaining every
+/// other result as a source projection.
+mod raw_json_option {
+    use super::Utf16JsonProjection;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde_json::value::RawValue;
+
+    pub fn serialize<S>(
+        value: &Option<Utf16JsonProjection>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(value) => {
+                lingxi_core::types::utf16_json::raw_json_serde::serialize(value, serializer)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Utf16JsonProjection>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        let value = Utf16JsonProjection::parse(raw.get()).map_err(serde::de::Error::custom)?;
+        if value.at_pointer("").is_some_and(|root| root.is_null()) {
+            Ok(None)
+        } else {
+            Ok(Some(value))
+        }
+    }
+}
+
+struct RawFrameFields {
+    frame_type: Box<RawValue>,
+    payload: Box<RawValue>,
+}
+
+// The derived adjacent-tag Deserialize buffers `payload` as serde Content
+// before it reaches raw-backed nested DTOs. Read the outer fields as RawValue,
+// then deserialize the payload directly from JSON text instead.
+impl<'de> Deserialize<'de> for RawFrameFields {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawFrameVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RawFrameVisitor {
+            type Value = RawFrameFields;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a bridge frame object with raw type and payload members")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut frame_type = None;
+                let mut payload = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "type" => {
+                            if frame_type.is_some() {
+                                return Err(serde::de::Error::duplicate_field("type"));
+                            }
+                            frame_type = Some(map.next_value::<Box<RawValue>>()?);
+                        }
+                        "payload" => {
+                            if payload.is_some() {
+                                return Err(serde::de::Error::duplicate_field("payload"));
+                            }
+                            payload = Some(map.next_value::<Box<RawValue>>()?);
+                        }
+                        _ => {
+                            let _ = map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Ok(RawFrameFields {
+                    frame_type: frame_type
+                        .ok_or_else(|| serde::de::Error::missing_field("type"))?,
+                    payload: payload.ok_or_else(|| serde::de::Error::missing_field("payload"))?,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(RawFrameVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for Frame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let RawFrameFields {
+            frame_type,
+            payload,
+        } = RawFrameFields::deserialize(deserializer)?;
+        let frame_type: String =
+            serde_json::from_str(frame_type.get()).map_err(serde::de::Error::custom)?;
+        let payload = payload.get();
+        match frame_type.as_str() {
+            "request" => serde_json::from_str(payload)
+                .map(Self::Request)
+                .map_err(serde::de::Error::custom),
+            "response" => serde_json::from_str(payload)
+                .map(Self::Response)
+                .map_err(serde::de::Error::custom),
+            "event" => serde_json::from_str(payload)
+                .map(Self::Event)
+                .map_err(serde::de::Error::custom),
+            "permission_request" => serde_json::from_str(payload)
+                .map(Self::PermissionRequest)
+                .map_err(serde::de::Error::custom),
+            "computer_access_request" => serde_json::from_str(payload)
+                .map(Self::ComputerAccessRequest)
+                .map_err(serde::de::Error::custom),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &[
+                    "request",
+                    "response",
+                    "event",
+                    "permission_request",
+                    "computer_access_request",
+                ],
+            )),
+        }
+    }
 }
 
 #[cfg(test)]

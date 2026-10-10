@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use base64::Engine as _;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use visualization::document::{Theme, ThemeMode};
@@ -93,15 +94,18 @@ impl DesktopVisualizationHost {
         Self { service }
     }
 
-    /// Answer one request. `Ok(Value::Null)` is a valid reply (an
+    /// Answer one request. A projected JSON `null` is a valid reply (an
     /// unavailable mount, an unmount); `Err` is a malformed request.
     ///
     /// # Errors
     /// The params do not decode as a known `op`.
-    pub async fn handle(&self, params: Value) -> Result<Value, String> {
-        let request: Request = serde_json::from_value(params)
+    pub async fn handle(&self, params: Utf16JsonProjection) -> Result<Utf16JsonProjection, String> {
+        let source = params
+            .to_json_string()
             .map_err(|_| "invalid visualization request".to_string())?;
-        Ok(match request {
+        let request: Request = serde_json::from_str(&source)
+            .map_err(|_| "invalid visualization request".to_string())?;
+        let response = match request {
             Request::Mount {
                 session_id,
                 id,
@@ -113,7 +117,8 @@ impl DesktopVisualizationHost {
                 let (Some(root_session), Some(id)) =
                     (session_uuid(&session_id), VisualizationId::parse(&id))
                 else {
-                    return Ok(Value::Null);
+                    return Ok(Utf16JsonProjection::from_serde_value(&Value::Null)
+                        .expect("null is a valid JSON response"));
                 };
                 let request = MountRequest {
                     root_session,
@@ -211,6 +216,8 @@ impl DesktopVisualizationHost {
                 )
             }
             Request::Notices => Value::String(visualization::assets::third_party_notices()),
-        })
+        };
+        Utf16JsonProjection::from_serde_value(&response)
+            .map_err(|_| "invalid visualization response".to_string())
     }
 }

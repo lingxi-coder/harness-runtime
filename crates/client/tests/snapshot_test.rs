@@ -1602,7 +1602,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/send_prompt.json",
             ClientCommand::SendPrompt {
-                text: "summarize the diff".to_string(),
+                text: "summarize the diff".into(),
                 prompt_mode: Some(PromptModeDto::Normal),
                 images: vec![ImageRefDto {
                     media_type: "image/png".to_string(),
@@ -1730,7 +1730,7 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/run_slash_command.json",
             ClientCommand::RunSlashCommand {
-                raw: "/model opus".to_string(),
+                raw: "/model opus".into(),
                 turn_id: Some(7),
             },
         ),

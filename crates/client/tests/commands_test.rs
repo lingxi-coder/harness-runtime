@@ -26,6 +26,7 @@ use client::protocol::local_apps::{
     AppSurfaceDto, PluginCommandDto,
 };
 use client::protocol::permission::PermissionResponseDto;
+use client::protocol::text::ClientTextDto;
 
 /// `SendPrompt` — the core inbound command. Carries the text, an optional
 /// prompt mode, inline image bytes (decision §0.8), and an optional client
@@ -33,7 +34,7 @@ use client::protocol::permission::PermissionResponseDto;
 #[test]
 fn send_prompt_round_trips() {
     let cmd = ClientCommand::SendPrompt {
-        text: "summarize this repo".to_string(),
+        text: ClientTextDto::from_utf8("summarize this repo"),
         prompt_mode: Some(PromptModeDto::Plan),
         images: vec![ImageRefDto {
             media_type: "image/png".to_string(),
@@ -58,7 +59,7 @@ fn send_prompt_round_trips() {
 #[test]
 fn send_prompt_optional_fields_skip_when_none() {
     let cmd = ClientCommand::SendPrompt {
-        text: "hi".to_string(),
+        text: ClientTextDto::from_utf8("hi"),
         prompt_mode: None,
         images: vec![],
         turn_id: None,
@@ -340,7 +341,7 @@ fn session_agent_commands_round_trip() {
 #[test]
 fn run_slash_command_round_trips() {
     let cmd = ClientCommand::RunSlashCommand {
-        raw: "/model opus".to_string(),
+        raw: ClientTextDto::from_utf8("/model opus"),
         turn_id: Some(7),
     };
     let json = serde_json::to_value(&cmd).expect("serialize RunSlashCommand");
@@ -351,7 +352,7 @@ fn run_slash_command_round_trips() {
     assert_eq!(back, cmd);
 
     let without_turn = ClientCommand::RunSlashCommand {
-        raw: "/help".to_string(),
+        raw: ClientTextDto::from_utf8("/help"),
         turn_id: None,
     };
     let json = serde_json::to_value(&without_turn).expect("serialize RunSlashCommand");
@@ -1039,7 +1040,7 @@ fn no_live_command_carries_session_id() {
     // One canonical instance of every command EXCEPT ResumeSession.
     let commands: Vec<ClientCommand> = vec![
         ClientCommand::SendPrompt {
-            text: "x".to_string(),
+            text: ClientTextDto::from_utf8("x"),
             prompt_mode: Some(PromptModeDto::Normal),
             images: vec![ImageRefDto {
                 media_type: "image/png".to_string(),
@@ -1063,7 +1064,7 @@ fn no_live_command_carries_session_id() {
             selection: ReasoningSelectionDto::Automatic,
         },
         ClientCommand::RunSlashCommand {
-            raw: "/x".to_string(),
+            raw: ClientTextDto::from_utf8("/x"),
             turn_id: None,
         },
         ClientCommand::RefreshListings {

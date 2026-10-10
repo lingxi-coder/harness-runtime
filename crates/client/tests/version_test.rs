@@ -33,8 +33,8 @@ fn version_is_semver() {
     }
 }
 
-/// Major 21 includes the Major 20 required provider stop_reason and retypes
-/// existing UI/app-agent text fields to `ClientTextDto`. The protocol bindings
+/// Major 22 carries exact prompt/slash inputs, command catalog fields and
+/// agent/compaction summaries through `ClientTextDto`. The protocol bindings
 /// and host must advance together; this is a deliberate second lock beyond the
 /// structural guard.
 ///
@@ -42,8 +42,8 @@ fn version_is_semver() {
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_twenty_one_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "21.0.0");
+fn version_is_twenty_two_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "22.0.0");
 }
 
 fn repository_root() -> PathBuf {

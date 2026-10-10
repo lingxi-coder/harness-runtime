@@ -48,8 +48,8 @@ pub async fn followup_text(
     config_home: &Path,
     root_session: &str,
     context: Option<&client::protocol::message::VisualizationRefDto>,
-    text: String,
-) -> String {
+    text: Utf16JsonProjection,
+) -> Utf16JsonProjection {
     let Some(context) = context else {
         return text;
     };
@@ -65,6 +65,27 @@ pub async fn followup_text(
     };
     let store = shared_store(fs, config_home);
     visualization::context::followup_prompt(&store, session.as_uuid(), &reference, &text).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn followup_without_visualization_context_preserves_exact_prompt_units() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
+            dir.path().to_path_buf(),
+        ));
+        let units = vec![b'x' as u16, 0xd800, 0xd83d, 0xde03];
+        let text =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+
+        let followed = followup_text(fs, dir.path(), "not-a-session", None, text).await;
+
+        assert_eq!(followed.string_units(""), Some(units));
+    }
 }
 
 struct VisualizePrompt(Utf16JsonProjection);

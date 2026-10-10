@@ -1699,11 +1699,9 @@ mod session_agent_exact_utf16_tests {
             .unwrap();
         let raw = format!("{}\n", row.to_json_string().unwrap());
 
-        assert!(
-            parse_session_agent_message_rows(raw.as_bytes())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(parse_session_agent_message_rows(raw.as_bytes())
+            .unwrap()
+            .is_empty());
         assert_eq!(session_agent_transcript_revision(raw.as_bytes()), 1);
     }
 }
@@ -5490,10 +5488,10 @@ impl MobileEngineHandle {
                     &self.lingxi_home,
                     &root_session,
                     visualization_context.as_ref(),
-                    text,
+                    text.into_projection(),
                 )
                 .await;
-                self.start_streaming_turn(text.into(), prompt_mode, images, turn_id, true)
+                self.start_streaming_turn(text, prompt_mode, images, turn_id, true)
                     .await
             }
 
@@ -5945,7 +5943,7 @@ impl MobileEngineHandle {
             // `SendPrompt` (claude-code injects the expanded prompt as the user
             // message), so a typed `/loop` actually schedules + executes.
             ClientCommand::RunSlashCommand { raw, turn_id } => {
-                let raw_source = Utf16JsonProjection::from(raw.as_str());
+                let raw_source = raw.into_projection();
                 if self.inner.session_mode == session::jsonl::SessionMode::Chat {
                     let allowed =
                         if let Some(parsed) = command_api::parse_slash_command(&raw_source) {
@@ -6065,7 +6063,16 @@ impl MobileEngineHandle {
                         self.event_sink
                             .emit(ClientEvent::SlashCommandResult {
                                 turn_id,
-                                display: format!("not a slash command: {raw}").into(),
+                                display: client::protocol::text::ClientTextDto::from_code_units(
+                                    "not a slash command: "
+                                        .encode_utf16()
+                                        .chain(
+                                            raw_source
+                                                .string_units("")
+                                                .expect("slash input is a text source"),
+                                        )
+                                        .collect(),
+                                ),
                                 is_error: true,
                             })
                             .await;
