@@ -44,8 +44,8 @@ from pathlib import Path
 MAX_DESCRIPTION_COLUMNS = 180
 
 # 门要扫的 skill 根目录，相对仓库根。
-# The Local App plugin's skills and agents are checked in the Local App repository; the device skills
-# below are the host's own.
+# The Local App plugin's skills are checked in their own repository; the device skills below are the
+# host's own.
 SKILL_ROOTS = [
     "crates/runtime/src/mobile/device_skills",
 ]

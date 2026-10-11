@@ -297,8 +297,8 @@ DEFAULT_NEEDLES = FULL_NEEDLES
 # `docs/` 与 `.omo/plans/`（两处：仓库根与 crates/ 下）是**历史归档**：
 # 它们记录的是当时写下的事实，改写它们等于伪造档案，所以它们贡献的条目
 # 永远不可能被合法地清掉——一条永远不会归零的 baseline 条目只有噪声价值。
-# `skills/*.md` 反过来**要扫**：skills/create-local-app/SKILL.md 指示 agent
-# 去写 `LINGXI.md`，那是一份活的契约，不是档案。
+# `skills/*.md` 反过来**要扫**：skill 正文是写给 agent 的活契约（例如指示它
+# 去写 `LINGXI.md`），不是档案。
 EXCLUDED_PREFIXES = (
     "third_party/",
     "docs/",

@@ -18,11 +18,6 @@ use lingxi_core::host::{
     McpTransportSpec, SecureStorage, ServerCapabilitiesDto,
 };
 use lingxi_core::types::{AgentId, McpConnectionId};
-// The scope of a managed-server conversation export (and the grammar of its names and keys)
-// is defined in `mcp-wire` so an out-of-tree service can bind one without this crate;
-// the old path stays.
-use mcp_wire::export::is_sha256;
-pub use mcp_wire::export::ConversationExport;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::OnceLock;
@@ -33,7 +28,6 @@ mod authentication;
 mod catalog_refresh;
 mod diagnostics;
 mod discovery_cache;
-mod managed;
 use authentication::error_is_401;
 use authentication::error_is_403_insufficient_scope;
 pub(crate) use authentication::error_is_auth_response;
@@ -208,110 +202,6 @@ pub struct McpCatalogChanged {
     /// publishes, and retire notifications leave this `None`.
     pub telemetry_cause: Option<&'static str>,
 }
-
-/// Host-managed logical server metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedServer {
-    /// Conversation-export scope.
-    pub scope: ConversationExport,
-    /// Digest of the currently active catalog.
-    pub catalog_sha256: String,
-    /// Generation of the exposed tool surface.
-    pub surface_generation: u64,
-}
-
-/// The grammar a registry holds managed-server identities to. The publisher of the servers supplies it
-/// (see [`McpRegistry::configure_managed_servers`]); this crate does not know what the servers are.
-#[derive(Debug, Clone, Copy)]
-pub struct ManagedServerPolicy {
-    /// Whether a string is a well-formed server identity.
-    pub is_valid_id: fn(&str) -> bool,
-    /// Whether a string is a well-formed raw tool name.
-    pub is_valid_tool_name: fn(&str) -> bool,
-}
-
-impl ManagedServerPolicy {
-    pub(crate) fn is_valid_id(&self, id: &str) -> bool {
-        (self.is_valid_id)(id)
-    }
-    pub(crate) fn is_valid_tool_name(&self, name: &str) -> bool {
-        (self.is_valid_tool_name)(name)
-    }
-}
-
-/// Optional widget resource exposed by one managed server.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedServerResource {
-    /// Concrete resource URI advertised to the model.
-    pub uri: String,
-    /// Human-readable name.
-    pub name: String,
-    /// Optional description.
-    pub description: Option<String>,
-    /// Optional MIME type.
-    pub mime_type: Option<String>,
-    /// MCP Apps resource metadata, including CSP/domain hints.
-    pub meta: Option<serde_json::Value>,
-}
-
-/// Host-owned runtime overlay for one managed server.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedServerRuntime {
-    /// Whether the logical server is currently visible/callable.
-    pub enabled: bool,
-    /// Optional allowlist of raw tool names from the active catalog.
-    pub enabled_tools: Option<Vec<String>>,
-    /// Optional widget resource advertised through `resources/list`.
-    pub resource: Option<ManagedServerResource>,
-    /// Monotonic generation for resource metadata changes.
-    pub resource_generation: u64,
-}
-
-impl Default for ManagedServerRuntime {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            enabled_tools: None,
-            resource: None,
-            resource_generation: 0,
-        }
-    }
-}
-
-/// One lazily exposed managed server in a conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerExposure {
-    /// Stable managed-server identity.
-    pub app_id: String,
-    /// Whether the conversation has explicitly pinned the app.
-    pub pinned: bool,
-    /// Number of calls currently in flight.
-    pub in_flight: usize,
-    /// Monotonic recency sequence.
-    pub last_used: u64,
-    /// Generation of the exposure metadata.
-    pub exposure_generation: u64,
-}
-
-/// Result of exposing one logical managed server in a conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerExposureUpdate {
-    /// The new or refreshed exposure entry.
-    pub exposure: ServerExposure,
-    /// Unpinned idle app evicted by the bounded LRU policy, if any.
-    pub evicted_app_id: Option<String>,
-}
-
-#[derive(Debug, Default)]
-struct ConversationExposureState {
-    entries: HashMap<String, ServerExposure>,
-    next_sequence: u64,
-    next_generation: u64,
-}
-
-const MAX_EXPOSED_SERVERS: usize = 8;
-const MAX_IN_FLIGHT_PER_SERVER: usize = 4;
-const MAX_IN_FLIGHT_PER_CONVERSATION: usize = 8;
 
 struct RegisteredClient {
     connection_id: Option<McpConnectionId>,
@@ -558,15 +448,6 @@ pub struct McpRegistry {
     /// `Disconnected` entries read from `.mcp.json` before the engine
     /// connects, and so engine-side tests can seed states directly.
     pub connections: Arc<RwLock<HashMap<String, McpConnectionState>>>,
-    /// Host-managed logical servers. This is metadata only; all
-    /// entries share the registry's physical transport substrate.
-    managed_servers: Arc<RwLock<HashMap<String, ManagedServer>>>,
-    /// Host-managed runtime overlays for logical managed servers.
-    managed_server_runtime: Arc<RwLock<HashMap<String, ManagedServerRuntime>>>,
-    /// Per-conversation bounded, lazy managed-server exposure state.
-    server_exposures: Arc<RwLock<HashMap<String, ConversationExposureState>>>,
-    /// How managed-server identities are validated; set once by the publisher.
-    managed_policy: Arc<std::sync::OnceLock<ManagedServerPolicy>>,
     /// Synchronous mirror of claude-code 2.1.238's `eZf()`
     /// (`bdl(b7e()??[]).length>0`, `cc-238.js @229641619`) — "at least one MCP
     /// client is `type === "pending"`".
@@ -800,10 +681,6 @@ impl McpRegistry {
     fn clone_for_background(&self) -> Self {
         Self {
             connections: Arc::clone(&self.connections),
-            managed_servers: Arc::clone(&self.managed_servers),
-            managed_server_runtime: Arc::clone(&self.managed_server_runtime),
-            server_exposures: Arc::clone(&self.server_exposures),
-            managed_policy: Arc::clone(&self.managed_policy),
             pending_servers: Arc::clone(&self.pending_servers),
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
@@ -843,10 +720,6 @@ impl McpRegistry {
         let (catalog_changes, _unused_rx) = broadcast::channel(64);
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
-            managed_servers: Arc::new(RwLock::new(HashMap::new())),
-            managed_server_runtime: Arc::new(RwLock::new(HashMap::new())),
-            server_exposures: Arc::new(RwLock::new(HashMap::new())),
-            managed_policy: Arc::new(std::sync::OnceLock::new()),
             pending_servers: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),

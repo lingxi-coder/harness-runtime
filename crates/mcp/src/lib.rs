@@ -139,10 +139,7 @@ pub use mcp_output_storage::{
     RawResourceContent as RawResourceContentRich,
 };
 pub use raw_conn::RawConnectionProvider;
-pub use registry::{
-    ConversationExport, ManagedServer, ManagedServerPolicy, McpCatalogChanged, McpCatalogKind,
-    McpRegistry, ServerExposure,
-};
+pub use registry::{McpCatalogChanged, McpCatalogKind, McpRegistry};
 pub use server_gate::{
     apply_project_server_gate, is_builtin_computer_use, mcp_server_is_disabled, McpPolicyContext,
     McpServerBlockReason, McpServerDecision, BUILTIN_COMPUTER_USE_SERVER,
