@@ -24,6 +24,9 @@ A "MISS" is a hypothesis, not a finding: read the divergence point before
 believing it.
 """
 import io, os, re, sys, glob
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 TOOL_NAMES = ["AskUserQuestion", "Agent", "Skill", "Task", "Workflow", "Bash",
               "Read", "Edit", "Write", "Grep", "Glob", "TodoWrite"]
@@ -86,7 +89,14 @@ def longest_prefix(t, corpus):
 def main():
     chunk_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser(
         "~/.claude/oracle-chunks/2.1.267")
-    patterns = sys.argv[2:] or ["orchestrator/src/prompt/*.rs"]
+    patterns = sys.argv[2:] or [str(REPO_ROOT / "crates/orchestrator/src/prompt/*.rs")]
+    files = set()
+    for pat in patterns:
+        matched = [f for f in glob.glob(pat) if os.path.isfile(f)]
+        if not matched:
+            print(f"FATAL: source pattern matched no files: {pat}", file=sys.stderr)
+            return 2
+        files.update(matched)
     corpus = build_corpus(chunk_dir)
     # Positive control: the scan must be able to FIND something.
     control = "Execute a workflow script that orchestrates multiple subagents deterministically."
@@ -95,26 +105,28 @@ def main():
         return 2
     print(f"corpus {len(corpus):,} chars; control OK")
     misses = checked = 0
-    for pat in patterns:
-        for f in sorted(glob.glob(pat)):
-            s = io.open(f, encoding="utf-8").read()
-            ti = s.find("mod tests")
-            prod = s if ti < 0 else s[:ti]
-            for m in re.finditer(r'"((?:[^"\\\n]|\\.){90,})"', prod):
-                lit = m.group(1)
-                if "\\n" in lit or lit.count("{") > 2:
-                    continue
-                t = unbrand(unescape_rust(lit))
-                if "{" in t:
-                    continue
-                checked += 1
-                if present(t, corpus):
-                    continue
-                misses += 1
-                p = longest_prefix(t, corpus)
-                line = prod[:m.start()].count("\n") + 1
-                print(f"\nMISS {f}:{line}  ({p}/{len(t)} chars matched)")
-                print(f"  diverges at: {t[p:p+120]!r}")
+    for f in sorted(files):
+        s = io.open(f, encoding="utf-8").read()
+        ti = s.find("mod tests")
+        prod = s if ti < 0 else s[:ti]
+        for m in re.finditer(r'"((?:[^"\\\n]|\\.){90,})"', prod):
+            lit = m.group(1)
+            if "\\n" in lit or lit.count("{") > 2:
+                continue
+            t = unbrand(unescape_rust(lit))
+            if "{" in t:
+                continue
+            checked += 1
+            if present(t, corpus):
+                continue
+            misses += 1
+            p = longest_prefix(t, corpus)
+            line = prod[:m.start()].count("\n") + 1
+            print(f"\nMISS {f}:{line}  ({p}/{len(t)} chars matched)")
+            print(f"  diverges at: {t[p:p+120]!r}")
+    if not checked:
+        print("FATAL: no comparable prompt literals were checked", file=sys.stderr)
+        return 2
     print(f"\nchecked {checked} literals; {misses} candidate(s) — read each before believing it")
     return 0
 

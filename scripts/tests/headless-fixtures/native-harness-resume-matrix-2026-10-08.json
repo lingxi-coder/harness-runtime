@@ -1,0 +1,3830 @@
+{
+  "schemaVersion": 1,
+  "nativeVersion": "2.1.293",
+  "nativeBinarySha256": "4e21122a227857da1178aca3299700c1fd7f2b77c93f12e73c2c76db796a105e",
+  "harnessBinary": {
+    "path": "/Users/luolingfeng/lingxi/.omx/context/headless-implementation-20261007T235741Z/validation/run-002/target/debug/lingxi-cli",
+    "sha256": "955318f932774293d78863c67c39a6d8e9f015cfcc258d98ff31d758fca5e312",
+    "bytes": 305661952
+  },
+  "sourceMode": "local source overlay of delivered commits; not committed dependency pin acceptance",
+  "rawCaptureRoot": "/tmp/headless-resume-293-matrix-02",
+  "rawReportSha256": "996a9a349b36ee734d9951051b73ec6e47e64be38145f7aa95605b421c50ece6",
+  "normalizationRulesChanged": false,
+  "nativeStableCases": 16,
+  "caseCount": 28,
+  "harnessProtocolCompleteCases": 26,
+  "fullByteParity": false,
+  "cases": [
+    {
+      "id": "print-text",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-print-text-workspace/6b7ff52d-e492-4084-88e2-5ad153e3c053.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 930,
+            "left": {
+              "length": 935,
+              "byte": 56,
+              "contextStart": 906,
+              "contextEnd": 935,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 935,
+              "byte": 51,
+              "contextStart": 906,
+              "contextEnd": 935,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 930,
+            "left": {
+              "length": 1867,
+              "byte": 56,
+              "contextStart": 906,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1862,
+              "byte": 51,
+              "contextStart": 906,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/6b7ff52d-e492-4084-88e2-5ad153e3c053/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "print-json",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-print-json-workspace/a551131e-7abd-4692-8a38-2eb7bacda426.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "difference": {
+            "offset": 788,
+            "left": {
+              "length": 1569,
+              "byte": 45,
+              "contextStart": 764,
+              "contextEnd": 813,
+              "hex": "6c4d6f64656c223a22636c617564652d736f6e6e65742d352d35222c2270726f7669646572223a22666972737450617274",
+              "text": "lModel\":\"claude-sonnet-5-5\",\"provider\":\"firstPart"
+            },
+            "right": {
+              "length": 1272,
+              "byte": 34,
+              "contextStart": 764,
+              "contextEnd": 813,
+              "hex": "6c4d6f64656c223a22636c617564652d736f6e6e65742d35222c2270726f7669646572223a226669727374506172747922",
+              "text": "lModel\":\"claude-sonnet-5\",\"provider\":\"firstParty\""
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 930,
+            "left": {
+              "length": 935,
+              "byte": 56,
+              "contextStart": 906,
+              "contextEnd": 935,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 935,
+              "byte": 51,
+              "contextStart": 906,
+              "contextEnd": 935,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 930,
+            "left": {
+              "length": 1867,
+              "byte": 56,
+              "contextStart": 906,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1862,
+              "byte": 51,
+              "contextStart": 906,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/a551131e-7abd-4692-8a38-2eb7bacda426/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "print-json-verbose",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-print-json-verbose-workspace/9d783f5c-874d-47b6-80fb-0fc0f036f0a6.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-2-timestamp-assistant",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/1/timestamp"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/9d783f5c-874d-47b6-80fb-0fc0f036f0a6/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "print-json-verbose-tools",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-print-json-verbose-tools-workspace/27489f29-90dc-450f-8311-6ee7976e643b.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-4-timestamp-user",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/2/timestamp"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 2497,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 4095,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 972,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 3469,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n{\"model\":\"claude-"
+            },
+            "right": {
+              "length": 5067,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n{\"model\":\"claude-"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 3685,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 5092,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-headers.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 972,
+              "byte": 51,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20333733310d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 3731\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 53,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20353133380d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 5138\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 4657,
+              "byte": 51,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20333733310d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 3731\r\n\r\n{\"model\":\"claude-"
+            },
+            "right": {
+              "length": 6064,
+              "byte": 53,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20353133380d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 5138\r\n\r\n{\"model\":\"claude-"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/27489f29-90dc-450f-8311-6ee7976e643b/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "print-json-verbose-hooks",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-print-json-verbose-hooks-workspace/2b441a1d-6021-4bf4-88ce-317e879c1190.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-timestamp-queue-operation",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 118,
+              "byte": 50,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "323032362d31302d30385431313a34373a30312e3333363935",
+              "text": "2026-10-08T11:47:01.33695"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Native socket path does not correlate to process PID",
+          "details": {
+            "side": "right"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 1962,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 1163,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 665,
+            "left": {
+              "length": 1013,
+              "byte": 109,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d636861",
+              "text": "turn-control-2026-07-01,mid-conversation-tool-cha"
+            },
+            "right": {
+              "length": 972,
+              "byte": 101,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6566666f72742d323032352d31312d32342c7468696e6b696e",
+              "text": "turn-control-2026-07-01,effort-2025-11-24,thinkin"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 665,
+            "left": {
+              "length": 2975,
+              "byte": 109,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d636861",
+              "text": "turn-control-2026-07-01,mid-conversation-tool-cha"
+            },
+            "right": {
+              "length": 2135,
+              "byte": 101,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6566666f72742d323032352d31312d32342c7468696e6b696e",
+              "text": "turn-control-2026-07-01,effort-2025-11-24,thinkin"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/2b441a1d-6021-4bf4-88ce-317e879c1190/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "print-json-verbose-shutdown",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-print-json-verbose-shutdown-workspace/fb183fe9-08e1-4a33-8802-229fd05a4683.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-timestamp-queue-operation",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 118,
+              "byte": 50,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "323032362d31302d30385431313a34373a30322e3838393334",
+              "text": "2026-10-08T11:47:02.88934"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Native socket path does not correlate to process PID",
+          "details": {
+            "side": "right"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 1905,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 1163,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 665,
+            "left": {
+              "length": 1013,
+              "byte": 109,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d636861",
+              "text": "turn-control-2026-07-01,mid-conversation-tool-cha"
+            },
+            "right": {
+              "length": 972,
+              "byte": 101,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6566666f72742d323032352d31312d32342c7468696e6b696e",
+              "text": "turn-control-2026-07-01,effort-2025-11-24,thinkin"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 665,
+            "left": {
+              "length": 2918,
+              "byte": 109,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d636861",
+              "text": "turn-control-2026-07-01,mid-conversation-tool-cha"
+            },
+            "right": {
+              "length": 2135,
+              "byte": 101,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6566666f72742d323032352d31312d32342c7468696e6b696e",
+              "text": "turn-control-2026-07-01,effort-2025-11-24,thinkin"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/fb183fe9-08e1-4a33-8802-229fd05a4683/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "print-stream-json",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-print-stream-json-workspace/c0a2ce5a-0c6b-4a7e-83e6-16b4ff3b93b8.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-uuid-system",
+            "side": "left",
+            "expected": 1,
+            "actual": 2,
+            "path": "/uuid"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/c0a2ce5a-0c6b-4a7e-83e6-16b4ff3b93b8/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "partial-stream",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-partial-stream-workspace/f474daa0-e785-4890-8987-cbc90fce915c.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-parentUuid-attachment",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/parentUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-uuid-system",
+            "side": "right",
+            "expected": 3,
+            "actual": 2,
+            "path": "/uuid"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/f474daa0-e785-4890-8987-cbc90fce915c/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "unicode-json",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-unicode-json-workspace/70b586fa-6933-44c6-8964-8f9009480aff.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-parentUuid-attachment",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/parentUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "difference": {
+            "offset": 788,
+            "left": {
+              "length": 1584,
+              "byte": 45,
+              "contextStart": 764,
+              "contextEnd": 813,
+              "hex": "6c4d6f64656c223a22636c617564652d736f6e6e65742d352d35222c2270726f7669646572223a22666972737450617274",
+              "text": "lModel\":\"claude-sonnet-5-5\",\"provider\":\"firstPart"
+            },
+            "right": {
+              "length": 1287,
+              "byte": 34,
+              "contextStart": 764,
+              "contextEnd": 813,
+              "hex": "6c4d6f64656c223a22636c617564652d736f6e6e65742d35222c2270726f7669646572223a226669727374506172747922",
+              "text": "lModel\":\"claude-sonnet-5\",\"provider\":\"firstParty\""
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 930,
+            "left": {
+              "length": 935,
+              "byte": 56,
+              "contextStart": 906,
+              "contextEnd": 935,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 935,
+              "byte": 51,
+              "contextStart": 906,
+              "contextEnd": 935,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 930,
+            "left": {
+              "length": 1867,
+              "byte": 56,
+              "contextStart": 906,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1862,
+              "byte": 51,
+              "contextStart": 906,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/70b586fa-6933-44c6-8964-8f9009480aff/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "stdin-text",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-stdin-text-workspace/c8915921-b269-4396-8023-842769048b77.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 374,
+            "left": {
+              "length": 934,
+              "byte": 97,
+              "contextStart": 350,
+              "contextEnd": 399,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 929,
+              "byte": 76,
+              "contextStart": 350,
+              "contextEnd": 399,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 929,
+            "left": {
+              "length": 935,
+              "byte": 56,
+              "contextStart": 905,
+              "contextEnd": 935,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a203938300d0a0d0a",
+              "text": " zstd\r\nContent-Length: 980\r\n\r\n"
+            },
+            "right": {
+              "length": 935,
+              "byte": 55,
+              "contextStart": 905,
+              "contextEnd": 935,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a203937350d0a0d0a",
+              "text": " zstd\r\nContent-Length: 975\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 929,
+            "left": {
+              "length": 1869,
+              "byte": 56,
+              "contextStart": 905,
+              "contextEnd": 954,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a203938300d0a0d0a7b226d6f64656c223a22636c617564652d736f",
+              "text": " zstd\r\nContent-Length: 980\r\n\r\n{\"model\":\"claude-so"
+            },
+            "right": {
+              "length": 1864,
+              "byte": 55,
+              "contextStart": 905,
+              "contextEnd": 954,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a203937350d0a0d0a7b226d6f64656c223a22636c617564652d736f",
+              "text": " zstd\r\nContent-Length: 975\r\n\r\n{\"model\":\"claude-so"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/c8915921-b269-4396-8023-842769048b77/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "no-persistence",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-2-timestamp-assistant",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "sdk-initialize",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-initialize-workspace/8bf067cd-04e1-447a-8985-6703c5d5cfd1.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-parentUuid-attachment",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/parentUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 108,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-3-timestamp-assistant",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/8bf067cd-04e1-447a-8985-6703c5d5cfd1/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "sdk-replay",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-replay-workspace/34b885d2-1a8b-46a3-8952-b39264254595.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 108,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Identity must be nonempty",
+          "details": {
+            "rule": "dynamic-1-uuid-user",
+            "side": "right",
+            "record": 2
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/34b885d2-1a8b-46a3-8952-b39264254595/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "sdk-multi-turn",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-multi-turn-workspace/f1e7c704-ee61-4de3-8932-75c124d1cc16.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 108,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-uuid-system",
+            "side": "right",
+            "expected": 3,
+            "actual": 2,
+            "path": "/uuid"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 358,
+            "left": {
+              "length": 918,
+              "byte": 97,
+              "contextStart": 334,
+              "contextEnd": 383,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 913,
+              "byte": 76,
+              "contextStart": 334,
+              "contextEnd": 383,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 965,
+            "left": {
+              "length": 971,
+              "byte": 54,
+              "contextStart": 941,
+              "contextEnd": 971,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a203936340d0a0d0a",
+              "text": " zstd\r\nContent-Length: 964\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 53,
+              "contextStart": 941,
+              "contextEnd": 971,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a203935390d0a0d0a",
+              "text": " zstd\r\nContent-Length: 959\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 965,
+            "left": {
+              "length": 1889,
+              "byte": 54,
+              "contextStart": 941,
+              "contextEnd": 990,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a203936340d0a0d0a7b226d6f64656c223a22636c617564652d736f",
+              "text": " zstd\r\nContent-Length: 964\r\n\r\n{\"model\":\"claude-so"
+            },
+            "right": {
+              "length": 1884,
+              "byte": 53,
+              "contextStart": 941,
+              "contextEnd": 990,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a203935390d0a0d0a7b226d6f64656c223a22636c617564652d736f",
+              "text": " zstd\r\nContent-Length: 959\r\n\r\n{\"model\":\"claude-so"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 1038,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a224669727374206c6f63616c207475726e2e227d2c7b22726f",
+              "text": "\"role\":\"user\",\"content\":\"First local turn.\"},{\"ro"
+            },
+            "right": {
+              "length": 1058,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2246",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"F"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-headers.bin",
+          "difference": {
+            "offset": 965,
+            "left": {
+              "length": 972,
+              "byte": 48,
+              "contextStart": 941,
+              "contextEnd": 972,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313038340d0a0d0a",
+              "text": " zstd\r\nContent-Length: 1084\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 49,
+              "contextStart": 941,
+              "contextEnd": 972,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313130340d0a0d0a",
+              "text": " zstd\r\nContent-Length: 1104\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request.bin",
+          "difference": {
+            "offset": 965,
+            "left": {
+              "length": 2010,
+              "byte": 48,
+              "contextStart": 941,
+              "contextEnd": 990,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313038340d0a0d0a7b226d6f64656c223a22636c617564652d73",
+              "text": " zstd\r\nContent-Length: 1084\r\n\r\n{\"model\":\"claude-s"
+            },
+            "right": {
+              "length": 2030,
+              "byte": 49,
+              "contextStart": 941,
+              "contextEnd": 990,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313130340d0a0d0a7b226d6f64656c223a22636c617564652d73",
+              "text": " zstd\r\nContent-Length: 1104\r\n\r\n{\"model\":\"claude-s"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/f1e7c704-ee61-4de3-8932-75c124d1cc16/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "sdk-resume",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-resume-workspace/f26f4157-e414-4518-867e-c4229b916d29.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 108,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-2-timestamp-assistant",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "processes/1/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-resume-workspace/f26f4157-e414-4518-867e-c4229b916d29.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 3,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/1/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 108,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/1/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-uuid-system",
+            "side": "right",
+            "expected": 1,
+            "actual": 2,
+            "path": "/uuid"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 1074,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 1094,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 972,
+              "byte": 50,
+              "contextStart": 942,
+              "contextEnd": 972,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a20313132300d0a0d0a",
+              "text": "zstd\r\nContent-Length: 1120\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 52,
+              "contextStart": 942,
+              "contextEnd": 972,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a20313134300d0a0d0a",
+              "text": "zstd\r\nContent-Length: 1140\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 2046,
+              "byte": 50,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a20313132300d0a0d0a7b226d6f64656c223a22636c617564652d736f",
+              "text": "zstd\r\nContent-Length: 1120\r\n\r\n{\"model\":\"claude-so"
+            },
+            "right": {
+              "length": 2066,
+              "byte": 52,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a20313134300d0a0d0a7b226d6f64656c223a22636c617564652d736f",
+              "text": "zstd\r\nContent-Length: 1140\r\n\r\n{\"model\":\"claude-so"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/f26f4157-e414-4518-867e-c4229b916d29/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        },
+        {
+          "artifact": "processes/1/sessions/session-state/f26f4157-e414-4518-867e-c4229b916d29/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "sdk-fork",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-fork-workspace/cfb6b45d-5034-4833-8b25-a8eeacf0e516.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 108,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-2-timestamp-assistant",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "processes/1/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-fork-workspace/cfb6b45d-5034-4833-8b25-a8eeacf0e516.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/1/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 108,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/1/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-session_id-system",
+            "side": "right",
+            "expected": 1,
+            "actual": 2,
+            "path": "/session_id"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 1057,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 1077,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-headers.bin",
+          "difference": {
+            "offset": 949,
+            "left": {
+              "length": 955,
+              "byte": 50,
+              "contextStart": 925,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a20313132300d0a0d0a",
+              "text": "zstd\r\nContent-Length: 1120\r\n\r\n"
+            },
+            "right": {
+              "length": 955,
+              "byte": 52,
+              "contextStart": 925,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a20313134300d0a0d0a",
+              "text": "zstd\r\nContent-Length: 1140\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request.bin",
+          "difference": {
+            "offset": 949,
+            "left": {
+              "length": 2012,
+              "byte": 50,
+              "contextStart": 925,
+              "contextEnd": 974,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a20313132300d0a0d0a7b226d6f64656c223a22636c617564652d736f",
+              "text": "zstd\r\nContent-Length: 1120\r\n\r\n{\"model\":\"claude-so"
+            },
+            "right": {
+              "length": 2032,
+              "byte": 52,
+              "contextStart": 925,
+              "contextEnd": 974,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a20313134300d0a0d0a7b226d6f64656c223a22636c617564652d736f",
+              "text": "zstd\r\nContent-Length: 1140\r\n\r\n{\"model\":\"claude-so"
+            }
+          }
+        },
+        {
+          "artifact": "processes/1/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-fork-workspace/@forked-session.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-sessionId-mode",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/sessionId"
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/cfb6b45d-5034-4833-8b25-a8eeacf0e516/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        },
+        {
+          "artifact": "processes/1/sessions/session-state/8f0715eb-3af8-4b45-ac26-5a7500b4b970/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        },
+        {
+          "artifact": "processes/1/sessions/session-state/cfb6b45d-5034-4833-8b25-a8eeacf0e516/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "schema-success",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-schema-success-workspace/8e812215-0a0c-46df-85f3-ee1062e2465e.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 215,
+              "byte": 91,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "5b7475726e2d646961676e6f737469635d20746f6f6c206361",
+              "text": "[turn-diagnostic] tool ca"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "difference": {
+            "offset": 36,
+            "left": {
+              "length": 1645,
+              "byte": 116,
+              "contextStart": 12,
+              "contextEnd": 61,
+              "hex": "70695f6d73223a302c2273746f705f726561736f6e223a22746f6f6c5f757365222c2273657373696f6e5f6964223a2238",
+              "text": "pi_ms\":0,\"stop_reason\":\"tool_use\",\"session_id\":\"8"
+            },
+            "right": {
+              "length": 1348,
+              "byte": 101,
+              "contextStart": 12,
+              "contextEnd": 61,
+              "hex": "70695f6d73223a302c2273746f705f726561736f6e223a22656e645f7475726e222c2273657373696f6e5f6964223a2238",
+              "text": "pi_ms\":0,\"stop_reason\":\"end_turn\",\"session_id\":\"8"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 1146,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 1275,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 929,
+            "left": {
+              "length": 936,
+              "byte": 49,
+              "contextStart": 905,
+              "contextEnd": 936,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313139320d0a0d0a",
+              "text": " zstd\r\nContent-Length: 1192\r\n\r\n"
+            },
+            "right": {
+              "length": 936,
+              "byte": 51,
+              "contextStart": 905,
+              "contextEnd": 936,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313332310d0a0d0a",
+              "text": " zstd\r\nContent-Length: 1321\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 929,
+            "left": {
+              "length": 2082,
+              "byte": 49,
+              "contextStart": 905,
+              "contextEnd": 954,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313139320d0a0d0a7b226d6f64656c223a22636c617564652d73",
+              "text": " zstd\r\nContent-Length: 1192\r\n\r\n{\"model\":\"claude-s"
+            },
+            "right": {
+              "length": 2211,
+              "byte": 51,
+              "contextStart": 905,
+              "contextEnd": 954,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313332310d0a0d0a7b226d6f64656c223a22636c617564652d73",
+              "text": " zstd\r\nContent-Length: 1321\r\n\r\n{\"model\":\"claude-s"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/8e812215-0a0c-46df-85f3-ee1062e2465e/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "schema-retry-exhausted",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-schema-retry-exhausted-workspace/2b222b75-dd0c-4597-8d0b-f28d203d8415.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 436,
+              "byte": 91,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "5b7475726e2d646961676e6f737469635d20746f6f6c206361",
+              "text": "[turn-diagnostic] tool ca"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 1648,
+              "byte": 116,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "7475726e73223a332c2273746f705f726561736f6e223a22746f6f6c5f757365222c2273657373696f6e5f6964223a2232",
+              "text": "turns\":3,\"stop_reason\":\"tool_use\",\"session_id\":\"2"
+            },
+            "right": {
+              "length": 1376,
+              "byte": 115,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "7475726e73223a332c2273746f705f726561736f6e223a22737472756374757265645f6f75747075745f72657472795f65",
+              "text": "turns\":3,\"stop_reason\":\"structured_output_retry_e"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 1146,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 1275,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 929,
+            "left": {
+              "length": 936,
+              "byte": 49,
+              "contextStart": 905,
+              "contextEnd": 936,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313139320d0a0d0a",
+              "text": " zstd\r\nContent-Length: 1192\r\n\r\n"
+            },
+            "right": {
+              "length": 936,
+              "byte": 51,
+              "contextStart": 905,
+              "contextEnd": 936,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313332310d0a0d0a",
+              "text": " zstd\r\nContent-Length: 1321\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 929,
+            "left": {
+              "length": 2082,
+              "byte": 49,
+              "contextStart": 905,
+              "contextEnd": 954,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313139320d0a0d0a7b226d6f64656c223a22636c617564652d73",
+              "text": " zstd\r\nContent-Length: 1192\r\n\r\n{\"model\":\"claude-s"
+            },
+            "right": {
+              "length": 2211,
+              "byte": 51,
+              "contextStart": 905,
+              "contextEnd": 954,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313332310d0a0d0a7b226d6f64656c223a22636c617564652d73",
+              "text": " zstd\r\nContent-Length: 1321\r\n\r\n{\"model\":\"claude-s"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 1419,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 1573,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-headers.bin",
+          "difference": {
+            "offset": 929,
+            "left": {
+              "length": 936,
+              "byte": 52,
+              "contextStart": 905,
+              "contextEnd": 936,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313436350d0a0d0a",
+              "text": " zstd\r\nContent-Length: 1465\r\n\r\n"
+            },
+            "right": {
+              "length": 936,
+              "byte": 54,
+              "contextStart": 905,
+              "contextEnd": 936,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313631390d0a0d0a",
+              "text": " zstd\r\nContent-Length: 1619\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request.bin",
+          "difference": {
+            "offset": 929,
+            "left": {
+              "length": 2355,
+              "byte": 52,
+              "contextStart": 905,
+              "contextEnd": 954,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313436350d0a0d0a7b226d6f64656c223a22636c617564652d73",
+              "text": " zstd\r\nContent-Length: 1465\r\n\r\n{\"model\":\"claude-s"
+            },
+            "right": {
+              "length": 2509,
+              "byte": 54,
+              "contextStart": 905,
+              "contextEnd": 954,
+              "hex": "207a7374640d0a436f6e74656e742d4c656e6774683a20313631390d0a0d0a7b226d6f64656c223a22636c617564652d73",
+              "text": " zstd\r\nContent-Length: 1619\r\n\r\n{\"model\":\"claude-s"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/2b222b75-dd0c-4597-8d0b-f28d203d8415/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "max-turns",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-max-turns-workspace/38a948fb-45f7-46dd-8bbb-373bac247e76.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-2-timestamp-assistant",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 2497,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 4095,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 972,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 3469,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n{\"model\":\"claude-"
+            },
+            "right": {
+              "length": 5067,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n{\"model\":\"claude-"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/38a948fb-45f7-46dd-8bbb-373bac247e76/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "budget-limit",
+      "protocolComplete": false,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/exit.json",
+          "difference": {
+            "offset": 8,
+            "left": {
+              "length": 25,
+              "byte": 49,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "7b22636f6465223a312c227369676e616c223a6e756c6c7d0a",
+              "text": "{\"code\":1,\"signal\":null}\n"
+            },
+            "right": {
+              "length": 25,
+              "byte": 48,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "7b22636f6465223a302c227369676e616c223a6e756c6c7d0a",
+              "text": "{\"code\":0,\"signal\":null}\n"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-budget-limit-workspace/e76c1c15-f7fa-4971-85ed-0844683c9651.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "difference": {
+            "offset": 131,
+            "left": {
+              "length": 1496,
+              "byte": 111,
+              "contextStart": 107,
+              "contextEnd": 156,
+              "hex": "73745f757364223a302e3031322c227573616765223a7b226f75747075745f746f6b656e735f64657461696c73223a7b22",
+              "text": "st_usd\":0.012,\"usage\":{\"output_tokens_details\":{\""
+            },
+            "right": {
+              "length": 1283,
+              "byte": 105,
+              "contextStart": 107,
+              "contextEnd": 156,
+              "hex": "73745f757364223a302e3031322c227573616765223a7b22696e7075745f746f6b656e73223a313030302c226361636865",
+              "text": "st_usd\":0.012,\"usage\":{\"input_tokens\":1000,\"cache"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 930,
+            "left": {
+              "length": 935,
+              "byte": 56,
+              "contextStart": 906,
+              "contextEnd": 935,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 935,
+              "byte": 51,
+              "contextStart": 906,
+              "contextEnd": 935,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 930,
+            "left": {
+              "length": 1867,
+              "byte": 56,
+              "contextStart": 906,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1862,
+              "byte": 51,
+              "contextStart": 906,
+              "contextEnd": 955,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/e76c1c15-f7fa-4971-85ed-0844683c9651/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "permission-deny-none",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-permission-deny-none-workspace/222122d2-aedd-467b-8891-4bcdd361fe6b.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-uuid-system",
+            "side": "left",
+            "expected": 3,
+            "actual": 2,
+            "path": "/uuid"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 2497,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 4095,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 972,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 3469,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n{\"model\":\"claude-"
+            },
+            "right": {
+              "length": 5067,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n{\"model\":\"claude-"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 3677,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 5092,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-headers.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 972,
+              "byte": 51,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20333732330d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 3723\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 53,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20353133380d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 5138\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 4649,
+              "byte": 51,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20333732330d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 3723\r\n\r\n{\"model\":\"claude-"
+            },
+            "right": {
+              "length": 6064,
+              "byte": 53,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20353133380d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 5138\r\n\r\n{\"model\":\"claude-"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/222122d2-aedd-467b-8891-4bcdd361fe6b/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "permission-host-allow",
+      "protocolComplete": true,
+      "nativeStable": false,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-permission-host-allow-workspace/a518a938-92ff-4b47-8260-9526aa242ef3.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 312,
+              "byte": 91,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "5b7475726e2d646961676e6f737469635d20746f6f6c206361",
+              "text": "[turn-diagnostic] tool ca"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-3-timestamp-assistant",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 2497,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 4095,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 972,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 3469,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n{\"model\":\"claude-"
+            },
+            "right": {
+              "length": 5067,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n{\"model\":\"claude-"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 2823,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 4446,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-headers.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 972,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323836390d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 2869\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343439320d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 4492\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 3795,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323836390d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 2869\r\n\r\n{\"model\":\"claude-"
+            },
+            "right": {
+              "length": 5418,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343439320d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 4492\r\n\r\n{\"model\":\"claude-"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/a518a938-92ff-4b47-8260-9526aa242ef3/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "permission-host-deny",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-permission-host-deny-workspace/08d6854c-5e11-4888-8885-f2d1057be605.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-3-timestamp-assistant",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 2497,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 4095,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 972,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 3469,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323534330d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 2543\r\n\r\n{\"model\":\"claude-"
+            },
+            "right": {
+              "length": 5067,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343134310d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 4141\r\n\r\n{\"model\":\"claude-"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 2826,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 4449,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request-headers.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 972,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323837320d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 2872\r\n\r\n"
+            },
+            "right": {
+              "length": 972,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 972,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343439350d0a0d0a",
+              "text": ", zstd\r\nContent-Length: 4495\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/001.request.bin",
+          "difference": {
+            "offset": 964,
+            "left": {
+              "length": 3798,
+              "byte": 50,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20323837320d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 2872\r\n\r\n{\"model\":\"claude-"
+            },
+            "right": {
+              "length": 5421,
+              "byte": 52,
+              "contextStart": 940,
+              "contextEnd": 989,
+              "hex": "2c207a7374640d0a436f6e74656e742d4c656e6774683a20343439350d0a0d0a7b226d6f64656c223a22636c617564652d",
+              "text": ", zstd\r\nContent-Length: 4495\r\n\r\n{\"model\":\"claude-"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/08d6854c-5e11-4888-8885-f2d1057be605/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "sdk-interrupt",
+      "protocolComplete": false,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/exit.json",
+          "difference": {
+            "offset": 8,
+            "left": {
+              "length": 25,
+              "byte": 49,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "7b22636f6465223a312c227369676e616c223a6e756c6c7d0a",
+              "text": "{\"code\":1,\"signal\":null}\n"
+            },
+            "right": {
+              "length": 25,
+              "byte": 48,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "7b22636f6465223a302c227369676e616c223a6e756c6c7d0a",
+              "text": "{\"code\":0,\"signal\":null}\n"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-interrupt-workspace/b043d89c-ef8c-40c1-8e2c-d9e3d41268e3.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 108,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-2-uuid-user",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/uuid"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.response-body.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 769,
+              "byte": 101,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "6576656e743a206d6573736167655f73746172740a64617461",
+              "text": "event: message_start\ndata"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.response.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 866,
+              "byte": 72,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "485454502f312e3120323030204f4b0d0a436f6e74656e742d",
+              "text": "HTTP/1.1 200 OK\r\nContent-"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/b043d89c-ef8c-40c1-8e2c-d9e3d41268e3/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "sdk-malformed-input",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 73,
+              "byte": 69,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "4572726f722070617273696e672073747265616d696e672069",
+              "text": "Error parsing streaming i"
+            },
+            "right": {
+              "length": 176,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-uuid-system",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/uuid"
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/a32ae88e-da34-4423-8230-b97966f10227/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "sdk-control-validation",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-sdk-control-validation-workspace/988c0e72-50be-48ee-8eef-2a499eadcbfa.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-leafUuid-last-prompt",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/leafUuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 108,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-3-timestamp-assistant",
+            "side": "right",
+            "expected": 1,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 372,
+            "left": {
+              "length": 932,
+              "byte": 97,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265206120436c61756465206167656e742c206275696c74206f6e20",
+              "text": ":\"text\",\"text\":\"You are a Claude agent, built on "
+            },
+            "right": {
+              "length": 927,
+              "byte": 76,
+              "contextStart": 348,
+              "contextEnd": 397,
+              "hex": "3a2274657874222c2274657874223a22596f7520617265204c696e6758692c20616e206167656e74696320636f6d6d616e",
+              "text": ":\"text\",\"text\":\"You are LingXi, an agentic comman"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 971,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n"
+            },
+            "right": {
+              "length": 971,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 971,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 966,
+            "left": {
+              "length": 1903,
+              "byte": 56,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937380d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 978\r\n\r\n{\"model\":\"claude-son"
+            },
+            "right": {
+              "length": 1898,
+              "byte": 51,
+              "contextStart": 942,
+              "contextEnd": 991,
+              "hex": "7a7374640d0a436f6e74656e742d4c656e6774683a203937330d0a0d0a7b226d6f64656c223a22636c617564652d736f6e",
+              "text": "zstd\r\nContent-Length: 973\r\n\r\n{\"model\":\"claude-son"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/988c0e72-50be-48ee-8eef-2a499eadcbfa/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "startup-hooks-mcp",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-startup-hooks-mcp-workspace/a8516c68-6829-4989-8be2-117e0166c51d.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-3-uuid-attachment",
+            "side": "right",
+            "expected": 8,
+            "actual": 4,
+            "path": "/uuid"
+          }
+        },
+        {
+          "artifact": "processes/0/stderr.bin",
+          "difference": {
+            "offset": 0,
+            "left": {
+              "length": 0,
+              "byte": null,
+              "contextStart": 0,
+              "contextEnd": 0,
+              "hex": "",
+              "text": ""
+            },
+            "right": {
+              "length": 226,
+              "byte": 45,
+              "contextStart": 0,
+              "contextEnd": 25,
+              "hex": "2d2d7065726d697373696f6e2d70726f6d707473206e6f6e65",
+              "text": "--permission-prompts none"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Native socket path does not correlate to process PID",
+          "details": {
+            "side": "right"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 1955,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 2434,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 665,
+            "left": {
+              "length": 1013,
+              "byte": 109,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d636861",
+              "text": "turn-control-2026-07-01,mid-conversation-tool-cha"
+            },
+            "right": {
+              "length": 972,
+              "byte": 101,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6566666f72742d323032352d31312d32342c7468696e6b696e",
+              "text": "turn-control-2026-07-01,effort-2025-11-24,thinkin"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 665,
+            "left": {
+              "length": 2968,
+              "byte": 109,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d636861",
+              "text": "turn-control-2026-07-01,mid-conversation-tool-cha"
+            },
+            "right": {
+              "length": 3406,
+              "byte": 101,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6566666f72742d323032352d31312d32342c7468696e6b696e",
+              "text": "turn-control-2026-07-01,effort-2025-11-24,thinkin"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/a8516c68-6829-4989-8be2-117e0166c51d/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    },
+    {
+      "id": "startup-local-plugin",
+      "protocolComplete": true,
+      "nativeStable": true,
+      "byteParity": false,
+      "failures": [
+        {
+          "artifact": "processes/0/sessions/projects/-private-tmp-headless-resume-293-matrix-02-startup-local-plugin-workspace/eb178fb3-8fad-4175-83da-d393c8d7e19f.jsonl",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Replacement hit count mismatch",
+          "details": {
+            "rule": "dynamic-0-timestamp-queue-operation",
+            "side": "right",
+            "expected": 2,
+            "actual": 0,
+            "path": "/timestamp"
+          }
+        },
+        {
+          "artifact": "processes/0/stdout.bin",
+          "kind": "comparison-rejected",
+          "error": "NormalizationError: Native socket path does not correlate to process PID",
+          "details": {
+            "side": "right"
+          }
+        },
+        {
+          "artifact": "provider/000.request-body.bin",
+          "difference": {
+            "offset": 66,
+            "left": {
+              "length": 1898,
+              "byte": 34,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a2252657475726e20484541444c4553535f4c4f43414c5f5245",
+              "text": "\"role\":\"user\",\"content\":\"Return HEADLESS_LOCAL_RE"
+            },
+            "right": {
+              "length": 1163,
+              "byte": 91,
+              "contextStart": 42,
+              "contextEnd": 91,
+              "hex": "22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252",
+              "text": "\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"R"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request-headers.bin",
+          "difference": {
+            "offset": 665,
+            "left": {
+              "length": 1013,
+              "byte": 109,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d636861",
+              "text": "turn-control-2026-07-01,mid-conversation-tool-cha"
+            },
+            "right": {
+              "length": 972,
+              "byte": 101,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6566666f72742d323032352d31312d32342c7468696e6b696e",
+              "text": "turn-control-2026-07-01,effort-2025-11-24,thinkin"
+            }
+          }
+        },
+        {
+          "artifact": "provider/000.request.bin",
+          "difference": {
+            "offset": 665,
+            "left": {
+              "length": 2911,
+              "byte": 109,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6d69642d636f6e766572736174696f6e2d746f6f6c2d636861",
+              "text": "turn-control-2026-07-01,mid-conversation-tool-cha"
+            },
+            "right": {
+              "length": 2135,
+              "byte": 101,
+              "contextStart": 641,
+              "contextEnd": 690,
+              "hex": "7475726e2d636f6e74726f6c2d323032362d30372d30312c6566666f72742d323032352d31312d32342c7468696e6b696e",
+              "text": "turn-control-2026-07-01,effort-2025-11-24,thinkin"
+            }
+          }
+        },
+        {
+          "artifact": "processes/0/sessions/session-state/eb178fb3-8fad-4175-83da-d393c8d7e19f/ledger.v1.jsonl",
+          "kind": "missing-artifact"
+        }
+      ]
+    }
+  ]
+}

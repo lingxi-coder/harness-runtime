@@ -277,6 +277,9 @@ pub fn first_party_name_to_canonical(name: &str) -> String {
     // sonnet-4-5 catches; the substrings are mutually exclusive —
     // "claude-sonnet-4-5" does NOT contain "sonnet-5").
     if name.contains("claude-sonnet-5") {
+        if name.contains("claude-sonnet-5-5") {
+            return "claude-sonnet-5-5".into();
+        }
         return "claude-sonnet-5".into();
     }
     if name.contains("claude-sonnet-4-6") {
@@ -406,6 +409,7 @@ impl PricingCatalog {
         // Sonnet 5 — current official $2/$10 rate, including $0.20 cache reads
         // and $2.50 five-minute cache writes.
         c.insert_anthropic("claude-sonnet-5", 2_000, 10_000, 2_500, 200);
+        c.insert_anthropic("claude-sonnet-5-5", 2_000, 10_000, 2_500, 200);
         // $3/$15 tier — prior Sonnet variants (COST_TIER_3_15).
         c.insert_anthropic("claude-sonnet-4-6", 3_000, 15_000, 3_750, 300);
         c.insert_anthropic("claude-sonnet-4-5", 3_000, 15_000, 3_750, 300);
