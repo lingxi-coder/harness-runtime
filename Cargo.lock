@@ -1605,11 +1605,12 @@ dependencies = [
 [[package]]
 name = "device-api"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=0b93d07d3194c867b2d9849056bb0bd0c1032c87#0b93d07d3194c867b2d9849056bb0bd0c1032c87"
 dependencies = [
  "async-trait",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 
@@ -3071,7 +3072,6 @@ dependencies = [
 [[package]]
 name = "json-projection"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=0b93d07d3194c867b2d9849056bb0bd0c1032c87#0b93d07d3194c867b2d9849056bb0bd0c1032c87"
 dependencies = [
  "ryu-js",
  "serde",
@@ -3290,7 +3290,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper"
 version = "1.9.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=60497015038a656c680587c151be84b3925f5a85#60497015038a656c680587c151be84b3925f5a85"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2be8d2575227751f91ad47bed2016130c3740ba5#2be8d2575227751f91ad47bed2016130c3740ba5"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3309,7 +3309,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-rustls"
 version = "0.27.5"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=60497015038a656c680587c151be84b3925f5a85#60497015038a656c680587c151be84b3925f5a85"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2be8d2575227751f91ad47bed2016130c3740ba5#2be8d2575227751f91ad47bed2016130c3740ba5"
 dependencies = [
  "futures-util",
  "http",
@@ -3326,7 +3326,7 @@ dependencies = [
 [[package]]
 name = "lingxi-hyper-util"
 version = "0.1.20"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=60497015038a656c680587c151be84b3925f5a85#60497015038a656c680587c151be84b3925f5a85"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2be8d2575227751f91ad47bed2016130c3740ba5#2be8d2575227751f91ad47bed2016130c3740ba5"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3348,7 +3348,7 @@ dependencies = [
 [[package]]
 name = "lingxi-llm-client"
 version = "0.3.0"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=60497015038a656c680587c151be84b3925f5a85#60497015038a656c680587c151be84b3925f5a85"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2be8d2575227751f91ad47bed2016130c3740ba5#2be8d2575227751f91ad47bed2016130c3740ba5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3376,7 +3376,7 @@ dependencies = [
 [[package]]
 name = "lingxi-reqwest"
 version = "0.12.28"
-source = "git+https://github.com/lingxi-coder/llm-client.git?rev=60497015038a656c680587c151be84b3925f5a85#60497015038a656c680587c151be84b3925f5a85"
+source = "git+https://github.com/lingxi-coder/llm-client.git?rev=2be8d2575227751f91ad47bed2016130c3740ba5#2be8d2575227751f91ad47bed2016130c3740ba5"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3615,7 +3615,6 @@ dependencies = [
  "futures-util",
  "indexmap",
  "jsonrpc",
- "mcp-wire",
  "migrations",
  "rand 0.9.4",
  "regex",
@@ -3636,7 +3635,6 @@ dependencies = [
 [[package]]
 name = "mcp-wire"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=0b93d07d3194c867b2d9849056bb0bd0c1032c87#0b93d07d3194c867b2d9849056bb0bd0c1032c87"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -5699,11 +5697,11 @@ dependencies = [
 [[package]]
 name = "rooted-fs"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/local-app-builder?rev=0b93d07d3194c867b2d9849056bb0bd0c1032c87#0b93d07d3194c867b2d9849056bb0bd0c1032c87"
 dependencies = [
  "fs2",
  "rustix 0.38.44",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
  "uuid",
 ]

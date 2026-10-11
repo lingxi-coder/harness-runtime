@@ -28,6 +28,10 @@ members = [
     "crates/tools/computer-use",
     "crates/tools/android-use",
     "crates/core",
+    "crates/device-api",
+    "crates/json-projection",
+    "crates/mcp-wire",
+    "crates/rooted-fs",
     "crates/test-harness",
     "crates/secret",
     "crates/cost",
@@ -104,6 +108,10 @@ default-members = [
     "crates/tools/computer-use",
     "crates/tools/android-use",
     "crates/core",
+    "crates/device-api",
+    "crates/json-projection",
+    "crates/mcp-wire",
+    "crates/rooted-fs",
     "crates/secret",
     "crates/cost",
     "crates/permission",
@@ -152,7 +160,7 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi-coder/harness-runtime"
 
 [workspace.dependencies]
-lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "60497015038a656c680587c151be84b3925f5a85", default-features = false }
+lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "2be8d2575227751f91ad47bed2016130c3740ba5", default-features = false }
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
 mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b65f8856d773d27ebf73b0cade907884d3080704" }
 mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "b65f8856d773d27ebf73b0cade907884d3080704" }
@@ -165,13 +173,12 @@ platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git
 # `branding.workspace = true` regardless of its own depth.
 branding = { path = "crates/branding" }
 
-# Shared library crates published from the local-app-builder repository. They are generic libraries (device API,
-# JSON projection, MCP wire types, rooted filesystem); the engine carries no Local App feature code. One revision for
-# every crate of it, here and in the product.
-device-api = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "0b93d07d3194c867b2d9849056bb0bd0c1032c87" }
-json-projection = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "0b93d07d3194c867b2d9849056bb0bd0c1032c87" }
-mcp-wire = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "0b93d07d3194c867b2d9849056bb0bd0c1032c87" }
-rooted-fs = { git = "https://github.com/lingxi-coder/local-app-builder", rev = "0b93d07d3194c867b2d9849056bb0bd0c1032c87" }
+# Generic leaf libraries with no workspace dependencies (device API, JSON projection, MCP wire types, rooted
+# filesystem). The product takes them from this repository at the same revision as the rest of the engine.
+device-api = { path = "crates/device-api" }
+json-projection = { path = "crates/json-projection" }
+mcp-wire = { path = "crates/mcp-wire" }
+rooted-fs = { path = "crates/rooted-fs" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps `serde_json::Map` keys in insertion order across
 # Value round-trips. Required for claude-code wire-byte fidelity: outbound

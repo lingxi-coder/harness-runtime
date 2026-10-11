@@ -196,7 +196,7 @@ CLAUDE_NEEDLES = [
 
 # G7 —— Claude 侧 plugin 标识符**到达**本仓库（P0a.0）。
 #
-# 本分支（local-app plugin）引入的方向与 G3 相反：不是 LingXi 值漏出去，而是
+# 这条规则的方向与 G3 相反：不是 LingXi 值漏出去，而是
 # oracle 的 plugin 标识符进来 —— `.claude-plugin` 目录名、`${CLAUDE_PLUGIN_ROOT}`
 # / `${CLAUDE_PLUGIN_DATA}` / `${CLAUDE_PLUGIN_OPTION_<KEY>}` 插值语法、
 # `${CLAUDE_PROJECT_DIR}`。实测：改动前这四类全部 exit 0 静默（G1 的 needle 表
@@ -297,8 +297,8 @@ DEFAULT_NEEDLES = FULL_NEEDLES
 # `docs/` 与 `.omo/plans/`（两处：仓库根与 crates/ 下）是**历史归档**：
 # 它们记录的是当时写下的事实，改写它们等于伪造档案，所以它们贡献的条目
 # 永远不可能被合法地清掉——一条永远不会归零的 baseline 条目只有噪声价值。
-# `skills/*.md` 反过来**要扫**：skills/create-local-app/SKILL.md 指示 agent
-# 去写 `LINGXI.md`，那是一份活的契约，不是档案。
+# `skills/*.md` 反过来**要扫**：skill 正文是写给 agent 的活契约（例如指示它
+# 去写 `LINGXI.md`），不是档案。
 EXCLUDED_PREFIXES = (
     "third_party/",
     "docs/",

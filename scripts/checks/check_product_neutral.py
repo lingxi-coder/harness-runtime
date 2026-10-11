@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """No crate names the Local App product (driver: scripts/checks/check-product-neutral.sh).
 
-Local App is an externally installed plugin (manifest, skills, agents, workflows and a separately distributed MCP
-server). The engine and the apps carry none of its code, so a Local App identifier anywhere under `crates/` is a
-coupling the extraction removed and must not come back.
+Local App is an externally installed plugin (a manifest, skills and templates). The engine and the apps carry none
+of its code, so a Local App identifier anywhere under `crates/` is a coupling the extraction removed and must not
+come back.
 
 A hit is `LocalApp…`, `local_app…`, `local-app…`, `local app…` or `LOCAL_APP…` in a tracked source, manifest, JSON or
 text file under `crates/` (`LocalAppData`, the Windows directory, is not one). The one way to keep a hit is a line
