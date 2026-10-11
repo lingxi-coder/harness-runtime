@@ -1,4 +1,0 @@
-interface:
-  display_name: "Apple Design"
-  short_description: "Apply Apple-style fluid interaction and visual design"
-  default_prompt: "Use $apple-design to design or review this LingXi local app's Apple-style interactions, materials, typography, motion, and accessibility."

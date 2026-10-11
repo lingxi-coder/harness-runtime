@@ -461,7 +461,6 @@ fn recovered_open_if_parent_ask_guard_probe_rejects_dangerous_paths_and_inline_r
                 "Bash",
                 &input,
                 PermissionMode::Default,
-                None,
                 &analysis,
             ),
             "guard probe must reject {command:?}"

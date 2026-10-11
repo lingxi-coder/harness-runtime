@@ -795,9 +795,6 @@ printf '{"ok":false,"protocol_version":1,"error_kind":"unavailable","error":"loc
         let openai = storage.broker_address("lingxi", "provider-key-openai");
         assert_eq!(openai.service, anthropic.service);
         assert_eq!(openai.account, "openai");
-        let web = storage.broker_address("lingxi", "provider-key-web:tavily");
-        assert_eq!(web.service, anthropic.service);
-        assert_eq!(web.account, "web:tavily");
     }
 
     #[test]

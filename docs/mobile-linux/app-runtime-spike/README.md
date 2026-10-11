@@ -2,9 +2,8 @@
 
 > Historical measurement fixture only. Production pins, the production-only
 > runtime command contract, SBOM, and static-export-compatible scaffold now
-> live in `docs/mobile-linux/local-app-runtime-pins.json`,
-> `docs/mobile-linux/local-app-runtime-policy.json`, and
-> `crates/local-apps/templates/next-static-v1`. Never use the placeholder
+> live in the `local-app-builder` repository: `docs/runtime/local-app-runtime-pins.json`,
+> `docs/runtime/local-app-runtime-policy.json`, and its runtime-profile templates. Never use the placeholder
 > spike manifest as a release input.
 
 This directory is a **manual feasibility spike kit**, not product code. It

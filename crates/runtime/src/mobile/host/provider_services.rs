@@ -997,8 +997,6 @@ pub(super) fn provider_id_is_valid(value: &str) -> bool {
 pub(super) const PROVIDER_CONNECTION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(15);
 
-pub(crate) const LOCAL_APPS_MCP_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
-
 pub(super) fn provider_connection_failure(
     message: impl Into<String>,
     reachable: bool,

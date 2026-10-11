@@ -25,7 +25,7 @@
 //! The port's `name` resolver (`tool_workflow::resolve_script_at`,
 //! `tools/workflow/src/lib.rs`) already checks saved (project/user) workflows,
 //! then this registry, then the built-in table last — matching the oracle
-//! order above. Local App workflows are plugin-owned as of Phase 9 and are
+//! order above. Product workflows are plugin-owned as of Phase 9 and are
 //! never duplicated in `tools/workflow`'s `BUILTIN_WORKFLOWS`, which today
 //! holds only the generic `deep-research` workflow
 //! (`tools/workflow/src/builtins.rs`); every key in this registry contains a

@@ -17,28 +17,7 @@ use crate::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 /// Cancellation scope shared by the driver and locally registered handlers.
 pub use tokio_util::sync::CancellationToken;
 
-/// An SDK result error, retaining its source-native structured data.
-#[derive(Debug, Clone, PartialEq, Error)]
-#[error("{message}")]
-pub struct McpSdkError {
-    pub code: &'static str,
-    pub message: String,
-    pub data: Option<Utf16JsonProjection>,
-}
-
-impl McpSdkError {
-    pub fn new(
-        code: &'static str,
-        message: impl Into<String>,
-        data: Option<Utf16JsonProjection>,
-    ) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            data,
-        }
-    }
-}
+pub use mcp_wire::transport::McpSdkError;
 
 #[derive(Debug, Error)]
 pub enum McpResultError {

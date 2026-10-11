@@ -17,6 +17,7 @@ use client::protocol::message::{MessageBlockDto, MessageDto};
 #[test]
 fn message_dto_round_trips() {
     let msg = MessageDto {
+        sent_at_ms: Some(1_791_417_600_000),
         loop_wakeup: None,
         visualization_context: None,
         role: "assistant".to_string(),
@@ -189,6 +190,7 @@ fn loop_wakeup_metadata_is_additive_and_round_trips() {
     let old: MessageDto = serde_json::from_str(r#"{"role":"assistant","blocks":[]}"#).unwrap();
     assert!(old.loop_wakeup.is_none());
     let dto = MessageDto {
+        sent_at_ms: None,
         role: "system".into(),
         blocks: vec![],
         images: vec![],
@@ -232,6 +234,7 @@ fn visualization_block_and_context_are_additive_and_round_trip() {
     let old: MessageDto = serde_json::from_str(r#"{"role":"user","blocks":[]}"#).unwrap();
     assert!(old.visualization_context.is_none());
     let dto = MessageDto {
+        sent_at_ms: None,
         role: "user".into(),
         blocks: vec![],
         images: vec![],

@@ -1,6 +1,0 @@
-{
-  "type": "resolve_app_ui_request",
-  "request_id": "ui-00000001",
-  "decision": "allow_session",
-  "result_json": "{\"elements\":[]}"
-}

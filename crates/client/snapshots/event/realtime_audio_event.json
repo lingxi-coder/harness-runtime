@@ -1,0 +1,5 @@
+{
+  "type": "realtime_audio_event",
+  "session_id": "session-1",
+  "event_json": "{\"type\":\"closed\",\"reason\":\"Cancelled\"}"
+}

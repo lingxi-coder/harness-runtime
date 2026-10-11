@@ -19,13 +19,11 @@ use crate::result::{
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource};
 use crate::shell_command;
 use crate::working_dirs::AdditionalWorkingDirs;
-use crate::workspace_lease;
 #[cfg(test)]
 use lingxi_core::types::utf16_json::JsonValueView;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::Mutex;
 
 /// Base commands a Bash invocation may auto-allow in `AcceptEdits` mode — 1:1
@@ -663,10 +661,6 @@ pub struct PermissionPolicy {
     /// Set at engine boot from any enabling settings tier via
     /// [`crate::classify_all_shell_from_settings_json`].
     pub classify_all_shell: bool,
-    /// Ephemeral local-app workflow leases.  This is deliberately orthogonal
-    /// to the session-wide mode and is checked only after explicit deny/ask
-    /// rules and shell safety guards have run.
-    pub workspace_leases: Option<Arc<crate::WorkspacePermissionLeaseRegistry>>,
     /// PER-SPAWN `bashCommandClamp` GROUPS folded out of this call's
     /// `bash_command_clamp` permission layers
     /// ([`crate::layers::FoldedPermissionContext::bash_command_clamps`]).
@@ -836,7 +830,6 @@ impl PermissionPolicy {
             plan_files: None,
             allow_managed_permission_rules_only: false,
             classify_all_shell: false,
-            workspace_leases: None,
             bash_command_clamps: Vec::new(),
             apply_auto_mode_restrictions: false,
             interactive_session: false,
@@ -1096,15 +1089,6 @@ impl PermissionPolicy {
         dirs
     }
 
-    #[must_use]
-    pub fn with_workspace_leases(
-        mut self,
-        leases: Arc<crate::WorkspacePermissionLeaseRegistry>,
-    ) -> Self {
-        self.workspace_leases = Some(leases);
-        self
-    }
-
     /// Mark whether `BypassPermissions` mode was available at session start
     /// (TS `isBypassPermissionsModeAvailable`). When `true`, `Plan` mode bypasses
     /// permissions like `BypassPermissions` (see
@@ -1344,41 +1328,32 @@ impl PermissionPolicy {
         input: &Utf16JsonProjection,
         mode: PermissionMode,
     ) -> PermissionResult {
-        self.authorize_with_mode_and_workspace_lease(
-            tool_name,
-            input,
-            mode,
-            None,
-            PermissionCheckPhase::Execution,
-        )
+        self.authorize_with_mode_and_phase(tool_name, input, mode, PermissionCheckPhase::Execution)
     }
 
     #[must_use]
-    pub fn authorize_with_mode_and_workspace_lease(
+    pub fn authorize_with_mode_and_phase(
         &self,
         tool_name: &str,
         input: &Utf16JsonProjection,
         mode: PermissionMode,
-        workspace_lease_token: Option<u64>,
         phase: PermissionCheckPhase,
     ) -> PermissionResult {
-        self.authorize_with_mode_and_workspace_lease_inner(
+        self.authorize_with_mode_inner(
             tool_name,
             input,
             mode,
-            workspace_lease_token,
             true,
             &mut ShellDecisionOrigin::Preliminary,
             phase,
         )
     }
 
-    fn authorize_with_mode_and_workspace_lease_inner(
+    fn authorize_with_mode_inner(
         &self,
         tool_name: &str,
         input: &Utf16JsonProjection,
         mode: PermissionMode,
-        workspace_lease_token: Option<u64>,
         attach_shell_reason_tree: bool,
         origin: &mut ShellDecisionOrigin,
         phase: PermissionCheckPhase,
@@ -1444,7 +1419,6 @@ impl PermissionPolicy {
                     tool_name,
                     input,
                     mode,
-                    workspace_lease_token,
                     &shell_analysis,
                     result,
                     origin,
@@ -1452,14 +1426,7 @@ impl PermissionPolicy {
                 )
             }
         };
-        let result = self.authorize_inner(
-            tool_name,
-            input,
-            mode,
-            workspace_lease_token,
-            &shell_analysis,
-            origin,
-        );
+        let result = self.authorize_inner(tool_name, input, mode, &shell_analysis, origin);
         // BGOP-01 — `&` background-operator allow→ask downgrade (claude-code
         // `Yqr`, the Bash checkPermissions wrapper). After the whole flow, an
         // ALLOW for a shell command containing `&` is downgraded to a forced ask
@@ -1567,7 +1534,6 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &Utf16JsonProjection,
         mode: PermissionMode,
-        workspace_lease_token: Option<u64>,
         analysis: &ShellCommandAnalysis,
     ) -> bool {
         if !shell_command::is_shell_tool(tool_name) {
@@ -1595,15 +1561,10 @@ impl PermissionPolicy {
         {
             return false;
         }
-        if !self.shell_content_ask_command_guards_pass(
-            tool_name,
-            input,
-            mode,
-            workspace_lease_token,
-            analysis,
-        ) || self
-            .background_operator_ask(tool_name, input, &allow_compound())
-            .is_some()
+        if !self.shell_content_ask_command_guards_pass(tool_name, input, mode, analysis)
+            || self
+                .background_operator_ask(tool_name, input, &allow_compound())
+                .is_some()
         {
             return false;
         }
@@ -1634,7 +1595,6 @@ impl PermissionPolicy {
                     tool_name,
                     &child_input,
                     mode,
-                    workspace_lease_token,
                     &child_analysis,
                 )
             {
@@ -1650,7 +1610,6 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &Utf16JsonProjection,
         mode: PermissionMode,
-        workspace_lease_token: Option<u64>,
         analysis: &ShellCommandAnalysis,
     ) -> bool {
         let Some(command) = shell_command::command_from_input(input) else {
@@ -1711,15 +1670,6 @@ impl PermissionPolicy {
             {
                 return false;
             }
-            if self.workspace_leases.as_ref().is_some_and(|leases| {
-                leases.denies_host_owned_for_token(workspace_lease_token, tool_name, input, roots)
-            }) || crate::WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
-                tool_name, input, roots,
-            ) || crate::WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
-                tool_name, input, roots,
-            ) {
-                return false;
-            }
         }
         !self.is_restricted_protected_mutation(tool_name, input)
             && self
@@ -1735,7 +1685,6 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &Utf16JsonProjection,
         mode: PermissionMode,
-        workspace_lease_token: Option<u64>,
         analysis: &ShellCommandAnalysis,
         result: PermissionResult,
         origin: ShellDecisionOrigin,
@@ -1785,11 +1734,10 @@ impl PermissionPolicy {
             // fixed recursion-depth cutoff.
             let allow_nested_tree = command.len() < parent_command.trim().len();
             let mut child_origin = ShellDecisionOrigin::Preliminary;
-            let child = self.authorize_with_mode_and_workspace_lease_inner(
+            let child = self.authorize_with_mode_inner(
                 tool_name,
                 &child_input,
                 mode,
-                workspace_lease_token,
                 allow_nested_tree,
                 &mut child_origin,
                 phase,
@@ -1843,13 +1791,7 @@ impl PermissionPolicy {
                 PermissionDecisionReason::MatchedRule { rule }
                     if rule.value.rule_content.is_some()
             )
-            && self.shell_content_ask_compound_guards_pass(
-                tool_name,
-                input,
-                mode,
-                workspace_lease_token,
-                analysis,
-            );
+            && self.shell_content_ask_compound_guards_pass(tool_name, input, mode, analysis);
         #[cfg(not(feature = "bash-ast"))]
         let parent_content_ask_guards_passed = false;
         let host_safety_guards_passed =
@@ -2113,7 +2055,6 @@ impl PermissionPolicy {
             plan_files: self.plan_files.clone(),
             allow_managed_permission_rules_only: self.allow_managed_permission_rules_only,
             classify_all_shell: self.classify_all_shell,
-            workspace_leases: self.workspace_leases.clone(),
             bash_command_clamps: self.bash_command_clamps.clone(),
             apply_auto_mode_restrictions: self.apply_auto_mode_restrictions,
             interactive_session: self.interactive_session,
@@ -2141,7 +2082,6 @@ impl PermissionPolicy {
         tool_name: &str,
         input: &Utf16JsonProjection,
         mode: PermissionMode,
-        workspace_lease_token: Option<u64>,
         shell_analysis: &ShellCommandAnalysis,
         origin: &mut ShellDecisionOrigin,
     ) -> PermissionResult {
@@ -2531,32 +2471,6 @@ impl PermissionPolicy {
                 }
             }
         }
-        // The local-app source boundary is a hard deny for leased workflows.
-        // Place this before shell exact-allow and the generic allow/mode
-        // branches so a broad `Edit(./**)` or `Bash(...)` rule cannot turn the
-        // generated workspace metadata into agent-writable state. Explicit
-        // deny/ask rules have already run above and retain their precedence.
-        if let (Some(leases), Some(roots)) = (&self.workspace_leases, &self.roots) {
-            if leases.denies_host_owned_for_token(workspace_lease_token, tool_name, input, roots) {
-                return deny_workspace_host_owned(tool_name);
-            }
-        }
-        // The generated local-app settings file contains a broad
-        // `Edit(./**)` allow for source files. Keep host-owned metadata and
-        // symlink escapes protected even after the temporary build lease has
-        // expired, and before any generic allow rule can short-circuit.
-        if let Some(roots) = self.roots.as_ref() {
-            if workspace_lease::WorkspacePermissionLeaseRegistry::denies_host_owned_for_workspace(
-                tool_name, input, roots,
-            ) {
-                return deny_workspace_host_owned(tool_name);
-            }
-            if workspace_lease::WorkspacePermissionLeaseRegistry::escapes_local_app_workspace(
-                tool_name, input, roots,
-            ) {
-                return deny_workspace_outside(tool_name);
-            }
-        }
         // 2c. BASH COMMAND-INJECTION SAFETY (claude-code `bashCommandIsSafe`,
         //     `bashSecurity.ts`'s legacy `bashCommandIsSafe_DEPRECATED` battery,
         //     wired at `bashPermissions.ts:1217-1239` inside
@@ -2617,15 +2531,6 @@ impl PermissionPolicy {
         ) {
             *origin = ShellDecisionOrigin::WholeCommand;
             return self.resolve_guard_ask(ask, bypass, mode, &sources, tool_name);
-        }
-        // Local-app build workflows receive a temporary, canonical-root lease.
-        // Explicit deny/ask rules and shell safety/containment guards have
-        // already run above, so this cannot weaken policy rules or approve an
-        // unsafe shell command.
-        if let (Some(leases), Some(roots)) = (&self.workspace_leases, &self.roots) {
-            if leases.allows_for_token(workspace_lease_token, tool_name, input, roots) {
-                return allow_with_mode(mode);
-            }
         }
         // 3. Allow. Shell tools need compound aggregation (a single allow rule
         //    matching ONE subcommand must not allow a whole compound command),
@@ -4512,18 +4417,7 @@ fn tool_content_key_units(tool_name: &str, input: &Utf16JsonProjection) -> Optio
                     .unwrap_or_else(|| "general-purpose".encode_utf16().collect()),
             )
         }
-        // MOBILE DIVERGENCE: the first-party local-app host operations key on
-        // their `app_id`, so `LocalAppBuild(app-a)` grants ONE app instead of
-        // every app on the device. Without this the only expressible grant is
-        // the tool-wide one — the exact limitation that moving these off
-        // `mcp__local_apps__*` was meant to remove.
-        //
-        // Absent `app_id` yields `None`, i.e. a CONTENT rule never matches a
-        // call that names no app. A tool-wide rule still matches either way.
-        name if name.starts_with("LocalApp") => {
-            Some(input.get_property("app_id")?.code_units()?.to_vec())
-        }
-        _ => None,
+        _ => crate::defaults_per_tool::extension_rule_content(tool_name, input),
     }
 }
 
@@ -4940,7 +4834,7 @@ impl PermissionPolicy {
     /// * `Wfm` (@294394648) — PowerShell: denied outright, no command inspection.
     /// * `Jkf` (@292829969) — the `Monitor{ws}` arm: a WebSocket is not a Bash
     ///   command form, so it is denied outright too. (A COMMAND-monitor never
-    ///   reaches this arm: `authorize_with_mode_and_workspace_lease` already
+    ///   reaches this arm: `authorize_with_mode_and_phase` already
     ///   rewrites its effective tool name to `Bash`, matching the oracle's
     ///   `return Lon({...e,command:e.command},t)`.)
     ///
@@ -5034,33 +4928,6 @@ fn ask_for_restricted_protected_mutation(
             options: Vec::new(),
         },
         pending_classifier_check: None,
-        metadata: PermissionMetadata::default(),
-    }
-}
-
-fn deny_workspace_host_owned(tool_name: &str) -> PermissionResult {
-    PermissionResult::Deny {
-        reason: PermissionDecisionReason::Other {
-            reason: format!("{tool_name} is outside the local-app source editing boundary").into(),
-        },
-        explanation: Some(
-            "Local-app writes must use structured file tools; host-managed build files and non-inspection shell commands are protected."
-                .to_string().into(),
-        ),
-        metadata: PermissionMetadata::default(),
-    }
-}
-
-fn deny_workspace_outside(tool_name: &str) -> PermissionResult {
-    PermissionResult::Deny {
-        reason: PermissionDecisionReason::Other {
-            reason: format!("{tool_name} path escapes the local-app workspace").into(),
-        },
-        explanation: Some(
-            "Local-app workspace operations cannot follow paths outside the canonical workspace."
-                .to_string()
-                .into(),
-        ),
         metadata: PermissionMetadata::default(),
     }
 }

@@ -1,9 +1,0 @@
-{
-  "type": "app_event",
-  "event": {
-    "type": "local_app_operation_failed",
-    "code": "builtin_bundle_unavailable",
-    "message": "The verified builtin bundle root is missing.",
-    "request_id": "plugin-read-1"
-  }
-}

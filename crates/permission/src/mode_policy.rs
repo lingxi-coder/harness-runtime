@@ -59,25 +59,6 @@ const PLAN_SAFE_TOOLS: &[&str] = &[
     "TaskList",
     "TaskStop",
     "TaskOutput",
-    // MOBILE DIVERGENCE: the READ-ONLY local-app host operations. Inspecting
-    // an app is exactly what planning does; the mutating siblings
-    // (`LocalAppBuild`, `LocalAppRuntime`, …) are deliberately absent, so the
-    // Plan backstop still stops them.
-    "LocalAppList",
-    "LocalAppGet",
-    "LocalAppLogs",
-    "LocalAppCheckpointList",
-    "LocalAppBackgroundList",
-    "LocalAppBackgroundStatus",
-    // The plan-driven create has to NAME a template while planning, and these
-    // two are how a planner sees the catalog and the runtime profiles without
-    // guessing. Both only read: `template_catalog` returns the redacted
-    // Host-verified view and `runtime_profiles` the published catalog. The
-    // operation that ACTS on a choice (`LocalAppPrepare`) stays absent on
-    // purpose, so Plan mode can still only look — approving the plan is what
-    // authorizes the landing.
-    "LocalAppTemplateCatalog",
-    "LocalAppRuntimeProfiles",
     // Plan mode / UI.
     "AskUserQuestion",
     "EnterPlanMode",
@@ -169,11 +150,14 @@ pub fn is_auto_mode_safe_tool(tool_name: &str) -> bool {
 /// Used by the Plan-mode backstop in [`crate::policy::PermissionPolicy::authorize`]:
 /// a tool that is NOT plan-safe is treated as a state mutation and asked about
 /// when no allow rule already matched. Returns `true` for the read-only /
-/// planning-safe tools enumerated in [`PLAN_SAFE_TOOLS`], `false` otherwise
+/// planning-safe tools enumerated in [`PLAN_SAFE_TOOLS`] or installed by a
+/// product (`ToolDefaultExtension::plan_safe`), `false` otherwise
 /// (mutating tools like `Edit`/`Write`/`Bash`, and unknown tools, fail closed).
 #[must_use]
 pub fn is_plan_safe_tool(tool_name: &str) -> bool {
     PLAN_SAFE_TOOLS.contains(&tool_name)
+        || crate::defaults_per_tool::extension()
+            .is_some_and(|ext| ext.plan_safe.contains(&tool_name))
 }
 
 #[cfg(test)]

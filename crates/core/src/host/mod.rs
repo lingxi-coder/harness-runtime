@@ -98,24 +98,23 @@ pub mod agent_processes;
 pub mod agent_statistics;
 pub mod agent_view;
 pub mod android_ui;
-pub mod audio;
+// The device facilities (camera, location, audio, ...) are traits and plain data in
+// `device-api`, which out-of-tree services name too; the old module paths stay.
+pub use device_api::{
+    audio, calendar, camera, clipboard, contacts, deep_link, device_status, haptics, location,
+    notification, share, stt, tts, voice,
+};
 pub mod auth;
 pub mod backgrounding;
 pub mod bg_session_forker;
 pub mod bridge;
 pub mod budget;
-pub mod calendar;
-pub mod camera;
 pub mod claude_model_identity;
-pub mod clipboard;
 pub mod clock;
 pub mod commands;
 pub mod compliance_taints;
 pub mod computer_control;
-pub mod contacts;
 pub mod coordinator_mode;
-pub mod deep_link;
-pub mod device_status;
 pub mod display;
 pub mod effect_handler;
 pub mod effort;
@@ -130,23 +129,21 @@ pub mod fusion;
 pub mod fusion_setup;
 pub mod handback;
 pub mod handback_wire;
-pub mod haptics;
 pub mod http;
 pub mod ide;
 mod live_session_words;
 pub mod live_sessions;
-pub mod local_app_paths;
-pub mod location;
 pub mod lsp;
 pub mod mailbox;
-pub mod mcp;
 pub mod mcp_result;
+// MCP's wire DTOs and the `McpTransport` interface live in `mcp-wire` so an out-of-tree
+// service can implement a transport without the engine; the old path stays.
+pub use mcp_wire::transport as mcp;
 pub mod mobile_runtime_environment;
 pub mod mod_agent_list;
 pub mod model_attempt;
 pub mod model_capabilities;
 pub mod model_safety;
-pub mod notification;
 pub mod observer_pairing;
 pub mod orchestrator;
 pub mod panel_pool;
@@ -160,18 +157,17 @@ pub mod prompting_gate;
 pub mod read_auto_allow;
 pub mod refusal_api_text;
 pub mod repo_root_reload;
-#[cfg_attr(windows, allow(unsafe_code))]
-pub mod rooted_fs;
+// The rooted filesystem primitives live in the `rooted-fs` crate; re-exporting
+// the crate keeps `host::rooted_fs::…` resolving for every caller.
+pub use ::rooted_fs;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
 pub mod server_fallback_row;
 pub mod session_flags;
 pub mod session_retention;
-pub mod share;
 pub mod skill_loader;
 pub mod source_tool_wire;
-pub mod stt;
 pub mod subagent_output;
 pub mod subagent_output_guard;
 pub mod subagent_spawn;
@@ -187,10 +183,7 @@ pub mod tool_execution;
 pub mod tool_invoker;
 pub mod tool_use_lifecycle;
 pub mod traffic_mode;
-pub mod tts;
 pub mod uds_inbox;
-pub mod voice;
-pub mod web_search;
 pub mod workflow_output;
 pub use session_retention::{
     SessionRetentionError, SessionRetentionGate, SessionRetentionPin, SessionRetirement,
@@ -200,6 +193,10 @@ pub mod worktree;
 pub use server_fallback_row::{ServerFallbackApiErrorMessage, ServerFallbackApiErrorRow};
 pub use source_tool_wire::SourceToolWireDefinition;
 
+pub use ::rooted_fs::{
+    atomic_write_pinned, lock_exclusive_pinned, open_read_file_pinned, sync_parent_pinned,
+    truncate_file_pinned, AtomicWriteOptions, RootIdentity, RootedFileLock,
+};
 pub use android_ui::{
     AndroidAccessRequest, AndroidAccessTier, AndroidAction, AndroidActionResult, AndroidAppInfo,
     AndroidAudioListenRequest, AndroidAudioSpeakRequest, AndroidAudioSpeakResult,
@@ -333,10 +330,6 @@ pub use prompting_gate::{
     PermissionRequest, PromptDecision, PromptDefault, PromptError, PromptingGate,
 };
 pub use repo_root_reload::{RepoRootReloadOutcome, RepoRootReloadRequest, RepoRootReloader};
-pub use rooted_fs::{
-    atomic_write_pinned, lock_exclusive_pinned, open_read_file_pinned, sync_parent_pinned,
-    truncate_file_pinned, AtomicWriteOptions, RootIdentity, RootedFileLock,
-};
 pub use runtime::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 pub use sandbox::{
     BackendPlanHandle, ProcessCommand, Sandbox, SandboxCapability, SandboxError, SandboxFeatures,
@@ -369,7 +362,6 @@ pub use tool_invoker::{
 pub use tool_use_lifecycle::{ToolUseLifecycleTracker, ToolUseRemoval, ToolUseRemovalReason};
 pub use tts::TtsAudio;
 pub use voice::VoiceRecording;
-pub use web_search::{WebSearchConfigProvider, WebSearchRuntimeConfig};
 pub use workflow_output::{
     WorkflowOutputAccount, WorkflowOutputEventId, WorkflowOutputScope, WorkflowOutputScopes,
 };

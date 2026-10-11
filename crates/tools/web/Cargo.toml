@@ -22,10 +22,6 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-# Drives the SSE event stream from `HttpTransport::stream_sse` to completion
-# (`StreamExt::next`) in the WebSearch streaming path. Same workspace pin used
-# by `platform-common`'s `LlmTransportBridge` SSE consumer.
-futures-util = { workspace = true }
 once_cell = "1"
 url = "2"
 thiserror.workspace = true

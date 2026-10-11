@@ -38,6 +38,10 @@ pub struct MessageDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub visualization_context: Option<VisualizationContextDto>,
+    /// Original persisted message time, in Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub sent_at_ms: Option<i64>,
 }
 
 /// One published revision of an inline visualization.

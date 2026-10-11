@@ -1,0 +1,6 @@
+{
+  "type": "audio_session_context",
+  "session_id": "session-1",
+  "profile_id": "profile-1",
+  "account_scope": "profile:profile-1"
+}

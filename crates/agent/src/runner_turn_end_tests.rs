@@ -87,7 +87,6 @@ impl lingxi_core::host::ToolInvoker for TurnEndInvoker {
         name: &str,
         _: lingxi_core::types::utf16_json::Utf16JsonProjection,
         context: SubagentInvocationContext,
-        _: Option<u64>,
     ) -> Result<ToolInvocationResult, ToolInvokerError> {
         assert!(context.tool_use_id.is_some());
         assert!(context.assistant_message_id.is_some());

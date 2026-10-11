@@ -1,5 +1,0 @@
-{
-  "type": "resolve_app_runtime_profile_selection",
-  "request_id": "runtime-00000001",
-  "selected_family": "react_dom"
-}

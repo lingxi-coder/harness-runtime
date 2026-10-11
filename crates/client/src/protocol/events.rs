@@ -27,10 +27,6 @@ use crate::protocol::listings::{
     SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto,
     StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
-use crate::protocol::local_apps::{
-    AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
-    AppRuntimeStateDto, AppSessionRowDto, AppWorkflowStateDto,
-};
 use crate::protocol::message::MessageDto;
 use crate::protocol::permission::PermissionResolutionDto;
 use crate::protocol::text::ClientTextDto;
@@ -109,6 +105,18 @@ macro_rules! define_client_event {
 }
 
 define_client_event! {
+
+    /// Native realtime JSON with authoritative current-session identity.
+    RealtimeAudioEvent {
+        session_id: String,
+        event_json: String,
+    },
+    /// Authoritative session selection for host-owned, follow-session audio.
+    AudioSessionContext {
+        session_id: String,
+        profile_id: String,
+        account_scope: String,
+    },
     Error {
         kind: ErrorKindDto,
         message: String,
@@ -417,65 +425,6 @@ define_client_event! {
 
     CommandsChanged {
         commands: Vec<SlashCommandDto>,
-    },
-
-    // ── Local apps ────────────────────────────────────────────────────────
-    //
-    // Docstrings in this section are deliberately terse: uniffi bakes every
-    // docstring into a fixed-capacity per-item metadata buffer, and the
-    // `ClientEvent` enum is near that cap. Full semantics live on the
-    // `crate::protocol::local_apps` DTOs and the matching `ClientCommand` variants.
-    AppsChanged {
-        apps: Vec<AppRecordDto>,
-    },
-
-    AppEvent {
-        event: AppEventDto,
-    },
-
-    AppWorkflowChanged {
-        app_id: String,
-        state: AppWorkflowStateDto,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
-    },
-
-    AppRuntimeChanged {
-        app_id: String,
-        state: AppRuntimeStateDto,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        details: Option<AppRuntimeDetailsDto>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        last_error: Option<String>,
-    },
-
-    AppSessionsChanged {
-        app_id: String,
-        sessions: Vec<AppSessionRowDto>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        next_offset: Option<u64>,
-    },
-
-    AppCheckpointCreated {
-        app_id: String,
-        checkpoint: AppCheckpointDto,
-    },
-
-    AppOperationFailed {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        app_id: Option<String>,
-        code: AppErrorCodeDto,
-        message: ClientTextDto,
-        // Correlation key from the `CreateApp` (or other app command) that
-        // failed, echoed verbatim so the caller that started the operation
-        // can recognise its own failure. `None` for a failure the engine
-        // synthesized with no originating request.
-        //
-        // Appended LAST: UniFFI encodes struct variants POSITIONALLY, so a
-        // field inserted above `message` would be reinterpreted by a client
-        // built against the previous bindings.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
     },
 
     // ── Live thinking/usage (§0.7 follow-up) + reserved (§0.9) ────────────
@@ -851,6 +800,29 @@ define_client_event! {
 impl From<ClientEventWire> for ClientEvent {
     fn from(value: ClientEventWire) -> Self {
         match value {
+            ClientEventWire::CoordinatorStatus {
+                active_workers,
+                team,
+            } => Self::CoordinatorStatus {
+                active_workers,
+                team,
+            },
+            ClientEventWire::RealtimeAudioEvent {
+                session_id,
+                event_json,
+            } => Self::RealtimeAudioEvent {
+                session_id,
+                event_json,
+            },
+            ClientEventWire::AudioSessionContext {
+                session_id,
+                profile_id,
+                account_scope,
+            } => Self::AudioSessionContext {
+                session_id,
+                profile_id,
+                account_scope,
+            },
             ClientEventWire::Error { kind, message } => Self::Error { kind, message },
             ClientEventWire::TerminalApiError {
                 api_error_status,
@@ -1091,58 +1063,6 @@ impl From<ClientEventWire> for ClientEvent {
                 error,
             },
             ClientEventWire::CommandsChanged { commands } => Self::CommandsChanged { commands },
-            ClientEventWire::AppsChanged { apps } => Self::AppsChanged { apps },
-            ClientEventWire::AppEvent { event } => Self::AppEvent { event },
-            ClientEventWire::AppWorkflowChanged {
-                app_id,
-                state,
-                detail,
-            } => Self::AppWorkflowChanged {
-                app_id,
-                state,
-                detail,
-            },
-            ClientEventWire::AppRuntimeChanged {
-                app_id,
-                state,
-                details,
-                last_error,
-            } => Self::AppRuntimeChanged {
-                app_id,
-                state,
-                details,
-                last_error,
-            },
-            ClientEventWire::AppSessionsChanged {
-                app_id,
-                sessions,
-                next_offset,
-            } => Self::AppSessionsChanged {
-                app_id,
-                sessions,
-                next_offset,
-            },
-            ClientEventWire::AppCheckpointCreated { app_id, checkpoint } => {
-                Self::AppCheckpointCreated { app_id, checkpoint }
-            }
-            ClientEventWire::AppOperationFailed {
-                app_id,
-                code,
-                message,
-                request_id,
-            } => Self::AppOperationFailed {
-                app_id,
-                code,
-                message,
-                request_id,
-            },
-            ClientEventWire::CoordinatorStatus {
-                active_workers,
-                team,
-            } => Self::CoordinatorStatus {
-                active_workers,
-                team,
-            },
             ClientEventWire::CoordinatorWorker { worker } => Self::CoordinatorWorker { worker },
             ClientEventWire::ThinkingDelta {
                 thinking,
@@ -1522,15 +1442,6 @@ impl<'de> Deserialize<'de> for ClientEvent {
                 run_id: event_raw_required(&mut fields, "run_id")?,
                 origin_session_id: event_raw_optional(&mut fields, "origin_session_id")?,
             }),
-            "app_operation_failed" => Ok(Self::AppOperationFailed {
-                app_id: event_raw_optional(&mut fields, "app_id")?,
-                code: event_raw_required(&mut fields, "code")?,
-                message: event_raw_required(&mut fields, "message")?,
-                request_id: event_raw_optional(&mut fields, "request_id")?,
-            }),
-            "app_event" => Ok(Self::AppEvent {
-                event: event_raw_required(&mut fields, "event")?,
-            }),
             "session_agent_message" => {
                 let session_id = event_raw_required(&mut fields, "session_id")?;
                 let agent_id = event_raw_required(&mut fields, "agent_id")?;
@@ -1788,6 +1699,7 @@ mod session_agent_identity_contract_tests {
             message_index: index,
             message_uuid: uuid.into(),
             message: MessageDto {
+                sent_at_ms: None,
                 role: "assistant".into(),
                 blocks: vec![MessageBlockDto::Text {
                     text: "declined".into(),
@@ -1867,8 +1779,8 @@ mod session_agent_identity_contract_tests {
     }
 
     #[test]
-    fn app_operation_failure_preserves_source_message_through_full_event_envelope() {
-        let wire = r#"{"type":"app_operation_failed","code":"lsp_diagnostics_failed","message":"LSP \ud800 failure","request_id":"lsp-7"}"#;
+    fn ui_log_preserves_source_text_through_full_event_envelope() {
+        let wire = r#"{"type":"ui_log","plugin":"test","text":"LSP \ud800 failure"}"#;
         let event: ClientEvent = serde_json::from_str(wire).expect("deserialize full event");
         let expected = vec![
             b'L' as u16,
@@ -1885,17 +1797,17 @@ mod session_agent_identity_contract_tests {
             b'r' as u16,
             b'e' as u16,
         ];
-        let ClientEvent::AppOperationFailed { message, .. } = &event else {
-            panic!("expected app operation failure event");
+        let ClientEvent::UiLog { text: message, .. } = &event else {
+            panic!("expected UI log event");
         };
         assert_eq!(message.code_units, expected);
 
         let encoded = serde_json::to_string(&event).expect("serialize full event");
-        assert!(encoded.contains(r#""type":"app_operation_failed""#));
-        assert!(encoded.contains(r#""message":"LSP \ud800 failure""#));
+        assert!(encoded.contains(r#""type":"ui_log""#));
+        assert!(encoded.contains(r#""text":"LSP \ud800 failure""#));
         let decoded: ClientEvent = serde_json::from_str(&encoded).expect("round-trip full event");
-        let ClientEvent::AppOperationFailed { message, .. } = decoded else {
-            panic!("expected app operation failure event");
+        let ClientEvent::UiLog { text: message, .. } = decoded else {
+            panic!("expected UI log event");
         };
         assert_eq!(message.code_units, expected);
     }

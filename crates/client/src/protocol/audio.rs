@@ -45,19 +45,12 @@ pub enum AudioOwnerDto {
         /// Stable session identifier.
         session_id: String,
     },
-    /// Local App runtime instance.
-    LocalApp {
-        /// Validated app identifier.
-        app_id: String,
-        /// Runtime generation that prevents stale requests stopping a new run.
-        runtime_generation: u64,
-    },
     /// UI app instance.
     Ui {
         /// Stable UI instance identifier.
         instance_id: String,
     },
-    /// Host-owned operation not tied to a chat or app runtime.
+    /// Host-owned operation not tied to a chat.
     System {
         /// Stable host instance identifier.
         instance_id: String,
@@ -74,7 +67,7 @@ pub struct AudioInitiatorDto {
     /// Tool-use identifier, when invoked by a model tool call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
-    /// Host request identifier, when invoked by a Local App or UI request.
+    /// Host request identifier, when invoked by an app or UI request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
 }
@@ -107,6 +100,29 @@ pub struct AudioOperationRequestDto {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AudioOperationDto {
+    /// Capture a bounded microphone clip, returning Recording.
+    Capture {
+        /// Sample rate.
+        sample_rate_hz: u32,
+        /// Exact requested encoding.
+        format: String,
+    },
+    /// Play bounded PCM16 mono audio.
+    Play {
+        /// PCM encoded in base64.
+        pcm_base64: String,
+        /// Sample rate.
+        sample_rate_hz: u32,
+    },
+    /// Recognize an existing recording.
+    Transcribe {
+        /// Encoded recording.
+        audio_base64: String,
+        /// MIME type.
+        mime_type: String,
+        /// Language hint.
+        language: Option<String>,
+    },
     /// Start raw capture and return an owner-bound handle.
     StartRecording {
         /// Requested sample rate in Hz.
@@ -279,6 +295,12 @@ pub enum AudioOperationResultDto {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
 pub enum AudioOperationKindDto {
+    /// Bounded microphone clip.
+    Capture,
+    /// Supplied PCM playback.
+    Play,
+    /// Recorded-file recognition.
+    Transcribe,
     /// Raw recording.
     Record,
     /// Live microphone transcription.

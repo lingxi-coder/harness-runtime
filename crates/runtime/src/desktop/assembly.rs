@@ -63,9 +63,8 @@ use super::{
     AsyncHookResponseBuffer, BootPermissionTiers, BuildError,
     CoordinatorTeammateDefinitionResolver, CoordinatorWiring, CredentialStoreAuthProvider,
     DeferredToolInvoker, DesktopBashRunner, DesktopConfig, DesktopHookMcpInvoker,
-    DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle,
-    DesktopWebSearchConfigProvider, DesktopWorkflowEvent, DesktopWorkflowEventSink,
-    DesktopWorktreeCommandHandler, FusionCatalogRefreshingChatGptConnect,
+    DesktopRepoRootReloader, DesktopRuntime, DesktopSessionLifecycle, DesktopWorkflowEvent,
+    DesktopWorkflowEventSink, DesktopWorktreeCommandHandler, FusionCatalogRefreshingChatGptConnect,
     FusionCatalogRefreshingCopilotConnect, FusionCatalogRefreshingCredentialWriter,
     FusionCatalogRefreshingOAuthConnect, JsonlWorktreeStatePersister, LlmStack,
     OrchestratorTeammatePromptRenderer, OutputRetryReporter, PluginRuntime,
@@ -564,6 +563,14 @@ pub async fn build_with_credential_stack(
     // agent seams. The `with_*` builders live on `ApiService`.
     let session_composition = cfg.session_composition();
     let interactive_session = session_composition.is_interactive_session();
+    let audio_services = llm_runtime
+        .provider_services(provider_region, llm_transport.clone())
+        .map_err(|error| BuildError::ApiBase(format!("audio provider services: {error}")))?;
+    let audio_credential_ids = fusion_catalog_refresher
+        .credential_sources
+        .iter()
+        .map(|source| (source.profile_name.clone(), source.credential_id.clone()))
+        .collect();
     let mut service_built = llm_runtime::ApiService::new_with_routing(
         llm_runtime,
         llm_transport.clone(),
@@ -2009,7 +2016,6 @@ pub async fn build_with_credential_stack(
     // arms below (the full union when enforcing; `--add-dir` only otherwise), so
     // it is always initialized before its later reads.
     let boot_additional_working_dirs: Vec<std::path::PathBuf>;
-    let workspace_leases = permission::WorkspacePermissionLeaseRegistry::new();
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →
         // project → local (3c: settings.local.json read after project so a
@@ -2180,7 +2186,6 @@ pub async fn build_with_credential_stack(
                 .with_block_reads_outside_working_directories(
                     block_reads_outside_working_directories,
                 )
-                .with_workspace_leases(workspace_leases.clone())
                 .with_sandbox_runtime(sandbox_auto_allow)
                 .with_managed_permission_rules_only(allow_managed_permission_rules_only)
                 .with_restricted(cfg.restricted)
@@ -3115,7 +3120,6 @@ pub async fn build_with_credential_stack(
     .with_token_budget(orch_cfg.token_budget)
     .with_output_pool_cell(local_workflow_output_pool.clone())
     .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
-    .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
     .with_worktree_manager(worktree_manager.clone())
     .with_status_sink(local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>)
     .with_workflow_progress_sink(local_workflow_event_sink.clone()
@@ -3765,10 +3769,6 @@ pub async fn build_with_credential_stack(
         hosted_search: Some(provider_adapter.clone()),
         mcp_token_counter: Some(provider_adapter.clone()),
         default_model: orch_cfg.model.clone(),
-        web_search_config: Some(Arc::new(DesktopWebSearchConfigProvider {
-            lingxi_home: cfg.lingxi_home.clone(),
-            credentials: credentials.clone(),
-        })),
         // The SAME manager the LocalAgent handler judges background-agent
         // worktrees with (created above) — one creation/judgment surface.
         worktree: worktree_manager.clone(),
@@ -6032,6 +6032,8 @@ pub async fn build_with_credential_stack(
         pending_fork_history: tokio::sync::Mutex::new(None),
         catalog_registry,
         provider_region,
+        audio_services,
+        audio_credential_ids,
         orchestrator: orch,
         session_state,
         fusion_recorder,

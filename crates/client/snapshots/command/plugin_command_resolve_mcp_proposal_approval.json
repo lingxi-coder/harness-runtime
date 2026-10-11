@@ -1,8 +1,0 @@
-{
-  "type": "plugin_command",
-  "command": {
-    "type": "resolve_mcp_proposal_approval",
-    "request_id": "proposal-0001",
-    "approved": false
-  }
-}

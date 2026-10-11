@@ -6,7 +6,7 @@ use lingxi_core::host::panel_pool::PanelPoolDrain;
 use lingxi_core::host::subagent_spawn::SubagentInheritance;
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use lingxi_core::host::*;
-use serde_json::json;
+use serde_json::{json, Value};
 use sidequery::{
     SideQueryClient, SideQueryError, SideQueryRequest, SideQueryResponse,
     StrictStructuredQueryRequest, StrictStructuredQueryResponse,

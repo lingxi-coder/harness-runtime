@@ -352,6 +352,7 @@ async fn read_restored_transcript(
     let mut history = Vec::new();
     let mut announcement_history = Vec::new();
     let mut resolved_selection = None;
+    let mut explicit_model_selection = false;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let decoded = lingxi_core::types::exact_json::parse_exact_json(line)
             .map_err(|error| format!("agent transcript is incomplete: {error}"))?;
@@ -435,6 +436,8 @@ async fn read_restored_transcript(
                 |error| format!("agent transcript source attachment is invalid: {error}"),
             )?);
         }
+        let is_model_selection =
+            value.get("type").and_then(serde_json::Value::as_str) == Some("model-selection");
         if let Some(model) = value
             .get("model")
             .and_then(serde_json::Value::as_str)
@@ -447,7 +450,13 @@ async fn read_restored_transcript(
                 .map(str::trim)
                 .filter(|profile| !profile.is_empty())
                 .map(str::to_string);
-            resolved_selection = Some((model.to_string(), profile));
+            if is_model_selection || !explicit_model_selection {
+                resolved_selection = Some((model.to_string(), profile));
+            }
+            explicit_model_selection |= is_model_selection;
+        }
+        if is_model_selection {
+            continue;
         }
         if let Some(message) = value
             .get("message")
@@ -1245,6 +1254,33 @@ mod tests {
         let restored = seen.first().expect("restored request");
         assert_eq!(restored.model.as_deref(), Some("deepseek-flash"));
         assert_eq!(restored.model_profile.as_deref(), Some("deepseek"));
+    }
+
+    #[tokio::test]
+    async fn restore_uses_latest_committed_model_selection_over_stale_message_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = lingxi_core::types::AgentId::new();
+        seed(dir.path(), id, &["already completed setup"]).await;
+        let path = session::forked_skill::agent_transcript_path(dir.path(), &id.to_string());
+        let mut rows = tokio::fs::read_to_string(&path).await.unwrap();
+        for selection in [
+            serde_json::json!({"type":"model-selection","model":"shared-model","model_profile":"b"}),
+            serde_json::json!({"model":"old-model","model_profile":"a"}),
+            serde_json::json!({"type":"model-selection","model":"shared-model","model_profile":null}),
+            serde_json::json!({"model":"shared-model","model_profile":"b"}),
+        ] {
+            rows.push_str(&selection.to_string());
+            rows.push('\n');
+        }
+        tokio::fs::write(path, rows).await.unwrap();
+        let spawner = RecordingSpawner::default();
+        let outcomes =
+            restore_parked_agents(dir.path(), &spawner, &Gate(None), &inherit(), None).await;
+        assert_eq!(outcomes[0].1, RestoreOutcome::Restored(id));
+        let seen = spawner.seen.lock().unwrap();
+        assert_eq!(seen[0].model.as_deref(), Some("shared-model"));
+        assert_eq!(seen[0].model_profile, None);
+        assert_eq!(seen[0].resumed_history.as_ref().unwrap().len(), 1);
     }
 
     #[tokio::test]

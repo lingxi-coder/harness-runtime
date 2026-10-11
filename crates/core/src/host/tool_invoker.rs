@@ -216,8 +216,7 @@ pub struct SubagentInvocationContext {
     /// from hook/session metadata.
     pub origin_session_id: Option<SessionId>,
     /// Trusted host-selected execution policy. This is copied unchanged into
-    /// the concrete tool-use context path, including the
-    /// workspace-lease entrypoint; it is not model-controlled.
+    /// the concrete tool-use context; it is not model-controlled.
     pub tool_execution_policy: ToolExecutionPolicy,
     /// Inherited instruction context and lazy discovery cursor.
     pub instruction_context: Option<crate::host::instructions::InstructionContext>,
@@ -687,28 +686,14 @@ pub trait ToolInvoker: Send + Sync + Any {
         ctx: SubagentInvocationContext,
     ) -> Result<crate::types::utf16_json::Utf16JsonProjection, ToolInvokerError>;
 
-    /// Invoke with an ephemeral workspace lease. Implementations that do not
-    /// participate in lease-aware permission enforcement retain the legacy
-    /// behavior by delegating to [`Self::invoke`].
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: crate::types::utf16_json::Utf16JsonProjection,
-        ctx: SubagentInvocationContext,
-        _workspace_lease_token: Option<u64>,
-    ) -> Result<crate::types::utf16_json::Utf16JsonProjection, ToolInvokerError> {
-        self.invoke(name, input, ctx).await
-    }
-
     /// Preserve model-facing text without replacing the structured result.
     async fn invoke_detailed(
         &self,
         name: &str,
         input: crate::types::utf16_json::Utf16JsonProjection,
         ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
     ) -> Result<ToolInvocationResult, ToolInvokerError> {
-        self.invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
+        self.invoke(name, input, ctx)
             .await
             .map(|data| ToolInvocationResult {
                 is_error: false,
@@ -732,7 +717,6 @@ pub trait ToolInvoker: Send + Sync + Any {
         name: &str,
         _input: crate::types::utf16_json::Utf16JsonProjection,
         _ctx: SubagentInvocationContext,
-        _workspace_lease_token: Option<u64>,
         _supplied: Arc<dyn Any + Send + Sync>,
     ) -> Result<ToolInvocationResult, ToolInvokerError> {
         Err(ToolInvokerError::Internal(

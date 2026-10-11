@@ -14,6 +14,10 @@ mod tests {
         assert_eq!(state.history.len(), 1);
         let runtime_metadata = orchestrator::runtime_metadata_from_messages(&messages);
         let replayed = orchestrator::ReplayedSession {
+            display_timestamps: messages
+                .iter()
+                .map(|row| (row.uuid.clone(), 1_791_417_600_000))
+                .collect(),
             display_history: state.history.clone(),
             state,
             messages,
@@ -28,6 +32,7 @@ mod tests {
         identities.next_message_index = 11;
         let rows = parse_main_session_agent_message_rows(&replayed, &identities).unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message.sent_at_ms, Some(1_791_417_600_000));
         assert_eq!(rows[0].message_index, 7);
         assert_eq!(rows[0].message_uuid, "11111111-1111-4111-8111-111111111111");
         assert!(parse_main_session_agent_message_rows(&replayed, &Default::default()).is_err());
@@ -55,88 +60,85 @@ pub fn parse_main_session_agent_message_rows(
     replayed: &orchestrator::ReplayedSession,
     identities: &session::jsonl::SessionMessageIdentitySnapshot,
 ) -> Result<Vec<client::protocol::listings::SessionAgentMessageRowDto>, String> {
-    client::adapter::lowering::lower_transcript_with_identities(
-        &replayed.display_history,
-        &replayed.client_state_tool_results,
-    )
-    .into_iter()
-    .map(|(id, message)| {
-        let logical_uuid = id.as_uuid().to_string();
-        let direct_row = replayed
-            .messages
-            .iter()
-            .find(|row| row.uuid == logical_uuid);
-        let (message_uuid, message_index, original) = if let Some(message_index) =
-            identities.by_uuid.get(&logical_uuid).copied()
-        {
-            (logical_uuid, message_index, direct_row)
-        } else {
-            // Native API-error rows have two identities: the assistant
-            // envelope UUID is the stable JSONL identity recorded by the
-            // sidecar, while replay reconstructs the conversation with
-            // the inner message.id. Bridge only that exact, marked row;
-            // all other missing identities remain a hard error.
-            let mut api_error_rows = replayed.messages.iter().filter(|row| {
-                row.message_type == "assistant"
-                    && row
+    client::adapter::lowering::lower_replayed_transcript_with_identities(replayed)
+        .into_iter()
+        .map(|(id, message)| {
+            let logical_uuid = id.as_uuid().to_string();
+            let direct_row = replayed
+                .messages
+                .iter()
+                .find(|row| row.uuid == logical_uuid);
+            let (message_uuid, message_index, original) =
+                if let Some(message_index) = identities.by_uuid.get(&logical_uuid).copied() {
+                    (logical_uuid, message_index, direct_row)
+                } else {
+                    // Native API-error rows have two identities: the assistant
+                    // envelope UUID is the stable JSONL identity recorded by the
+                    // sidecar, while replay reconstructs the conversation with
+                    // the inner message.id. Bridge only that exact, marked row;
+                    // all other missing identities remain a hard error.
+                    let mut api_error_rows = replayed.messages.iter().filter(|row| {
+                        row.message_type == "assistant"
+                            && row
+                                .extra
+                                .get_property("isApiErrorMessage")
+                                .and_then(|value| value.as_bool())
+                                == Some(true)
+                            && row.message.string_at("/id") == Some(logical_uuid.as_str())
+                    });
+                    let Some(api_error_row) = api_error_rows.next() else {
+                        return Err(format!(
+                            "main transcript row lacks its stable identity index: {logical_uuid}"
+                        ));
+                    };
+                    if api_error_rows.next().is_some() {
+                        return Err(format!(
+                    "main transcript row has ambiguous API-error envelope identity: {logical_uuid}"
+                ));
+                    }
+                    let Some(message_index) = identities.by_uuid.get(&api_error_row.uuid).copied()
+                    else {
+                        return Err(format!(
+                            "main transcript row lacks its stable identity index: {}",
+                            api_error_row.uuid
+                        ));
+                    };
+                    (
+                        api_error_row.uuid.clone(),
+                        message_index,
+                        Some(api_error_row),
+                    )
+                };
+            let api_error_json = match original {
+                Some(row)
+                    if row
                         .extra
                         .get_property("isApiErrorMessage")
                         .and_then(|value| value.as_bool())
-                        == Some(true)
-                    && row.message.string_at("/id") == Some(logical_uuid.as_str())
-            });
-            let Some(api_error_row) = api_error_rows.next() else {
-                return Err(format!(
-                    "main transcript row lacks its stable identity index: {logical_uuid}"
-                ));
-            };
-            if api_error_rows.next().is_some() {
-                return Err(format!(
-                    "main transcript row has ambiguous API-error envelope identity: {logical_uuid}"
-                ));
-            }
-            let Some(message_index) = identities.by_uuid.get(&api_error_row.uuid).copied() else {
-                return Err(format!(
-                    "main transcript row lacks its stable identity index: {}",
-                    api_error_row.uuid
-                ));
-            };
-            (
-                api_error_row.uuid.clone(),
-                message_index,
-                Some(api_error_row),
-            )
-        };
-        let api_error_json = match original {
-            Some(row)
-                if row
-                    .extra
-                    .get_property("isApiErrorMessage")
-                    .and_then(|value| value.as_bool())
-                    == Some(true) =>
-            {
-                Some(
-                    String::from_utf8(
-                        session::jsonl::exact_json::native_message_bytes(row)
-                            .map_err(|error| error.to_string())?,
+                        == Some(true) =>
+                {
+                    Some(
+                        String::from_utf8(
+                            session::jsonl::exact_json::native_message_bytes(row)
+                                .map_err(|error| error.to_string())?,
+                        )
+                        .map_err(|error| error.to_string())?,
                     )
-                    .map_err(|error| error.to_string())?,
-                )
-            }
-            Some(row) => row
-                .extra
-                .string_at("/server_fallback_api_error_json")
-                .map(str::to_owned),
-            None => None,
-        };
-        Ok(client::protocol::listings::SessionAgentMessageRowDto {
-            message_index,
-            message_uuid,
-            message,
-            api_error_json,
+                }
+                Some(row) => row
+                    .extra
+                    .string_at("/server_fallback_api_error_json")
+                    .map(str::to_owned),
+                None => None,
+            };
+            Ok(client::protocol::listings::SessionAgentMessageRowDto {
+                message_index,
+                message_uuid,
+                message,
+                api_error_json,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 fn session_agent_message_from_projection(

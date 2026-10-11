@@ -1675,7 +1675,7 @@ mod tests {
             .await
             .is_err());
         let result = invoker
-            .invoke_detailed("ExitPlanMode", source(json!({})), context(), None)
+            .invoke_detailed("ExitPlanMode", source(json!({})), context())
             .await
             .unwrap();
         assert_eq!(as_value(&result.data)["plan"], "Inspect, test, implement");

@@ -1406,7 +1406,6 @@ export function register(on) {
                 Utf16JsonProjection::from_serde_value(&json!({"file_path":"original.txt"}))
                     .unwrap(),
                 invocation,
-                None,
             )
             .await
             .unwrap();

@@ -135,7 +135,7 @@ pub struct TaskOutputManager {
     /// claude-code's `DiskTaskOutput.#bytesWritten` / `#capped`.
     caps: Mutex<HashMap<PathBuf, CapState>>,
     /// Per-spool serialization for append/terminal replacement operations. A
-    /// terminal Local App result must replace its raw payload as one
+    /// terminal managed-app result must replace its raw payload as one
     /// indivisible write; reads also take this lock so a fail-closed terminal
     /// override cannot race a stale filesystem read. Unrelated task spools
     /// remain independent.
@@ -983,7 +983,7 @@ impl TaskOutputManager {
     /// Replace a terminal task payload in its already-allocated spool.
     ///
     /// This is deliberately narrower than the generic task-output API: the
-    /// mobile Local App completion sink calls it only after authenticating a
+    /// mobile managed-app completion sink calls it only after authenticating a
     /// Host QA result (or constructing a fail-closed terminal error). The
     /// path is validated against this manager's output root, the root identity
     /// is pinned before and after the rooted atomic write, and replacement is

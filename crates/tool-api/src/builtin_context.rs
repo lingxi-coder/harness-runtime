@@ -162,9 +162,6 @@ pub struct BuiltinToolContext {
     /// Model used by `WebSearch` when calling `POST /v1/messages` (M4-03).
     /// Sourced from the session's `coordinator_model` at registration time.
     pub default_model: String,
-    /// Runtime `/web` config loader for provider-agnostic client-side WebSearch.
-    /// `None` preserves env-only fallback behavior.
-    pub web_search_config: Option<Arc<dyn lingxi_core::host::WebSearchConfigProvider>>,
     /// Worktree manager (M2-01 trait) — backs `EnterWorktree` + `ExitWorktree`
     /// (M4-04). Tests inject `MockWorktreeManager`; production uses
     /// `platform_posix::PosixWorktreeManager`.
@@ -236,7 +233,7 @@ pub struct BuiltinToolContext {
     /// desktop; mobile composition roots wire `platform.camera()` (a Swift /
     /// Kotlin impl via UniFFI).
     pub camera: Option<Arc<dyn CameraControl>>,
-    /// Unified per-device audio service. The audio tools, Local App adapter,
+    /// Unified per-device audio service. The audio tools, the app adapter,
     /// and Computer Use audio routes share this app-scoped service.
     pub audio: Option<Arc<dyn AudioService>>,
     /// Host-managed recording handles for public voice start/stop actions.

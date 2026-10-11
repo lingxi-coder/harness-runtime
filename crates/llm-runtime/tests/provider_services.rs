@@ -498,3 +498,172 @@ async fn host_configured_files_reject_unsupported_explicit_credential_overrides_
         assert!(transport.sent.lock().unwrap().is_empty());
     }
 }
+
+#[derive(Debug, Default)]
+struct ConfiguredCredentials(Mutex<Vec<llm_runtime::CredentialScope>>);
+impl llm_runtime::CredentialProvider for ConfiguredCredentials {
+    fn load<'a>(
+        &'a self,
+        scope: &'a llm_runtime::CredentialScope,
+    ) -> BoxFuture<'a, Result<llm_runtime::Credential, LlmError>> {
+        Box::pin(async move {
+            self.0.lock().unwrap().push(scope.clone());
+            match scope.credential_id.as_deref() {
+                Some("original-static") => Ok(llm_runtime::Credential::ApiKey("static-key".into())),
+                Some("original-managed") => {
+                    Ok(llm_runtime::Credential::BearerToken("managed-token".into()))
+                }
+                _ => Err(LlmError::Authentication {
+                    message: "wrong configured scope".into(),
+                }),
+            }
+        })
+    }
+}
+fn credential_profile(
+    name: &str,
+    credential: llm_runtime::CredentialConfig,
+) -> llm_runtime::ProviderProfile {
+    let mut profile = llm_runtime::builtin_presets()
+        .providers
+        .into_iter()
+        .find(|profile| profile.profile_name == "openai")
+        .unwrap();
+    profile.profile_name = name.into();
+    profile.credential = credential;
+    profile
+}
+#[tokio::test]
+async fn bound_services_capture_original_static_and_managed_credential_scopes() {
+    let credentials = Arc::new(ConfiguredCredentials::default());
+    let mut managed = credential_profile(
+        "effective-managed",
+        llm_runtime::CredentialConfig::HostManaged {
+            id: "original-managed".into(),
+        },
+    );
+    managed.auth = llm_runtime::AuthStrategy::Bearer;
+    let client = llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
+        providers: vec![
+            credential_profile(
+                "effective-static",
+                llm_runtime::CredentialConfig::Static {
+                    id: "original-static".into(),
+                },
+            ),
+            managed,
+        ],
+    })
+    .unwrap()
+    .with_credential_provider(credentials.clone());
+    let transport = Arc::new(HostTransport::default());
+    let services = client
+        .provider_services(sdk::protocol::Region::International, transport.clone())
+        .unwrap();
+    assert_eq!(
+        services
+            .service_credential("effective-static")
+            .await
+            .unwrap()
+            .expose_secret(),
+        "static-key"
+    );
+    assert_eq!(
+        services
+            .service_credential("effective-managed")
+            .await
+            .unwrap()
+            .expose_secret(),
+        "managed-token"
+    );
+    assert!(matches!(
+        services.service_credential("other-profile").await,
+        Err(LlmError::ModelUnavailable)
+    ));
+    let scopes = credentials.0.lock().unwrap().clone();
+    assert_eq!(
+        scopes
+            .into_iter()
+            .map(|scope| (scope.profile_name, scope.credential_id))
+            .collect::<Vec<_>>(),
+        vec![
+            ("effective-static".into(), Some("original-static".into())),
+            ("effective-managed".into(), Some("original-managed".into())),
+        ]
+    );
+    assert!(transport.sent.lock().unwrap().is_empty());
+}
+#[test]
+fn configured_service_credentials_load_original_env_in_child() {
+    const MARKER: &str = "LINGXI_SERVICE_CREDENTIAL_TEST_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "configured_service_credentials_load_original_env_in_child",
+            ])
+            .env(MARKER, "1")
+            .env("LINGXI_EXACT_AUDIO_CREDENTIAL_SOURCE", "configured-only")
+            .env("OPENAI_API_KEY", "wrong-unconfigured-default")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated credential test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let client = llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
+            providers: vec![credential_profile(
+                "effective-env",
+                llm_runtime::CredentialConfig::Env {
+                    var: "LINGXI_EXACT_AUDIO_CREDENTIAL_SOURCE".into(),
+                },
+            )],
+        })
+        .unwrap();
+        let transport = Arc::new(HostTransport::default());
+        let services = client
+            .provider_services(sdk::protocol::Region::International, transport.clone())
+            .unwrap();
+        assert_eq!(
+            services
+                .service_credential("effective-env")
+                .await
+                .unwrap()
+                .expose_secret(),
+            "configured-only"
+        );
+        assert!(transport.sent.lock().unwrap().is_empty());
+    });
+}
+#[tokio::test]
+async fn service_tokens_reject_account_specific_auth_and_unconfigured_sdk_sources() {
+    let mut profile = credential_profile(
+        "account-auth",
+        llm_runtime::CredentialConfig::HostManaged {
+            id: "account".into(),
+        },
+    );
+    profile.auth = llm_runtime::AuthStrategy::ChatGptPlan;
+    let client = llm_runtime::ModelRuntime::from_config(llm_runtime::ClientConfig {
+        providers: vec![profile],
+    })
+    .unwrap();
+    assert!(matches!(
+        client.service_credential("account-auth").await,
+        Err(LlmError::UnsupportedCapability { .. })
+    ));
+    let services = ProviderServices::with_transport(
+        &profiles(),
+        sdk::protocol::Region::International,
+        Arc::new(HostTransport::default()),
+    )
+    .unwrap();
+    assert!(matches!(
+        services.service_credential("speech").await,
+        Err(LlmError::UnsupportedCapability { .. })
+    ));
+}

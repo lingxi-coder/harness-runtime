@@ -579,7 +579,6 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
         _name: &str,
         _input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        _workspace_lease_token: Option<u64>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
         lingxi_core::host::tool_invoker::ToolInvokerError,
@@ -2317,7 +2316,6 @@ impl lingxi_core::host::ToolInvoker for RouteChangingCleanupInvoker {
         _: &str,
         _: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        _: Option<u64>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
         lingxi_core::host::tool_invoker::ToolInvokerError,
@@ -7260,7 +7258,7 @@ async fn loop_api_error_persists_seed_and_terminal_reason() {
     )) as Arc<dyn lingxi_core::host::FileSystem>);
     ctx.prompt_messages = vec![lingxi_core::types::ConversationMessage::user(
         MessageId::new(),
-        "design the local app".to_string(),
+        "design the app".to_string(),
     )];
     let agent_id = ctx.agent_id;
 
@@ -7277,7 +7275,7 @@ async fn loop_api_error_persists_seed_and_terminal_reason() {
         )
     });
     assert!(
-        body.contains("design the local app"),
+        body.contains("design the app"),
         "the seed must survive a first-request API failure: {body}"
     );
     assert!(
@@ -9315,9 +9313,9 @@ async fn generic_workflow_watchdog_preserves_server_content_retry_and_usage_beha
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_preserves_completed_scaffold_and_read() {
+async fn host_create_transport_retry_preserves_completed_scaffold_and_read() {
     let api = ResultStreamMockApiClient::new(vec![
-        streamed_tool_use_turn("LocalAppScaffold", "tool_use")
+        streamed_tool_use_turn("HostScaffold", "tool_use")
             .into_iter()
             .map(Ok)
             .collect(),
@@ -9369,7 +9367,7 @@ async fn local_app_create_transport_retry_preserves_completed_scaffold_and_read(
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_shares_watchdog_limit_and_fails_closed() {
+async fn host_create_transport_retry_shares_watchdog_limit_and_fails_closed() {
     let api = ResultStreamMockApiClient::new(vec![
         vec![Err(response_body_transport_error())],
         vec![Err(workflow_watchdog_timeout_error(
@@ -9404,7 +9402,7 @@ async fn local_app_create_transport_retry_shares_watchdog_limit_and_fails_closed
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_discards_tools_from_interrupted_response() {
+async fn host_create_transport_retry_discards_tools_from_interrupted_response() {
     let mut interrupted: Vec<_> = streamed_tool_use_turn("Write", "tool_use")
         .into_iter()
         .take_while(|event| {
@@ -9448,7 +9446,7 @@ async fn local_app_create_transport_retry_discards_tools_from_interrupted_respon
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_never_replays_an_unclosed_server_tool() {
+async fn host_create_transport_retry_never_replays_an_unclosed_server_tool() {
     for error in [
         response_body_transport_error(),
         workflow_watchdog_timeout_error(
@@ -9498,7 +9496,7 @@ async fn local_app_create_transport_retry_never_replays_an_unclosed_server_tool(
 }
 
 #[tokio::test]
-async fn local_app_create_transport_retry_is_not_a_generic_error_retry() {
+async fn host_create_transport_retry_is_not_a_generic_error_retry() {
     for (workflow, failure) in [
         (false, vec![Err(response_body_transport_error())]),
         (
@@ -9633,11 +9631,11 @@ fn create_parse_recovery_api(
 
 fn enable_create_parse_recovery(ctx: &mut SubagentContext) {
     enable_design_parse_recovery(ctx);
-    ctx.tool_schemas = ["Write", "Read", "LocalAppScaffold"]
+    ctx.tool_schemas = ["Write", "Read", "HostScaffold"]
         .into_iter()
         .map(|name| source_tool(name, "", serde_json::json!({"type": "object"})))
         .collect();
-    ctx.allowed_tools = vec!["Write".into(), "Read".into(), "LocalAppScaffold".into()];
+    ctx.allowed_tools = vec!["Write".into(), "Read".into(), "HostScaffold".into()];
 }
 
 fn reasoning_only_truncated_turn() -> Vec<Result<llm_runtime::HistoryEvent, llm_runtime::LlmError>>
@@ -9655,9 +9653,9 @@ fn reasoning_only_truncated_turn() -> Vec<Result<llm_runtime::HistoryEvent, llm_
 }
 
 #[tokio::test]
-async fn local_app_create_truncation_continues_without_replaying_completed_tools() {
+async fn host_create_truncation_continues_without_replaying_completed_tools() {
     let api = create_parse_recovery_api(vec![
-        streamed_tool_use_turn("LocalAppScaffold", "tool_use")
+        streamed_tool_use_turn("HostScaffold", "tool_use")
             .into_iter()
             .map(Ok)
             .collect(),
@@ -9702,7 +9700,7 @@ async fn local_app_create_truncation_continues_without_replaying_completed_tools
 }
 
 #[tokio::test]
-async fn local_app_create_truncation_recovery_is_bounded_by_retries_and_turns() {
+async fn host_create_truncation_recovery_is_bounded_by_retries_and_turns() {
     for (max_turns, expected_calls) in [(8, 3), (1, 1)] {
         let api =
             create_parse_recovery_api((0..3).map(|_| reasoning_only_truncated_turn()).collect());
@@ -9742,9 +9740,9 @@ async fn generic_schema_truncation_keeps_existing_structured_output_nudge() {
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_preserves_completed_scaffold_and_read() {
+async fn host_create_json_correction_preserves_completed_scaffold_and_read() {
     let api = create_parse_recovery_api(vec![
-        streamed_tool_use_turn("LocalAppScaffold", "tool_use")
+        streamed_tool_use_turn("HostScaffold", "tool_use")
             .into_iter()
             .map(Ok)
             .collect(),
@@ -9795,7 +9793,7 @@ async fn local_app_create_json_correction_preserves_completed_scaffold_and_read(
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_shares_hard_run_cap_with_structured_output() {
+async fn host_create_json_correction_shares_hard_run_cap_with_structured_output() {
     for configured in [2, 99] {
         let api = create_parse_recovery_api(vec![
             malformed_structured_turn("Write"),
@@ -9825,7 +9823,7 @@ async fn local_app_create_json_correction_shares_hard_run_cap_with_structured_ou
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_requires_host_policy_and_advertised_local_tool() {
+async fn host_create_json_correction_requires_host_policy_and_advertised_local_tool() {
     for case in [
         "ordinary agent",
         "default workflow",
@@ -9881,7 +9879,7 @@ async fn local_app_create_json_correction_requires_host_policy_and_advertised_lo
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_rejects_mixed_server_or_incomplete_response() {
+async fn host_create_json_correction_rejects_mixed_server_or_incomplete_response() {
     for (other_tool, other_first) in [
         ("local", true),
         ("local", false),
@@ -9945,7 +9943,7 @@ async fn local_app_create_json_correction_rejects_mixed_server_or_incomplete_res
 }
 
 #[tokio::test]
-async fn local_app_create_json_correction_rechecks_cancellation_and_budget() {
+async fn host_create_json_correction_rechecks_cancellation_and_budget() {
     for cancel in [true, false] {
         let api = create_parse_recovery_api(vec![
             malformed_structured_turn("Write"),
@@ -12185,7 +12183,6 @@ async fn tool_reported_error_and_context_reach_model_history() {
             _: &str,
             _: Utf16JsonProjection,
             _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-            _: Option<u64>,
         ) -> Result<
             lingxi_core::host::tool_invoker::ToolInvocationResult,
             lingxi_core::host::tool_invoker::ToolInvokerError,
@@ -12275,7 +12272,6 @@ async fn child_tool_context_is_one_plugin_attachment_in_the_model_snapshot() {
             _: &str,
             _: Utf16JsonProjection,
             _: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-            _: Option<u64>,
         ) -> Result<
             lingxi_core::host::tool_invoker::ToolInvocationResult,
             lingxi_core::host::tool_invoker::ToolInvokerError,

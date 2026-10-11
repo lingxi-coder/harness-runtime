@@ -793,11 +793,24 @@ impl Transport for ProviderTransport {
             .extend(input.prompt_cache.breakpoints);
         request.execution.message_json_string_overrides = exact;
         request.execution.input_protocol = Some(family);
-        let response = self
-            .service
-            .execute_classifier_request(request, query.max_retries)
-            .await
-            .map_err(classifier_query_error)?;
+        let response = if family == llm_runtime::ProtocolFamily::OpenAiResponses {
+            // Responses has no stop parameter (the parser reads the first
+            // <block> anyway), and the ChatGPT Codex backend only streams.
+            request.input.stop_sequences.clear();
+            let stream = self
+                .service
+                .stream_request(request)
+                .await
+                .map_err(classifier_query_error)?;
+            llm_runtime::stream_accumulator::accumulate_stream_salvaging(stream)
+                .await
+                .map_err(|(_partial, error)| classifier_query_error(error))?
+        } else {
+            self.service
+                .execute_classifier_request(request, query.max_retries)
+                .await
+                .map_err(classifier_query_error)?
+        };
         Ok(Reply {
             text: response
                 .content
@@ -813,16 +826,14 @@ impl Transport for ProviderTransport {
 }
 
 fn classifier_query_error(error: llm_runtime::LlmError) -> QueryError {
-    #[cfg(test)]
-    eprintln!("classifier provider source error: {error:?}");
-    let classification = error.classification_source();
+    tracing::warn!(%error, "auto mode classifier query failed");
     if matches!(
-        classification,
+        error.classification_source(),
         llm_runtime::LlmError::ContextOverflow { .. }
     ) {
         return QueryError::TranscriptTooLong;
     }
-    let error_kind = match classification {
+    let error_kind = match error.classification_source() {
         llm_runtime::LlmError::TransportTimeout { .. } => Some("connection_timeout".to_string()),
         llm_runtime::LlmError::Transport { .. } => Some("connection_error".to_string()),
         _ => None,

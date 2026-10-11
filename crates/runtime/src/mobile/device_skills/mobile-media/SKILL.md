@@ -6,7 +6,7 @@ session-modes: [chat, code]
 
 # Mobile media
 
-Use the available native tools below directly for the requested media operation. No Local App, manifest, app identifier, JavaScript bridge, or generated application is needed. Follow the live tool schema: a device can support only some actions, and support can change with audio configuration.
+Use the available native tools below directly for the requested media operation. No manifest, app identifier, JavaScript bridge, or generated application is needed. Follow the live tool schema: a device can support only some actions, and support can change with audio configuration.
 
 An OS permission denial, cancellation, or unavailable service is an operation result. Report it without repeatedly reopening native prompts. Start capture only when the request calls for it, and distinguish captured metadata from media that the model can actually inspect.
 

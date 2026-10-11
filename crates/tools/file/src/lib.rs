@@ -50,7 +50,7 @@ pub const FILE_STATE_CURRENT_SUFFIX: &str =
 
 /// Whether this build of `tool-file` can decode images for `FileRead`.
 ///
-/// A consumer that hands the model an image BY PATH (the local-app annotation
+/// A consumer that hands the model an image BY PATH (the app annotation
 /// crop does) needs this on, or `Read` falls to the NUL scan and returns
 /// `format_binary` — a silent failure where the call succeeds and the model
 /// sees no picture. Exposed as a const so a downstream crate can assert its

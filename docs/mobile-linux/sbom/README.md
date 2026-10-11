@@ -11,8 +11,9 @@ Required outputs for each release candidate:
 - license inventory for all shipped runtime components
 - corresponding-source pins from the Git-pinned SDK `docs/toolchains/runtime-pins.json`
 - the SDK-owned license texts and `docs/mobile-linux/LICENSES/NOTICE.md`
-- `local-app-runtime.spdx.json`, deterministically generated from the committed
-  pnpm lockfile and pinned by its SHA-256 digest
+- the Local App runtime seed's `local-app-runtime.spdx.json`, generated from its pnpm lockfile
+  and pinned by its SHA-256 digest; it is owned and checked by the `local-app-builder`
+  repository (`docs/runtime/sbom`)
 
 Required external release evidence layout (`MOBILE_LINUX_EVIDENCE_DIR`), alongside
 the actual `MOBILE_LINUX_ROOTFS_ARCHIVE`:
@@ -35,14 +36,8 @@ Evidence shape enforced by CI:
 An Android release must fail closed when any of these artifacts is missing or
 does not match the staged native/rootfs bytes.
 
-Regenerate and verify the bundled engine-free local-app seed evidence with:
-
-```text
-python3 scripts/local-apps/generate-local-app-sbom.py \
-  --lock crates/local-apps/templates/runtime-profiles/react-dom/r1/pnpm-lock.yaml \
-  --output docs/mobile-linux/sbom/local-app-runtime.spdx.json
-bash scripts/tests/test-local-app-supply-chain.sh
-```
+The engine-free local-app seed evidence is regenerated and verified from the `local-app-builder`
+repository (`scripts/runtime/generate-local-app-sbom.py`, `scripts/tests/test-local-app-supply-chain.sh`).
 
 Historical aggregate source records are preserved byte-for-byte in the SDK
 `docs/migration/legacy`; they are not active release evidence. The SDK archive

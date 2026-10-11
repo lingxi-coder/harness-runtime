@@ -77,6 +77,8 @@ use command_api::builtins::{
 
 use lingxi_core::host::{AuthHandle, OrchestratorHandle, OutputStream};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+pub use lingxi_llm_client::protocol::computer::NativeComputerProvider;
+pub use orchestrator::native_computer::VerifiedComputerProfile;
 use orchestrator::{ConversationOrchestrator, ProviderApiAdapter};
 use permission::gate::PermissionGate;
 
@@ -222,43 +224,6 @@ mod desktop_hook_mcp_invoker_tests;
 #[cfg(test)]
 #[path = "tests/mcp_transport_wiring_tests.rs"]
 mod mcp_transport_wiring_tests;
-
-struct DesktopWebSearchConfigProvider {
-    lingxi_home: std::path::PathBuf,
-    credentials: Arc<secret::CredentialManager>,
-}
-
-#[async_trait::async_trait]
-impl lingxi_core::host::WebSearchConfigProvider for DesktopWebSearchConfigProvider {
-    async fn load_web_search_config(&self) -> lingxi_core::host::WebSearchRuntimeConfig {
-        let settings_path = self.lingxi_home.join("settings.json");
-        let parsed = std::fs::read_to_string(&settings_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .map(|v| tool_web::web_search_config::WebSearchConfig::from_settings_json(&v))
-            .unwrap_or_default();
-        let tavily_key = self
-            .credentials
-            .get_provider_key("web:tavily")
-            .await
-            .ok()
-            .flatten()
-            .map(|s| s.expose_secret().clone());
-        let brave_key = self
-            .credentials
-            .get_provider_key("web:brave")
-            .await
-            .ok()
-            .flatten()
-            .map(|s| s.expose_secret().clone());
-        lingxi_core::host::WebSearchRuntimeConfig {
-            provider: Some(parsed.provider.as_str().to_string()),
-            searxng_url: parsed.searxng_url,
-            tavily_key,
-            brave_key,
-        }
-    }
-}
 
 async fn emit_mcp_servers_inventory(
     bus: &telemetry::AnalyticsBus,
@@ -504,7 +469,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         name: &str,
         input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
         supplied: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
@@ -513,7 +477,7 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         match self.inner.get() {
             Some(invoker) => {
                 invoker
-                    .invoke_supplied_detailed(name, input, ctx, workspace_lease_token, supplied)
+                    .invoke_supplied_detailed(name, input, ctx, supplied)
                     .await
             }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
@@ -528,17 +492,12 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
         name: &str,
         input: Utf16JsonProjection,
         ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
     ) -> Result<
         lingxi_core::host::tool_invoker::ToolInvocationResult,
         lingxi_core::host::tool_invoker::ToolInvokerError,
     > {
         match self.inner.get() {
-            Some(invoker) => {
-                invoker
-                    .invoke_detailed(name, input, ctx, workspace_lease_token)
-                    .await
-            }
+            Some(invoker) => invoker.invoke_detailed(name, input, ctx).await,
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .into(),
@@ -554,34 +513,6 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
         match self.inner.get() {
             Some(invoker) => invoker.invoke(name, input, ctx).await,
-            None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
-                "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
-                    .into(),
-            )),
-        }
-    }
-
-    /// Forward the lease token instead of inheriting the trait's delegating
-    /// default. This wrapper sits between the lease PRODUCER
-    /// (`WorkspaceLeaseToolInvoker`) and the CONSUMER (`RegistryToolInvoker`,
-    /// which folds the token into `PermissionCheckContext`), so the default —
-    /// which drops the token and calls `invoke` — left
-    /// `workspace_lease_token` permanently `None` in production: the lease
-    /// ALLOW never fired, and neither did the paired `denies_host_owned_for_token`
-    /// hard deny.
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: Utf16JsonProjection,
-        ctx: lingxi_core::host::tool_invoker::SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
-    ) -> Result<Utf16JsonProjection, lingxi_core::host::tool_invoker::ToolInvokerError> {
-        match self.inner.get() {
-            Some(invoker) => {
-                invoker
-                    .invoke_with_workspace_lease(name, input, ctx, workspace_lease_token)
-                    .await
-            }
             None => Err(lingxi_core::host::tool_invoker::ToolInvokerError::Internal(
                 "DeferredToolInvoker: tool dispatch attempted before build() bound the registry"
                     .into(),
@@ -1292,27 +1223,6 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                             .creator_agent_id
                             .as_deref()
                             .and_then(lingxi_core::types::AgentId::parse_prefixed),
-                        // Desktop hosts no Local Apps: no app store and no
-                        // delete guard, so there is nothing for a scope to
-                        // authorize. `None` rather than a purpose invented at
-                        // the call site.
-                        //
-                        // ⚠️ Desktop DOES have a workspace-lease registry —
-                        // `with_workspace_permission_leases` is wired further
-                        // down this file. `None` is still right, and strictly
-                        // safer: a lease is an ALLOW grant, so an unscoped
-                        // desktop workflow gets less than before, never more.
-                        //
-                        // Unremarked behaviour delta, recorded here because the
-                        // diff does not otherwise say it: before the scope was
-                        // threaded, a desktop launch named like a Local App
-                        // build workflow but carrying no `args.app_id` failed
-                        // hard with `requires a non-empty workflow args.app_id`.
-                        // It now runs silently unscoped. Nothing on desktop
-                        // relies on that refusal today — there is no app store
-                        // for it to protect — but a future reader looking for
-                        // where it went should find this.
-                        scope: None,
                     },
                     task_description.into(),
                 )
@@ -1741,6 +1651,27 @@ pub struct DesktopAudio {
 }
 
 impl DesktopAudio {
+    /// Compose device-only audio, installed offline backends and hosted cloud
+    /// routes. A native service already implementing complete v4 policy should
+    /// continue using `from_single` to resolve routing only once.
+    pub fn from_unified(
+        device: Arc<dyn lingxi_core::host::audio::AudioService>,
+        offline: Vec<audio_runtime::OfflineAudioBackend>,
+        cloud_host: Option<Arc<dyn audio_runtime::CloudAudioHost>>,
+        settings: audio_runtime::AudioRoutingSettings,
+        owner: Option<lingxi_core::host::audio::AudioOwner>,
+    ) -> Self {
+        let service = Arc::new(audio_runtime::UnifiedAudioService::new(
+            device, offline, cloud_host, settings,
+        ));
+        Self {
+            service: match owner {
+                Some(owner) => service.for_owner(owner),
+                None => service,
+            },
+        }
+    }
+
     /// Build from one app-scoped audio service.
     #[must_use]
     pub fn from_single<T>(implementation: Arc<T>) -> Self
@@ -2435,6 +2366,8 @@ pub struct DesktopRuntime {
     pub catalog_registry: FusionCatalogRegistry,
     /// Product region actually selected by the running client.
     pub provider_region: llm_runtime::Region,
+    audio_services: llm_runtime::services::ProviderServices,
+    audio_credential_ids: std::collections::BTreeMap<String, String>,
     /// The fully-constructed orchestrator (cost tracker + MCP/hook/agent
     /// registries + compaction wired), bound to the supplied output stream and
     /// permission gate.
@@ -2678,12 +2611,34 @@ pub struct DesktopRuntime {
 }
 
 impl DesktopRuntime {
+    /// Actual assembled SDK services and credential sources for native audio.
+    pub fn audio_provider_services(
+        &self,
+    ) -> (
+        llm_runtime::services::ProviderServices,
+        std::collections::BTreeMap<String, String>,
+        Arc<secret::CredentialManager>,
+    ) {
+        (
+            self.audio_services.clone(),
+            self.audio_credential_ids.clone(),
+            self.credentials.clone(),
+        )
+    }
     /// Current local Agent statistics, sampled when a result is published.
     /// Tool selection does not disable the session's statistics owner: an
     /// empty snapshot still comes from this runtime's real session registry.
     pub async fn agent_session_statistics(
         &self,
     ) -> Option<lingxi_core::host::agent_statistics::AgentSessionStatisticsSnapshot> {
+        if !self
+            .orchestrator
+            .tool_names()
+            .iter()
+            .any(|name| name == "Agent")
+        {
+            return None;
+        }
         let session_id = self.orchestrator.current_session_id().await;
         Some(
             self.task_registry
@@ -4756,20 +4711,22 @@ impl PluginRuntime {
             .iter()
             .filter(|id| live.contains(*id))
         {
-            if let Some(
-                plugin::PluginState::Loaded {
-                    manifest,
-                    install_dir,
-                    ..
+            match self.manager.plugin_state(id).await {
+                Some(
+                    plugin::PluginState::Loaded {
+                        manifest,
+                        install_dir,
+                        ..
+                    }
+                    | plugin::PluginState::DisablingFailed {
+                        manifest,
+                        install_dir,
+                        ..
+                    },
+                ) => {
+                    result.push((manifest, install_dir));
                 }
-                | plugin::PluginState::DisablingFailed {
-                    manifest,
-                    install_dir,
-                    ..
-                },
-            ) = self.manager.plugin_state(id).await
-            {
-                result.push((manifest, install_dir));
+                _ => {}
             }
         }
         // Stable sorting preserves discovery order for each category; it does
@@ -5224,6 +5181,31 @@ mod async_hook_response_buffer_tests {
         ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
             self.publish_if_current(mutation)
         }
+    }
+
+    #[tokio::test]
+    async fn startup_rewakes_wait_for_the_initialized_target() {
+        let buffer = AsyncHookResponseBuffer::default();
+        let canceled = lingxi_core::host::CancellationToken::new();
+        let live = lingxi_core::host::CancellationToken::new();
+        buffer.schedule_rewake(Some(canceled.clone()));
+        buffer.schedule_rewake(Some(live.clone()));
+        buffer.schedule_rewake(None);
+        assert_eq!(buffer.pending_rewakes.lock().unwrap().len(), 3);
+        canceled.cancel();
+
+        let target: Arc<dyn OrchestratorHandle> =
+            Arc::new(orchestrator::test_support::MockOrchestratorHandle::default());
+        buffer.attach_rewake_handle(&target);
+        assert!(buffer.pending_rewakes.lock().unwrap().is_empty());
+        assert!(buffer
+            .rewake_target
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .is_some());
+        buffer.schedule_rewake(None);
+        assert!(buffer.pending_rewakes.lock().unwrap().is_empty());
+        tokio::task::yield_now().await;
     }
 
     #[tokio::test]
@@ -5710,10 +5692,6 @@ mod environment_oauth_tests;
 #[path = "tests/connected_fallback_tests.rs"]
 mod connected_fallback_tests;
 
-#[cfg(test)]
-#[path = "tests/workspace_lease_forwarding_tests.rs"]
-mod workspace_lease_forwarding_tests;
-
 /// Round-5 review item 11's class member (1), handed to the gate by that
 /// fixer's `needs_other_file`: the connect LOOP inside
 /// [`build_agent_mcp_tool_set`] is one await EARLIER than the
@@ -5782,6 +5760,17 @@ use credentials::resolve_llm_stack_with_credentials;
 use credentials::CredentialStoreAuthProvider;
 pub use credentials::LlmStack;
 pub use credentials::SharedCredentialStack;
+use fusion_services::desktop_fusion_attempts;
+use fusion_services::desktop_fusion_catalog_row;
+use fusion_services::desktop_fusion_runtime_config;
+use fusion_services::filter_fusion_catalog;
+pub use fusion_services::fusion_credential_restart_required_message;
+use fusion_services::fusion_route_flag;
+pub use fusion_services::publish_fusion_catalog_credential;
+pub use fusion_services::refresh_fusion_catalog_after_credential_delete;
+pub use fusion_services::refresh_fusion_catalog_after_credential_write;
+pub use fusion_services::register_fusion_catalog_refresher;
+pub use fusion_services::spawn_fusion_catalog_refresh;
 use fusion_services::DesktopFusionConfigSource;
 use fusion_services::DesktopFusionExecutor;
 use fusion_services::DesktopFusionPriceBook;
@@ -5793,15 +5782,6 @@ use fusion_services::FusionCatalogRefreshingCopilotConnect;
 use fusion_services::FusionCatalogRefreshingCredentialWriter;
 use fusion_services::FusionCatalogRefreshingOAuthConnect;
 pub use fusion_services::FusionCatalogRegistry;
-use fusion_services::{
-    desktop_fusion_attempts, desktop_fusion_catalog_row, desktop_fusion_runtime_config,
-    filter_fusion_catalog, fusion_route_flag,
-};
-pub use fusion_services::{
-    fusion_credential_restart_required_message, publish_fusion_catalog_credential,
-    refresh_fusion_catalog_after_credential_delete, refresh_fusion_catalog_after_credential_write,
-    register_fusion_catalog_refresher, spawn_fusion_catalog_refresh,
-};
 pub use orchestrator::config::ModRenderSurface;
 use permission_config::append_mcp_permission_rules;
 use permission_config::append_restricted_builtin_denies;

@@ -1,0 +1,4 @@
+{
+  "type": "start_realtime_audio",
+  "request_json": "{\"operationId\":\"audio-1\"}"
+}

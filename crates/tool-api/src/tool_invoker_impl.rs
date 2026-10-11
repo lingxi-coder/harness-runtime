@@ -304,18 +304,7 @@ impl ToolInvoker for RegistryToolInvoker {
         input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
     ) -> Result<Utf16JsonProjection, ToolInvokerError> {
-        self.invoke_with_workspace_lease(name, input, ctx, None)
-            .await
-    }
-
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: Utf16JsonProjection,
-        ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
-    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
-        self.invoke_detailed(name, input, ctx, workspace_lease_token)
+        self.invoke_detailed(name, input, ctx)
             .await
             .map(|result| result.data)
     }
@@ -325,9 +314,8 @@ impl ToolInvoker for RegistryToolInvoker {
         name: &str,
         input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
-        self.invoke_registered_or_supplied(name, input, ctx, workspace_lease_token, None)
+        self.invoke_registered_or_supplied(name, input, ctx, None)
             .await
     }
 
@@ -336,7 +324,6 @@ impl ToolInvoker for RegistryToolInvoker {
         name: &str,
         input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
         supplied: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         if self.gate.is_none() {
@@ -352,7 +339,7 @@ impl ToolInvoker for RegistryToolInvoker {
         if tool.name() != name && !tool.aliases().contains(&name) {
             return Err(ToolInvokerError::NotFound(name.into()));
         }
-        self.invoke_registered_or_supplied(name, input, ctx, workspace_lease_token, Some(tool))
+        self.invoke_registered_or_supplied(name, input, ctx, Some(tool))
             .await
     }
 
@@ -367,7 +354,6 @@ impl RegistryToolInvoker {
         name: &str,
         mut input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
-        workspace_lease_token: Option<u64>,
         supplied: Option<Arc<dyn crate::Tool>>,
     ) -> Result<lingxi_core::host::tool_invoker::ToolInvocationResult, ToolInvokerError> {
         let tool = supplied
@@ -610,7 +596,6 @@ impl RegistryToolInvoker {
                 // main thread / a spawn with no override.
                 mode_override: ctx.mode_override.clone(),
                 is_non_interactive_session: ctx.is_non_interactive_session,
-                workspace_lease_token,
                 // Replay the fork-time command denies as a `disallowed_tools`
                 // LAYER. The fold applies layers ON TOP of the base policy, so a
                 // frozen deny wins over a live rule that would now allow the same
@@ -1158,7 +1143,7 @@ mod tests {
         let invoker = RegistryToolInvoker::new(registry_with_echo());
         for failed in [false, true] {
             let result = invoker
-                .invoke_detailed("TestEcho", json!({"fail": failed}), no_ctx(), None)
+                .invoke_detailed("TestEcho", json!({"fail": failed}), no_ctx())
                 .await
                 .expect("a tool-reported failure is still a completed invocation");
             assert_eq!(result.is_error, failed);
@@ -1265,7 +1250,7 @@ mod tests {
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
         let result = invoker
-            .invoke_detailed("TurnEndProbe", input.clone(), no_ctx(), None)
+            .invoke_detailed("TurnEndProbe", input.clone(), no_ctx())
             .await
             .expect("probe invocation completes");
         assert_eq!(result.data, input);
@@ -1437,7 +1422,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_call_cancellation_reaches_normal_and_workspace_lease_tool_contexts() {
+    async fn per_call_cancellation_reaches_tool_contexts_without_leaking_a_prior_scope() {
         let captured: Arc<
             StdMutex<
                 Option<(
@@ -1452,12 +1437,12 @@ mod tests {
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
 
-        for workspace_lease_token in [None, Some(41)] {
+        for with_prior_snapshot in [false, true] {
             *captured.lock().unwrap() = None;
             let cancellation_token = tokio_util::sync::CancellationToken::new();
             let mut context = no_ctx();
             context.cancellation_token = cancellation_token.clone();
-            let stale_token = if workspace_lease_token.is_some() {
+            let stale_token = if with_prior_snapshot {
                 let stale_token = tokio_util::sync::CancellationToken::new();
                 let mut stale_context = ToolUseContext::model_seed("prior-call".into());
                 stale_context.cancel = Some(stale_token.clone());
@@ -1468,17 +1453,10 @@ mod tests {
                 None
             };
 
-            if let Some(token) = workspace_lease_token {
-                invoker
-                    .invoke_with_workspace_lease("RecordingTool", json!({}), context, Some(token))
-                    .await
-                    .expect("workspace-leased tool call succeeds");
-            } else {
-                invoker
-                    .invoke("RecordingTool", json!({}), context)
-                    .await
-                    .expect("normal tool call succeeds");
-            }
+            invoker
+                .invoke("RecordingTool", json!({}), context)
+                .await
+                .expect("tool call succeeds");
 
             let observed_token = captured
                 .lock()
@@ -1798,7 +1776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_lease_dispatch_preserves_trusted_execution_policy() {
+    async fn dispatch_preserves_trusted_execution_policy() {
         let captured = Arc::new(StdMutex::new(None));
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(NameRecordingTool {
@@ -1806,7 +1784,7 @@ mod tests {
         }));
         let invoker = RegistryToolInvoker::new(Arc::new(registry));
         invoker
-            .invoke_with_workspace_lease(
+            .invoke(
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
@@ -1840,16 +1818,15 @@ mod tests {
                     request_source: None,
                     frozen_command_denies: Vec::new(),
                 },
-                Some(77),
             )
             .await
-            .expect("lease-aware dispatch succeeds");
+            .expect("dispatch succeeds");
         let captured = captured.lock().unwrap();
         let captured = captured.as_ref().expect("tool call ran");
         assert_eq!(
             captured.4,
             lingxi_core::host::tool_invoker::ToolExecutionPolicy::FusionPanel,
-            "workspace lease path must not drop the trusted Fusion policy"
+            "dispatch must not drop the trusted Fusion policy"
         );
     }
 
@@ -2687,6 +2664,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_preserves_original_and_approved_utf16_input_carriers() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let original =
+            Utf16JsonProjection::parse(r#"{"text":"\ud800","\ud801":"original"}"#).unwrap();
+        let updated =
+            Utf16JsonProjection::parse(r#"{"text":"\udfff","\ud901":"approved"}"#).unwrap();
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(ContextRecordingGate {
+            seen: seen.clone(),
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::Allow {
+                updated_input: Some(updated.clone()),
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let invocation = ctx_with_tool_use_id("toolu_exact");
+        let result = invoker
+            .invoke_detailed("TestEcho", original.clone(), invocation)
+            .await
+            .unwrap();
+        assert!(seen.lock().unwrap().is_some());
+        assert_eq!(result.data.subprojection("/echo").unwrap(), updated);
+    }
+
+    #[tokio::test]
+    async fn dispatch_allow_auto_preserves_utf16_rewrite() {
+        use lingxi_core::types::utf16_json::Utf16JsonProjection;
+        let updated =
+            Utf16JsonProjection::parse(r#"{"text":"\udfff","\ud901":"approved"}"#).unwrap();
+        let gate = Arc::new(ContextRecordingGate {
+            seen: Arc::new(StdMutex::new(None)),
+            outcome: lingxi_core::host::permission_gate::PermissionOutcome::AllowAuto {
+                updated_input: Some(updated.clone()),
+            },
+        });
+        let invoker = RegistryToolInvoker::new(registry_with_echo()).with_gate(gate);
+        let result = invoker
+            .invoke_detailed("TestEcho", json!({}), no_ctx())
+            .await
+            .unwrap();
+        assert_eq!(result.data.subprojection("/echo").unwrap(), updated);
+    }
+
+    #[tokio::test]
+    async fn dispatch_does_not_reuse_a_previous_calls_utf16_projection() {
+        let exact = Utf16JsonProjection::parse(r#"{"text":"\ud800"}"#).unwrap();
+        let current = Utf16JsonProjection::parse(r#"{"text":"\ufffd"}"#).unwrap();
+        let invoker = RegistryToolInvoker::new(registry_with_echo());
+        let first = invoker
+            .invoke_detailed("TestEcho", exact, no_ctx())
+            .await
+            .unwrap();
+        let mut next = no_ctx();
+        next.tool_context_state = first.context_state;
+        let result = invoker
+            .invoke_detailed("TestEcho", current.clone(), next)
+            .await
+            .unwrap();
+        assert_eq!(result.data.subprojection("/echo").unwrap(), current);
+    }
+
+    #[tokio::test]
+    async fn dispatch_keeps_current_argument_identity_with_reused_context() {
+        let exact = Utf16JsonProjection::parse(r#"{"text":"\ud800","old":true}"#).unwrap();
+        let current = Utf16JsonProjection::parse(r#"{"text":"different","new":true}"#).unwrap();
+        let invoker = RegistryToolInvoker::new(registry_with_echo());
+        let first = invoker
+            .invoke_detailed("TestEcho", exact, no_ctx())
+            .await
+            .unwrap();
+        let mut next = no_ctx();
+        next.tool_context_state = first.context_state;
+        let result = invoker
+            .invoke_detailed("TestEcho", current.clone(), next)
+            .await
+            .unwrap();
+        assert_eq!(result.data.subprojection("/echo").unwrap(), current);
+    }
+
+    #[tokio::test]
     async fn dispatch_keeps_original_input_when_updated_input_none() {
         // Behavior identical when updated_input is None: the original input runs.
         let gate = Arc::new(ContextRecordingGate {
@@ -3009,7 +3067,7 @@ mod tests {
             .await
             .is_err());
         let result = invoker
-            .invoke_detailed("Write", input.clone(), plan_probe_context(id), None)
+            .invoke_detailed("Write", input.clone(), plan_probe_context(id))
             .await
             .unwrap();
         assert_eq!(result.data, json!({"written":true}));

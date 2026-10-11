@@ -349,7 +349,6 @@ fn live_agent_tool_dispatch(ctx: &SubagentContext) -> Option<live_tools::LiveAge
                             &call.name,
                             call.input,
                             call.context,
-                            None,
                             std::sync::Arc::new(tool_api::tool_invoker_impl::SuppliedTool(tool)),
                         )
                         .await
@@ -360,7 +359,7 @@ fn live_agent_tool_dispatch(ctx: &SubagentContext) -> Option<live_tools::LiveAge
                 }
             } else {
                 invoker
-                    .invoke_detailed(&call.name, call.input, call.context, None)
+                    .invoke_detailed(&call.name, call.input, call.context)
                     .await
             }
         }) as futures::future::BoxFuture<'static, _>
@@ -1958,6 +1957,67 @@ async fn run_subagent_inner(
 /// forwards it. Only when the spawner has no `default_model` wired (legacy /
 /// tests) does this forward a raw `"inherit"` / bare alias — which then resolves
 /// solely via any configured `routing.aliases`.
+/// Validate a captured `StructuredOutput` input against the workflow
+/// `agent({schema})` JSON Schema (claude-code's Ajv `validateSchema`/`compile`
+/// inside the StructuredOutput tool `call`). Returns a concise leaf-error string
+/// on mismatch, `Ok(())` on a valid input.
+///
+/// BEHAVIORAL parity only: PASS/FAIL matches claude-code (full JSON-Schema
+/// validation), but the error-detail bytes differ from Ajv's
+/// `${instancePath}: ${message}` form (boon's native messages are unportable —
+/// the same intentional divergence as `orchestrator::schema_validation`). The
+/// byte-exact part is the `Output does not match required schema: ` WRAPPER the
+/// caller prepends. A schema that fails to COMPILE is treated as PASS (a LingXi
+/// schema bug must not block the model), matching the binary's stance.
+pub fn validate_structured_output(
+    schema_json: Option<&str>,
+    input: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(schema_str) = schema_json else {
+        return Ok(());
+    };
+    let schema: serde_json::Value = match serde_json::from_str(schema_str) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    const URL: &str = "mem://structured-output-schema";
+    let mut schemas = boon::Schemas::new();
+    let mut compiler = boon::Compiler::new();
+    if compiler.add_resource(URL, schema).is_err() {
+        return Ok(());
+    }
+    let sch = match compiler.compile(URL, &mut schemas) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    match schemas.validate(input, sch) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let mut out = Vec::new();
+            flatten_schema_error(&err, &mut out);
+            Err(out.join(", "))
+        }
+    }
+}
+
+/// Flatten a boon validation error into concise `at '<loc>': <kind>` leaves
+/// (mirrors `orchestrator::schema_validation::flatten`).
+fn flatten_schema_error(err: &boon::ValidationError, out: &mut Vec<String>) {
+    if err.causes.is_empty() {
+        let loc = err.instance_location.to_string();
+        let loc = if loc.is_empty() {
+            "(root)".to_string()
+        } else {
+            loc
+        };
+        out.push(format!("at '{loc}': {}", err.kind));
+    } else {
+        for cause in &err.causes {
+            flatten_schema_error(cause, out);
+        }
+    }
+}
+
 /// The workflow `agent({schema})` StructuredOutput retry cap — claude-code
 /// `Fe.MAX_STRUCTURED_OUTPUT_RETRIES ?? OBp`, where `OBp = 5`. The env override
 /// matches the binary's `parseInt(process.env.MAX_STRUCTURED_OUTPUT_RETRIES||"5")`.
@@ -4365,7 +4425,7 @@ async fn run_subagent_loop(
                             ..
                         } = e.classification_source()
                         {
-                            // The Host enables this policy only for Create Local App.
+                            // The Host enables this policy only for a host-managed app creation run.
                             // Ordinary agents keep the existing StructuredOutput-only
                             // recovery policy, even when parse retries are configured.
                             let create_local_tool = retry_response_body

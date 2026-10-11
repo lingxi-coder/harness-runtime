@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Single entry point for every checked-in gate script — the execution
-# trigger for P1.12 (see docs/local-apps/... review history: three of these
+# trigger for P1.12 (review history: three of these
 # gates shipped with 0 automation triggers and only human memory ran them).
 #
-# Gates are discovered under scripts/checks/, excluding test fixtures and
-# Local Apps build helpers. Discovery selects
+# Gates are discovered under scripts/checks/, excluding test fixtures.
+# Discovery selects
 # executable files matching the naming convention every gate wrapper in
 # this repo already follows: `check-*.sh` or `*-gate.sh`. That convention
 # is the whole point: a fifth gate written tomorrow by someone who has
@@ -64,15 +64,6 @@ ran=()
 for g in "${gates[@]}"; do
     echo "=== RUNNING: $g ==="
     case "$g" in
-        lap-gate.sh)
-            # lap-gate is a criterion *library*: every subcommand wants a
-            # specific --run/--baseline/--range argument for a specific
-            # task under review. There is no "check this repo" mode. The
-            # closest thing an unattended trigger can run is the engine's
-            # own self-test: it exercises all ten planted criteria in both
-            # directions and fails if the judging logic itself regresses.
-            if ./scripts/checks/lap-gate.sh selftest 2>&1; then rc=0; else rc=$?; fi
-            ;;
         *)
             if ./scripts/checks/"$g" 2>&1; then rc=0; else rc=$?; fi
             ;;

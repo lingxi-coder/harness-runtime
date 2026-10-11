@@ -55,23 +55,9 @@ impl AndroidProotRuntime {
                     rootfs_version: config.rootfs_version,
                     archive_sha256: config.archive_sha256,
                     native_library_dir,
-                    isolated_build_profile: Some(product_build_profile()),
                 },
             ),
         }
-    }
-}
-
-fn product_build_profile() -> mobile_linux_android::IsolatedBuildProfile {
-    mobile_linux_android::IsolatedBuildProfile {
-        guest_root: lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_ROOT.into(),
-        project_directory: lingxi_core::host::local_app_paths::LOCAL_APP_BUILD_PROJECT_DIR.into(),
-        dependency_store: lingxi_core::host::local_app_paths::LOCAL_APP_DEPENDENCY_STORE.into(),
-        state_directory: ".lingxi-build-state".into(),
-        host_apps_directory: "apps".into(),
-        host_build_directory: "build".into(),
-        host_workspace_directory: "workspace".into(),
-        channels: vec!["store".into(), "full".into()],
     }
 }
 
@@ -123,13 +109,6 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
         request: LinuxCommandRequest,
     ) -> Result<LinuxCommandResult, MobileLinuxError> {
         self.inner.run(request).await
-    }
-
-    async fn run_isolated(
-        &self,
-        request: LinuxCommandRequest,
-    ) -> Result<LinuxCommandResult, MobileLinuxError> {
-        self.inner.run_isolated(request).await
     }
 
     async fn run_streaming(
@@ -257,12 +236,19 @@ mod tests {
     use super::*;
     use mobile_linux_api::RootfsState;
 
+    /// Byte-pins the atlas atoms. The Swift twin (`LXISHGuestPaths`) pins the
+    /// SAME literals — drift on either side fails one of the twins.
     #[test]
-    fn product_profile_keeps_existing_paths() {
-        let profile = product_build_profile();
-        assert_eq!(profile.guest_root, "/var/lingxi/local-app-build");
-        assert_eq!(profile.state_directory, ".lingxi-build-state");
-        assert_eq!(profile.channels, ["store", "full"]);
+    fn atlas_atoms_are_pinned() {
+        use mobile_linux_api::guest_paths as sdk;
+        assert_eq!(sdk::HOME, "/root");
+        assert_eq!(sdk::SCRATCH, &["/tmp", "/var/tmp"]);
+        assert_eq!(sdk::WORKSPACE_ROOT, "/workspace");
+        assert_eq!(sdk::workspace("abc-123"), "/workspace/abc-123");
+        assert_eq!(
+            sdk::writable_roots(),
+            ["/root", "/tmp", "/var/tmp", "/workspace"]
+        );
     }
 
     #[tokio::test]

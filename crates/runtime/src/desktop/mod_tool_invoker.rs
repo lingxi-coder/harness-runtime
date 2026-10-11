@@ -207,19 +207,7 @@ impl ToolInvoker for ModSubagentToolInvoker {
         input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
     ) -> Result<Utf16JsonProjection, ToolInvokerError> {
-        self.invoke_detailed(name, input, ctx, None)
-            .await
-            .map(|result| result.data)
-    }
-
-    async fn invoke_with_workspace_lease(
-        &self,
-        name: &str,
-        input: Utf16JsonProjection,
-        ctx: SubagentInvocationContext,
-        lease: Option<u64>,
-    ) -> Result<Utf16JsonProjection, ToolInvokerError> {
-        self.invoke_detailed(name, input, ctx, lease)
+        self.invoke_detailed(name, input, ctx)
             .await
             .map(|result| result.data)
     }
@@ -229,14 +217,13 @@ impl ToolInvoker for ModSubagentToolInvoker {
         name: &str,
         input: Utf16JsonProjection,
         ctx: SubagentInvocationContext,
-        lease: Option<u64>,
     ) -> Result<ToolInvocationResult, ToolInvokerError> {
         let (host, session) = {
             let hooks = self.hooks.read().await;
             (hooks.mod_host(), hooks.mod_background_context())
         };
         let Some(host) = host else {
-            return self.inner.invoke_detailed(name, input, ctx, lease).await;
+            return self.inner.invoke_detailed(name, input, ctx).await;
         };
         let session = session.and_then(|weak| weak.upgrade()).ok_or_else(|| {
             ToolInvokerError::Internal("Mod session ended before the child tool call".into())
@@ -299,7 +286,7 @@ impl ToolInvoker for ModSubagentToolInvoker {
                             ));
                         }
                         let args = tool_call_arguments(&forwarded)?;
-                        let result = match inner.invoke_detailed(&name, args, ctx, lease).await {
+                        let result = match inner.invoke_detailed(&name, args, ctx).await {
                             Ok(result) => result,
                             Err(error) => {
                                 let source = error.model_facing_message();
@@ -359,10 +346,7 @@ impl ToolInvoker for ModSubagentToolInvoker {
                     return Ok(core);
                 }
                 tracing::warn!(tool = name, error = %error, "nested Mod tool.call failed");
-                return self
-                    .inner
-                    .invoke_detailed(name, original_input, ctx, lease)
-                    .await;
+                return self.inner.invoke_detailed(name, original_input, ctx).await;
             }
         };
 
@@ -583,7 +567,6 @@ mod tests {
             _name: &str,
             input: Utf16JsonProjection,
             _ctx: SubagentInvocationContext,
-            _lease: Option<u64>,
         ) -> Result<ToolInvocationResult, ToolInvokerError> {
             self.calls.lock().unwrap().push(input.clone());
             let marker = input.string_at("/marker").map(str::to_owned);
@@ -710,7 +693,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"original.txt"})),
                 child_context(child),
-                None,
             )
             .await
             .unwrap();
@@ -784,8 +766,8 @@ mod tests {
             };
 
         let (result_a, result_b) = tokio::join!(
-            invoker.invoke_detailed("Read", source(&json!({"file_path":"a"})), context_a, None),
-            invoker.invoke_detailed("Read", source(&json!({"file_path":"b"})), context_b, None),
+            invoker.invoke_detailed("Read", source(&json!({"file_path":"a"})), context_a),
+            invoker.invoke_detailed("Read", source(&json!({"file_path":"b"})), context_b),
         );
         result_a.unwrap();
         result_b.unwrap();
@@ -820,7 +802,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"original.txt"})),
                 child_context(AgentId::new()),
-                None,
             )
             .await
             .unwrap_err();
@@ -846,7 +827,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"read.txt"})),
                 child_context(AgentId::new()),
-                None,
             )
             .await
             .unwrap();
@@ -880,7 +860,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"read.txt"})),
                 child_context(AgentId::new()),
-                None,
             )
             .await
             .unwrap();
@@ -906,7 +885,7 @@ mod tests {
         .await;
         let input = Utf16JsonProjection::parse(r#"{"file_path":"lone\ud800.txt"}"#).unwrap();
         invoker
-            .invoke_detailed("Read", input, child_context(AgentId::new()), None)
+            .invoke_detailed("Read", input, child_context(AgentId::new()))
             .await
             .unwrap();
         assert_eq!(
@@ -933,7 +912,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"read.txt"})),
                 child_context(AgentId::new()),
-                None,
             )
             .await
             .unwrap();
@@ -965,7 +943,6 @@ mod tests {
                     "Read",
                     source(&json!({"file_path":"read.txt"})),
                     child_context(AgentId::new()),
-                    None,
                 )
                 .await
                 .unwrap();
@@ -997,7 +974,6 @@ mod tests {
                     "Read",
                     source(&json!({"file_path":"read.txt"})),
                     child_context(AgentId::new()),
-                    None,
                 )
                 .await
                 .unwrap();
@@ -1023,7 +999,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"read.txt"})),
                 child_context(AgentId::new()),
-                None,
             )
             .await
             .unwrap();
@@ -1058,7 +1033,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"original.txt"})),
                 child_context(AgentId::new()),
-                None,
             )
             .await
             .unwrap();
@@ -1094,7 +1068,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"read.txt"})),
                 child_context(AgentId::new()),
-                None,
             )
             .await
             .expect("the selected native run resolves");
@@ -1169,7 +1142,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"read.txt"})),
                 child_context(AgentId::new()),
-                None,
             )
             .await
             .expect_err("deny is terminal even when a selected ref is present");
@@ -1196,7 +1168,6 @@ mod tests {
                 "Read",
                 source(&json!({"file_path":"read.txt"})),
                 child_context(AgentId::new()),
-                None,
             )
             .await
             .expect("an invalid ref can still carry a synthetic replacement result");

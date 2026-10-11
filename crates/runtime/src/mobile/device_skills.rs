@@ -2,7 +2,7 @@
 //!
 //! Only tools provided by this host appear in a skill's discovery description
 //! and prompt. These prompts grant no additional tool permissions and have no
-//! dependency on the separately enabled Local App plugin.
+//! dependency on any separately installed plugin.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -251,7 +251,7 @@ mod tests {
                 let prompt = descriptor.dynamic_body.unwrap();
                 let body = prompt.build(&"".into()).string_at("").unwrap().to_owned();
                 assert!(body.starts_with("# "));
-                assert!(body.contains("No Local App"));
+                assert!(body.contains("No manifest"));
                 assert!(prompt
                     .build(&"Read my device".into())
                     .string_at("")
