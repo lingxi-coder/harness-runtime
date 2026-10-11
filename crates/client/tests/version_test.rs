@@ -32,9 +32,8 @@ fn version_is_semver() {
     }
 }
 
-/// Major 20 removes the app families from the client protocol; major 18
-/// added the current Mod UI request/result and targeted invalidation
-/// protocol. This is a deliberate second lock beyond the structural guard
+/// Major 21 adds persisted message clocks to the generated native bindings.
+/// This is a deliberate second lock beyond the structural guard
 /// because generated native bindings change and the host requires protocol
 /// version lockstep.
 ///
@@ -42,6 +41,6 @@ fn version_is_semver() {
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_twenty_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "20.0.0");
+fn version_is_twenty_one_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "21.0.0");
 }

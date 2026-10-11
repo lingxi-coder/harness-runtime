@@ -2030,3 +2030,16 @@ fn resume_normalizes_nontext_tool_results_like_claude_2_1_286() {
         assert_eq!(row.message, original, "raw transcript is not rewritten");
     }
 }
+
+#[tokio::test]
+async fn cold_resume_restores_original_display_timestamps_by_uuid() {
+    let (_temp, home, cwd, sid, _last, fs) = setup_two_turn_jsonl().await;
+    let replayed = replay_session_state(&home, &cwd, sid, fs).await.unwrap();
+    for row in &replayed.messages {
+        let expected = chrono::DateTime::parse_from_rfc3339(&row.timestamp)
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(replayed.display_timestamps.get(&row.uuid), Some(&expected));
+    }
+    assert!(!replayed.display_timestamps.is_empty());
+}

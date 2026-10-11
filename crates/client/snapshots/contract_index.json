@@ -671,6 +671,7 @@
   "MessageDto.blocks": "Vec<MessageBlockDto>",
   "MessageDto.loop_wakeup": "Option<LoopWakeupDto>",
   "MessageDto.role": "String",
+  "MessageDto.sent_at_ms": "Option<i64>",
   "MessageDto.visualization_context": "Option<VisualizationContextDto>",
   "ModelBillingModeDto::Free": "free",
   "ModelBillingModeDto::PerToken": "per_token",

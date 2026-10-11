@@ -207,6 +207,7 @@ pub fn lower_content_block_with(
 #[must_use]
 pub fn synthesize_message(turn: &PumpedTurn) -> MessageDto {
     MessageDto {
+        sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,
         role: ASSISTANT_ROLE.to_string(),

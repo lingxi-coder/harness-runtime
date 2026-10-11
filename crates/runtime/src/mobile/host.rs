@@ -3199,10 +3199,7 @@ impl MobileEngineHandle {
                     .workflow_checkpoints
                     .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
                     .await;
-                let messages = client::adapter::lowering::lower_transcript_with_tool_results(
-                    &replayed.display_history,
-                    &replayed.client_state_tool_results,
-                );
+                let messages = client::adapter::lowering::lower_replayed_transcript(&replayed);
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),

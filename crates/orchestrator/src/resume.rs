@@ -298,6 +298,8 @@ pub struct ReplayedSession {
     /// messages before the latest compact boundary; callers must keep it out
     /// of the model context and use [`Self::state`] for engine resume.
     pub display_history: Vec<ConversationMessage>,
+    /// Persisted timestamps for the complete display history, keyed by row UUID.
+    pub display_timestamps: std::collections::HashMap<String, i64>,
     /// UUID of the last replayed message — used to seed the orchestrator's
     /// `last_jsonl_uuid` so the next append chains via `parent_uuid`.
     pub last_message_uuid: Option<Uuid>,
@@ -463,6 +465,14 @@ pub async fn replay_session_state(
     );
     Ok(ReplayedSession {
         state,
+        display_timestamps: display_entries
+            .iter()
+            .filter_map(|row| {
+                chrono::DateTime::parse_from_rfc3339(&row.timestamp)
+                    .ok()
+                    .map(|at| (row.uuid.clone(), at.timestamp_millis()))
+            })
+            .collect(),
         display_history: display_state.history,
         last_message_uuid: last_uuid,
         messages,

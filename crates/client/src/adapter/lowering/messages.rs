@@ -72,6 +72,7 @@ pub fn lower_conversation_message_with(
                 |text| vec![MessageBlockDto::Text { text }],
             );
             MessageDto {
+                sent_at_ms: None,
                 loop_wakeup: None,
                 visualization_context,
                 role: "user".to_string(),
@@ -81,6 +82,7 @@ pub fn lower_conversation_message_with(
         }
         ConversationMessage::Assistant { content, .. } => {
             MessageDto {
+                sent_at_ms: None,
                 loop_wakeup: None,
                 visualization_context: None,
                 role: "assistant".to_string(),
@@ -96,6 +98,7 @@ pub fn lower_conversation_message_with(
             let payload: serde_json::Value = serde_json::from_str(content).unwrap_or_default();
             if payload.get("taskKindLoop") == Some(&serde_json::json!(false)) {
                 MessageDto {
+                    sent_at_ms: None,
                     role: "system".into(),
                     images: Vec::new(),
                     loop_wakeup: None,
@@ -106,6 +109,7 @@ pub fn lower_conversation_message_with(
                 }
             } else {
                 MessageDto {
+                    sent_at_ms: None,
                     role: "system".into(),
                     blocks: Vec::new(),
                     images: Vec::new(),
@@ -119,6 +123,7 @@ pub fn lower_conversation_message_with(
             compact_metadata,
             ..
         } if subtype.as_deref() == Some("compact_boundary") => MessageDto {
+            sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,
             role: "system".to_string(),
@@ -133,6 +138,7 @@ pub fn lower_conversation_message_with(
             images: Vec::new(),
         },
         ConversationMessage::System { content, .. } => MessageDto {
+            sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,
             role: "system".to_string(),
@@ -393,6 +399,7 @@ fn lower_transcript_inner(
                     transcript.push((
                         message.id(),
                         MessageDto {
+                            sent_at_ms: None,
                             role: "user".to_string(),
                             blocks,
                             images: Vec::new(),
@@ -451,6 +458,45 @@ mod identity_projection_tests {
         );
     }
     #[test]
+    fn replayed_clocks_follow_ids_after_hidden_rows_are_filtered() {
+        let raw = serde_json::json!({
+            "type": "user", "uuid": "11111111-1111-4111-8111-111111111111",
+            "sessionId": "22222222-2222-4222-8222-222222222222",
+            "parentUuid": null, "timestamp": "2026-10-08T00:00:00Z",
+            "cwd": "/workspace", "version": "test", "isSidechain": false,
+            "message": { "role": "user", "content": "same" },
+        })
+        .to_string();
+        let messages = session::jsonl::reader::route_lines(&raw).messages_in_order;
+        let state = orchestrator::state_from_messages(uuid::Uuid::new_v4(), &messages);
+        let first = state.history[0].id();
+        let last = lingxi_core::types::MessageId::new();
+        let replayed = orchestrator::ReplayedSession {
+            display_history: vec![
+                state.history[0].clone(),
+                ConversationMessage::user_meta(
+                    lingxi_core::types::MessageId::new(),
+                    "hidden".into(),
+                ),
+                ConversationMessage::user(last, "same".into()),
+            ],
+            display_timestamps: std::collections::HashMap::from([
+                (first.as_uuid().to_string(), 1_791_417_600_000),
+                (last.as_uuid().to_string(), 1_791_417_660_000),
+            ]),
+            runtime_metadata: orchestrator::runtime_metadata_from_messages(&messages),
+            state,
+            messages,
+            last_message_uuid: None,
+            client_state_tool_results: Default::default(),
+        };
+        let rows = lower_replayed_transcript(&replayed);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].sent_at_ms, Some(1_791_417_600_000));
+        assert_eq!(rows[1].sent_at_ms, Some(1_791_417_660_000));
+    }
+
+    #[test]
     fn filtered_meta_rows_do_not_shift_retained_transcript_identities() {
         let first = lingxi_core::types::MessageId::new();
         let last = lingxi_core::types::MessageId::new();
@@ -470,4 +516,33 @@ mod identity_projection_tests {
             lower_transcript(&history)
         );
     }
+}
+
+/// Restore display metadata by UUID after transcript filtering and folding.
+#[must_use]
+pub fn lower_replayed_transcript_with_identities(
+    replayed: &orchestrator::ReplayedSession,
+) -> Vec<(lingxi_core::types::MessageId, MessageDto)> {
+    lower_transcript_with_identities(
+        &replayed.display_history,
+        &replayed.client_state_tool_results,
+    )
+    .into_iter()
+    .map(|(id, mut message)| {
+        message.sent_at_ms = replayed
+            .display_timestamps
+            .get(&id.as_uuid().to_string())
+            .copied();
+        (id, message)
+    })
+    .collect()
+}
+
+/// Lower the complete persisted display transcript, including original clocks.
+#[must_use]
+pub fn lower_replayed_transcript(replayed: &orchestrator::ReplayedSession) -> Vec<MessageDto> {
+    lower_replayed_transcript_with_identities(replayed)
+        .into_iter()
+        .map(|(_, message)| message)
+        .collect()
 }

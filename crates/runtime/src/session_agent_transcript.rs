@@ -8,14 +8,23 @@ mod tests {
 
     #[test]
     fn main_native_rows_keep_identity_gaps_and_use_the_existing_replay_decoder() {
-        let raw = concat!(
-            "{\"type\":\"user\",\"uuid\":\"11111111-1111-4111-8111-111111111111\",\"sessionId\":\"22222222-2222-4222-8222-222222222222\",\"parentUuid\":null,\"timestamp\":\"2026-10-08T00:00:00Z\",\"cwd\":\"/workspace\",\"version\":\"2.1.293\",\"isSidechain\":false,\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n"
-        );
-        let messages = session::jsonl::reader::route_lines(raw).messages_in_order;
+        let raw = serde_json::json!({
+            "type": "user", "uuid": "11111111-1111-4111-8111-111111111111",
+            "sessionId": "22222222-2222-4222-8222-222222222222",
+            "parentUuid": null, "timestamp": "2026-10-08T00:00:00Z",
+            "cwd": "/workspace", "version": "2.1.293", "isSidechain": false,
+            "message": { "role": "user", "content": "hello" },
+        })
+        .to_string();
+        let messages = session::jsonl::reader::route_lines(&raw).messages_in_order;
         let state = orchestrator::state_from_messages(uuid::Uuid::new_v4(), &messages);
         assert_eq!(state.history.len(), 1);
         let runtime_metadata = orchestrator::runtime_metadata_from_messages(&messages);
         let replayed = orchestrator::ReplayedSession {
+            display_timestamps: messages
+                .iter()
+                .map(|row| (row.uuid.clone(), 1_791_417_600_000))
+                .collect(),
             display_history: state.history.clone(),
             state,
             messages,
@@ -30,6 +39,7 @@ mod tests {
         identities.next_message_index = 11;
         let rows = parse_main_session_agent_message_rows(&replayed, &identities).unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message.sent_at_ms, Some(1_791_417_600_000));
         assert_eq!(rows[0].message_index, 7);
         assert_eq!(rows[0].message_uuid, "11111111-1111-4111-8111-111111111111");
         assert!(parse_main_session_agent_message_rows(&replayed, &Default::default()).is_err());
@@ -57,47 +67,45 @@ pub fn parse_main_session_agent_message_rows(
     replayed: &orchestrator::ReplayedSession,
     identities: &session::jsonl::SessionMessageIdentitySnapshot,
 ) -> Result<Vec<client::protocol::listings::SessionAgentMessageRowDto>, String> {
-    client::adapter::lowering::lower_transcript_with_identities(
-        &replayed.display_history,
-        &replayed.client_state_tool_results,
-    )
-    .into_iter()
-    .map(|(id, message)| {
-        let message_uuid = id.as_uuid().to_string();
-        let message_index = *identities.by_uuid.get(&message_uuid).ok_or_else(|| {
-            format!("main transcript row lacks its stable identity index: {message_uuid}")
-        })?;
-        let original = replayed
-            .messages
-            .iter()
-            .find(|row| row.uuid == message_uuid);
-        let api_error_json = match original {
-            Some(row)
-                if row.extra.get("isApiErrorMessage") == Some(&serde_json::Value::Bool(true)) =>
-            {
-                Some(
-                    String::from_utf8(
-                        session::jsonl::exact_json::native_message_bytes(row)
-                            .map_err(|error| error.to_string())?,
+    client::adapter::lowering::lower_replayed_transcript_with_identities(replayed)
+        .into_iter()
+        .map(|(id, message)| {
+            let message_uuid = id.as_uuid().to_string();
+            let message_index = *identities.by_uuid.get(&message_uuid).ok_or_else(|| {
+                format!("main transcript row lacks its stable identity index: {message_uuid}")
+            })?;
+            let original = replayed
+                .messages
+                .iter()
+                .find(|row| row.uuid == message_uuid);
+            let api_error_json = match original {
+                Some(row)
+                    if row.extra.get("isApiErrorMessage")
+                        == Some(&serde_json::Value::Bool(true)) =>
+                {
+                    Some(
+                        String::from_utf8(
+                            session::jsonl::exact_json::native_message_bytes(row)
+                                .map_err(|error| error.to_string())?,
+                        )
+                        .map_err(|error| error.to_string())?,
                     )
-                    .map_err(|error| error.to_string())?,
-                )
-            }
-            Some(row) => row
-                .extra
-                .get("server_fallback_api_error_json")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-            None => None,
-        };
-        Ok(client::protocol::listings::SessionAgentMessageRowDto {
-            message_index,
-            message_uuid,
-            message,
-            api_error_json,
+                }
+                Some(row) => row
+                    .extra
+                    .get("server_fallback_api_error_json")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                None => None,
+            };
+            Ok(client::protocol::listings::SessionAgentMessageRowDto {
+                message_index,
+                message_uuid,
+                message,
+                api_error_json,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 fn session_agent_message_from_projection(

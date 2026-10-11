@@ -137,4 +137,7 @@
 /// `PluginCommand`), the `App*` events and their DTOs are gone. Removals are
 /// BREAKING structural changes under the F1-09 guard, and the generated mobile
 /// bindings change positionally.
-pub const CLIENT_PROTOCOL_VERSION: &str = "20.0.0";
+/// Bumped to 21.0.0 for persisted message clocks. `MessageDto` gains an optional
+/// timestamp; JSON remains additive, while the UniFFI record layout grows and
+/// native clients must regenerate their version-locked bindings.
+pub const CLIENT_PROTOCOL_VERSION: &str = "21.0.0";

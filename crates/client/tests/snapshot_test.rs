@@ -501,6 +501,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 // `MessageDto` element exactly for the client mappers.
                 messages: vec![
                     MessageDto {
+                        sent_at_ms: None,
                         loop_wakeup: None,
                         visualization_context: None,
                         role: "user".to_string(),
@@ -1956,6 +1957,7 @@ fn canonical_cost() -> CostDto {
 /// CompactBoundary | ToolUse | ToolResult`.
 fn canonical_message() -> MessageDto {
     MessageDto {
+        sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,
         role: "assistant".to_string(),

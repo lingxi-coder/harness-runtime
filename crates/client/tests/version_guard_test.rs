@@ -1279,6 +1279,7 @@ fn current_contract_index() -> ContractIndex {
 
     // ── MessageDto / MessageBlockDto (message.rs) ─────────────────────────
     put("MessageDto.role", "String");
+    put("MessageDto.sent_at_ms", "Option<i64>");
     put("MessageDto.loop_wakeup", "Option<LoopWakeupDto>");
     put("LoopWakeupDto.message", "String");
     put("LoopWakeupDto.companion", "Option<String>");
@@ -2601,6 +2602,7 @@ fn contract_index_covers_every_dto() {
         message: String::new(),
     };
     let _msg = MessageDto {
+        sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: Some(client::protocol::message::VisualizationContextDto {
             id: String::new(),
@@ -2706,6 +2708,7 @@ fn contract_index_covers_every_dto() {
             message_index: 0,
             message_uuid: String::new(),
             message: MessageDto {
+                sent_at_ms: None,
                 role: String::new(),
                 blocks: vec![],
                 images: vec![],
