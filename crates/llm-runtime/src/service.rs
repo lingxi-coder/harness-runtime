@@ -6040,12 +6040,19 @@ impl ApiService {
         let mut dispatch =
             DispatchHeaderState::for_query_source(req.execution.query_source.as_deref());
         dispatch.context_hint_beta = req.execution.context_hint_beta;
-        // The conversation's WebSocket belongs to its main turn; every other
-        // stream may run while that turn is still streaming.
-        let main_conversation = matches!(
-            query_source_category(req.execution.query_source.as_deref()),
-            None | Some(QuerySourceCategory::Main)
-        );
+        // The conversation's WebSocket belongs to its main turn. Every other
+        // stream may run while that turn is still streaming, including a
+        // subagent that carries no source label. The orchestrator's streaming
+        // turn (`stream_with_system_prompt`) names its source only to the
+        // prompt-cache policy, so read it there when the request has no label;
+        // a subagent request records none in either place.
+        let source = req.execution.query_source.as_deref().or_else(|| {
+            req.execution
+                .prompt_cache
+                .as_ref()
+                .and_then(|cache| cache.policy.query_source.as_deref())
+        });
+        let main_conversation = query_source_category(source) == Some(QuerySourceCategory::Main);
 
         loop {
             // Prepare so we can inject headers, then call execute_stream via
