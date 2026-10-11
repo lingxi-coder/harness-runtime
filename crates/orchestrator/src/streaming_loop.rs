@@ -1166,9 +1166,29 @@ pub(crate) const MID_STREAM_STALE_CONNECTION_MAX_RETRIES: u32 = 2;
 /// (`Mn<ao`, @219649648) — the idle-timeout retry budget.
 pub(crate) const MID_STREAM_IDLE_TIMEOUT_MAX_RETRIES: u32 = 1;
 
+/// Max streaming-request retries for a Responses WebSocket that the server
+/// closed under the response. The server does this far more often than an
+/// HTTP body is cut, and Codex retries it five times (`stream_max_retries`)
+/// before giving up on the request.
+pub(crate) const WEBSOCKET_STREAM_MAX_RETRIES: u32 = 5;
+
+/// Codex's first retry delay after a WebSocket close, doubled per attempt.
+pub(crate) const WEBSOCKET_STREAM_RETRY_BASE_MS: u64 = 200;
+
+/// Whether a mid-stream error is a Responses WebSocket that the peer or the
+/// network closed under the response.
+pub(crate) fn is_websocket_connection_lost(error: &OrchestratorError) -> bool {
+    matches!(
+        error,
+        OrchestratorError::Streaming(LlmError::Transport { message })
+            if message.starts_with(lingxi_llm_client::transport::WEBSOCKET_CONNECTION_LOST)
+    )
+}
+
 /// Cause-aware retry cap for a mid-stream transient error, matching the
 /// binary's split `ac?Mn<ao:Kn<An` (idle-timeout `ao=1` vs stale-connection
-/// `An=2`). Only meaningful when [`is_transient_mid_stream`] is `true`.
+/// `An=2`), with Codex's budget for a closed WebSocket. Only meaningful when
+/// [`is_transient_mid_stream`] is `true`.
 pub(crate) fn mid_stream_retry_cap(error: &OrchestratorError) -> u32 {
     let is_idle = matches!(
         error,
@@ -1177,6 +1197,8 @@ pub(crate) fn mid_stream_retry_cap(error: &OrchestratorError) -> u32 {
     );
     if is_idle {
         MID_STREAM_IDLE_TIMEOUT_MAX_RETRIES
+    } else if is_websocket_connection_lost(error) {
+        WEBSOCKET_STREAM_MAX_RETRIES
     } else {
         MID_STREAM_STALE_CONNECTION_MAX_RETRIES
     }
