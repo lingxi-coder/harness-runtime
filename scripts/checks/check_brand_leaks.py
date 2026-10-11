@@ -196,7 +196,7 @@ CLAUDE_NEEDLES = [
 
 # G7 —— Claude 侧 plugin 标识符**到达**本仓库（P0a.0）。
 #
-# 本分支（local-app plugin）引入的方向与 G3 相反：不是 LingXi 值漏出去，而是
+# 这条规则的方向与 G3 相反：不是 LingXi 值漏出去，而是
 # oracle 的 plugin 标识符进来 —— `.claude-plugin` 目录名、`${CLAUDE_PLUGIN_ROOT}`
 # / `${CLAUDE_PLUGIN_DATA}` / `${CLAUDE_PLUGIN_OPTION_<KEY>}` 插值语法、
 # `${CLAUDE_PROJECT_DIR}`。实测：改动前这四类全部 exit 0 静默（G1 的 needle 表
